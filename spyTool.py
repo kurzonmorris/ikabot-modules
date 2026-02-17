@@ -41,9 +41,9 @@ class FileLock:
         self.locked = False
     
     def acquire(self):
-        """Acquire lock, wait up to timeout seconds"""
+        """Acquire lock atomically, wait up to timeout seconds."""
         start_time = time.time()
-        
+
         while time.time() - start_time < self.timeout:
             try:
                 if self.lock_path.exists():
@@ -51,17 +51,23 @@ class FileLock:
                     if lock_age > self.timeout:
                         self.lock_path.unlink()
                         debug_log(f"Removed stale lock file (age: {lock_age:.1f}s)")
-                
-                self.lock_path.write_text(f"{os.getpid()}\n{time.time()}")
+                    else:
+                        time.sleep(0.5)
+                        continue
+
+                with open(self.lock_path, "x", encoding="utf-8") as lock_file:
+                    lock_file.write(f"{os.getpid()}\n{time.time()}")
+
                 self.locked = True
                 debug_log(f"Lock acquired: {self.lock_path}")
                 return True
+
             except FileExistsError:
                 time.sleep(0.5)
             except Exception as e:
-                debug_log_error(f"Lock acquire error", e)
+                debug_log_error("Lock acquire error", e)
                 time.sleep(0.5)
-        
+
         debug_log(f"Lock timeout after {self.timeout}s: {self.lock_path}")
         return False
     
@@ -78,7 +84,8 @@ class FileLock:
         return False
     
     def __enter__(self):
-        self.acquire()
+        if not self.acquire():
+            raise TimeoutError(f"Could not acquire lock: {self.lock_path}")
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -1857,6 +1864,7 @@ def search_player_with_cache(session, cache):
                 print()
                 print("Options:")
                 print("(1) Enter island coordinates manually")
+                print(f"    Tip: You can use {bcolors.CYAN}www.ikalogs.ru/tools/map/{bcolors.ENDC} to find player city locations.")
                 print("(2) Search within radius of coordinates")
                 print("(0) Cancel")
                 print("(') Return to Ikabot main menu")
@@ -1878,6 +1886,7 @@ def search_player_with_cache(session, cache):
         print(f"{bcolors.WARNING}Player not found in cache.{bcolors.ENDC}")
         print("Options:")
         print("(1) Enter island coordinates manually")
+        print(f"    Tip: You can use {bcolors.CYAN}www.ikalogs.ru/tools/map/{bcolors.ENDC} to find player city locations.")
         print("(2) Search within radius of coordinates")
         print("(0) Cancel")
         print("(') Return to Ikabot main menu")
@@ -1908,6 +1917,7 @@ def search_player_with_cache(session, cache):
         print("\nOptions for finding a player:")
         print("")
         print("(1) Enter island coordinates manually (if you know where they are)")
+        print(f"    Tip: You can use {bcolors.CYAN}www.ikalogs.ru/tools/map/{bcolors.ENDC} to find player city locations.")
         print("(2) Search within radius of coordinates (faster than full scan)")
         print("(3) Full server scan (1-2 hours) - also builds cache for future")
         print("(4) Build server cache first (recommended)")
@@ -1961,6 +1971,7 @@ def search_player_manual_coords(session):
     print_module_header("Manual Coordinate Search", "Enter known island coordinates")
     
     print("Enter island coordinates where you know the player has cities.")
+    print(f"Tip: You can use {bcolors.CYAN}www.ikalogs.ru/tools/map/{bcolors.ENDC} to look up player city locations.")
     print("Format: x:y (e.g., 45:32)")
     print("Enter multiple separated by commas (e.g., 45:32, 50:40, 55:35)")
     print("Or enter 'done' when finished, or ' to go back")
@@ -2584,6 +2595,319 @@ def export_player_intel(intel):
         lock.release()
 
 
+def extract_ajax_change_view_html(response):
+    """Extract HTML payload from an ajax=1 response."""
+    try:
+        data = json.loads(response, strict=False)
+        for item in data:
+            if isinstance(item, list) and len(item) >= 2 and item[0] == "changeView":
+                if isinstance(item[1], list) and len(item[1]) >= 2:
+                    return item[1][1]
+    except Exception as e:
+        debug_log_error("Failed to parse ajax changeView response", e)
+    return ""
+
+
+def parse_hideout_spy_stats(html_content):
+    """
+    Parse hideout page HTML and return spy/capacity data.
+
+    Returns
+    -------
+    dict with keys:
+        registered_spies, spies_in_city, spies_out, max_capacity, free_slots
+    """
+    stats = {
+        "registered_spies": 0,
+        "spies_in_city": 0,
+        "spies_out": 0,
+        "max_capacity": 0,
+        "free_slots": 0,
+    }
+
+    if not html_content:
+        return stats
+
+    compact = re.sub(r"\s+", " ", html_content)
+
+    key_patterns = {
+        "registered_spies": [
+            r"(?:registered|total)\s*sp(?:y|ies)[^0-9]{0,30}(\d+)",
+            r"spiesRegistered\s*[:=]\s*(\d+)",
+            r"agentsRegistered\s*[:=]\s*(\d+)",
+        ],
+        "spies_in_city": [
+            r"(?:in\s*city|stationed|at\s*home)\s*sp(?:y|ies)[^0-9]{0,30}(\d+)",
+            r"spiesInCity\s*[:=]\s*(\d+)",
+            r"agentsAtHome\s*[:=]\s*(\d+)",
+        ],
+        "max_capacity": [
+            r"(?:max(?:imum)?\s*)?(?:sp(?:y|ies)|agents)\s*(?:capacity|limit)[^0-9]{0,30}(\d+)",
+            r"maxSpies\s*[:=]\s*(\d+)",
+            r"agentsLimit\s*[:=]\s*(\d+)",
+        ],
+    }
+
+    for key, patterns in key_patterns.items():
+        for pattern in patterns:
+            match = re.search(pattern, compact, re.IGNORECASE)
+            if match:
+                stats[key] = int(match.group(1))
+                break
+
+    if stats["registered_spies"] == 0 or stats["max_capacity"] == 0:
+        ratio_match = re.search(r"(\d+)\s*/\s*(\d+)\s*(?:sp(?:y|ies)|agents)", compact, re.IGNORECASE)
+        if ratio_match:
+            left = int(ratio_match.group(1))
+            right = int(ratio_match.group(2))
+            if stats["registered_spies"] == 0:
+                stats["registered_spies"] = left
+            if stats["max_capacity"] == 0 and right >= left:
+                stats["max_capacity"] = right
+
+    if stats["spies_in_city"] == 0 and stats["registered_spies"] > 0:
+        stats["spies_in_city"] = stats["registered_spies"]
+
+    stats["spies_out"] = max(0, stats["registered_spies"] - stats["spies_in_city"])
+    stats["free_slots"] = max(0, stats["max_capacity"] - stats["registered_spies"])
+
+    return stats
+
+
+def get_city_hideout_data(session, city_id):
+    """Collect hideout and spy capacity data for one city."""
+    city_html = session.get(city_url + str(city_id))
+    city = getCity(city_html)
+
+    city_data = {
+        "city_id": str(city_id),
+        "city_name": city.get("cityName", city.get("name", f"City {city_id}")),
+        "island_id": city.get("islandId"),
+        "x": city.get("x"),
+        "y": city.get("y"),
+        "hideout_found": False,
+        "hideout_level": 0,
+        "hideout_position": None,
+        "registered_spies": 0,
+        "spies_in_city": 0,
+        "spies_out": 0,
+        "max_capacity": 0,
+        "free_slots": 0,
+    }
+
+    hideout_building = None
+    for position in city.get("position", []):
+        b = str(position.get("building", "")).lower()
+        if b in ["safehouse", "hideout", "spyhouse"]:
+            hideout_building = position
+            break
+
+    if not hideout_building:
+        return city_data
+
+    city_data["hideout_found"] = True
+    city_data["hideout_level"] = int(hideout_building.get("level", 0) or 0)
+    city_data["hideout_position"] = hideout_building.get("position")
+
+    view_candidates = ["safeHouse", "safehouse", "espionage" ]
+    hideout_html = ""
+    for view in view_candidates:
+        try:
+            params = (
+                f"view={view}&cityId={city_id}&position={city_data['hideout_position']}"
+                f"&backgroundView=city&currentCityId={city_id}&ajax=1"
+            )
+            response = session.post(params)
+            hideout_html = extract_ajax_change_view_html(response)
+            if hideout_html:
+                break
+        except Exception as e:
+            debug_log_error(f"Error fetching hideout view {view} for city {city_id}", e)
+
+    stats = parse_hideout_spy_stats(hideout_html)
+    city_data.update(stats)
+
+    return city_data
+
+
+def run_empire_spy_capacity_audit(session, progress_callback=None):
+    """Scan all own cities and gather hideout/spy capacity information."""
+    ids, _ = getIdsOfCities(session)
+    total = len(ids)
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "total_cities": total,
+        "cities": [],
+        "summary": {
+            "cities_with_hideout": 0,
+            "registered_spies": 0,
+            "spies_in_city": 0,
+            "spies_out": 0,
+            "max_capacity": 0,
+            "free_slots": 0,
+        },
+    }
+
+    for i, city_id in enumerate(ids, 1):
+        if progress_callback:
+            progress_callback(i, total, f"City {city_id}")
+
+        try:
+            city_data = get_city_hideout_data(session, city_id)
+            report["cities"].append(city_data)
+
+            if city_data["hideout_found"]:
+                report["summary"]["cities_with_hideout"] += 1
+                report["summary"]["registered_spies"] += city_data["registered_spies"]
+                report["summary"]["spies_in_city"] += city_data["spies_in_city"]
+                report["summary"]["spies_out"] += city_data["spies_out"]
+                report["summary"]["max_capacity"] += city_data["max_capacity"]
+                report["summary"]["free_slots"] += city_data["free_slots"]
+        except Exception as e:
+            debug_log_error(f"Error auditing city {city_id}", e)
+
+        time.sleep(0.15)
+
+    return report
+
+
+def display_spy_capacity_audit(report):
+    """Print formatted audit report to terminal."""
+    print(f"\n{'=' * 74}")
+    print("  EMPIRE SPY CAPACITY AUDIT")
+    print(f"{'=' * 74}")
+    print(f"Timestamp: {report.get('timestamp', 'Unknown')}")
+    print()
+    print(f"{'City':<22} {'Coords':<10} {'Hideout':<8} {'Reg':>5} {'In':>5} {'Out':>5} {'Max':>5} {'Free':>5}")
+    print("-" * 74)
+
+    for city in report.get("cities", []):
+        hideout = city.get("hideout_level", 0) if city.get("hideout_found") else "-"
+        coords = f"[{city.get('x', '?')}:{city.get('y', '?')}]"
+        print(
+            f"{str(city.get('city_name', 'Unknown'))[:21]:<22} {coords:<10} {str(hideout):<8} "
+            f"{city.get('registered_spies', 0):>5} {city.get('spies_in_city', 0):>5} {city.get('spies_out', 0):>5} "
+            f"{city.get('max_capacity', 0):>5} {city.get('free_slots', 0):>5}"
+        )
+
+    summary = report.get("summary", {})
+    print("-" * 74)
+    print(
+        f"TOTALS (hideout cities: {summary.get('cities_with_hideout', 0)}/{report.get('total_cities', 0)}): "
+        f"reg={summary.get('registered_spies', 0)}, in={summary.get('spies_in_city', 0)}, "
+        f"out={summary.get('spies_out', 0)}, max={summary.get('max_capacity', 0)}, free={summary.get('free_slots', 0)}"
+    )
+    print(f"{'=' * 74}\n")
+
+
+def save_spy_capacity_audit(report):
+    """Save audit report as JSON and HTML in storage folder."""
+    storage = get_storage_path()
+    if not storage:
+        return None, None
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_dir = storage / "spy_audits"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    json_file = report_dir / f"spy_capacity_audit_{stamp}.json"
+    html_file = report_dir / f"spy_capacity_audit_{stamp}.html"
+
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+
+    rows = []
+    for city in report.get("cities", []):
+        hideout = city.get("hideout_level", 0) if city.get("hideout_found") else "-"
+        rows.append(
+            f"<tr><td>{city.get('city_name', 'Unknown')}</td>"
+            f"<td>[{city.get('x', '?')}:{city.get('y', '?')}]</td>"
+            f"<td>{hideout}</td>"
+            f"<td>{city.get('registered_spies', 0)}</td>"
+            f"<td>{city.get('spies_in_city', 0)}</td>"
+            f"<td>{city.get('spies_out', 0)}</td>"
+            f"<td>{city.get('max_capacity', 0)}</td>"
+            f"<td>{city.get('free_slots', 0)}</td></tr>"
+        )
+
+    s = report.get("summary", {})
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset=\"UTF-8\">
+  <title>Spy Capacity Audit</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 20px; background: #111; color: #eee; }}
+    table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
+    th, td {{ border: 1px solid #333; padding: 8px; text-align: left; }}
+    th {{ background: #1f4a7a; }}
+    .summary {{ margin-top: 20px; padding: 10px; background: #1c1c2d; }}
+  </style>
+</head>
+<body>
+  <h1>Empire Spy Capacity Audit</h1>
+  <p>Timestamp: {report.get('timestamp', 'Unknown')}</p>
+  <table>
+    <tr><th>City</th><th>Coords</th><th>Hideout</th><th>Registered</th><th>In City</th><th>Out</th><th>Max</th><th>Free</th></tr>
+    {''.join(rows)}
+  </table>
+  <div class=\"summary\">
+    <strong>Totals:</strong> Hideout cities: {s.get('cities_with_hideout', 0)}/{report.get('total_cities', 0)} |
+    Registered: {s.get('registered_spies', 0)} |
+    In city: {s.get('spies_in_city', 0)} |
+    Out: {s.get('spies_out', 0)} |
+    Max capacity: {s.get('max_capacity', 0)} |
+    Free slots: {s.get('free_slots', 0)}
+  </div>
+</body>
+</html>"""
+
+    with open(html_file, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    return json_file, html_file
+
+
+def empire_spy_capacity_menu(session):
+    """Phase 1: audit hideout and spy capacity across all own cities."""
+    print_module_header("Empire Spy Capacity Audit", "Scan all cities for hideout and spy capacity")
+    print("This scan checks each city for hideout level and spy counts.")
+    print("It will then show:")
+    print("  - Registered spies")
+    print("  - Spies in city")
+    print("  - Spies out of city")
+    print("  - Free spy slots")
+    print()
+    print("Run scan now? (y/n)")
+
+    confirm = read(values=["y", "Y", "n", "N", "'"])
+    if confirm == "'":
+        return "'"
+    if confirm.lower() != "y":
+        return None
+
+    print("\nScanning cities: ", end="", flush=True)
+
+    def progress_callback(current, total, message):
+        pct = int((current / total) * 100) if total else 0
+        print(f"\rScanning cities: {current}/{total} ({pct}%) - {message:<20}", end="", flush=True)
+
+    report = run_empire_spy_capacity_audit(session, progress_callback=progress_callback)
+    print()
+
+    display_spy_capacity_audit(report)
+
+    json_file, html_file = save_spy_capacity_audit(report)
+    if json_file and html_file:
+        print(f"Saved JSON: {json_file}")
+        print(f"Saved HTML: {html_file}")
+    else:
+        print(f"{bcolors.WARNING}Storage not configured; report not saved to file.{bcolors.ENDC}")
+
+    enter()
+    return None
+
+
 def generate_player_html_report(html_file, intel):
     """Generate HTML report for a single player"""
     
@@ -2948,12 +3272,13 @@ def main_menu(session, event):
         print("(2) Send Spy to City - Infiltrate and run missions")
         print("(3) Hideout Monitor - Auto-recruit spies")
         print("(4) Settings - Configure debug and storage")
+        print("(5) Empire Spy Capacity Audit - Hideout/spies summary")
         print("(0) Exit")
         print()
         print("(') Return to Ikabot main menu")
         print()
         
-        choice = read(min=0, max=4, digit=True, additionalValues=["'"])
+        choice = read(min=0, max=5, digit=True, additionalValues=["'"])
         
         debug_log(f"Main menu selection: {choice}")
         
@@ -2976,6 +3301,11 @@ def main_menu(session, event):
         
         elif choice == 4:
             result = settings_menu(session)
+            if result == "'":
+                return
+
+        elif choice == 5:
+            result = empire_spy_capacity_menu(session)
             if result == "'":
                 return
 
