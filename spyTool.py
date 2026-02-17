@@ -2908,6 +2908,321 @@ def empire_spy_capacity_menu(session):
     return None
 
 
+def estimate_hideout_level_for_target(townhall_level, known_hideout_level=None):
+    """Estimate target hideout level using provided fallback formula."""
+    if known_hideout_level is not None:
+        return int(known_hideout_level)
+    townhall_level = max(1, int(townhall_level or 1))
+    # User requested formula: (50 - town hall level) / 2 + town hall level
+    return int(round(((50 - townhall_level) / 2.0) + townhall_level))
+
+
+def estimate_defending_spies(townhall_level, hideout_level):
+    """Estimate defending spies from town hall and hideout level."""
+    townhall_level = max(1, int(townhall_level or 1))
+    hideout_level = max(townhall_level, int(hideout_level or townhall_level))
+    # Conservative heuristic: defenders scale with hideout level and city maturity.
+    base = max(1, int(round(hideout_level * 0.75)))
+    maturity = int(round(townhall_level * 0.20))
+    return base + maturity
+
+
+def estimate_travel_seconds(source_x, source_y, target_x, target_y):
+    """Estimate spy travel time from map distance."""
+    if None in [source_x, source_y, target_x, target_y]:
+        return 999999
+    distance = ((int(source_x) - int(target_x)) ** 2 + (int(source_y) - int(target_y)) ** 2) ** 0.5
+    # Approximation tuned for planning only.
+    return int(distance * 90)
+
+
+def format_duration(seconds):
+    if seconds >= 3600:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+    if seconds >= 60:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds}s"
+
+
+def estimate_spy_outcome(attacking_spies, decoys, defending_spies, target_hideout_level):
+    """Estimate success and discovery risk percentages."""
+    attacking_spies = max(1, int(attacking_spies))
+    decoys = max(0, int(decoys))
+    defending_spies = max(1, int(defending_spies))
+    target_hideout_level = max(1, int(target_hideout_level))
+
+    attack_power = attacking_spies + decoys * 0.35
+    defense_power = defending_spies + target_hideout_level * 0.35
+
+    success = 20 + (75 * (attack_power / max(1.0, attack_power + defense_power)))
+    success = max(5.0, min(99.0, success))
+
+    discovery = (
+        58.0
+        - success * 0.45
+        + (defending_spies / max(1, attacking_spies)) * 4.0
+        + target_hideout_level * 0.22
+        - decoys * 1.8
+    )
+    discovery = max(1.0, min(95.0, discovery))
+
+    return round(success, 1), round(discovery, 1)
+
+
+def estimate_spy_costs(attacking_spies, decoys):
+    """Estimate gold and wine costs for dispatch planning."""
+    attacking_spies = max(0, int(attacking_spies))
+    decoys = max(0, int(decoys))
+    gold_cost = attacking_spies * 120 + decoys * 40
+    wine_cost = round(attacking_spies * 0.20 + decoys * 0.05, 1)
+    return gold_cost, wine_cost
+
+
+def load_player_report_files():
+    """List available saved player JSON reports."""
+    storage = get_storage_path()
+    if not storage:
+        return []
+    players_folder = storage / "players"
+    if not players_folder.exists():
+        return []
+    return sorted(players_folder.glob("*.json"))
+
+
+def build_phase2_send_plan(target_cities, own_spy_audit, desired_spies, max_decoys=15):
+    """Build optimized per-city send plan with success/risk/cost/time estimates."""
+    plan = []
+
+    own_sources = []
+    for city in own_spy_audit.get("cities", []):
+        available = city.get("spies_in_city", 0)
+        if available <= 0:
+            available = city.get("registered_spies", 0)
+        if available > 0:
+            own_sources.append({
+                "city_id": city.get("city_id"),
+                "city_name": city.get("city_name"),
+                "x": city.get("x"),
+                "y": city.get("y"),
+                "available_spies": int(available),
+            })
+
+    for target in target_cities:
+        townhall_level = int(target.get("city_level", 1) or 1)
+        known_hideout = target.get("hideout_level")
+        target_hideout = estimate_hideout_level_for_target(townhall_level, known_hideout)
+        defenders = estimate_defending_spies(townhall_level, target_hideout)
+
+        candidates = []
+        for source in own_sources:
+            max_send = min(source["available_spies"], desired_spies)
+            if max_send <= 0:
+                continue
+
+            for decoys in range(0, min(max_decoys, source["available_spies"]) + 1):
+                attackers = max_send
+                if attackers + decoys > source["available_spies"]:
+                    break
+
+                success, discovery = estimate_spy_outcome(attackers, decoys, defenders, target_hideout)
+                travel_seconds = estimate_travel_seconds(source["x"], source["y"], target.get("island_x"), target.get("island_y"))
+                gold_cost, wine_cost = estimate_spy_costs(attackers, decoys)
+
+                candidates.append({
+                    "source_city_id": source["city_id"],
+                    "source_city_name": source["city_name"],
+                    "attackers": attackers,
+                    "decoys": decoys,
+                    "success": success,
+                    "discovery": discovery,
+                    "travel_seconds": travel_seconds,
+                    "gold_cost": gold_cost,
+                    "wine_cost": wine_cost,
+                })
+
+        if not candidates:
+            plan.append({
+                "target_city": target,
+                "error": "No available source city with spies.",
+                "estimated_defenders": defenders,
+                "estimated_hideout": target_hideout,
+            })
+            continue
+
+        # Priority requested: max success, min discovery, min decoys, min travel time.
+        best = sorted(
+            candidates,
+            key=lambda c: (-c["success"], c["discovery"], c["decoys"], c["travel_seconds"]),
+        )[0]
+
+        plan.append({
+            "target_city": target,
+            "estimated_defenders": defenders,
+            "estimated_hideout": target_hideout,
+            "recommendation": best,
+        })
+
+    return plan
+
+
+def display_phase2_send_plan(plan):
+    """Display phase 2 send plan in terminal."""
+    print(f"\n{'=' * 90}")
+    print("  PHASE 2 SPY DISPATCH PLAN")
+    print(f"{'=' * 90}")
+
+    total_gold = 0
+    total_wine = 0.0
+
+    for entry in plan:
+        target = entry.get("target_city", {})
+        print(f"\nTarget: {target.get('city_name', 'Unknown')} [{target.get('island_x', '?')}:{target.get('island_y', '?')}]")
+        print(
+            f"  Est. Town Hall Lv: {target.get('city_level', '?')} | "
+            f"Est. Hideout Lv: {entry.get('estimated_hideout', '?')} | "
+            f"Est. Defending spies: {entry.get('estimated_defenders', '?')}"
+        )
+
+        if "error" in entry:
+            print(f"  {bcolors.RED}{entry['error']}{bcolors.ENDC}")
+            continue
+
+        rec = entry["recommendation"]
+        print(f"  Source city: {rec['source_city_name']} (ID: {rec['source_city_id']})")
+        print(
+            f"  Send spies: {rec['attackers']} + decoys: {rec['decoys']} | "
+            f"Success: {bcolors.GREEN}{rec['success']}%{bcolors.ENDC} | "
+            f"Discovery risk: {bcolors.WARNING}{rec['discovery']}%{bcolors.ENDC}"
+        )
+        print(
+            f"  Est. travel: {format_duration(rec['travel_seconds'])} | "
+            f"Gold: {rec['gold_cost']:,} | Wine: {rec['wine_cost']}"
+        )
+
+        total_gold += rec["gold_cost"]
+        total_wine += rec["wine_cost"]
+
+    print(f"\n{'-' * 90}")
+    print(f"Totals: Gold {total_gold:,} | Wine {round(total_wine, 1)}")
+    print(f"{'=' * 90}\n")
+
+
+def phase2_dispatch_from_report_menu(session):
+    """Phase 2 menu: choose report, choose targets, compute/confirm dispatch plan."""
+    print_module_header("Targeted Spy Dispatch", "Choose report -> targets -> send plan")
+
+    files = load_player_report_files()
+    if not files:
+        print(f"{bcolors.WARNING}No player report JSON files found in storage/players.{bcolors.ENDC}")
+        print("Create at least one player report first from Player Spying.")
+        enter()
+        return None
+
+    print("Available target report files:")
+    report_rows = []
+    for i, fpath in enumerate(files, 1):
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            player_name = data.get("player_name", fpath.stem)
+            city_count = len(data.get("cities", []))
+            date = data.get("timestamp", "")[:16]
+            report_rows.append((fpath, data))
+            print(f"({i}) {player_name:<20} cities={city_count:<3} date={date}")
+        except Exception:
+            report_rows.append((fpath, None))
+            print(f"({i}) {fpath.stem:<20} (unreadable)")
+
+    print("(0) Back")
+    print("(') Return to Ikabot main menu")
+    print()
+
+    choice = read(min=0, max=len(report_rows), digit=True, additionalValues=["'"])
+    if choice == "'":
+        return "'"
+    if choice == 0:
+        return None
+
+    selected_path, selected_data = report_rows[choice - 1]
+    if not selected_data:
+        print(f"{bcolors.RED}Could not read selected JSON report.{bcolors.ENDC}")
+        enter()
+        return None
+
+    target_cities = selected_data.get("cities", [])
+    if not target_cities:
+        print(f"{bcolors.WARNING}Selected report has no city entries.{bcolors.ENDC}")
+        enter()
+        return None
+
+    print("\nTarget cities:")
+    for i, city in enumerate(target_cities, 1):
+        print(f"({i}) {city.get('city_name', 'Unknown'):<20} [{city.get('island_x', '?')}:{city.get('island_y', '?')}] Lv{city.get('city_level', '?')}")
+
+    print("\nSelect target cities:")
+    print("  (1) One city")
+    print("  (2) Multiple cities (comma separated)")
+    print("  (3) All cities")
+    print("  (0) Cancel")
+    print("  (') Return to Ikabot main menu")
+    mode = read(min=0, max=3, digit=True, additionalValues=["'"])
+
+    if mode == "'":
+        return "'"
+    if mode == 0:
+        return None
+
+    selected_targets = []
+    if mode == 1:
+        idx = read(min=1, max=len(target_cities), digit=True, msg="City number: ", additionalValues=["'"])
+        if idx == "'":
+            return "'"
+        selected_targets = [target_cities[idx - 1]]
+    elif mode == 2:
+        raw = read(msg="City numbers (e.g. 1,3,5): ", additionalValues=["'"])
+        if raw == "'":
+            return "'"
+        selected = set()
+        for token in str(raw).split(","):
+            token = token.strip()
+            if token.isdigit():
+                i = int(token)
+                if 1 <= i <= len(target_cities):
+                    selected.add(i)
+        selected_targets = [target_cities[i - 1] for i in sorted(selected)]
+    else:
+        selected_targets = list(target_cities)
+
+    if not selected_targets:
+        print(f"{bcolors.WARNING}No valid target cities selected.{bcolors.ENDC}")
+        enter()
+        return None
+
+    print("\nHow many primary spies should be sent per selected city?")
+    desired_spies = read(min=1, max=200, digit=True, msg="Spies per city: ", additionalValues=["'"])
+    if desired_spies == "'":
+        return "'"
+
+    print("\nBuilding own-city spy availability snapshot...")
+    own_audit = run_empire_spy_capacity_audit(session)
+    plan = build_phase2_send_plan(selected_targets, own_audit, desired_spies)
+    display_phase2_send_plan(plan)
+
+    print(f"Plan based on report: {selected_path}")
+    print("These values are estimates. Send now? (y/n)")
+    confirm = read(values=["y", "Y", "n", "N", "'"])
+    if confirm == "'":
+        return "'"
+    if confirm.lower() != "y":
+        return None
+
+    print(f"\n{bcolors.WARNING}Live spy-dispatch endpoint mapping is not finalized yet for this server/build.{bcolors.ENDC}")
+    print("No spies were sent. Plan generated and shown for confirmation/testing.")
+    print("Next step: wire exact send endpoint and payload from your live hideout page responses.")
+    enter()
+    return None
+
+
 def generate_player_html_report(html_file, intel):
     """Generate HTML report for a single player"""
     
@@ -3273,12 +3588,13 @@ def main_menu(session, event):
         print("(3) Hideout Monitor - Auto-recruit spies")
         print("(4) Settings - Configure debug and storage")
         print("(5) Empire Spy Capacity Audit - Hideout/spies summary")
+        print("(6) Targeted Spy Dispatch - Plan from saved JSON report")
         print("(0) Exit")
         print()
         print("(') Return to Ikabot main menu")
         print()
         
-        choice = read(min=0, max=5, digit=True, additionalValues=["'"])
+        choice = read(min=0, max=6, digit=True, additionalValues=["'"])
         
         debug_log(f"Main menu selection: {choice}")
         
@@ -3306,6 +3622,11 @@ def main_menu(session, event):
 
         elif choice == 5:
             result = empire_spy_capacity_menu(session)
+            if result == "'":
+                return
+
+        elif choice == 6:
+            result = phase2_dispatch_from_report_menu(session)
             if result == "'":
                 return
 
