@@ -109,12 +109,12 @@ class TavernManager:
         """Parse Spanish-formatted numbers (with commas, periods, spaces, non-breaking spaces)"""
         if not text:
             return 0
-        text = text.replace(',', '').replace('.', '').replace(' ', '').replace(' ', '')
+        # Remove all separators: commas, periods, spaces, non-breaking spaces
+        text = text.replace(',', '').replace('.', '').replace(' ', '').replace('\xa0', '')
         try:
             return int(text)
         except ValueError:
             return 0
-
 
     def _get_town_hall_data(self, city_id, city_data):
         town_hall_position = next(
@@ -148,6 +148,37 @@ class TavernManager:
         if not th_html:
             return None
 
+        # Extract population data from JSON (if available)
+        current_citizens = None
+        max_citizens = None
+
+        # Try to find JSON with population data in the response
+        for item in th_data:
+            if isinstance(item, list) and item[0] == "updateTemplateData" and isinstance(item[1], dict):
+                load_js = item[1].get("load_js", {})
+                if isinstance(load_js, dict) and "params" in load_js:
+                    try:
+                        js_data = json.loads(load_js["params"])
+                        if "js_TownHallOccupiedSpace" in js_data and isinstance(js_data["js_TownHallOccupiedSpace"], dict):
+                            occupied = js_data["js_TownHallOccupiedSpace"].get("text", "")
+                            current_citizens = self._parse_number(occupied)
+                        if "js_TownHallMaxInhabitants" in js_data and isinstance(js_data["js_TownHallMaxInhabitants"], dict):
+                            max_hab = js_data["js_TownHallMaxInhabitants"].get("text", "")
+                            max_citizens = self._parse_number(max_hab)
+                    except (json.JSONDecodeError, ValueError, KeyError):
+                        pass
+
+        # Fallback: parse from HTML if JSON parsing didn't work
+        if current_citizens is None:
+            occupied_match = re.search(r'id="js_TownHallOccupiedSpace"[^>]*>([0-9,. \xa0]+)', th_html)
+            if occupied_match:
+                current_citizens = self._parse_number(occupied_match.group(1))
+
+        if max_citizens is None:
+            max_match = re.search(r'id="js_TownHallMaxInhabitants"[^>]*>([0-9,. \xa0]+)', th_html)
+            if max_match:
+                max_citizens = self._parse_number(max_match.group(1))
+
         growth_match = re.search(r'id="js_TownHallPopulationGrowthValue">([0-9.-]+)', th_html)
         satisfaction_match = re.search(
             r'id="js_TownHallHappinessLargeValue"[^>]*>([0-9,.-]+)', th_html
@@ -161,6 +192,8 @@ class TavernManager:
         )
 
         return {
+            'current_citizens': current_citizens,
+            'max_citizens': max_citizens,
             'growth_rate': float(growth_match.group(1)),
             'total_satisfaction': int(satisfaction_match.group(1).replace(',', '')),
             'resource_shortage': resource_shortage,
@@ -224,19 +257,16 @@ class TavernManager:
                     results.append(result)
                     continue
 
-                citizens_match = re.search(
-                    r'id="js_TownHallOccupiedSpace">([0-9,.  ]+)</span>[^<]*'
-                    r'<[^>]*id="js_TownHallMaxInhabitants">([0-9,.  ]+)',
-                    html
-                )
+                # Get population data from Town Hall instead of city page
+                th_data = self._get_town_hall_data(city_id, city_data)
 
-                if not citizens_match:
-                    result.update({'status': 'SKIP', 'note': 'Could not read population'})
+                if not th_data or th_data['current_citizens'] is None or th_data['max_citizens'] is None:
+                    result.update({'status': 'SKIP', 'note': 'Could not read population from Town Hall'})
                     results.append(result)
                     continue
 
-                current_citizens = int(citizens_match.group(1).replace(',', ''))
-                max_citizens = int(citizens_match.group(2).replace(',', ''))
+                current_citizens = th_data['current_citizens']
+                max_citizens = th_data['max_citizens']
                 result['pop'] = f"{current_citizens}/{max_citizens}"
 
                 tavern_data = self._get_tavern_data(city, tavern)
@@ -260,13 +290,6 @@ class TavernManager:
                             'status': 'CHANGED',
                             'note': f"L{current_level}({current_wine}/h)→L{max_level}({new_wine}/h) [MAX]",
                         })
-                    results.append(result)
-                    continue
-
-                th_data = self._get_town_hall_data(city_id, city_data)
-
-                if not th_data:
-                    result.update({'status': 'SKIP', 'note': 'Could not load town hall'})
                     results.append(result)
                     continue
 
