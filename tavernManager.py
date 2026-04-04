@@ -225,8 +225,8 @@ class TavernManager:
                     continue
 
                 citizens_match = re.search(
-                    r'id="js_GlobalMenu_citizens">([0-9,]+)</span>[^<]*'
-                    r'<[^>]*id="js_GlobalMenu_population">([0-9,]+)',
+                    r'id="js_TownHallOccupiedSpace">([0-9,.  ]+)</span>[^<]*'
+                    r'<[^>]*id="js_TownHallMaxInhabitants">([0-9,.  ]+)',
                     html
                 )
 
