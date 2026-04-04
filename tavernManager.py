@@ -105,12 +105,23 @@ class TavernManager:
         self.session.post(params=params)
         self._cache.pop(city['id'], None)
 
+    def _parse_number(self, text):
+        """Parse Spanish-formatted numbers (with commas, periods, spaces, non-breaking spaces)"""
+        if not text:
+            return 0
+        text = text.replace(',', '').replace('.', '').replace(' ', '').replace(' ', '')
+        try:
+            return int(text)
+        except ValueError:
+            return 0
+
+
     def _get_town_hall_data(self, city_id, city_data):
         town_hall_position = next(
             (b['position'] for b in city_data['position'] if b['building'] == 'townHall'),
             None
         )
-        if not town_hall_position:
+        if town_hall_position is None:
             return None
 
         th_params = {
