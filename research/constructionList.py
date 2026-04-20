@@ -27,9 +27,10 @@ from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import *
 from ikabot.web.session import normal_get
 
-# Safety caps for polling loops
-_MAX_CONSTRUCTION_WAIT_SECS = 7 * 24 * 3600  # 7 days
-_MAX_RESOURCE_WAIT_SECS = 6 * 3600           # 6 hours
+# Safety caps and intervals for polling loops
+_MAX_CONSTRUCTION_WAIT_SECS = 7 * 24 * 3600   # 7 days
+_MAX_RESOURCE_WAIT_SECS     = 7 * 24 * 3600   # 7 days (queue retries indefinitely up to this)
+_RESOURCE_RETRY_INTERVAL    = 30 * 60         # 30 minutes between resource checks
 
 
 def waitForConstruction(session, city_id, final_lvl):
@@ -95,6 +96,23 @@ def waitForConstruction(session, city_id, final_lvl):
     return city
 
 
+def _printQueueSummary(buildings):
+    """Print a formatted summary of the construction queue."""
+    total_levels = sum(b["upgradeTo"] - b.get("startLevel", b["level"]) for b in buildings)
+    print("\nConstruction queue ({:d} building(s), {:d} total level(s)):".format(
+        len(buildings), total_levels
+    ))
+    for i, b in enumerate(buildings, 1):
+        start = b.get("startLevel", b["level"])
+        levels = b["upgradeTo"] - start
+        print("  {:d}. {} lv {:d} -> {:d}  ({:d} level(s))".format(
+            i, b["name"], start, b["upgradeTo"], levels
+        ))
+    print("  Queue will retry every {:d} min if resources are insufficient.\n".format(
+        _RESOURCE_RETRY_INTERVAL // 60
+    ))
+
+
 def expandBuilding(session, cityId, building, waitForResources):
     """
     Parameters
@@ -118,34 +136,50 @@ def expandBuilding(session, cityId, building, waitForResources):
         city = waitForConstruction(session, cityId, upgradeTo)
         building = city["position"][position]
 
-        if building["canUpgrade"] is False and waitForResources is True:
-            # FIX #7: added a 6-hour total cap so this loop can't spin forever
-            resource_wait_total = 0
-            while building["canUpgrade"] is False:
-                if resource_wait_total >= _MAX_RESOURCE_WAIT_SECS:
-                    sendToBotDebug(
-                        session,
-                        "expandBuilding: 6-hour resource wait cap reached, aborting wait.",
-                        debugON_constructionList,
-                    )
-                    break
-                time.sleep(60)
-                resource_wait_total += 60
-                seconds = getMinimumWaitingTime(session)
-                html = session.get(city_url + cityId)
-                city = getCity(html)
-                building = city["position"][position]
-                # if no ships are coming, exit no matter if the building can or can't upgrade
-                if seconds == 0:
-                    break
-                wait(seconds + 5)
-                resource_wait_total += seconds + 5
+        # Queue retry loop: if resources are insufficient, poll every 30 minutes.
+        # This runs unconditionally — the queue will keep trying until resources
+        # arrive, the 7-day safety cap is hit, or the user interrupts.
+        retry_total = 0
+        while building["canUpgrade"] is False:
+            if retry_total >= _MAX_RESOURCE_WAIT_SECS:
+                sendToBotDebug(
+                    session,
+                    "expandBuilding: 7-day resource retry cap reached, skipping remaining levels.",
+                    debugON_constructionList,
+                )
+                break
+            levels_remaining = levels_to_upgrade - lv
+            msg = (
+                "{}: Cannot upgrade {} to level {:d} — insufficient resources. "
+                "{:d} level(s) remaining in queue. Retrying in {:d} min."
+            ).format(
+                city["cityName"],
+                building["name"],
+                building["level"] + 1,
+                levels_remaining,
+                _RESOURCE_RETRY_INTERVAL // 60,
+            )
+            sendToBotDebug(session, msg, debugON_constructionList)
+            session.setStatus(
+                "Queue: {} lv {:d}->{:d} in {} | {:d} level(s) pending | retry in {:d}min".format(
+                    building["name"],
+                    building["level"],
+                    building["level"] + 1,
+                    city["cityName"],
+                    levels_remaining,
+                    _RESOURCE_RETRY_INTERVAL // 60,
+                )
+            )
+            wait(_RESOURCE_RETRY_INTERVAL)
+            retry_total += _RESOURCE_RETRY_INTERVAL
+            html = session.get(city_url + cityId)
+            city = getCity(html)
+            building = city["position"][position]
 
         if building["canUpgrade"] is False:
-            msg = "City:{}\n".format(city["cityName"])
-            msg += "Building:{}\n".format(building["name"])
-            msg += "The building could not be completed due to lack of resources.\n"
-            msg += "Missed {:d} levels".format(levels_to_upgrade - lv)
+            msg = "City: {}\nBuilding: {}\nCould not upgrade due to insufficient resources.\nMissed {:d} level(s).".format(
+                city["cityName"], building["name"], levels_to_upgrade - lv
+            )
             sendToBot(session, msg)
             return
 
@@ -657,6 +691,9 @@ def constructionList(session, event, stdin_fd, predetermined_input):
         if buildings is None or len(buildings) == 0:
             event.set()
             return
+
+        banner()
+        _printQueueSummary(buildings)
 
         for building in buildings:
             # FIX #9: city state was stale for every building after the first;
