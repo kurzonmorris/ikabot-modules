@@ -27,9 +27,9 @@ from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import *
 from ikabot.web.session import normal_get
 
-sendResources = True
-expand = True
-thread = None
+# Safety caps for polling loops
+_MAX_CONSTRUCTION_WAIT_SECS = 7 * 24 * 3600  # 7 days
+_MAX_RESOURCE_WAIT_SECS = 6 * 3600           # 6 hours
 
 
 def waitForConstruction(session, city_id, final_lvl):
@@ -44,8 +44,9 @@ def waitForConstruction(session, city_id, final_lvl):
     -------
     city : dict
     """
+    # FIX #5: was infinite with no timeout; FIX #11: city['name'] -> city['cityName']
+    total_waited = 0
     while True:
-
         html = session.get(city_url + city_id)
         city = getCity(html)
 
@@ -62,6 +63,17 @@ def waitForConstruction(session, city_id, final_lvl):
         final_time = int(construction_time)
         seconds_to_wait = final_time - current_time
 
+        # FIX #5: guard against negative or runaway wait times
+        if seconds_to_wait < 0:
+            seconds_to_wait = 0
+        if total_waited + seconds_to_wait > _MAX_CONSTRUCTION_WAIT_SECS:
+            sendToBotDebug(
+                session,
+                "waitForConstruction: exceeded 7-day safety cap, aborting wait.",
+                debugON_constructionList,
+            )
+            break
+
         msg = "{}: I wait {:d} seconds so that {} gets to the level {:d}".format(
             city["cityName"],
             seconds_to_wait,
@@ -69,10 +81,14 @@ def waitForConstruction(session, city_id, final_lvl):
             construction_building["level"] + 1,
         )
         sendToBotDebug(session, msg, debugON_constructionList)
+        # FIX #11: was city['name'], correct key is city['cityName']
         session.setStatus(
-            f"Waiting until {getDateTime(time.time()+seconds_to_wait+10)[8:]}, {construction_building['name']} {construction_building['level']} -> {construction_building['level']+1} in {city['name']}, final lvl: {final_lvl}"
+            f"Waiting until {getDateTime(time.time()+seconds_to_wait+10)[8:]}, "
+            f"{construction_building['name']} {construction_building['level']} -> "
+            f"{construction_building['level']+1} in {city['cityName']}, final lvl: {final_lvl}"
         )
         wait(seconds_to_wait + 10)
+        total_waited += seconds_to_wait + 10
 
     html = session.get(city_url + city_id)
     city = getCity(html)
@@ -103,16 +119,27 @@ def expandBuilding(session, cityId, building, waitForResources):
         building = city["position"][position]
 
         if building["canUpgrade"] is False and waitForResources is True:
+            # FIX #7: added a 6-hour total cap so this loop can't spin forever
+            resource_wait_total = 0
             while building["canUpgrade"] is False:
+                if resource_wait_total >= _MAX_RESOURCE_WAIT_SECS:
+                    sendToBotDebug(
+                        session,
+                        "expandBuilding: 6-hour resource wait cap reached, aborting wait.",
+                        debugON_constructionList,
+                    )
+                    break
                 time.sleep(60)
+                resource_wait_total += 60
                 seconds = getMinimumWaitingTime(session)
                 html = session.get(city_url + cityId)
                 city = getCity(html)
                 building = city["position"][position]
-                # if no ships are comming, exit no matter if the building can or can't upgrade
+                # if no ships are coming, exit no matter if the building can or can't upgrade
                 if seconds == 0:
                     break
                 wait(seconds + 5)
+                resource_wait_total += seconds + 5
 
         if building["canUpgrade"] is False:
             msg = "City:{}\n".format(city["cityName"])
@@ -161,7 +188,7 @@ def getCostsReducers(city):
 
     Returns
     -------
-    reducers_per_material_level : dict[int, int]
+    reducers_per_material_level : list[int]
     """
     reducers_per_material = [0] * len(materials_names)
     assert len(reducers_per_material) == 5
@@ -195,47 +222,60 @@ def getResourcesNeeded(session, city, building, current_level, final_level):
 
     Returns
     -------
-    costs_per_material : dict[int, int]
+    costs_per_material : list[int]
     """
-    # get html with information about buildings
-    building_detail_url = "view=buildingDetail&buildingId=0&helpId=1&backgroundView=city&currentCityId={}&templateView=ikipedia&actionRequest={}&ajax=1".format(
-        city["id"], actionRequest
-    )
-    building_detail_response = session.post(building_detail_url)
-    building_detail = json.loads(building_detail_response, strict=False)
-    building_html = building_detail[1][1][1]
+    # FIX #10 (partial): wrap all JSON parsing in try/except
+    try:
+        building_detail_url = "view=buildingDetail&buildingId=0&helpId=1&backgroundView=city&currentCityId={}&templateView=ikipedia&actionRequest={}&ajax=1".format(
+            city["id"], actionRequest
+        )
+        building_detail_response = session.post(building_detail_url)
+        building_detail = json.loads(building_detail_response, strict=False)
+        building_html = building_detail[1][1][1]
+    except (json.JSONDecodeError, IndexError, KeyError, TypeError) as e:
+        print("Failed to fetch building details: {}".format(e))
+        return [-1, -1, -1, -1, -1]
 
-    # get html with information about buildings costs
     regex_building_detail = (
         r'<div class="(?:selected)? button_building '
         + re.escape(building["building"])
         + r'"\s*onmouseover="\$\(this\)\.addClass\(\'hover\'\);" onmouseout="\$\(this\)\.removeClass\(\'hover\'\);"\s*onclick="ajaxHandlerCall\(\'\?(.*?)\'\);'
     )
     match = re.search(regex_building_detail, building_html)
-    building_costs_url = match.group(1)
-    building_costs_url += "backgroundView=city&currentCityId={}&templateView=buildingDetail&actionRequest={}&ajax=1".format(
-        city["id"], actionRequest
-    )
-    building_costs_response = session.post(building_costs_url)
-    building_costs = json.loads(building_costs_response, strict=False)
-    html_costs = building_costs[1][1][1]
+    # FIX #8: was match.group(1) with no None guard — would crash on unmatched regex
+    if match is None:
+        print("Could not find upgrade details for building: {}".format(building["name"]))
+        return [-1, -1, -1, -1, -1]
 
-    # if the user has all the resource saving studies, we save that in the session data (one less request)
+    try:
+        building_costs_url = match.group(1)
+        building_costs_url += "backgroundView=city&currentCityId={}&templateView=buildingDetail&actionRequest={}&ajax=1".format(
+            city["id"], actionRequest
+        )
+        building_costs_response = session.post(building_costs_url)
+        building_costs = json.loads(building_costs_response, strict=False)
+        html_costs = building_costs[1][1][1]
+    except (json.JSONDecodeError, IndexError, KeyError, TypeError) as e:
+        print("Failed to fetch building costs: {}".format(e))
+        return [-1, -1, -1, -1, -1]
+
     sessionData = session.getSessionData()
     if "reduccion_inv_max" in sessionData:
         costs_reduction = 14
     else:
-        # get the studies
-        url = "view=noViewChange&researchType=economy&backgroundView=city&currentCityId={}&templateView=researchAdvisor&actionRequest={}&ajax=1".format(
-            city["id"], actionRequest
-        )
-        rta = session.post(url)
-        rta = json.loads(rta, strict=False)
-        studies = rta[2][1]["new_js_params"]
-        studies = json.loads(studies, strict=False)
-        studies = studies["currResearchType"]
+        try:
+            url = "view=noViewChange&researchType=economy&backgroundView=city&currentCityId={}&templateView=researchAdvisor&actionRequest={}&ajax=1".format(
+                city["id"], actionRequest
+            )
+            rta = session.post(url)
+            rta = json.loads(rta, strict=False)
+            studies = rta[2][1]["new_js_params"]
+            studies = json.loads(studies, strict=False)
+            studies = studies["currResearchType"]
+        except (json.JSONDecodeError, IndexError, KeyError, TypeError) as e:
+            print("Failed to fetch research data, assuming no cost reduction: {}".format(e))
+            studies = {}
 
-        # look for resource saving studies
         costs_reduction = 0
         for study in studies:
             if studies[study]["liClass"] != "explored":
@@ -248,29 +288,23 @@ def getResourcesNeeded(session, city, building, current_level, final_level):
             elif "2100" in link:
                 costs_reduction += 8
 
-        # if the user has all the resource saving studies, save that in the session data
         if costs_reduction == 14:
             sessionData["reduccion_inv_max"] = True
             session.setSessionData(sessionData)
 
-    # calculate cost reductions
     costs_reduction /= 100
     costs_reduction = 1 - costs_reduction
 
-    # get buildings that reduce the cost of upgrades
     costs_reductions = getCostsReducers(city)
 
-    # get the type of resources that this upgrade will cost (wood, marble, etc)
     resources_types = re.findall(
         r'<th class="costs"><img src="(.*?)\.png"/></th>', html_costs
     )[:-1]
 
-    # get the actual cost of each upgrade
     matches = re.findall(
         r'<td class="level">\d+</td>(?:\s+<td class="costs">.*?</td>)+', html_costs
     )
 
-    # calculate the cost of the entire upgrade, taking into account all the possible reductions
     final_costs = [0] * len(materials_names)
     levels_to_upgrade = 0
     for match in matches:
@@ -283,31 +317,33 @@ def getResourcesNeeded(session, city, building, current_level, final_level):
             break
 
         levels_to_upgrade += 1
-        # get the costs for the current level
         costs = re.findall(r'<td class="costs"><div.*>([\d,\.\s\xa0]*)</div></div></td>', match)
-        # delete blank spaces (\xa0) in costs
         costs = [value.replace('\xa0', '').replace(' ', '') for value in costs]
 
         for i in range(len(costs)):
-            # get hash from CDN images to identify the resource type
             resource_type = checkhash("https:" + resources_types[i] + ".png")
 
+            # FIX #8 (partial): checkhash can now return None; skip unknown resource types
+            if resource_type is None:
+                continue
+
+            resource_index = None
             for j in range(len(materials_names_tec)):
                 name = materials_names_tec[j]
                 if resource_type == name:
                     resource_index = j
                     break
 
-            # get the cost of the current resource type
+            # FIX #8 (partial): resource_index was used unguarded; skip if not found
+            if resource_index is None:
+                continue
+
             cost = costs[i]
             cost = cost.replace(",", "").replace(".", "")
             cost = 0 if cost == "" else int(cost)
 
-            # calculate all the reductions
             real_cost = Decimal(cost)
-            # investigation reduction
             original_cost = Decimal(real_cost) / Decimal(costs_reduction)
-            # special building reduction
             real_cost -= Decimal(original_cost) * (
                 Decimal(costs_reductions[resource_index]) / Decimal(100)
             )
@@ -335,9 +371,8 @@ def sendResourcesNeeded(session, destination_city_id, city_origins, missing_reso
     session : ikabot.web.session.Session
     destination_city_id : int
     city_origins : dict
-    missing_resources : dict[int, int]
+    missing_resources : list[int]
     """
-
     info = "\nTransport resources to upload building\n"
 
     try:
@@ -349,7 +384,6 @@ def sendResourcesNeeded(session, destination_city_id, city_origins, missing_reso
             if missing <= 0:
                 continue
 
-            # send the resources from each origin city
             for cityOrigin in city_origins[i]:
                 if missing == 0:
                     break
@@ -378,11 +412,14 @@ def chooseResourceProviders(session, cities_ids, cities, city_id, resource, miss
     city_id : int
     resource : int
     missing : int
+
+    Returns
+    -------
+    tuple: (origin_cities, send_resources, do_expand)
     """
-    global sendResources
-    sendResources = True
-    global expand
-    expand = True
+    # FIX #16: removed global sendResources / expand; now returned as local values
+    send_resources = True
+    do_expand = True
 
     banner()
     print("From what cities obtain {}?".format(materials_names[resource].lower()))
@@ -405,7 +442,6 @@ def chooseResourceProviders(session, cities_ids, cities, city_id, resource, miss
         if available == 0:
             continue
 
-        # ask the user it this city should provide resources
         tradegood_initial = tradegood_initials[int(cities[cityId]["tradegood"])]
         pad = " " * (maxName - len(cities[cityId]["name"]))
         is_producer = (int(cities[cityId]["tradegood"]) == int(resource))
@@ -414,34 +450,31 @@ def chooseResourceProviders(session, cities_ids, cities, city_id, resource, miss
             cities[cityId]["name"],
             tradegood_initial,
             addThousandSeparator(available),
-            ("y/N", "Y/n")[is_producer == True]
+            ("y/N", "Y/n")[is_producer is True]
         )
-        choice = read(msg=msg, values=["Y", "y", "N", "n", ""], default=("N", "Y")[is_producer == True])
+        choice = read(msg=msg, values=["Y", "y", "N", "n", ""], default=("N", "Y")[is_producer is True])
         if choice.lower() == "n":
             continue
 
-        # if so, save the city and calculate the total amount resources to send
         total_available += available
         origin_cities.append(city)
-        # if we have enough resources, return
         if total_available >= missing:
-            return origin_cities
+            return origin_cities, send_resources, do_expand
 
-    # if we reach this part, there are not enough resources to expand the building
     print("\nThere are not enough resources.")
 
     if len(origin_cities) > 0:
         print("\nSend the resources anyway? [Y/n]")
         choice = read(values=["y", "Y", "n", "N", ""])
         if choice.lower() == "n":
-            sendResources = False
+            send_resources = False
 
     print("\nTry to expand the building anyway? [y/N]")
     choice = read(values=["y", "Y", "n", "N", ""])
     if choice.lower() == "n" or choice == "":
-        expand = False
+        do_expand = False
 
-    return origin_cities
+    return origin_cities, send_resources, do_expand
 
 
 def sendResourcesMenu(session, city_id, missing, useFreighters=False):
@@ -450,40 +483,41 @@ def sendResourcesMenu(session, city_id, missing, useFreighters=False):
     ----------
     session : ikabot.web.session.Session
     city_id : int
-    missing : list[int, int]
+    missing : list[int]
+    useFreighters : bool
+
+    Returns
+    -------
+    tuple: (resource_thread or None, do_expand)
     """
-    global thread
+    # FIX #16: removed global thread; thread is now returned to the caller
     cities_ids, cities = getIdsOfCities(session)
     origins = {}
-    # for each missing resource, choose providers
+    do_expand = True
+
     for resource in range(len(missing)):
         if missing[resource] <= 0:
             continue
 
-        origin_cities = chooseResourceProviders(
+        origin_cities, send_resources, do_expand = chooseResourceProviders(
             session, cities_ids, cities, city_id, resource, missing[resource]
         )
-        if sendResources is False and expand:
+        if send_resources is False and do_expand:
             print("\nThe building will be expanded if possible.")
             enter()
-            return
-        elif sendResources is False:
-            return
+            return None, do_expand
+        elif send_resources is False:
+            return None, False
         origins[resource] = origin_cities
 
-    if expand:
-        print(
-            
-                "\nThe resources will be sent and the building will be expanded if possible."
-            
-        )
+    if do_expand:
+        print("\nThe resources will be sent and the building will be expanded if possible.")
     else:
         print("\nThe resources will be sent.")
 
     enter()
 
-    # create a new thread to send the resources
-    thread = threading.Thread(
+    resource_thread = threading.Thread(
         target=sendResourcesNeeded,
         args=(
             session,
@@ -493,7 +527,8 @@ def sendResourcesMenu(session, city_id, missing, useFreighters=False):
             useFreighters,
         ),
     )
-    thread.start()
+    resource_thread.start()
+    return resource_thread, do_expand
 
 
 def getBuildingsToExpand(session, cityId):
@@ -511,7 +546,6 @@ def getBuildingsToExpand(session, cityId):
     city = getCity(html)
 
     banner()
-    # show the buildings available to expand (ignore empty spaces)
     print("Which buildings do you want to expand? Separate numbers with commas (7, 1, 3, 5, ...)\n")
     print("(0)\t\texit")
     buildings = [
@@ -542,12 +576,19 @@ def getBuildingsToExpand(session, cityId):
     if len(selected_building_ids) == 0 or 0 in selected_building_ids:
         return None
 
+    max_building_id = len(buildings)
     selected_buildings = []
     for building_id in selected_building_ids:
+        # FIX #17: out-of-range input would cause IndexError; now validated
+        if building_id < 1 or building_id > max_building_id:
+            print("Invalid selection {:d} (valid range: 1-{:d}), skipping.".format(
+                building_id, max_building_id
+            ))
+            continue
+
         building = buildings[building_id - 1]
 
         current_level = int(building["level"])
-        # if the building is being expanded, add 1 level
         if building["isBusy"]:
             current_level += 1
 
@@ -557,29 +598,38 @@ def getBuildingsToExpand(session, cityId):
 
         final_level = read(min=current_level, msg="increase to level:")
         building["upgradeTo"] = final_level
+        # FIX #19: store computed start level so the info string uses it correctly
+        building["startLevel"] = current_level
         selected_buildings.append(building)
 
     return selected_buildings
 
+
 @cache
 def checkhash(url):
+    # FIX #6/#7/#8: was checking intermediate MD5 hashes per chunk (never correct),
+    # had no HTTP error handling, and could return unbound 'material' on no match.
+    # Now: full MD5 computed across all chunks, errors handled, returns None on failure.
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+    except requests.RequestException:
+        return None
     m = hashlib.md5()
-    r = requests.get(url)
     for data in r.iter_content(8192):
         m.update(data)
-        if m.hexdigest() == config.material_img_hash[0]:
-            material = "wood"
-        elif m.hexdigest() == config.material_img_hash[1]:
-            material = "wine"
-        elif m.hexdigest() == config.material_img_hash[2]:
-            material = "marble"
-        elif m.hexdigest() == config.material_img_hash[3]:
-            material = "glass"
-        elif m.hexdigest() == config.material_img_hash[4]:
-            material = "sulfur"
-        else:
-            continue
-    return material
+    digest = m.hexdigest()
+    if digest == config.material_img_hash[0]:
+        return "wood"
+    elif digest == config.material_img_hash[1]:
+        return "wine"
+    elif digest == config.material_img_hash[2]:
+        return "marble"
+    elif digest == config.material_img_hash[3]:
+        return "glass"
+    elif digest == config.material_img_hash[4]:
+        return "sulfur"
+    return None
 
 
 def constructionList(session, event, stdin_fd, predetermined_input):
@@ -594,13 +644,12 @@ def constructionList(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
     try:
-        global expand
-        global sendResources
-        expand = True
-        sendResources = True
-
+        # FIX #16: removed global expand / sendResources resets; state flows via return values
         banner()
         wait_resources = False
+        do_expand = True
+        resource_thread = None
+
         print("In which city do you want to expand buildings?")
         city = chooseCity(session)
         cityId = city["id"]
@@ -609,14 +658,17 @@ def constructionList(session, event, stdin_fd, predetermined_input):
             event.set()
             return
 
-        # Sequentially upgrade each building
         for building in buildings:
+            # FIX #9: city state was stale for every building after the first;
+            # re-fetch on each iteration so resource counts are current
+            html = session.get(city_url + cityId)
+            city = getCity(html)
+
             current_level = building["level"]
             if building["isBusy"]:
                 current_level += 1
             final_level = building["upgradeTo"]
 
-            # calculate the resources that are needed
             resourcesNeeded = getResourcesNeeded(
                 session, city, building, current_level, final_level
             )
@@ -632,13 +684,11 @@ def constructionList(session, event, stdin_fd, predetermined_input):
                 print("- {}: {}".format(name, addThousandSeparator(amount)))
             print("")
 
-            # calculate the resources that are missing
             missing = [0] * len(materials_names)
             for i in range(len(materials_names)):
                 if city["availableResources"][i] < resourcesNeeded[i]:
                     missing[i] = resourcesNeeded[i] - city["availableResources"][i]
 
-            # show missing resources to the user
             if sum(missing) > 0:
                 print("\nMissing:")
                 for i in range(len(materials_names)):
@@ -648,7 +698,6 @@ def constructionList(session, event, stdin_fd, predetermined_input):
                     print("{} of {}".format(addThousandSeparator(missing[i]), name))
                 print("")
 
-                # if the user wants, send the resources from the selected cities
                 print("Automatically transport resources? [Y/n]")
                 rta = read(values=["y", "Y", "n", "N", ""])
                 if rta.lower() == "n":
@@ -661,15 +710,15 @@ def constructionList(session, event, stdin_fd, predetermined_input):
                     print("What type of ships do you want to use? (Default: Trade ships)")
                     print("(1) Trade ships")
                     print("(2) Freighters")
-                    shiptype = read(min=1, max=2, digit=True, empty=True)
-                    if shiptype == '':
-                        shiptype = 1
-                    if shiptype == 1:
-                        useFreighters = False
-                    elif shiptype == 2:
-                        useFreighters = True
+                    shiptype_raw = read(min=1, max=2, digit=True, empty=True)
+                    # FIX #15: read() returns a string; comparing str to int was always False,
+                    # leaving useFreighters undefined and causing UnboundLocalError
+                    shiptype = 1 if shiptype_raw == "" else int(shiptype_raw)
+                    useFreighters = (shiptype == 2)
                     wait_resources = True
-                    sendResourcesMenu(session, cityId, missing, useFreighters)
+                    resource_thread, do_expand = sendResourcesMenu(
+                        session, cityId, missing, useFreighters
+                    )
             else:
                 print("\nYou have enough materials")
                 print("Proceed? [Y/n]")
@@ -680,25 +729,30 @@ def constructionList(session, event, stdin_fd, predetermined_input):
     except KeyboardInterrupt:
         event.set()
         return
-    
+
     set_child_mode(session)
+
+    # FIX #19: info string previously used only the last loop iteration's building/level vars.
+    # Now covers all buildings using the startLevel stored in getBuildingsToExpand.
+    info = "\nUpgrade buildings\n"
+    info += "City: {}\n".format(city["cityName"])
+    for b in buildings:
+        b_start = b.get("startLevel", b["level"])
+        info += "Building: {}. From {:d}, to {:d}\n".format(b["name"], b_start, b["upgradeTo"])
+
+    # FIX #18: setInfoSignal was called after event.set(), risking a teardown race.
+    # Signal is now registered before we release the event.
+    setInfoSignal(session, info)
     event.set()
 
-    info = "\nUpgrade building\n"
-    info = info + "City: {}\nBuilding: {}. From {:d}, to {:d}".format(
-        city["cityName"], building["name"], current_level, final_level
-    )
-
-    setInfoSignal(session, info)
     try:
-        if expand:
+        if do_expand:
             for building in buildings:
                 expandBuilding(session, cityId, building, wait_resources)
-        elif thread:
-            thread.join()
+        elif resource_thread:
+            resource_thread.join()
     except Exception as e:
         msg = "Error in:\n{}\nCause:\n{}".format(info, traceback.format_exc())
         sendToBot(session, msg)
     finally:
         session.logout()
-
