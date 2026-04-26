@@ -661,3 +661,356 @@ def _get_buildable_options(session, city, slot_position):
     ]
 
 # === END CHUNK 2 OF 5 — chunk 3 of 5 inserted below this line ===
+
+# ---------------------------------------------------------------------------
+# Chunk 3 of 5: slot renderer + interactive add-to-queue flow
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Display helpers
+# ---------------------------------------------------------------------------
+
+def _render_slot_grid(city):
+    """Print a one-line-per-slot summary of the city's building positions."""
+    positions = city.get("position", [])
+    print("")
+    for i, slot in enumerate(positions):
+        name = slot.get("name", "empty")
+        if name == "empty":
+            slot_type = slot.get("type", "")
+            label = f"[ -- ]  (empty, {slot_type})"
+            print(f"  Slot {i:>2}  {label}")
+        else:
+            lv = slot.get("level", 0)
+            lv_str = f"lv{lv:>2}"
+            busy_mark = ""
+            if slot.get("isBusy"):
+                busy_mark = "  * building..."
+                eta = slot.get("completed")
+                if eta:
+                    busy_mark += f" → done {getDateTime(int(eta))[8:]}"
+            if slot.get("isMaxLevel"):
+                color = bcolors.BLACK
+                note = "  MAX"
+            elif slot.get("canUpgrade"):
+                color = bcolors.GREEN
+                note = ""
+            else:
+                color = bcolors.RED
+                note = "  (resources missing)"
+            print(
+                f"  Slot {i:>2}  [{lv_str}]  "
+                f"{color}{name}{bcolors.ENDC}"
+                f"{note}{busy_mark}"
+            )
+    print("")
+
+
+def _fmt_res(vals):
+    """Format a 5-element resource list as a compact string."""
+    parts = []
+    names = ["Wd", "Wi", "Mb", "Cr", "Su"]
+    for n, v in zip(names, vals):
+        if v:
+            parts.append(f"{n} {addThousandSeparator(v)}")
+    return "  ".join(parts) if parts else "0"
+
+
+def _print_cost_table(header, rows):
+    """Print a labelled table of resource amounts.
+
+    *rows* is a list of (label, [w,wi,mb,cr,su]) tuples.
+    """
+    col_w = 10
+    res_names = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
+    header_line = f"  {'':30}" + "".join(f"{r:>{col_w}}" for r in res_names)
+    print(f"\n  {header}")
+    print(header_line)
+    print("  " + "-" * (30 + col_w * 5))
+    for label, vals in rows:
+        vals = list(vals) + [0] * (5 - len(vals))
+        row_line = f"  {label:<30}" + "".join(
+            f"{addThousandSeparator(v):>{col_w}}" for v in vals
+        )
+        print(row_line)
+
+
+# ---------------------------------------------------------------------------
+# Interactive add-to-queue flow (menu option 1)
+# ---------------------------------------------------------------------------
+
+def _add_to_queue(session):
+    """Interactive: pick a city, pick slots + targets, append rows to CSV."""
+    banner()
+    print("Add construction(s) to queue\n")
+    city = chooseCity(session)
+    city_id = city["id"]
+    city_name = city.get("cityName") or city.get("name", str(city_id))
+
+    banner()
+    print(f"City: {city_name}\n")
+    avail = city.get("availableResources", [0] * 5)
+    free  = city.get("freeSpaceForResources", [0] * 5)
+    cap   = [a + f for a, f in zip(avail, free)]
+    _print_cost_table(
+        "Current resources",
+        [
+            ("Available", avail),
+            ("Free space", free),
+            ("Capacity",  cap),
+        ],
+    )
+    _render_slot_grid(city)
+
+    positions     = city.get("position", [])
+    max_slot      = len(positions) - 1
+    slot_targets  = 0          # distinct slot-target picks this session
+    added_ids     = []         # queue_ids added; kept for rollback
+    cost_cache    = {}         # building_slug → costs dict (per add-session cache)
+    session_totals = [0] * 5  # running grand total of costs added this session
+
+    while slot_targets < ADD_SESSION_SLOT_CAP:
+        remaining = ADD_SESSION_SLOT_CAP - slot_targets
+        print(
+            f"  Enter slot number (0–{max_slot}), or press Enter to finish "
+            f"[{remaining} slot-target(s) remaining]:"
+        )
+        raw = read(min=0, max=max_slot, digit=True, empty=True)
+        if raw == "":
+            break
+        slot_pos = int(raw)
+        slot = positions[slot_pos]
+        is_empty = slot.get("building") == "empty"
+
+        if is_empty:
+            # ---- empty slot: pick a building to construct ----
+            opts = _get_buildable_options(session, city, slot_pos)
+            if not opts:
+                print("  No buildings can be constructed in that slot.")
+                enter()
+                continue
+            banner()
+            print(f"  Slot {slot_pos} is empty. Choose a building to construct:\n")
+            for idx, o in enumerate(opts, 1):
+                print(f"  ({idx}) {o['name']}")
+            chosen = opts[read(min=1, max=len(opts)) - 1]
+            building_slug = chosen["building"]
+            building_name = chosen["name"]
+            building_id   = chosen["buildingId"]
+            target_level  = 1
+            rows_to_add = [(target_level, "build")]
+
+            # fetch costs for level 1
+            if building_slug not in cost_cache:
+                print("  Fetching cost data…")
+                cost_cache[building_slug] = fetch_costs_for_building(
+                    session, city, building_slug
+                )
+            costs_dict = cost_cache[building_slug]
+            row_costs = [costs_dict.get(1, [0] * 5)]
+
+        else:
+            # ---- occupied slot: pick a target level to upgrade to ----
+            current_lv = slot.get("level", 0)
+            if slot.get("isBusy"):
+                current_lv += 1          # already building toward this level
+            building_slug = slot.get("building", "")
+            building_name = slot.get("name", building_slug)
+            building_id   = ""
+
+            if slot.get("isMaxLevel"):
+                print(
+                    f"\n  {bcolors.YELLOW}Warning: slot {slot_pos} "
+                    f"({building_name}) is already at max level.{bcolors.ENDC}"
+                )
+                print("  Continue anyway? [y/N]")
+                if read(values=["y", "Y", "n", "N", ""], default="N").lower() != "y":
+                    continue
+
+            print(
+                f"\n  Slot {slot_pos}: {building_name}  lv {current_lv}  "
+                f"(max allowed: {HARD_LEVEL_CAP})"
+            )
+            target_level = read(
+                min=current_lv + 1,
+                max=HARD_LEVEL_CAP,
+                msg=f"  Upgrade to level (current {current_lv}): ",
+            )
+
+            # fetch costs for all levels in one shot, cache for this session
+            if building_slug not in cost_cache:
+                print("  Fetching cost data…")
+                cost_cache[building_slug] = fetch_costs_for_building(
+                    session, city, building_slug
+                )
+            costs_dict = cost_cache[building_slug]
+
+            rows_to_add  = [
+                (lv, "upgrade")
+                for lv in range(current_lv + 1, target_level + 1)
+            ]
+            row_costs = []
+            missing_levels = []
+            for lv, _ in rows_to_add:
+                c = costs_dict.get(lv)
+                if c is None:
+                    row_costs.append([0] * 5)
+                    missing_levels.append(lv)
+                else:
+                    row_costs.append(c)
+            if missing_levels:
+                print(
+                    f"  {bcolors.YELLOW}Cost data missing for levels "
+                    f"{missing_levels}; stored as 0 and will be recomputed "
+                    f"before execution.{bcolors.ENDC}"
+                )
+
+        # ---- transport mode ----
+        print(
+            "\n  Transport mode for this slot-target:\n"
+            "  (1) jit  — ship resources just in time for each level [default]\n"
+            "  (2) bulk — ship all pending costs upfront\n"
+            "  (3) none — rely on existing stock only"
+        )
+        tm_choice = read(min=1, max=3, digit=True, empty=True)
+        transport_mode = {1: "jit", 2: "bulk", 3: "none", "": "jit"}.get(
+            tm_choice, "jit"
+        )
+
+        # ---- append rows to CSV ----
+        now_ts = int(time.time())
+        row_total = [0] * 5
+        for (lv, action), cost in zip(rows_to_add, row_costs):
+            qid = csv_next_queue_id(session)
+            notes_val = ""
+            if action == "upgrade" and costs_dict.get(lv) is None:
+                notes_val = "cost unknown at add-time; will be recomputed before execution"
+            new_row = {
+                "queue_id":             qid,
+                "city_id":              city_id,
+                "city_name":            city_name,
+                "slot_position":        slot_pos,
+                "action":               action,
+                "building":             building_slug,
+                "building_id":          building_id if action == "build" else "",
+                "target_level":         lv,
+                "wood":                 cost[0],
+                "wine":                 cost[1],
+                "marble":               cost[2],
+                "crystal":              cost[3],
+                "sulphur":              cost[4],
+                "transport_mode":       transport_mode,
+                "auto_transport_enabled": "no" if transport_mode == "none" else "yes",
+                "status":               "pending",
+                "expected_finish":      "",
+                "added_at":             now_ts,
+                "notes":                notes_val,
+                "schema_version":       SCHEMA_VERSION,
+            }
+            csv_append(session, new_row)
+            added_ids.append(qid)
+            for i in range(5):
+                row_total[i] += cost[i]
+        for i in range(5):
+            session_totals[i] += row_total[i]
+
+        slot_targets += 1
+
+        # ---- per-slot summary ----
+        lvl_range = (
+            f"lv {current_lv}→{target_level}"
+            if not is_empty
+            else "new (lv 1)"
+        )
+        n_rows = len(rows_to_add)
+        print(
+            f"\n  Added: {city_name} · slot {slot_pos} · "
+            f"{building_name} · {lvl_range} · "
+            f"{n_rows} row(s) · cost = {_fmt_res(row_total)} · mode={transport_mode}"
+        )
+
+        if slot_targets >= ADD_SESSION_SLOT_CAP:
+            print(f"\n  Slot-target cap ({ADD_SESSION_SLOT_CAP}) reached for this session.")
+            break
+
+        print("\n  Add another slot-target? [Y/n]")
+        again = read(values=["y", "Y", "n", "N", ""], default="Y")
+        if again.lower() == "n":
+            break
+
+    if not added_ids:
+        print("\n  Nothing added.")
+        enter()
+        return
+
+    # ---- grand totals + feasibility ----
+    banner()
+    print(f"  Session summary for {city_name}\n")
+
+    city = fetch_city(session, city_id)   # re-fetch for fresh stock
+    avail = city.get("availableResources", [0] * 5)
+    free  = city.get("freeSpaceForResources", [0] * 5)
+    missing = [max(0, t - a) for t, a in zip(session_totals, avail)]
+    warehouse_warn = any(t > f for t, f in zip(session_totals, free))
+
+    _print_cost_table(
+        "Grand totals",
+        [
+            ("Total cost (all rows)",  session_totals),
+            ("In city now",            avail),
+            ("Shortfall (needs ship)", missing),
+        ],
+    )
+    if warehouse_warn:
+        print(
+            f"\n  {bcolors.YELLOW}Warning: total cost exceeds free warehouse "
+            f"space — resources may need to be staged across multiple "
+            f"shipments.{bcolors.ENDC}"
+        )
+
+    # cross-city check: sum available across all owned cities
+    if any(missing):
+        print("\n  Computing cross-city resource totals…")
+        try:
+            city_ids, _ = getIdsOfCities(session)
+            cross = [0] * 5
+            for cid in city_ids:
+                c = fetch_city(session, cid)
+                for i in range(5):
+                    cross[i] += c.get("availableResources", [0]*5)[i]
+            can_cover = all(cross[i] >= missing[i] for i in range(5))
+            if can_cover:
+                print(
+                    f"  {bcolors.GREEN}Cross-city totals cover the shortfall "
+                    f"— auto-transport should succeed.{bcolors.ENDC}"
+                )
+            else:
+                shortfalls = [
+                    f"{materials_names[i]} (need {addThousandSeparator(missing[i])}, "
+                    f"available {addThousandSeparator(cross[i])})"
+                    for i in range(5)
+                    if cross[i] < missing[i]
+                ]
+                print(
+                    f"  {bcolors.RED}Insufficient resources across all cities: "
+                    f"{', '.join(shortfalls)}.{bcolors.ENDC}"
+                )
+                print("  Rows will be skipped at execution time unless you acquire more.")
+        except Exception:
+            print("  (Could not fetch cross-city data.)")
+
+    # ---- confirm or rollback ----
+    print(
+        f"\n  {len(added_ids)} row(s) staged in CSV.\n"
+        "  [C] Confirm and keep   [R] Rollback and discard"
+    )
+    choice = read(values=["C", "c", "R", "r"])
+    if choice.upper() == "R":
+        for qid in added_ids:
+            csv_delete(session, qid)
+        print("  Rolled back — no rows saved.")
+    else:
+        print(f"  Confirmed. {len(added_ids)} row(s) queued for {city_name}.")
+    enter()
+
+# === END CHUNK 3 OF 5 — chunk 4 of 5 inserted below this line ===
