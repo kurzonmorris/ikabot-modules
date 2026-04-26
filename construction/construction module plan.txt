@@ -206,12 +206,25 @@ Implementation (mirrors research/constructionList.py:186 `getResourcesNeeded`):
    &currentCityId=<id>&templateView=ikipedia&actionRequest=<a>&ajax=1`.
 2. Extract the ikipedia HTML, find the `button_building <slug>` block, follow
    its `ajaxHandlerCall(...)` URL to the per-building cost table.
+   **If the regex returns no match (wonder buildings, palace variants, museum,
+   embassy variants, or any slug the ikipedia view doesn't expose), the helper
+   returns `{}` and logs a `notes="ikipedia: no entry for slug=<X>"` value.
+   The scheduler's existing `cost is None → skip` branch in `service_city`
+   then marks the row `skipped` cleanly instead of crashing on
+   `match.group(1)` against `None`.** Same guard applies to step 3's
+   per-building URL fetch if the response is empty.
 3. POST the per-building URL; from the returned HTML, extract every
    `<td class="level">N</td>` row plus its sibling `<td class="costs">` cells.
-4. **Read columns positionally** (`wood, wine, marble, crystal, sulphur`).
-   We deliberately do NOT use `checkhash` / PNG hashing — column order in the
-   ikipedia HTML is fixed. (If a future game patch breaks this, an ordering
-   sanity-check assertion at the top will fire.)
+4. **Map columns to resources by reading the th image filename, not by
+   position.** The number of cost columns is per-building (carpentering = 1,
+   barracks = 2, town hall = 3, only a handful of buildings show all 5), so
+   a positional read would mis-bucket costs. We extract the th headers with
+   `re.findall(r'<th class="costs"><img src="(.*?)\.png"`, html_costs)[:-1]`
+   (the trailing `-1` drops the "total time" header) and string-match each
+   filename against `materials_names_tec` (`["wood","wine","marble","glass",
+   "sulfur"]`) to get the resource index 0–4. We deliberately do NOT use
+   `checkhash` / PNG hashing — the URL filename already carries the resource
+   identity, so no HTTP fetch and no MD5 are needed.
 5. Apply research-discount math from `getResourcesNeeded`:
    - cache `reduccion_inv_max` flag in `session.getSessionData()`
    - sum economy-research discounts (2020 → +2%, 2060 → +4%, 2100 → +8%)
@@ -219,6 +232,9 @@ Implementation (mirrors research/constructionList.py:186 `getResourcesNeeded`):
    research/constructionList.py:156) — discount = reducer_level percent
    off the post-research cost.
 7. Return `{level: [w, wi, m, c, s]}` for every level the table exposes.
+   Each list always has length 5; resources the building doesn't use are
+   left as 0 (because step 4 only writes into the indices that have a
+   matching column header).
 
 The scheduler's pre-execution recompute (used in `service_city`'s `idle`
 branch) calls the same helper, picks the entry for `target_level`, and
@@ -641,7 +657,18 @@ Cost: N - 1 city-view HTTP requests every time the scheduler enters
 
 - **Build new** (action=build): mirror `constructBuilding.py`'s `view=buildingGround` fetch + `action=CityScreen&function=build` POST with `position`, `building` = `building_id`, `actionRequest`.
 - **Upgrade** (action=upgrade): mirror `constructionList.py`'s upgrade URL: `action=CityScreen&function=upgradeBuilding&actionRequest&cityId&position&level=<current_level>&activeTab=tabSendTransporter&backgroundView=city&currentCityId&templateView=<building_slug>&ajax=1`.
-- Both: re-fetch city after the POST and confirm the slot is now `isBusy` with a `completed` timestamp; if not, mark row `skipped`.
+- **Verify with a small settle delay.** After the POST, sleep
+  `BUILD_POST_VERIFY_DELAY_SECONDS = 2` (constant, defined alongside the
+  other tick budgets in chunk 1) before the verifying `fetch_city` call.
+  The game flips `isBusy` and writes the `completed` timestamp on the
+  slot only after the build event is committed server-side; without the
+  short settle the verify can fire too early and false-flag a successful
+  build as `skipped`. Two seconds is short enough to add no meaningful
+  latency vs. a build that takes minutes-to-hours, and long enough to
+  avoid the race in practice.
+- If the slot is **still not** `isBusy` after the verify, mark the row
+  `skipped` with note `"POST did not start construction"` and let the
+  scheduler enter `skip-cooldown`.
 
 ### 11. Locking summary
 
@@ -707,3 +734,10 @@ Cost: N - 1 city-view HTTP requests every time the scheduler enters
 - Happiness / wine guardrails before queueing.
 - Per-row scheduled start time (e.g. "don't start before 03:00 server time").
 - Telegram /add command to add rows remotely.
+- **Session / `actionRequest` re-auth.** A long-running scheduler is exposed
+  to session-cookie or `actionRequest`-token expiry mid-run; every cost
+  fetch, build POST, and shipment dispatch silently fails after that point.
+  Neither legacy module handles this either, so we inherit the behaviour
+  in v1 — the user must restart the bot. v2 should detect the
+  login-redirect HTML in any response and trigger a fresh login before
+  retrying the failed POST.
