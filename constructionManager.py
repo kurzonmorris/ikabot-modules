@@ -1014,3 +1014,358 @@ def _add_to_queue(session):
     enter()
 
 # === END CHUNK 3 OF 5 — chunk 4 of 5 inserted below this line ===
+
+# ---------------------------------------------------------------------------
+# Chunk 4 of 5: view queue, edit queue, stop worker, main menu entry point
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# View queue (menu option 2)
+# ---------------------------------------------------------------------------
+
+def _view_queue(session):
+    banner()
+    rows = csv_load(session)
+    if not rows:
+        print("  Queue is empty.")
+        enter()
+        return
+
+    by_city = {}
+    for r in rows:
+        by_city.setdefault(r["city_id"], []).append(r)
+
+    for cid, city_rows in sorted(by_city.items()):
+        city_name = city_rows[0]["city_name"]
+        print(f"\n  City: {city_name}  (id {cid})\n")
+        print(
+            f"  {'QID':>5}  {'Slot':>4}  {'Building':<18}  "
+            f"{'→Lv':>4}  {'Mode':>5}  {'Status':<10}  ETA"
+        )
+        print("  " + "-" * 72)
+        for r in sorted(city_rows, key=lambda x: x["queue_id"]):
+            eta = r.get("expected_finish", "")
+            eta_str = getDateTime(int(eta))[8:] if eta else "--"
+            status = r["status"]
+            if status == "running":
+                s_col = f"{bcolors.GREEN}{status:<10}{bcolors.ENDC}"
+            elif status == "skipped":
+                s_col = f"{bcolors.RED}{status:<10}{bcolors.ENDC}"
+            elif status == "shipping":
+                s_col = f"{bcolors.YELLOW}{status:<10}{bcolors.ENDC}"
+            else:
+                s_col = f"{status:<10}"
+            print(
+                f"  {r['queue_id']:>5}  {r['slot_position']:>4}  "
+                f"{r['building']:<18}  {r['target_level']:>4}  "
+                f"{r['transport_mode']:>5}  {s_col}  {eta_str}"
+            )
+            cost = [r.get(k, 0) for k in RESOURCE_COLS]
+            notes = r.get("notes", "")
+            if any(cost) or notes:
+                cost_str = _fmt_res(cost) if any(cost) else "0"
+                suffix = f"  notes: {notes}" if notes else ""
+                print(f"         cost: {cost_str}{suffix}")
+    print("")
+    enter()
+
+
+# ---------------------------------------------------------------------------
+# Edit queue (menu option 3)
+# ---------------------------------------------------------------------------
+
+def _edit_queue(session):
+    while True:
+        banner()
+        rows = csv_load(session)
+        if not rows:
+            print("  Queue is empty.")
+            enter()
+            return
+
+        # Reuse view to show current state
+        _view_queue(session)
+
+        banner()
+        print("  Edit queue — choose action:\n")
+        print("  (D) Delete row(s)")
+        print("  (M) Modify a row")
+        print("  (R) Reorder rows within a city")
+        print("  (T) Set transport mode for all rows in a city")
+        print("  (B) Back")
+        action = read(values=["D", "d", "M", "m", "R", "r", "T", "t", "B", "b"])
+        action = action.upper()
+
+        if action == "B":
+            return
+
+        # ---- Delete -------------------------------------------------------
+        if action == "D":
+            print(
+                "\n  Enter queue_id(s) to delete — single number, "
+                "comma-separated list, or range (e.g. 3-7):"
+            )
+            raw = read(empty=True).strip()
+            if not raw:
+                continue
+            qids_to_delete = set()
+            for part in raw.split(","):
+                part = part.strip()
+                if "-" in part:
+                    try:
+                        lo, hi = part.split("-", 1)
+                        qids_to_delete.update(range(int(lo.strip()), int(hi.strip()) + 1))
+                    except ValueError:
+                        print(f"  Invalid range: {part}")
+                        continue
+                else:
+                    try:
+                        qids_to_delete.add(int(part))
+                    except ValueError:
+                        print(f"  Invalid id: {part}")
+            valid = {r["queue_id"] for r in rows}
+            bad = qids_to_delete - valid
+            if bad:
+                print(f"  Warning: queue_id(s) not found and skipped: {sorted(bad)}")
+            to_del = qids_to_delete & valid
+            if not to_del:
+                print("  Nothing to delete.")
+                enter()
+                continue
+            print(f"\n  Delete {len(to_del)} row(s): {sorted(to_del)}? [Y/n]")
+            if read(values=["Y", "y", "N", "n", ""], default="Y").lower() != "n":
+                for qid in to_del:
+                    csv_delete(session, qid)
+                print(f"  Deleted {len(to_del)} row(s).")
+            enter()
+
+        # ---- Modify -------------------------------------------------------
+        elif action == "M":
+            print("\n  Enter queue_id to modify:")
+            try:
+                qid = int(read())
+            except (TypeError, ValueError):
+                continue
+            row = next((r for r in rows if r["queue_id"] == qid), None)
+            if row is None:
+                print(f"  queue_id {qid} not found.")
+                enter()
+                continue
+            print(
+                f"\n  Modifying row {qid}: {row['city_name']} · "
+                f"slot {row['slot_position']} · {row['building']} → lv {row['target_level']}\n"
+            )
+            print("  (1) target_level")
+            print("  (2) transport_mode")
+            print("  (3) notes")
+            print("  (B) Cancel")
+            field_choice = read(values=["1", "2", "3", "B", "b"])
+            if field_choice.upper() == "B":
+                continue
+
+            if field_choice == "1":
+                print(f"  Current target_level: {row['target_level']}")
+                print("  New target_level:")
+                try:
+                    new_lv = int(read(min=1, max=HARD_LEVEL_CAP))
+                except (TypeError, ValueError):
+                    continue
+                csv_update(session, qid, target_level=new_lv)
+                print(f"  Updated target_level to {new_lv}.")
+                print(
+                    f"  {bcolors.YELLOW}Note: adjacent rows for this slot may "
+                    f"need manual adjustment if target levels overlap."
+                    f"{bcolors.ENDC}"
+                )
+
+            elif field_choice == "2":
+                print(
+                    f"  Current transport_mode: {row['transport_mode']}\n"
+                    "  (1) jit   (2) bulk   (3) none"
+                )
+                tm_choice = read(min=1, max=3)
+                new_tm = {1: "jit", 2: "bulk", 3: "none"}[tm_choice]
+                csv_update(session, qid, transport_mode=new_tm)
+                print(f"  Updated transport_mode to {new_tm}.")
+
+            elif field_choice == "3":
+                print(f"  Current notes: {row.get('notes', '')}")
+                print("  New notes (Enter to clear):")
+                new_notes = read(empty=True)
+                csv_update(session, qid, notes=new_notes)
+                print("  Updated notes.")
+
+            enter()
+
+        # ---- Reorder within city ------------------------------------------
+        elif action == "R":
+            city_ids = sorted({r["city_id"] for r in rows})
+            if not city_ids:
+                print("  No cities in queue.")
+                enter()
+                continue
+            print("\n  Choose city to reorder (by city_id):\n")
+            for i, cid in enumerate(city_ids, 1):
+                cname = next(r["city_name"] for r in rows if r["city_id"] == cid)
+                print(f"  ({i}) {cname}  (id {cid})")
+            idx = read(min=1, max=len(city_ids))
+            target_cid = city_ids[idx - 1]
+            city_rows = sorted(
+                [r for r in rows if r["city_id"] == target_cid],
+                key=lambda x: x["queue_id"],
+            )
+            if len(city_rows) < 2:
+                print("  Only one row for that city — nothing to reorder.")
+                enter()
+                continue
+
+            print(f"\n  Current order (enter new order as space-separated queue_ids):\n")
+            for r in city_rows:
+                print(
+                    f"    {r['queue_id']:>5}  {r['building']:<18}  → lv {r['target_level']}"
+                )
+            print(
+                f"\n  New order (queue_ids separated by spaces, "
+                f"e.g. '{' '.join(str(r['queue_id']) for r in reversed(city_rows))}'):"
+            )
+            raw = read(empty=True).strip()
+            if not raw:
+                continue
+            try:
+                new_order = [int(x) for x in raw.split()]
+            except ValueError:
+                print("  Invalid input — must be space-separated queue_ids.")
+                enter()
+                continue
+            existing_qids = [r["queue_id"] for r in city_rows]
+            if sorted(new_order) != sorted(existing_qids):
+                print(
+                    f"  Must contain exactly these queue_ids: {sorted(existing_qids)}"
+                )
+                enter()
+                continue
+            # Reassign: sort the existing qid pool ascending, map them to the
+            # user's desired row order so the lowest qid goes to the first
+            # requested row — preserving the same qid values, no global conflicts.
+            sorted_pool = sorted(existing_qids)
+            for new_qid, old_qid in zip(sorted_pool, new_order):
+                if new_qid != old_qid:
+                    csv_update(session, old_qid, queue_id=new_qid)
+            print(f"  Reordered {len(city_rows)} rows for that city.")
+            enter()
+
+        # ---- Transport mode bulk-set for city ------------------------------
+        elif action == "T":
+            city_ids = sorted({r["city_id"] for r in rows})
+            if not city_ids:
+                print("  No cities in queue.")
+                enter()
+                continue
+            print("\n  Choose city to update transport mode:\n")
+            for i, cid in enumerate(city_ids, 1):
+                cname = next(r["city_name"] for r in rows if r["city_id"] == cid)
+                print(f"  ({i}) {cname}  (id {cid})")
+            idx = read(min=1, max=len(city_ids))
+            target_cid = city_ids[idx - 1]
+            print("\n  New transport mode for ALL rows in this city:")
+            print("  (1) jit   (2) bulk   (3) none")
+            tm_choice = read(min=1, max=3)
+            new_tm = {1: "jit", 2: "bulk", 3: "none"}[tm_choice]
+            count = 0
+            for r in rows:
+                if r["city_id"] == target_cid:
+                    csv_update(session, r["queue_id"], transport_mode=new_tm)
+                    count += 1
+            print(f"  Set transport_mode={new_tm} on {count} row(s).")
+            enter()
+
+
+# ---------------------------------------------------------------------------
+# Stop worker (menu option 5)
+# ---------------------------------------------------------------------------
+
+def _stop_worker(session):
+    flag = stop_flag_path(session)
+    wlock = worker_lock_path(session)
+    if not os.path.exists(wlock):
+        print("  No construction worker appears to be running.")
+        enter()
+        return
+    open(flag, "w").close()
+    print(
+        f"  Stop flag written. The scheduler will exit within "
+        f"{TICK_BUDGET_SECONDS} s after finishing any active shipments."
+    )
+    enter()
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def constructionManager(session, event, stdin_fd, predetermined_input):
+    """Entry point called by the ikabot menu.
+
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    event : multiprocessing.Event
+    stdin_fd : int
+    predetermined_input : multiprocessing.managers.SyncManager.list
+    """
+    sys.stdin = os.fdopen(stdin_fd)
+    config.predetermined_input = predetermined_input
+    interactive = predetermined_input is None or len(predetermined_input) == 0
+
+    if not enforce_schema_or_abort(session):
+        enter()
+        event.set()
+        return
+
+    try:
+        while True:
+            banner()
+            pending = csv_count_pending(session)
+            n_cities = csv_count_cities_with_work(session)
+            print(
+                f"Construction Manager\n"
+                f"  CSV: {csv_path(session)}\n"
+                f"  {pending} pending row(s) across {n_cities} city/cities\n"
+            )
+            print("(1) Add construction(s) to queue        [interactive only]")
+            print("(2) View queue")
+            print("(3) Edit queue (modify / delete / reorder) [interactive only]")
+            print("(4) Activate construction worker (background, all cities)")
+            print("(5) Stop construction worker")
+            print("(6) Back")
+            choice = read(min=1, max=6)
+
+            if choice in (1, 3) and not interactive:
+                print(
+                    f"  Option {choice} requires an interactive session "
+                    f"(predetermined_input is set). Skipping."
+                )
+                enter()
+                continue
+
+            if choice == 1:
+                _add_to_queue(session)
+            elif choice == 2:
+                _view_queue(session)
+            elif choice == 3:
+                _edit_queue(session)
+            elif choice == 4:
+                # _activate_worker is defined in chunk 5.
+                # Parent returns after fork; finally block sets event.
+                _activate_worker(session, event)
+                return
+            elif choice == 5:
+                _stop_worker(session)
+            else:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        event.set()
+
+# === END CHUNK 4 OF 5 — chunk 5 of 5 inserted below this line ===
