@@ -12,6 +12,7 @@ import importlib.util
 import json
 import math
 import os
+import queue
 import re
 import sys
 import threading
@@ -26,7 +27,7 @@ from ikabot.config import (
     island_url,
     materials_names,
 )
-from ikabot.helpers.botComm import sendToBot, sendToBotDebug
+from ikabot.helpers.botComm import checkTelegramData, sendToBot, sendToBotDebug
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import banner, bcolors, enter
 from ikabot.helpers.pedirInfo import chooseCity, getIdsOfCities, read
@@ -1368,4 +1369,274 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
     finally:
         event.set()
 
-# === END CHUNK 4 OF 5 — chunk 5 of 5 inserted below this line ===
+# === END CHUNK 4 OF 6 — chunk 5 of 6 inserted below this line ===
+
+# ---------------------------------------------------------------------------
+# Chunk 5 of 6: worker helpers
+# (WORKER_PREFS, post_build_or_upgrade, supplier list, spawn_shipment,
+#  state helpers, shortage event relay)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Module-level worker state — written by parent before fork, read by child
+# ---------------------------------------------------------------------------
+
+WORKER_PREFS = {}          # {"notif_config": ..., "log_path": ...}
+
+# Thread-safe queue for daemon shipment threads to post shortage events back
+# to the scheduler thread without touching city_state directly.
+shortage_event_queue = queue.Queue()
+
+
+# ---------------------------------------------------------------------------
+# Build / upgrade POST  (plan §10)
+# ---------------------------------------------------------------------------
+
+def post_build_or_upgrade(session, city, row):
+    """Issue the build or upgrade POST to the game server.
+
+    Does NOT verify success — the caller re-fetches the city after the
+    BUILD_POST_VERIFY_DELAY_SECONDS settle period to confirm isBusy.
+    """
+    cid = city["id"]
+    pos = int(row["slot_position"])
+
+    if row["action"] == "build":
+        params = {
+            "action": "CityScreen",
+            "function": "build",
+            "cityId": cid,
+            "position": pos,
+            "building": row["building_id"],
+            "backgroundView": "city",
+            "currentCityId": cid,
+            "templateView": "buildingGround",
+            "actionRequest": actionRequest,
+            "ajax": "1",
+        }
+        session.post(params=params, noIndex=True)
+    else:
+        # Upgrade: pass the slot's *current* level (not target) — the game
+        # increments from there.  If isBusy, the visible level is already the
+        # in-progress target so we use level directly.
+        slot = city["position"][pos]
+        current_lv = slot.get("level", 0)
+        url = (
+            f"action=CityScreen&function=upgradeBuilding"
+            f"&actionRequest={actionRequest}"
+            f"&cityId={cid}&position={pos}"
+            f"&level={current_lv}"
+            f"&activeTab=tabSendTransporter"
+            f"&backgroundView=city&currentCityId={cid}"
+            f"&templateView={row['building']}"
+            f"&ajax=1"
+        )
+        session.post(url)
+
+
+# ---------------------------------------------------------------------------
+# Supplier list with short-lived ID cache  (plan §8)
+# ---------------------------------------------------------------------------
+
+_supplier_id_cache = {}   # {dest_city_id: (timestamp, [city_id_str, ...])}
+
+
+def _get_supplier_ids(session, dest_city_id):
+    now = time.time()
+    cached = _supplier_id_cache.get(dest_city_id)
+    if cached and now - cached[0] < SUPPLIER_LIST_TTL_SECONDS:
+        return cached[1]
+    html = session.get()
+    ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
+    ids = [cid for cid in ids if str(cid) != str(dest_city_id)]
+    _supplier_id_cache[dest_city_id] = (now, ids)
+    return ids
+
+
+def build_supplier_list(session, dest_city_id):
+    """Return list of freshly-fetched city dicts for all cities except dest."""
+    supplier_ids = _get_supplier_ids(session, dest_city_id)
+    suppliers = []
+    for cid in supplier_ids:
+        try:
+            suppliers.append(fetch_city(session, cid))
+        except Exception:
+            continue
+    return suppliers
+
+
+# ---------------------------------------------------------------------------
+# Auto-transport thread  (plan §8)
+# ---------------------------------------------------------------------------
+
+def spawn_shipment(session, city_id, row, cost):
+    """Launch a non-daemon thread that ships the needed resources to city_id.
+
+    Thread is daemon=False so the child process waits for it to finish before
+    exiting — a shipment is never aborted mid-flight (plan §12).
+    Returns the Thread, or None when transport_mode is 'none'.
+    """
+    mode = row["transport_mode"]
+    if mode == "none":
+        return None
+
+    # Snapshot queue_id so the closure doesn't race with row mutations.
+    queue_id = int(row["queue_id"])
+
+    def run():
+        try:
+            rtm = load_rtm()
+            city = fetch_city(session, city_id)
+            stock = city.get("availableResources", [0] * 5)
+
+            if mode == "jit":
+                need = [max(0, c - s) for c, s in zip(cost, stock)]
+            else:  # bulk: ship sum of all pending rows' shortfalls
+                all_rows = csv_load(session)
+                pending = [
+                    r for r in all_rows
+                    if r["city_id"] == city_id
+                    and r["status"] in ("pending", "shipping")
+                ]
+                total = [0] * 5
+                for r in pending:
+                    for i, k in enumerate(RESOURCE_COLS):
+                        total[i] += int(r.get(k, 0) or 0)
+                need = [max(0, t - s) for t, s in zip(total, stock)]
+
+            # Don't over-ship past free warehouse space.
+            free = city.get("freeSpaceForResources", [0] * 5)
+            need = [min(n, f) for n, f in zip(need, free)]
+            if not any(need):
+                return
+
+            suppliers = build_supplier_list(session, city_id)
+            island    = fetch_island(session, city)
+            routes    = rtm.allocate_from_suppliers(need, suppliers, city, island)
+
+            if routes is None:
+                csv_update(
+                    session, queue_id,
+                    status="skipped",
+                    notes="insufficient supply across all cities",
+                )
+                shortage_event_queue.put({
+                    "city_id": city_id,
+                    "row_id":  queue_id,
+                    "msg": (
+                        f"City {city.get('cityName', city_id)}: "
+                        f"total shortage — row {queue_id} skipped"
+                    ),
+                })
+                return
+
+            island_coords = f"[{island['x']}:{island['y']}]"
+            dest_player   = city.get("ownerName", "")
+            for route in routes:
+                rtm.send_shipment(
+                    session,
+                    route,
+                    useFreighters=False,
+                    notif_config=WORKER_PREFS.get("notif_config"),
+                    log_path=WORKER_PREFS.get("log_path"),
+                    mode_name="construction",
+                    dest_island_coords=island_coords,
+                    dest_player=dest_player,
+                    max_lock_retries=3,
+                )
+        except Exception:
+            try:
+                sendToBotDebug(
+                    session,
+                    f"construction shipment thread error:\n{traceback.format_exc()}",
+                    True,
+                )
+            except Exception:
+                pass
+
+    t = threading.Thread(target=run, daemon=False)
+    t.start()
+    return t
+
+
+# ---------------------------------------------------------------------------
+# Small state-machine helpers
+# ---------------------------------------------------------------------------
+
+def fresh_state():
+    return {
+        "phase":                  "idle",
+        "current_queue_id":       None,
+        "expected_finish":        None,
+        "ship_deadline":          None,
+        "shipment_thread":        None,
+        "next_check":             0,
+        "last_shortage_notify_ts": None,
+    }
+
+
+def stock_covers(city, cost):
+    """True if city's available resources already cover every element of cost."""
+    avail = city.get("availableResources", [0] * 5)
+    return all(avail[i] >= cost[i] for i in range(5))
+
+
+def first_busy_slot(city):
+    """Return the first position dict that is currently busy, or None."""
+    for slot in city.get("position", []):
+        if slot.get("isBusy") and "completed" in slot:
+            return slot
+    return None
+
+
+def next_pending_row(rows):
+    """Return the pending row with the smallest queue_id, or None."""
+    pending = [r for r in rows if r["status"] == "pending"]
+    if not pending:
+        return None
+    return min(pending, key=lambda r: r["queue_id"])
+
+
+def find_row(rows, queue_id):
+    """Return the row dict matching queue_id, or None."""
+    return next((r for r in rows if r["queue_id"] == int(queue_id)), None)
+
+
+def cost_tuple(row):
+    """Return the row's resource costs as a plain list of ints."""
+    return [int(row.get(k, 0) or 0) for k in RESOURCE_COLS]
+
+
+# ---------------------------------------------------------------------------
+# Telegram rate-limiting + shortage event relay  (plan §7)
+# ---------------------------------------------------------------------------
+
+def maybe_notify_shortage(session, city_id, st, message, now):
+    """Send a Telegram shortage alert at most once per cooldown window."""
+    last = st.get("last_shortage_notify_ts") or 0
+    if now - last >= SHORTAGE_COOLDOWN_SECONDS:
+        try:
+            sendToBot(session, message)
+        except Exception:
+            pass
+        st["last_shortage_notify_ts"] = now
+    st["phase"]      = "skip-cooldown"
+    st["next_check"] = now + SHORTAGE_COOLDOWN_SECONDS
+
+
+def drain_shortage_events(session, city_state, now):
+    """Pop all queued shortage events from daemon threads and apply cooldowns.
+
+    Daemon shipment threads must NOT touch city_state directly — they post
+    events here and the scheduler thread processes them on the next tick.
+    """
+    while True:
+        try:
+            ev = shortage_event_queue.get_nowait()
+        except queue.Empty:
+            break
+        cid = ev["city_id"]
+        st  = city_state.setdefault(cid, fresh_state())
+        maybe_notify_shortage(session, cid, st, ev["msg"], now)
+
+# === END CHUNK 5 OF 6 — chunk 6 of 6 inserted below this line ===
