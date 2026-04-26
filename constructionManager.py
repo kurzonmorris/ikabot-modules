@@ -1640,3 +1640,457 @@ def drain_shortage_events(session, city_state, now):
         maybe_notify_shortage(session, cid, st, ev["msg"], now)
 
 # === END CHUNK 5 OF 6 — chunk 6 of 6 inserted below this line ===
+
+# ---------------------------------------------------------------------------
+# Chunk 6 of 6: scheduler + worker activation
+# (issue_and_confirm, service_city, reconcile_on_startup, scheduler_loop,
+#  _activate_worker)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# issue_and_confirm  (plan §7)
+# ---------------------------------------------------------------------------
+
+def issue_and_confirm(session, city_id, st, row, city, cost):
+    """POST the build/upgrade, settle, verify isBusy, schedule next wake-up.
+
+    On verified start: set phase=running, expected_finish=eta, kick a JIT
+    prefetch shipment for the next pending row if applicable.
+    On verify failure: mark row skipped and enter skip-cooldown.
+    """
+    qid = int(row["queue_id"])
+    csv_update(session, qid, status="running")
+
+    try:
+        post_build_or_upgrade(session, city, row)
+    except Exception:
+        sendToBotDebug(
+            session,
+            f"construction POST error city {city_id} row {qid}:\n{traceback.format_exc()}",
+            True,
+        )
+
+    # Server-side propagation: give the game a moment to flip isBusy and
+    # write the slot's `completed` timestamp (plan §10).
+    time.sleep(BUILD_POST_VERIFY_DELAY_SECONDS)
+
+    try:
+        city = fetch_city(session, city_id)
+    except Exception:
+        st["phase"]      = "skip-cooldown"
+        st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
+        return
+
+    slot = city["position"][int(row["slot_position"])]
+    if not slot.get("isBusy") or "completed" not in slot:
+        csv_update(
+            session, qid,
+            status="skipped",
+            notes="POST did not start construction",
+        )
+        try:
+            sendToBot(
+                session,
+                f"City {city.get('cityName', city_id)} slot "
+                f"{row['slot_position']}: build did not start",
+            )
+        except Exception:
+            pass
+        st["phase"]      = "skip-cooldown"
+        st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
+        return
+
+    eta = int(slot["completed"])
+    csv_update(session, qid, status="running", expected_finish=eta)
+    st["phase"]            = "running"
+    st["current_queue_id"] = qid
+    st["expected_finish"]  = eta
+    st["next_check"]       = eta + ETA_FUDGE_SECONDS
+
+    # JIT prefetch: launch a shipment for the next pending row in this city
+    # so resources are warming while the current build runs.
+    if row["transport_mode"] == "jit":
+        all_rows = csv_load(session)
+        next_row = None
+        for r in sorted(all_rows, key=lambda x: x["queue_id"]):
+            if (r["city_id"] == city_id
+                    and r["queue_id"] > qid
+                    and r["status"] == "pending"):
+                next_row = r
+                break
+        if next_row is not None:
+            t = spawn_shipment(session, city_id, next_row, cost_tuple(next_row))
+            if t is not None:
+                st["shipment_thread"] = t
+
+
+# ---------------------------------------------------------------------------
+# service_city — per-city state machine  (plan §7)
+# ---------------------------------------------------------------------------
+
+def service_city(session, city_id, st, rows, stop_event):
+    now = int(time.time())
+
+    # ---- IDLE ----------------------------------------------------------
+    if st["phase"] == "idle":
+        if not rows:
+            st["next_check"] = now + TICK_BUDGET_SECONDS
+            return
+        row = next_pending_row(rows)
+        if row is None:
+            st["next_check"] = now + TICK_BUDGET_SECONDS
+            return
+
+        try:
+            city = fetch_city(session, city_id)
+        except Exception:
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            return
+
+        # If ANY slot in this city is busy, the game won't accept a new build.
+        busy = first_busy_slot(city)
+        if busy is not None and busy["position"] != int(row["slot_position"]):
+            st["next_check"] = int(busy["completed"]) + ETA_FUDGE_SECONDS
+            return
+        if busy is not None and busy["position"] == int(row["slot_position"]):
+            # The slot we want is already busy — adopt it as our running row.
+            eta = int(busy["completed"])
+            csv_update(
+                session, row["queue_id"],
+                status="running", expected_finish=eta,
+            )
+            st["phase"]            = "running"
+            st["current_queue_id"] = int(row["queue_id"])
+            st["expected_finish"]  = eta
+            st["next_check"]       = eta + ETA_FUDGE_SECONDS
+            return
+
+        # Pre-execution cost recompute (plan §2b).
+        all_costs = fetch_costs_for_building(session, city, row["building"])
+        cost = all_costs.get(int(row["target_level"])) if all_costs else None
+        if not cost:
+            csv_update(
+                session, row["queue_id"],
+                status="skipped",
+                notes=f"no ikipedia cost row for level {row['target_level']}",
+            )
+            try:
+                sendToBot(
+                    session,
+                    f"City {city.get('cityName', city_id)} slot "
+                    f"{row['slot_position']}: cannot determine cost for "
+                    f"{row['building']} lv {row['target_level']}",
+                )
+            except Exception:
+                pass
+            st["phase"]      = "skip-cooldown"
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            return
+        csv_update(
+            session, row["queue_id"],
+            wood=cost[0], wine=cost[1], marble=cost[2],
+            crystal=cost[3], sulphur=cost[4],
+        )
+        # Reload row to pick up the fresh costs.
+        row = find_row(csv_load(session), row["queue_id"]) or row
+
+        if row["transport_mode"] == "none" or stock_covers(city, cost):
+            issue_and_confirm(session, city_id, st, row, city, cost)
+            return
+
+        # Need to ship — kick a daemon thread, sit in `shipping` phase.
+        csv_update(session, row["queue_id"], status="shipping")
+        st["phase"]            = "shipping"
+        st["current_queue_id"] = int(row["queue_id"])
+        st["ship_deadline"]    = now + SHIP_TIMEOUT_SECONDS
+        st["next_check"]       = now + SHIP_RETRY_SECONDS
+        st["shipment_thread"]  = spawn_shipment(session, city_id, row, cost)
+        return
+
+    # ---- SHIPPING ------------------------------------------------------
+    if st["phase"] == "shipping":
+        try:
+            city = fetch_city(session, city_id)
+        except Exception:
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            return
+        row = find_row(rows, st["current_queue_id"])
+        if row is None:
+            # Row vanished (deleted from CSV mid-ship). Reset to idle.
+            st["phase"]            = "idle"
+            st["current_queue_id"] = None
+            st["next_check"]       = now
+            return
+        cost = cost_tuple(row)
+        if stock_covers(city, cost):
+            issue_and_confirm(session, city_id, st, row, city, cost)
+            return
+        if now >= (st.get("ship_deadline") or 0):
+            csv_update(
+                session, row["queue_id"],
+                status="skipped",
+                notes="resources did not arrive in time",
+            )
+            try:
+                sendToBot(
+                    session,
+                    f"City {city.get('cityName', city_id)}: shipment timeout — "
+                    f"row {row['queue_id']} skipped",
+                )
+            except Exception:
+                pass
+            st["phase"]      = "skip-cooldown"
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            return
+        st["next_check"] = now + SHIP_RETRY_SECONDS
+        return
+
+    # ---- RUNNING -------------------------------------------------------
+    if st["phase"] == "running":
+        # The scheduler has slept until expected_finish + ETA_FUDGE so the
+        # server has had time to commit completion. Verify and advance.
+        try:
+            city = fetch_city(session, city_id)
+        except Exception:
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            return
+        row = find_row(rows, st["current_queue_id"])
+        if row is None:
+            # Edge case: row was deleted while running. Walk away.
+            st["phase"]            = "idle"
+            st["current_queue_id"] = None
+            st["expected_finish"]  = None
+            st["next_check"]       = now
+            return
+        slot = city["position"][int(row["slot_position"])]
+        if slot.get("isBusy") and "completed" in slot:
+            # Still running — an in-game event extended the timer (pirate
+            # raid, attack pause, etc).  Adopt the new ETA and sleep again.
+            new_eta = int(slot["completed"])
+            csv_update(
+                session, st["current_queue_id"],
+                expected_finish=new_eta,
+                notes="eta extended by in-game event",
+            )
+            st["expected_finish"] = new_eta
+            st["next_check"]      = new_eta + ETA_FUDGE_SECONDS
+            return
+        # Slot is no longer busy → row is complete. Delete and re-enter idle.
+        csv_delete(session, st["current_queue_id"])
+        st["phase"]            = "idle"
+        st["current_queue_id"] = None
+        st["expected_finish"]  = None
+        st["next_check"]       = now
+        return
+
+    # ---- SKIP-COOLDOWN -------------------------------------------------
+    if st["phase"] == "skip-cooldown":
+        # Cooldown duration was set by whoever entered this phase; once
+        # next_check has elapsed we reset to idle and try the next pending row.
+        st["phase"]      = "idle"
+        st["next_check"] = now
+        return
+
+
+# ---------------------------------------------------------------------------
+# reconcile_on_startup  (plan §7a)
+# ---------------------------------------------------------------------------
+
+def reconcile_on_startup(session, city_state):
+    """Walk every city with CSV rows once at boot to recover from a crash."""
+    rows = csv_load(session)
+    by_city = {}
+    for r in rows:
+        by_city.setdefault(r["city_id"], []).append(r)
+
+    now = int(time.time())
+    for cid, city_rows in by_city.items():
+        st = city_state.setdefault(cid, fresh_state())
+        try:
+            city = fetch_city(session, cid)
+        except Exception:
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            continue
+
+        running = next(
+            (r for r in city_rows if r["status"] == "running"),
+            None,
+        )
+        if running is not None:
+            slot = city["position"][int(running["slot_position"])]
+            if slot.get("isBusy") and "completed" in slot:
+                eta = int(slot["completed"])
+                csv_update(session, running["queue_id"], expected_finish=eta)
+                st["phase"]            = "running"
+                st["current_queue_id"] = int(running["queue_id"])
+                st["expected_finish"]  = eta
+                st["next_check"]       = eta + ETA_FUDGE_SECONDS
+                continue
+            else:
+                # Crashed mid-build but slot is no longer busy → completed.
+                csv_delete(session, running["queue_id"])
+                # Fall through to busy-slot / idle handling.
+
+        busy = first_busy_slot(city)
+        if busy is not None:
+            # Pre-existing in-game build (or another tool's). Wait it out
+            # before attempting our own pending row for this city.
+            st["phase"]      = "idle"
+            st["next_check"] = int(busy["completed"]) + ETA_FUDGE_SECONDS
+        else:
+            st["phase"]      = "idle"
+            st["next_check"] = now
+
+
+# ---------------------------------------------------------------------------
+# scheduler_loop  (plan §7)
+# ---------------------------------------------------------------------------
+
+def scheduler_loop(session, stop_event):
+    city_state = {}
+    reconcile_on_startup(session, city_state)
+
+    while not stop_event.is_set():
+        # Honour the menu's stop flag.
+        if os.path.exists(stop_flag_path(session)):
+            stop_event.set()
+            break
+
+        now = int(time.time())
+        drain_shortage_events(session, city_state, now)
+
+        # Hot-reload the CSV every tick so menu edits take effect immediately.
+        rows = csv_load(session)
+        rows_by_city = {}
+        for r in rows:
+            rows_by_city.setdefault(r["city_id"], []).append(r)
+
+        all_cids = set(rows_by_city.keys()) | set(city_state.keys())
+        for cid in sorted(all_cids):
+            st = city_state.setdefault(cid, fresh_state())
+            if st["next_check"] > now:
+                continue
+            try:
+                service_city(session, cid, st, rows_by_city.get(cid, []), stop_event)
+            except Exception:
+                sendToBotDebug(
+                    session,
+                    f"scheduler service_city({cid}) crashed:\n{traceback.format_exc()}",
+                    True,
+                )
+                # Push next_check out so we don't tight-loop on a persistent error.
+                st["next_check"] = now + SHIP_RETRY_SECONDS
+
+        # Sleep until the soonest next_check, capped at TICK_BUDGET_SECONDS.
+        soonest = min(
+            (s["next_check"] for s in city_state.values()),
+            default=now + TICK_BUDGET_SECONDS,
+        )
+        sleep_for = max(1, min(TICK_BUDGET_SECONDS, soonest - int(time.time())))
+        try:
+            session.setStatus(
+                f"Construction worker: sleeping {sleep_for}s "
+                f"(next wake at {getDateTime(int(time.time()) + sleep_for)[8:]})"
+            )
+        except Exception:
+            pass
+        stop_event.wait(sleep_for)
+
+    # ---- cleanup ------------------------------------------------------
+    # Drain every active shipment thread (no timeout — never abort).
+    for st in city_state.values():
+        t = st.get("shipment_thread")
+        if t is not None and t.is_alive():
+            try:
+                t.join()
+            except Exception:
+                pass
+
+    # Remove stop flag (might not exist; ignore failure).
+    try:
+        os.remove(stop_flag_path(session))
+    except OSError:
+        pass
+
+    # Release worker lock.
+    _lock_release(worker_lock_path(session))
+
+
+# ---------------------------------------------------------------------------
+# _activate_worker  (menu option 4)
+# ---------------------------------------------------------------------------
+
+def _activate_worker(session, event):
+    """Capture interactive prefs, acquire worker lock, fork, run scheduler."""
+    rtm = load_rtm()
+
+    banner()
+    print("Activate construction worker\n")
+
+    try:
+        telegram_enabled = checkTelegramData(session)
+    except Exception:
+        telegram_enabled = False
+
+    notif_config = rtm.get_notification_config(telegram_enabled, event)
+    if notif_config is None:
+        # User backed out; get_notification_config has already set the event.
+        return
+
+    log_path = rtm.get_log_path(session)
+
+    # Refuse if another worker for this account is already running.
+    wlock = worker_lock_path(session)
+    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
+        print(
+            f"  {bcolors.RED}Another construction worker is already running "
+            f"for this account.{bcolors.ENDC}"
+        )
+        print(f"  Lock file: {wlock}")
+        print("  Use main-menu option 5 to stop it, or remove the lock file "
+              "if you're sure no worker is running.")
+        enter()
+        event.set()
+        return
+
+    WORKER_PREFS["notif_config"] = notif_config
+    WORKER_PREFS["log_path"]     = log_path
+
+    # Clear any leftover stop flag from a prior run.
+    try:
+        os.remove(stop_flag_path(session))
+    except OSError:
+        pass
+
+    # Hand the menu back to the user; we keep running in the background.
+    set_child_mode(session)
+    event.set()
+
+    info = (
+        f"\nConstruction Manager worker\n"
+        f"  CSV: {csv_path(session)}\n"
+        f"  Stop via main-menu option 5 (touches {stop_flag_path(session)})\n"
+    )
+    setInfoSignal(session, info)
+
+    stop_event = threading.Event()
+    try:
+        scheduler_loop(session, stop_event)
+    except Exception:
+        try:
+            sendToBot(
+                session,
+                f"Construction worker crashed:\n{traceback.format_exc()}",
+            )
+        except Exception:
+            pass
+    finally:
+        # scheduler_loop already releases the worker lock on graceful exit;
+        # this is a defensive safety net if it crashed before that.
+        _lock_release(wlock)
+        try:
+            session.logout()
+        except Exception:
+            pass
+
+# === END CHUNK 6 OF 6 — module complete ===
