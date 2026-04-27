@@ -12,6 +12,7 @@ import importlib.util
 import json
 import math
 import os
+import pathlib
 import queue
 import re
 import sys
@@ -95,7 +96,7 @@ RESOURCE_FILENAMES = ("wood", "wine", "marble", "glass", "sulfur")
 # ---------------------------------------------------------------------------
 
 def _safe(value):
-    return str(value).replace("/", "_").replace("\\", "_")
+    return re.sub(r'[^\w.-]', '_', str(value))
 
 
 def _account_suffix(session):
@@ -143,13 +144,8 @@ def stop_flag_path(session):
 
 def enforce_schema_or_abort(session):
     sidecar = schema_sidecar_path(session)
-    if not os.path.exists(csv_path(session)) and not os.path.exists(sidecar):
-        # First run: create sidecar.
-        with open(sidecar, "w", encoding="utf-8") as f:
-            json.dump({"version": SCHEMA_VERSION, "columns": COLUMNS}, f)
-        return True
     if not os.path.exists(sidecar):
-        # CSV exists but no sidecar — assume current schema and create one.
+        # First run, or CSV exists but sidecar was lost — create it now.
         with open(sidecar, "w", encoding="utf-8") as f:
             json.dump({"version": SCHEMA_VERSION, "columns": COLUMNS}, f)
         return True
@@ -290,12 +286,13 @@ def _coerce_row_out(row):
 
 
 def csv_load(session):
-    if not os.path.exists(csv_path(session)):
-        return []
     with _csv_lock(session):
-        with open(csv_path(session), "r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            return [_coerce_row_in(r) for r in reader]
+        try:
+            with open(csv_path(session), "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                return [_coerce_row_in(r) for r in reader]
+        except FileNotFoundError:
+            return []
 
 
 def csv_save_all(session, rows):
@@ -310,31 +307,49 @@ def csv_save_all(session, rows):
         os.replace(tmp, path)
 
 
+def _csv_modify(session, fn):
+    """Load rows, apply fn(rows) in-place, save — all under a single lock hold."""
+    path = csv_path(session)
+    tmp = path + ".tmp"
+    with _csv_lock(session):
+        try:
+            with open(path, "r", newline="", encoding="utf-8") as f:
+                rows = [_coerce_row_in(r) for r in csv.DictReader(f)]
+        except FileNotFoundError:
+            rows = []
+        fn(rows)
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=COLUMNS)
+            w.writeheader()
+            for r in rows:
+                w.writerow(_coerce_row_out(r))
+        os.replace(tmp, path)
+
+
 def csv_append(session, row):
-    rows = csv_load(session)
-    rows.append(row)
-    csv_save_all(session, rows)
+    _csv_modify(session, lambda rows: rows.append(row))
 
 
 def csv_delete(session, queue_id):
-    rows = csv_load(session)
-    rows = [r for r in rows if r["queue_id"] != int(queue_id)]
-    csv_save_all(session, rows)
+    qid = int(queue_id)
+    def _delete(rows):
+        rows[:] = [r for r in rows if r["queue_id"] != qid]
+    _csv_modify(session, _delete)
 
 
 def csv_update(session, queue_id, **fields):
-    rows = csv_load(session)
     qid = int(queue_id)
-    for r in rows:
-        if r["queue_id"] == qid:
-            for k, v in fields.items():
-                r[k] = v
-            if "transport_mode" in fields:
-                r["auto_transport_enabled"] = (
-                    "no" if fields["transport_mode"] == "none" else "yes"
-                )
-            break
-    csv_save_all(session, rows)
+    def _apply(rows):
+        for r in rows:
+            if r["queue_id"] == qid:
+                for k, v in fields.items():
+                    r[k] = v
+                if "transport_mode" in fields:
+                    r["auto_transport_enabled"] = (
+                        "no" if fields["transport_mode"] == "none" else "yes"
+                    )
+                break
+    _csv_modify(session, _apply)
 
 
 def csv_next_queue_id(session):
@@ -363,6 +378,7 @@ def csv_count_cities_with_work(session):
 # ---------------------------------------------------------------------------
 
 _rtm_module = None
+_rtm_lock = threading.Lock()
 
 
 def _parse_version_suffix(filename):
@@ -380,6 +396,14 @@ def load_rtm():
     global _rtm_module
     if _rtm_module is not None:
         return _rtm_module
+    with _rtm_lock:
+        if _rtm_module is not None:
+            return _rtm_module
+        return _load_rtm_locked()
+
+
+def _load_rtm_locked():
+    global _rtm_module
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = glob.glob(os.path.join(here, "resourceTransportManager*.py"))
     if not candidates:
@@ -524,31 +548,54 @@ def fetch_costs_for_building(session, city, building_slug):
         resp = session.post(detail_url)
         building_html = json.loads(resp, strict=False)[1][1][1]
     except Exception:
+        sendToBotDebug(
+            session,
+            f"fetch_costs_for_building: ikipedia listing fetch failed for "
+            f"city {city.get('id')}:\n{traceback.format_exc()}",
+            True,
+        )
         return {}
 
     # Step 2: find the per-building ajaxHandlerCall URL in the ikipedia HTML.
     # Guard: wonders / palace / museum slugs have no `button_building` entry
     # here; the regex will return None, and we return {} so the scheduler's
     # existing `cost is None → skip` branch handles it cleanly.
+    # [^>]* keeps the match inside the opening tag — avoids crossing element
+    # boundaries that re.DOTALL + .*? could cause, which yielded a wrong URL
+    # and sent raw game-rejection JSON to Telegram.
     pat = (
         r'<div class="(?:selected)? *button_building '
         + re.escape(building_slug)
-        + r'"\s*onmouseover=.*?onclick="ajaxHandlerCall\(\'\?(.*?)\'\);'
+        + r'"[^>]*onclick="ajaxHandlerCall\(\'\?(.*?)\'\)'
     )
-    match = re.search(pat, building_html, re.DOTALL)
+    match = re.search(pat, building_html)
     if match is None:
+        sendToBotDebug(
+            session,
+            f"fetch_costs_for_building: no ikipedia button for slug "
+            f"'{building_slug}' in city {city.get('id')}",
+            True,
+        )
         return {}
-    cost_url = (
-        match.group(1)
-        + "&backgroundView=city&currentCityId={cid}"
-          "&templateView=buildingDetail&actionRequest={ar}&ajax=1"
+    # Apply .format only to the suffix we control — match.group(1) may contain
+    # literal braces from the game URL that would confuse str.format.
+    suffix = (
+        "&backgroundView=city&currentCityId={cid}"
+        "&templateView=buildingDetail&actionRequest={ar}&ajax=1"
     ).format(cid=city["id"], ar=actionRequest)
+    cost_url = match.group(1) + suffix
 
     # Step 3: per-building cost table
     try:
         resp2 = session.post(cost_url)
         html_costs = json.loads(resp2, strict=False)[1][1][1]
     except Exception:
+        sendToBotDebug(
+            session,
+            f"fetch_costs_for_building: cost table fetch failed for slug "
+            f"'{building_slug}' city {city.get('id')}:\n{traceback.format_exc()}",
+            True,
+        )
         return {}
 
     # Step 4: derive column → resource-index from th image filename.
@@ -881,8 +928,9 @@ def _add_to_queue(session):
         # ---- append rows to CSV ----
         now_ts = int(time.time())
         row_total = [0] * 5
-        for (lv, action), cost in zip(rows_to_add, row_costs):
-            qid = csv_next_queue_id(session)
+        next_qid = csv_next_queue_id(session)
+        for i, ((lv, action), cost) in enumerate(zip(rows_to_add, row_costs)):
+            qid = next_qid + i
             notes_val = ""
             if action == "upgrade" and costs_dict.get(lv) is None:
                 notes_val = "cost unknown at add-time; will be recomputed before execution"
@@ -1245,13 +1293,15 @@ def _edit_queue(session):
                 )
                 enter()
                 continue
-            # Reassign: sort the existing qid pool ascending, map them to the
-            # user's desired row order so the lowest qid goes to the first
-            # requested row — preserving the same qid values, no global conflicts.
+            # Reassign queue_ids in a single atomic lock hold to avoid
+            # intermediate collisions when the new order forms a cycle.
             sorted_pool = sorted(existing_qids)
-            for new_qid, old_qid in zip(sorted_pool, new_order):
-                if new_qid != old_qid:
-                    csv_update(session, old_qid, queue_id=new_qid)
+            qid_map = {new_order[i]: sorted_pool[i] for i in range(len(new_order))}
+            def _do_reorder(rows, _m=qid_map):
+                for r in rows:
+                    if r["queue_id"] in _m:
+                        r["queue_id"] = _m[r["queue_id"]]
+            _csv_modify(session, _do_reorder)
             print(f"  Reordered {len(city_rows)} rows for that city.")
             enter()
 
@@ -1292,7 +1342,7 @@ def _stop_worker(session):
         print("  No construction worker appears to be running.")
         enter()
         return
-    open(flag, "w").close()
+    pathlib.Path(flag).touch()
     print(
         f"  Stop flag written. The scheduler will exit within "
         f"{TICK_BUDGET_SECONDS} s after finishing any active shipments."
@@ -1414,7 +1464,7 @@ def post_build_or_upgrade(session, city, row):
             "actionRequest": actionRequest,
             "ajax": "1",
         }
-        session.post(params=params, noIndex=True)
+        resp = session.post(params=params, noIndex=True)
     else:
         # Upgrade: pass the slot's *current* level (not target) — the game
         # increments from there.  If isBusy, the visible level is already the
@@ -1431,7 +1481,17 @@ def post_build_or_upgrade(session, city, row):
             f"&templateView={row['building']}"
             f"&ajax=1"
         )
-        session.post(url)
+        resp = session.post(url)
+    try:
+        msg = json.loads(resp, strict=False)[3][1][0]["text"]
+        if msg:
+            sendToBotDebug(
+                session,
+                f"build/upgrade POST response (city {cid} slot {pos}): {msg}",
+                True,
+            )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1439,17 +1499,20 @@ def post_build_or_upgrade(session, city, row):
 # ---------------------------------------------------------------------------
 
 _supplier_id_cache = {}   # {dest_city_id: (timestamp, [city_id_str, ...])}
+_supplier_cache_lock = threading.Lock()
 
 
 def _get_supplier_ids(session, dest_city_id):
     now = time.time()
-    cached = _supplier_id_cache.get(dest_city_id)
-    if cached and now - cached[0] < SUPPLIER_LIST_TTL_SECONDS:
-        return cached[1]
+    with _supplier_cache_lock:
+        cached = _supplier_id_cache.get(dest_city_id)
+        if cached and now - cached[0] < SUPPLIER_LIST_TTL_SECONDS:
+            return cached[1]
     html = session.get()
     ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
     ids = [cid for cid in ids if str(cid) != str(dest_city_id)]
-    _supplier_id_cache[dest_city_id] = (now, ids)
+    with _supplier_cache_lock:
+        _supplier_id_cache[dest_city_id] = (now, ids)
     return ids
 
 
@@ -1669,6 +1732,10 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
             f"construction POST error city {city_id} row {qid}:\n{traceback.format_exc()}",
             True,
         )
+        csv_update(session, qid, status="skipped", notes="POST exception")
+        st["phase"]      = "skip-cooldown"
+        st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
+        return
 
     # Server-side propagation: give the game a moment to flip isBusy and
     # write the slot's `completed` timestamp (plan §10).
@@ -1681,7 +1748,15 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
         st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
         return
 
-    slot = city["position"][int(row["slot_position"])]
+    positions = city.get("position", [])
+    slot_pos = int(row["slot_position"])
+    if slot_pos >= len(positions):
+        csv_update(session, qid, status="skipped",
+                   notes=f"slot {slot_pos} out of range after POST")
+        st["phase"]      = "skip-cooldown"
+        st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
+        return
+    slot = positions[slot_pos]
     if not slot.get("isBusy") or "completed" not in slot:
         csv_update(
             session, qid,
@@ -1765,6 +1840,19 @@ def service_city(session, city_id, st, rows, stop_event):
             st["next_check"]       = eta + ETA_FUDGE_SECONDS
             return
 
+        # Bounds check: city layout may differ from what was queued (Bug 8).
+        positions = city.get("position", [])
+        slot_pos = int(row["slot_position"])
+        if slot_pos >= len(positions):
+            csv_update(
+                session, row["queue_id"],
+                status="skipped",
+                notes=f"slot {slot_pos} out of range for city {city_id}",
+            )
+            st["phase"]      = "skip-cooldown"
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            return
+
         # Pre-execution cost recompute (plan §2b).
         all_costs = fetch_costs_for_building(session, city, row["building"])
         cost = all_costs.get(int(row["target_level"])) if all_costs else None
@@ -1795,6 +1883,12 @@ def service_city(session, city_id, st, rows, stop_event):
         row = find_row(csv_load(session), row["queue_id"]) or row
 
         if row["transport_mode"] == "none" or stock_covers(city, cost):
+            # canUpgrade=False means the game won't accept the POST yet
+            # (insufficient citizens, wine/happiness, or game-side resource check).
+            # Retry after a short wait rather than wasting a POST.
+            if positions[slot_pos].get("canUpgrade") is False:
+                st["next_check"] = now + SHIP_RETRY_SECONDS
+                return
             issue_and_confirm(session, city_id, st, row, city, cost)
             return
 
@@ -1862,7 +1956,16 @@ def service_city(session, city_id, st, rows, stop_event):
             st["expected_finish"]  = None
             st["next_check"]       = now
             return
-        slot = city["position"][int(row["slot_position"])]
+        positions = city.get("position", [])
+        slot_pos = int(row["slot_position"])
+        if slot_pos >= len(positions):
+            # City layout changed while running — reset to idle.
+            st["phase"]            = "idle"
+            st["current_queue_id"] = None
+            st["expected_finish"]  = None
+            st["next_check"]       = now
+            return
+        slot = positions[slot_pos]
         if slot.get("isBusy") and "completed" in slot:
             # Still running — an in-game event extended the timer (pirate
             # raid, attack pause, etc).  Adopt the new ETA and sleep again.
@@ -1917,7 +2020,14 @@ def reconcile_on_startup(session, city_state):
             None,
         )
         if running is not None:
-            slot = city["position"][int(running["slot_position"])]
+            positions = city.get("position", [])
+            slot_pos = int(running["slot_position"])
+            if slot_pos >= len(positions):
+                csv_delete(session, running["queue_id"])
+                running = None
+            else:
+                slot = positions[slot_pos]
+        if running is not None:
             if slot.get("isBusy") and "completed" in slot:
                 eta = int(slot["completed"])
                 csv_update(session, running["queue_id"], expected_finish=eta)
@@ -1948,7 +2058,14 @@ def reconcile_on_startup(session, city_state):
 
 def scheduler_loop(session, stop_event):
     city_state = {}
-    reconcile_on_startup(session, city_state)
+    try:
+        reconcile_on_startup(session, city_state)
+    except Exception:
+        sendToBotDebug(
+            session,
+            f"reconcile_on_startup error:\n{traceback.format_exc()}",
+            True,
+        )
 
     while not stop_event.is_set():
         # Honour the menu's stop flag.
