@@ -42,7 +42,35 @@ def _dump_path():
                         f"ikabot_construction_diag_{ts}.txt")
 
 
-def _summarise(fh, step, ok, note=""):
+def _log_request_history(fh, session, label):
+    """Dump the most recent request the session sent — including the
+    post-substitution URL (token replaced), the actual params/headers, and
+    the response status. Reveals whether 'REQUESTID' made it to the wire."""
+    try:
+        last = session.requestHistory[-1]
+    except (AttributeError, IndexError):
+        _log(fh, f"{label}: requestHistory unavailable", "")
+        return
+    # Trim cookies / sensitive header bits
+    headers = {k: v for k, v in (last.get("headers") or {}).items()
+               if k.lower() not in ("cookie",)}
+    safe = {
+        "method": last.get("method"),
+        "url": last.get("url"),
+        "params": last.get("params"),
+        "payload": last.get("payload"),
+        "headers": headers,
+        "response_status": (last.get("response") or {}).get("status"),
+        "response_elapsed_s": (last.get("response") or {}).get("elapsed"),
+    }
+    _log(fh, label, safe)
+    # Sanity check: did REQUESTID get substituted?
+    wire = json.dumps({"url": safe["url"], "params": safe["params"],
+                       "payload": safe["payload"]})
+    if "REQUESTID" in wire:
+        _log(fh, f"{label} — TOKEN SUBSTITUTION FAILED",
+             "literal 'REQUESTID' reached the wire — session.__token() did "
+             "not substitute it. This is the rejection cause.")
     mark = f"{bcolors.GREEN}OK{bcolors.ENDC}" if ok else f"{bcolors.RED}FAIL{bcolors.ENDC}"
     line = f"  [{mark}] {step}"
     if note:
@@ -97,9 +125,11 @@ def _diagnose_build(session, fh, city, slot_pos):
         resp1 = session.post(params=params1, noIndex=True)
     except Exception:
         _log(fh, "STEP 1 EXCEPTION", traceback.format_exc())
+        _log_request_history(fh, session, "STEP 1 WIRE REQUEST (after exception)")
         _summarise(fh, "Step 1 buildingGround POST", False, "exception, see log")
         return
     _log(fh, "STEP 1 RAW RESPONSE", resp1)
+    _log_request_history(fh, session, "STEP 1 WIRE REQUEST (post-substitution)")
 
     try:
         parsed1 = json.loads(resp1, strict=False)
@@ -168,9 +198,11 @@ def _diagnose_build(session, fh, city, slot_pos):
         resp2 = session.post(params=params2, noIndex=True)
     except Exception:
         _log(fh, "STEP 2 EXCEPTION", traceback.format_exc())
+        _log_request_history(fh, session, "STEP 2 WIRE REQUEST (after exception)")
         _summarise(fh, "Step 2 build POST", False, "exception, see log")
         return
     _log(fh, "STEP 2 RAW RESPONSE", resp2)
+    _log_request_history(fh, session, "STEP 2 WIRE REQUEST (post-substitution)")
 
     try:
         parsed2 = json.loads(resp2, strict=False)
@@ -243,9 +275,11 @@ def _diagnose_upgrade(session, fh, city, slot_pos):
         resp = session.post(url)
     except Exception:
         _log(fh, "STEP 1 EXCEPTION", traceback.format_exc())
+        _log_request_history(fh, session, "STEP 1 WIRE REQUEST (after exception)")
         _summarise(fh, "Step 1 upgrade POST", False, "exception, see log")
         return
     _log(fh, "STEP 1 RAW RESPONSE", resp)
+    _log_request_history(fh, session, "STEP 1 WIRE REQUEST (post-substitution)")
 
     try:
         parsed = json.loads(resp, strict=False)
@@ -257,17 +291,22 @@ def _diagnose_upgrade(session, fh, city, slot_pos):
 
     is_rej, reason = _check_reload_rejection(parsed)
     if is_rej:
-        _summarise(fh, "Step 1 upgrade POST", False, reason)
-        return
-
-    try:
-        msg = parsed[3][1][0]["text"]
-        _summarise(fh, "Step 1 upgrade POST", True, f"server message: {msg!r}")
-    except (IndexError, TypeError, KeyError):
-        _log(fh, "STEP 1 SHAPE MISMATCH",
-             "Expected parsed[3][1][0]['text'] — see PARSED JSON above")
-        _summarise(fh, "Step 1 upgrade POST", False,
-                   "request did not crash but result-message shape changed")
+        _log(fh, "STEP 1 NOTE",
+             "custom/reload could be either rejection OR success-with-reload. "
+             "Step 2 verifies by re-fetching the city — if isBusy=True, the "
+             "build actually started despite this response shape.")
+        _summarise(fh, "Step 1 upgrade POST shape", False,
+                   f"{reason} — running Step 2 to confirm")
+    else:
+        try:
+            msg = parsed[3][1][0]["text"]
+            _summarise(fh, "Step 1 upgrade POST", True,
+                       f"server message: {msg!r}")
+        except (IndexError, TypeError, KeyError):
+            _log(fh, "STEP 1 SHAPE MISMATCH",
+                 "Expected parsed[3][1][0]['text'] — see PARSED JSON above")
+            _summarise(fh, "Step 1 upgrade POST", False,
+                       "request did not crash but result-message shape changed")
 
     # ---- Step 2: re-fetch city and confirm isBusy flipped ----
     print("\nStep 2: re-fetch city and verify isBusy flipped on the slot…")
