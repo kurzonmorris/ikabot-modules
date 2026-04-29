@@ -340,7 +340,59 @@ def _diagnose_upgrade(session, fh, city, slot_pos):
         "ajax": "1",
     }
 
+    def _variant_g():
+        """Bypass session.post entirely to avoid the implicit __token() re-GET.
+
+        1. Fetch the city page directly via session.s.get (raw requests).
+        2. Parse actionRequest straight out of that page's HTML.
+        3. POST the upgrade with that exact token via session.s.post,
+           setting Referer to the city URL like a browser would.
+        """
+        base = session.urlBase
+        city_get_url = base + f"view=city&cityId={cid}"
+        r = session.s.get(city_get_url, verify=config.do_ssl_verify, timeout=60)
+        page_html = r.text
+        m = re.search(r'actionRequest"?:\s*"(.*?)"', page_html)
+        if not m:
+            raise RuntimeError("could not parse actionRequest from city page HTML")
+        fresh_token = m.group(1)
+        _log(fh, "VARIANT G token from city HTML", fresh_token)
+
+        post_params = dict(params_form)
+        post_params["actionRequest"] = fresh_token
+        # Browsers send Referer of the page that initiated the AJAX call.
+        headers = dict(session.s.headers)
+        headers["Referer"] = city_get_url
+        # Mirror requestHistory append so _log_request_history can pick it up.
+        session.requestHistory.append({
+            "method": "POST",
+            "url": base,
+            "params": post_params,
+            "payload": {},
+            "proxies": session.s.proxies,
+            "headers": dict(headers),
+            "response": None,
+        })
+        resp = session.s.post(
+            base,
+            params=post_params,
+            headers=headers,
+            verify=config.do_ssl_verify,
+            timeout=60,
+        )
+        session.requestHistory[-1]["response"] = {
+            "status": resp.status_code,
+            "elapsed": resp.elapsed.total_seconds(),
+            "headers": dict(resp.headers),
+            "text": resp.text,
+        }
+        return resp.text
+
     variants = [
+        ("G", "raw GET city + parse token from HTML + raw POST with Referer "
+         "(bypasses session.post __token re-GET — most browser-like)",
+         None,
+         _variant_g),
         ("D", "GET city view first, then params=dict + activeTab",
          lambda: session.get(f"view=city&cityId={cid}"),
          lambda: session.post(params=params_form)),
