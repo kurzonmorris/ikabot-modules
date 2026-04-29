@@ -338,64 +338,86 @@ def constructionDiagnostic(session, event, stdin_fd, predetermined_input):
     """Entry point — pick city + slot, run the relevant flow, dump everything."""
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
+    path = _dump_path()
+    fh = None
     try:
         banner()
         print("Construction Diagnostic\n")
         print("Walks the build/upgrade HTTP flow step by step and saves every")
         print("request and response to a file you can inspect or share.\n")
+        print(f"Dump file: {path}\n")
 
-        path = _dump_path()
         fh = open(path, "w", encoding="utf-8")
-        try:
-            fh.write(f"Construction diagnostic dump\n")
-            fh.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            fh.write(f"Player: {getattr(session, 'username', '?')} "
-                     f"@ {getattr(session, 'servidor', '?')}\n")
+        fh.write(f"Construction diagnostic dump\n")
+        fh.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        fh.write(f"Player: {getattr(session, 'username', '?')} "
+                 f"@ {getattr(session, 'servidor', '?')}\n")
+        fh.flush()
 
-            print("Pick a city to test against:")
-            city = chooseCity(session)
-            cid = city["id"]
-            _log(fh, "CITY", {
-                "id": cid, "name": city.get("cityName"),
-                "islandId": city.get("islandId"),
-                "availableResources": city.get("availableResources"),
-            })
+        print("Pick a city to test against:")
+        city = chooseCity(session)
+        cid = city["id"]
+        _log(fh, "CITY", {
+            "id": cid, "name": city.get("cityName"),
+            "islandId": city.get("islandId"),
+            "availableResources": city.get("availableResources"),
+        })
 
-            positions = city.get("position", [])
-            print(f"\nCity has {len(positions)} slots:\n")
-            for i, s in enumerate(positions):
-                if s.get("building") == "empty":
-                    print(f"  ({i:>2}) [empty, {s.get('type', '?')}]")
-                else:
-                    extras = []
-                    if s.get("isBusy"):
-                        extras.append("BUSY")
-                    if s.get("isMaxLevel"):
-                        extras.append("MAX")
-                    if s.get("canUpgrade") is False:
-                        extras.append("canUpgrade=False")
-                    suffix = f"  [{', '.join(extras)}]" if extras else ""
-                    print(f"  ({i:>2}) {s.get('name')} lv{s.get('level', 0)}{suffix}")
-
-            print(f"\nPick a slot (0–{len(positions) - 1}):")
-            slot_pos = int(read(min=0, max=len(positions) - 1))
-            slot = positions[slot_pos]
-            _log(fh, "CHOSEN SLOT INDEX", slot_pos)
-
-            if slot.get("building") == "empty":
-                print(f"\n→ Slot {slot_pos} is empty. Running NEW-BUILD flow.\n")
-                _diagnose_build(session, fh, city, slot_pos)
+        positions = city.get("position", [])
+        print(f"\nCity has {len(positions)} slots:\n")
+        for i, s in enumerate(positions):
+            if s.get("building") == "empty":
+                print(f"  ({i:>2}) [empty, {s.get('type', '?')}]")
             else:
-                print(f"\n→ Slot {slot_pos} is occupied. Running UPGRADE flow.\n")
-                _diagnose_upgrade(session, fh, city, slot_pos)
+                extras = []
+                if s.get("isBusy"):
+                    extras.append("BUSY")
+                if s.get("isMaxLevel"):
+                    extras.append("MAX")
+                if s.get("canUpgrade") is False:
+                    extras.append("canUpgrade=False")
+                suffix = f"  [{', '.join(extras)}]" if extras else ""
+                print(f"  ({i:>2}) {s.get('name')} lv{s.get('level', 0)}{suffix}")
 
-            print(f"\n{bcolors.GREEN}Dump written to:{bcolors.ENDC} {path}")
-            print("Share that file (or paste the relevant STEP sections) so the")
-            print("exact site response can be inspected.\n")
-        finally:
-            fh.close()
-        enter()
+        print(f"\nPick a slot (0–{len(positions) - 1}):")
+        slot_pos = int(read(min=0, max=len(positions) - 1))
+        slot = positions[slot_pos]
+        _log(fh, "CHOSEN SLOT INDEX", slot_pos)
+
+        if slot.get("building") == "empty":
+            print(f"\n→ Slot {slot_pos} is empty. Running NEW-BUILD flow.\n")
+            _diagnose_build(session, fh, city, slot_pos)
+        else:
+            print(f"\n→ Slot {slot_pos} is occupied. Running UPGRADE flow.\n")
+            _diagnose_upgrade(session, fh, city, slot_pos)
+
+        print(f"\n{bcolors.GREEN}Dump written to:{bcolors.ENDC} {path}")
+        print("Share that file (or paste the relevant STEP sections) so the")
+        print("exact site response can be inspected.\n")
     except KeyboardInterrupt:
-        pass
+        print("\nCancelled.")
+    except Exception:
+        tb = traceback.format_exc()
+        # Show prominently — don't let it scroll off
+        print(f"\n{bcolors.RED}{'=' * 70}")
+        print("Diagnostic crashed:")
+        print(f"{'=' * 70}{bcolors.ENDC}")
+        print(tb)
+        print(f"\n{bcolors.YELLOW}Dump file (partial): {path}{bcolors.ENDC}")
+        if fh is not None:
+            try:
+                _log(fh, "DIAGNOSTIC CRASHED", tb)
+            except Exception:
+                pass
     finally:
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        try:
+            print("\nPress Enter to return to the main menu…")
+            enter()
+        except Exception:
+            pass
         event.set()
