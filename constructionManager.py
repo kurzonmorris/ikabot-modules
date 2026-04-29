@@ -718,26 +718,55 @@ def _get_buildable_options(session, city, slot_position):
 # Display helpers
 # ---------------------------------------------------------------------------
 
-def _render_slot_grid(city):
-    """Print a one-line-per-slot summary of the city's building positions."""
+def _render_slot_grid(city, pending_by_slot=None):
+    """Print a one-line-per-slot summary of the city's building positions.
+
+    If *pending_by_slot* is provided ({slot_pos: [{action, building,
+    target_level}]}) the grid overlays the queue: empty slots with a
+    queued build show the future building + level, occupied slots with
+    queued upgrades show ``current → target``, both in yellow + [QUEUED]
+    so the user can plan around what's already staged.
+    """
+    pending_by_slot = pending_by_slot or {}
     positions = city.get("position", [])
     print("")
     for i, slot in enumerate(positions):
+        queued = pending_by_slot.get(i, [])
         name = slot.get("name", "empty")
         if name == "empty":
             slot_type = slot.get("type", "")
-            label = f"[ -- ]  (empty, {slot_type})"
-            print(f"  Slot {i:>2}  {label}")
+            build_q = next((q for q in queued if q["action"] == "build"), None)
+            if build_q is not None:
+                # The build queues lv 1; subsequent rows for the same slot are
+                # upgrades on top of it, so the effective target is the max.
+                effective_lv = max(q["target_level"] for q in queued)
+                label = (
+                    f"[QUEUED]  lv 1→{effective_lv:>2}  {build_q['building']} "
+                    f"(planned, {slot_type})"
+                )
+                print(f"  Slot {i:>2}  {bcolors.YELLOW}{label}{bcolors.ENDC}")
+            else:
+                label = f"[ -- ]  (empty, {slot_type})"
+                print(f"  Slot {i:>2}  {label}")
         else:
             lv = slot.get("level", 0)
-            lv_str = f"lv{lv:>2}"
+            queued_targets = [q["target_level"] for q in queued
+                              if q["action"] == "upgrade"]
+            effective_lv = max(queued_targets + [lv])
+            lv_str = (
+                f"lv{lv:>2}→{effective_lv}"
+                if queued_targets else f"lv{lv:>2}"
+            )
             busy_mark = ""
             if slot.get("isBusy"):
                 busy_mark = "  * building..."
                 eta = slot.get("completed")
                 if eta:
                     busy_mark += f" → done {getDateTime(int(eta))[8:]}"
-            if slot.get("isMaxLevel"):
+            if queued_targets:
+                color = bcolors.YELLOW
+                note = "  [QUEUED]"
+            elif slot.get("isMaxLevel"):
                 color = bcolors.BLACK
                 note = "  MAX"
             elif slot.get("canUpgrade"):
@@ -752,6 +781,24 @@ def _render_slot_grid(city):
                 f"{note}{busy_mark}"
             )
     print("")
+
+
+def _gather_pending_for_city(session, city_id):
+    """Return {slot_pos: [{action, building, target_level}]} for unfinished
+    rows belonging to *city_id*, sorted by queue_id within each slot."""
+    pending = {}
+    for r in sorted(csv_load(session), key=lambda x: x["queue_id"]):
+        if r["city_id"] != city_id:
+            continue
+        if r["status"] not in ("pending", "shipping", "running"):
+            continue
+        sp = int(r["slot_position"])
+        pending.setdefault(sp, []).append({
+            "action":       r["action"],
+            "building":     r["building"],
+            "target_level": int(r["target_level"]),
+        })
+    return pending
 
 
 def _fmt_res(vals):
@@ -808,7 +855,7 @@ def _add_to_queue(session):
             ("Capacity",  cap),
         ],
     )
-    _render_slot_grid(city)
+    _render_slot_grid(city, _gather_pending_for_city(session, city_id))
 
     positions     = city.get("position", [])
     max_slot      = len(positions) - 1
@@ -820,13 +867,26 @@ def _add_to_queue(session):
     while slot_targets < ADD_SESSION_SLOT_CAP:
         remaining = ADD_SESSION_SLOT_CAP - slot_targets
         print(
-            f"  Enter slot number (0–{max_slot}), or press Enter to finish "
+            f"  Enter slot number (0–{max_slot}), 'S' to re-show slots "
+            f"with pending overlay, or press Enter to finish "
             f"[{remaining} slot-target(s) remaining]:"
         )
-        raw = read(min=0, max=max_slot, digit=True, empty=True)
+        raw = read(empty=True).strip()
         if raw == "":
             break
-        slot_pos = int(raw)
+        if raw.lower() == "s":
+            _render_slot_grid(
+                city, _gather_pending_for_city(session, city_id)
+            )
+            continue
+        try:
+            slot_pos = int(raw)
+        except ValueError:
+            print(f"  Invalid input — enter a number 0–{max_slot}, 'S', or Enter.")
+            continue
+        if not 0 <= slot_pos <= max_slot:
+            print(f"  Slot {slot_pos} out of range (0–{max_slot}).")
+            continue
         slot = positions[slot_pos]
         is_empty = slot.get("building") == "empty"
 
