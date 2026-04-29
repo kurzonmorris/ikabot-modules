@@ -104,9 +104,56 @@ def _check_actionrequest_token(url_or_params):
     return "REQUESTID" in s
 
 
+def _change_current_city(session, fh, target_city_id):
+    """POST action=header&function=changeCurrentCity, mirroring planRoutes.sendGoods.
+
+    The game's server tracks 'current city' separately from the cityId field on
+    individual requests. State-changing actions (build, upgrade, transport) are
+    silently ignored if the server-side current-city doesn't match. Working
+    modules (resource transport) always do this switch explicitly first.
+    """
+    # Discover the city the bot is currently 'at' on the server.
+    try:
+        landing_html = session.get()
+        from ikabot.helpers.getJson import getCity as _getCity
+        current_city = _getCity(landing_html)
+        currId = current_city["id"]
+    except Exception:
+        currId = target_city_id  # best-effort fallback
+    _log(fh, "PRE-STEP: server-side current city before switch", currId)
+    if str(currId) == str(target_city_id):
+        _log(fh, "PRE-STEP: changeCurrentCity",
+             f"already at city {target_city_id}, skipping switch POST")
+        return True
+    data = {
+        "action": "header",
+        "function": "changeCurrentCity",
+        "actionRequest": actionRequest,
+        "oldView": "city",
+        "cityId": target_city_id,
+        "backgroundView": "city",
+        "currentCityId": currId,
+        "ajax": "1",
+    }
+    _log(fh, "PRE-STEP REQUEST PARAMS (changeCurrentCity)", data)
+    try:
+        resp = session.post(params=data)
+    except Exception:
+        _log(fh, "PRE-STEP EXCEPTION", traceback.format_exc())
+        _log_request_history(fh, session, "PRE-STEP WIRE REQUEST (after exception)")
+        _summarise(fh, "Pre-step changeCurrentCity", False, "exception, see log")
+        return False
+    _log(fh, "PRE-STEP RAW RESPONSE", resp)
+    _log_request_history(fh, session, "PRE-STEP WIRE REQUEST (post-substitution)")
+    _summarise(fh, "Pre-step changeCurrentCity", True,
+               f"switched server-side current city to {target_city_id}")
+    return True
+
+
 def _diagnose_build(session, fh, city, slot_pos):
     """Walk the new-build flow for an empty slot."""
     cid = city["id"]
+    _change_current_city(session, fh, cid)
 
     # ---- Step 1: GET buildingGround listing ----
     print(f"\nStep 1: fetch buildingGround listing for slot {slot_pos}…")
@@ -234,6 +281,7 @@ def _diagnose_build(session, fh, city, slot_pos):
 def _diagnose_upgrade(session, fh, city, slot_pos):
     """Walk the upgrade flow for an occupied slot."""
     cid = city["id"]
+    _change_current_city(session, fh, cid)
     slot = city["position"][slot_pos]
     building = slot.get("building", "")
     current_lv = slot.get("level", 0)
