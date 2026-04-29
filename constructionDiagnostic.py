@@ -71,6 +71,9 @@ def _log_request_history(fh, session, label):
         _log(fh, f"{label} — TOKEN SUBSTITUTION FAILED",
              "literal 'REQUESTID' reached the wire — session.__token() did "
              "not substitute it. This is the rejection cause.")
+
+
+def _summarise(fh, step, ok, note=""):
     mark = f"{bcolors.GREEN}OK{bcolors.ENDC}" if ok else f"{bcolors.RED}FAIL{bcolors.ENDC}"
     line = f"  [{mark}] {step}"
     if note:
