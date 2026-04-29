@@ -890,8 +890,14 @@ def _add_to_queue(session):
         slot = positions[slot_pos]
         is_empty = slot.get("building") == "empty"
 
-        if is_empty:
-            # ---- empty slot: pick a building to construct ----
+        # Queue-aware: pick up where any prior pending rows for this slot end.
+        slot_queue = _gather_pending_for_city(session, city_id).get(slot_pos, [])
+        build_q     = next((q for q in slot_queue if q["action"] == "build"), None)
+        upgrade_qs  = [q for q in slot_queue if q["action"] == "upgrade"]
+        queued_max  = max((q["target_level"] for q in slot_queue), default=0)
+
+        if is_empty and build_q is None:
+            # ---- empty slot, nothing queued: pick a building to construct ----
             opts = _get_buildable_options(session, city, slot_pos)
             if not opts:
                 print("  No buildings can be constructed in that slot.")
@@ -917,11 +923,61 @@ def _add_to_queue(session):
             costs_dict = cost_cache[building_slug]
             row_costs = [costs_dict.get(1, [0] * 5)]
 
+        elif is_empty and build_q is not None:
+            # ---- empty slot, build already queued: extend with more upgrades ----
+            if queued_max >= HARD_LEVEL_CAP:
+                print(
+                    f"  Slot {slot_pos} is already queued to lv {queued_max} "
+                    f"(cap is {HARD_LEVEL_CAP}). Nothing more to add."
+                )
+                enter()
+                continue
+            building_slug = build_q["building"]
+            building_name = building_slug   # CSV doesn't store the friendly name
+            building_id   = ""
+            print(
+                f"\n  Slot {slot_pos}: {building_slug} is already queued to "
+                f"reach lv {queued_max}.\n"
+                f"  Continuing from lv {queued_max + 1}."
+            )
+            target_level = read(
+                min=queued_max + 1,
+                max=HARD_LEVEL_CAP,
+                msg=f"  Extend to level: ",
+            )
+            rows_to_add = [
+                (lv, "upgrade")
+                for lv in range(queued_max + 1, target_level + 1)
+            ]
+            if building_slug not in cost_cache:
+                print("  Fetching cost data…")
+                cost_cache[building_slug] = fetch_costs_for_building(
+                    session, city, building_slug
+                )
+            costs_dict = cost_cache[building_slug]
+            row_costs = []
+            missing_levels = []
+            for lv, _ in rows_to_add:
+                c = costs_dict.get(lv)
+                if c is None:
+                    row_costs.append([0] * 5)
+                    missing_levels.append(lv)
+                else:
+                    row_costs.append(c)
+            if missing_levels:
+                print(
+                    f"  {bcolors.YELLOW}Cost data missing for levels "
+                    f"{missing_levels}; stored as 0 and will be recomputed "
+                    f"before execution.{bcolors.ENDC}"
+                )
+
         else:
             # ---- occupied slot: pick a target level to upgrade to ----
             current_lv = slot.get("level", 0)
             if slot.get("isBusy"):
                 current_lv += 1          # already building toward this level
+            # Effective level = max of in-game level and any queued targets.
+            effective_lv = max(current_lv, queued_max)
             building_slug = slot.get("building", "")
             building_name = slot.get("name", building_slug)
             building_id   = ""
@@ -935,14 +991,29 @@ def _add_to_queue(session):
                 if read(values=["y", "Y", "n", "N", ""], default="N").lower() != "y":
                     continue
 
-            print(
-                f"\n  Slot {slot_pos}: {building_name}  lv {current_lv}  "
-                f"(max allowed: {HARD_LEVEL_CAP})"
-            )
+            if effective_lv >= HARD_LEVEL_CAP:
+                print(
+                    f"  Slot {slot_pos} ({building_name}) already queued to "
+                    f"lv {effective_lv} (cap is {HARD_LEVEL_CAP}). "
+                    f"Nothing more to add."
+                )
+                enter()
+                continue
+            if upgrade_qs:
+                print(
+                    f"\n  Slot {slot_pos}: {building_name} lv {current_lv}, "
+                    f"already queued to reach lv {queued_max}.\n"
+                    f"  Continuing from lv {effective_lv + 1}."
+                )
+            else:
+                print(
+                    f"\n  Slot {slot_pos}: {building_name}  lv {current_lv}  "
+                    f"(max allowed: {HARD_LEVEL_CAP})"
+                )
             target_level = read(
-                min=current_lv + 1,
+                min=effective_lv + 1,
                 max=HARD_LEVEL_CAP,
-                msg=f"  Upgrade to level (current {current_lv}): ",
+                msg=f"  Upgrade to level (effective {effective_lv}): ",
             )
 
             # fetch costs for all levels in one shot, cache for this session
@@ -955,7 +1026,7 @@ def _add_to_queue(session):
 
             rows_to_add  = [
                 (lv, "upgrade")
-                for lv in range(current_lv + 1, target_level + 1)
+                for lv in range(effective_lv + 1, target_level + 1)
             ]
             row_costs = []
             missing_levels = []
