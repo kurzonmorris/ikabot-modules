@@ -388,7 +388,32 @@ def _diagnose_upgrade(session, fh, city, slot_pos):
         }
         return resp.text
 
+    def _variant_h():
+        """The URL shape the web client actually sends in 2026.
+
+        Captured from the user's ikabot webserver:
+          action=UpgradeExistingBuilding   (was: CityScreen&function=upgradeBuilding)
+          no function= param
+          no ajax=1 param
+        """
+        new_params = {
+            "action": "UpgradeExistingBuilding",
+            "actionRequest": actionRequest,
+            "cityId": cid,
+            "position": slot_pos,
+            "level": current_lv,
+            "activeTab": "tabSendTransporter",
+            "backgroundView": "city",
+            "currentCityId": cid,
+            "templateView": building,
+        }
+        return session.post(params=new_params)
+
     variants = [
+        ("H", "action=UpgradeExistingBuilding (no function, no ajax) — "
+         "matches the URL the web client actually sends today",
+         None,
+         _variant_h),
         ("G", "raw GET city + parse token from HTML + raw POST with Referer "
          "(bypasses session.post __token re-GET — most browser-like)",
          None,
