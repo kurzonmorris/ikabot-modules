@@ -341,11 +341,15 @@ def _diagnose_upgrade(session, fh, city, slot_pos):
     }
 
     variants = [
-        ("A", "URL string, NO activeTab (current code)",
-         lambda: session.post(base_url)),
-        ("B", "URL string, WITH activeTab=tabSendTransporter (legacy match)",
-         lambda: session.post(legacy_url)),
-        ("C", "params=dict, WITH activeTab (matches working sendGoods style)",
+        ("D", "GET city view first, then params=dict + activeTab",
+         lambda: session.get(f"view=city&cityId={cid}"),
+         lambda: session.post(params=params_form)),
+        ("E", "GET building detail first, then params=dict + activeTab",
+         lambda: session.get(f"view={building}&cityId={cid}&position={slot_pos}"),
+         lambda: session.post(params=params_form)),
+        ("F", "GET city + GET building, then params=dict + activeTab",
+         lambda: (session.get(f"view=city&cityId={cid}"),
+                  session.get(f"view={building}&cityId={cid}&position={slot_pos}")),
          lambda: session.post(params=params_form)),
     ]
 
@@ -357,12 +361,20 @@ def _diagnose_upgrade(session, fh, city, slot_pos):
         return
 
     succeeded = False
-    for code, desc, do_post in variants:
+    for code, desc, prereq, do_post in variants:
         if succeeded:
             _log(fh, f"VARIANT {code} SKIPPED", "previous variant succeeded")
             continue
         print(f"\n  Variant {code}: {desc}…")
         _log(fh, f"VARIANT {code} DESCRIPTION", desc)
+        if prereq is not None:
+            try:
+                prereq()
+                _log(fh, f"VARIANT {code} PREREQ", "completed without exception")
+            except Exception:
+                _log(fh, f"VARIANT {code} PREREQ EXCEPTION", traceback.format_exc())
+                _summarise(fh, f"Variant {code} prereq", False, "exception, see log")
+                continue
         try:
             resp = do_post()
         except Exception:
