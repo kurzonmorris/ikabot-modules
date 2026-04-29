@@ -279,7 +279,12 @@ def _diagnose_build(session, fh, city, slot_pos):
 
 
 def _diagnose_upgrade(session, fh, city, slot_pos):
-    """Walk the upgrade flow for an occupied slot."""
+    """Walk the upgrade flow for an occupied slot.
+
+    Tries multiple URL variants in a single run. Once any variant flips
+    isBusy=True, subsequent variants are skipped (the slot is now busy and
+    can't be re-tested without waiting for completion).
+    """
     cid = city["id"]
     _change_current_city(session, fh, cid)
     slot = city["position"][slot_pos]
@@ -299,14 +304,10 @@ def _diagnose_upgrade(session, fh, city, slot_pos):
         return
     if can_upgrade is False:
         _summarise(fh, "Pre-flight slot check", False,
-                   "canUpgrade=False — game-side prerequisite (citizens, "
-                   "happiness, or resources) not met")
+                   "canUpgrade=False — game-side prerequisite not met")
         return
 
-    # ---- Step 1: POST CityScreen/upgradeBuilding ----
-    print(f"\nStep 1: POST CityScreen/upgradeBuilding for {building} "
-          f"lv {current_lv} → {current_lv + 1}…")
-    url = (
+    base_url = (
         f"action=CityScreen&function=upgradeBuilding"
         f"&actionRequest={actionRequest}"
         f"&cityId={cid}&position={slot_pos}"
@@ -315,74 +316,87 @@ def _diagnose_upgrade(session, fh, city, slot_pos):
         f"&templateView={building}"
         f"&ajax=1"
     )
-    _log(fh, "STEP 1 REQUEST URL", url)
-    print(f"  About to POST a real upgrade request — slot {slot_pos} ({building}) "
-          f"will start upgrading to lv {current_lv + 1} if it succeeds.")
-    print("  Continue? [y/N]")
+    legacy_url = (
+        f"action=CityScreen&function=upgradeBuilding"
+        f"&actionRequest={actionRequest}"
+        f"&cityId={cid}&position={slot_pos}"
+        f"&level={current_lv}"
+        f"&activeTab=tabSendTransporter"
+        f"&backgroundView=city&currentCityId={cid}"
+        f"&templateView={building}"
+        f"&ajax=1"
+    )
+    params_form = {
+        "action": "CityScreen",
+        "function": "upgradeBuilding",
+        "actionRequest": actionRequest,
+        "cityId": cid,
+        "position": slot_pos,
+        "level": current_lv,
+        "activeTab": "tabSendTransporter",
+        "backgroundView": "city",
+        "currentCityId": cid,
+        "templateView": building,
+        "ajax": "1",
+    }
+
+    variants = [
+        ("A", "URL string, NO activeTab (current code)",
+         lambda: session.post(base_url)),
+        ("B", "URL string, WITH activeTab=tabSendTransporter (legacy match)",
+         lambda: session.post(legacy_url)),
+        ("C", "params=dict, WITH activeTab (matches working sendGoods style)",
+         lambda: session.post(params=params_form)),
+    ]
+
+    print(f"\nAbout to POST upgrade for {building} lv {current_lv} → {current_lv + 1}.")
+    print(f"Will try up to {len(variants)} URL variants until one succeeds.")
+    print("Continue? [y/N]")
     if read(values=["y", "Y", "n", "N", ""], default="N").lower() != "y":
-        _summarise(fh, "Step 1 upgrade POST", False, "skipped by user")
+        _summarise(fh, "Upgrade variants", False, "skipped by user")
         return
-    try:
-        resp = session.post(url)
-    except Exception:
-        _log(fh, "STEP 1 EXCEPTION", traceback.format_exc())
-        _log_request_history(fh, session, "STEP 1 WIRE REQUEST (after exception)")
-        _summarise(fh, "Step 1 upgrade POST", False, "exception, see log")
-        return
-    _log(fh, "STEP 1 RAW RESPONSE", resp)
-    _log_request_history(fh, session, "STEP 1 WIRE REQUEST (post-substitution)")
 
-    try:
-        parsed = json.loads(resp, strict=False)
-    except Exception:
-        _log(fh, "STEP 1 PARSE ERROR", traceback.format_exc())
-        _summarise(fh, "Step 1 upgrade POST", False, "response was not JSON")
-        return
-    _log(fh, "STEP 1 PARSED JSON", parsed)
-
-    is_rej, reason = _check_reload_rejection(parsed)
-    if is_rej:
-        _log(fh, "STEP 1 NOTE",
-             "custom/reload could be either rejection OR success-with-reload. "
-             "Step 2 verifies by re-fetching the city — if isBusy=True, the "
-             "build actually started despite this response shape.")
-        _summarise(fh, "Step 1 upgrade POST shape", False,
-                   f"{reason} — running Step 2 to confirm")
-    else:
+    succeeded = False
+    for code, desc, do_post in variants:
+        if succeeded:
+            _log(fh, f"VARIANT {code} SKIPPED", "previous variant succeeded")
+            continue
+        print(f"\n  Variant {code}: {desc}…")
+        _log(fh, f"VARIANT {code} DESCRIPTION", desc)
         try:
-            msg = parsed[3][1][0]["text"]
-            _summarise(fh, "Step 1 upgrade POST", True,
-                       f"server message: {msg!r}")
-        except (IndexError, TypeError, KeyError):
-            _log(fh, "STEP 1 SHAPE MISMATCH",
-                 "Expected parsed[3][1][0]['text'] — see PARSED JSON above")
-            _summarise(fh, "Step 1 upgrade POST", False,
-                       "request did not crash but result-message shape changed")
+            resp = do_post()
+        except Exception:
+            _log(fh, f"VARIANT {code} EXCEPTION", traceback.format_exc())
+            _log_request_history(fh, session, f"VARIANT {code} WIRE (after exception)")
+            _summarise(fh, f"Variant {code} POST", False, "exception, see log")
+            continue
+        _log(fh, f"VARIANT {code} RAW RESPONSE", resp)
+        _log_request_history(fh, session, f"VARIANT {code} WIRE REQUEST")
 
-    # ---- Step 2: re-fetch city and confirm isBusy flipped ----
-    print("\nStep 2: re-fetch city and verify isBusy flipped on the slot…")
-    time.sleep(2)
-    try:
-        html = session.get(city_url + str(cid))
-        city2 = getCity(html)
-    except Exception:
-        _log(fh, "STEP 2 EXCEPTION", traceback.format_exc())
-        _summarise(fh, "Step 2 verify", False, "city re-fetch failed")
-        return
-    slot2 = city2["position"][slot_pos]
-    _log(fh, "STEP 2 SLOT AFTER POST", {
-        "isBusy": slot2.get("isBusy"),
-        "completed": slot2.get("completed"),
-        "level": slot2.get("level"),
-        "canUpgrade": slot2.get("canUpgrade"),
-    })
-    if slot2.get("isBusy"):
-        _summarise(fh, "Step 2 verify", True,
-                   f"isBusy=True, completes at {slot2.get('completed')}")
-    else:
-        _summarise(fh, "Step 2 verify", False,
-                   "slot is NOT isBusy after the POST — server accepted the "
-                   "request body but did not start construction")
+        # Verify by re-fetching the city
+        time.sleep(2)
+        try:
+            html = session.get(city_url + str(cid))
+            city2 = getCity(html)
+            slot2 = city2["position"][slot_pos]
+        except Exception:
+            _log(fh, f"VARIANT {code} VERIFY EXCEPTION", traceback.format_exc())
+            _summarise(fh, f"Variant {code} verify", False, "city re-fetch failed")
+            continue
+        _log(fh, f"VARIANT {code} SLOT AFTER POST", {
+            "isBusy": slot2.get("isBusy"),
+            "completed": slot2.get("completed"),
+            "level": slot2.get("level"),
+            "canUpgrade": slot2.get("canUpgrade"),
+        })
+        if slot2.get("isBusy"):
+            _summarise(fh, f"Variant {code} verify", True,
+                       f"isBusy=True, completes at {slot2.get('completed')} "
+                       f"— THIS IS THE WORKING VARIANT")
+            succeeded = True
+        else:
+            _summarise(fh, f"Variant {code} verify", False,
+                       "slot is NOT isBusy — variant rejected")
 
 
 def constructionDiagnostic(session, event, stdin_fd, predetermined_input):
