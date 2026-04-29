@@ -1447,11 +1447,22 @@ def post_build_or_upgrade(session, city, row):
 
     Does NOT verify success — the caller re-fetches the city after the
     BUILD_POST_VERIFY_DELAY_SECONDS settle period to confirm isBusy.
+
+    NOTE: as of Ikariam v17 the URL shape has been simplified.
+    OLD: action=CityScreen&function=upgradeBuilding&...&ajax=1
+    NEW: action=UpgradeExistingBuilding&...
+    The old action no longer exists and the server silently rejects with
+    a custom/reload-to-city response. Confirmed working via the
+    constructionDiagnostic Variant H run.
     """
     cid = city["id"]
     pos = int(row["slot_position"])
 
     if row["action"] == "build":
+        # TODO: the new-build URL has likely changed too (legacy used
+        #   action=CityScreen&function=build). Capture a real "Build"
+        #   click via the ikabot webserver to confirm the new action
+        #   name (probably action=BuildNewBuilding or similar).
         params = {
             "action": "CityScreen",
             "function": "build",
@@ -1466,22 +1477,19 @@ def post_build_or_upgrade(session, city, row):
         }
         resp = session.post(params=params, noIndex=True)
     else:
-        # Upgrade: pass the slot's *current* level (not target) — the game
-        # increments from there.  If isBusy, the visible level is already the
-        # in-progress target so we use level directly.
+        # Upgrade: pass the slot's *current* level — the game increments
+        # to current+1.  If isBusy, level already reflects the in-progress
+        # target so we use it directly.
         slot = city["position"][pos]
         current_lv = slot.get("level", 0)
-        url = (
-            f"action=CityScreen&function=upgradeBuilding"
-            f"&actionRequest={actionRequest}"
-            f"&cityId={cid}&position={pos}"
-            f"&level={current_lv}"
-            f"&activeTab=tabSendTransporter"
-            f"&backgroundView=city&currentCityId={cid}"
-            f"&templateView={row['building']}"
-            f"&ajax=1"
-        )
-        resp = session.post(url)
+        params = {
+            "action": "UpgradeExistingBuilding",
+            "actionRequest": actionRequest,
+            "cityId": cid,
+            "position": pos,
+            "level": current_lv,
+        }
+        resp = session.post(params=params)
     try:
         msg = json.loads(resp, strict=False)[3][1][0]["text"]
         if msg:
