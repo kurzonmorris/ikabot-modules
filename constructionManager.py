@@ -1476,6 +1476,7 @@ def post_build_or_upgrade(session, city, row):
             f"&actionRequest={actionRequest}"
             f"&cityId={cid}&position={pos}"
             f"&level={current_lv}"
+            f"&activeTab=tabSendTransporter"
             f"&backgroundView=city&currentCityId={cid}"
             f"&templateView={row['building']}"
             f"&ajax=1"
