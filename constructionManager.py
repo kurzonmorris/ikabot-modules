@@ -718,68 +718,83 @@ def _get_buildable_options(session, city, slot_position):
 # Display helpers
 # ---------------------------------------------------------------------------
 
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _visible_len(s):
+    """Length excluding ANSI colour escapes — used for column padding."""
+    return len(_ANSI_RE.sub('', s))
+
+
+def _format_slot_line(i, slot, queued):
+    """Return the formatted text for a single slot (no leading indent)."""
+    name = slot.get("name", "empty")
+    if name == "empty":
+        slot_type = slot.get("type", "")
+        build_q = next((q for q in queued if q["action"] == "build"), None)
+        if build_q is not None:
+            effective_lv = max(q["target_level"] for q in queued)
+            label = (
+                f"[QUEUED] lv 1→{effective_lv:>2} {build_q['building']} "
+                f"({slot_type})"
+            )
+            return f"Slot {i:>2}  {bcolors.YELLOW}{label}{bcolors.ENDC}"
+        return f"Slot {i:>2}  [ -- ]  (empty, {slot_type})"
+
+    lv = slot.get("level", 0)
+    queued_targets = [q["target_level"] for q in queued
+                      if q["action"] == "upgrade"]
+    effective_lv = max(queued_targets + [lv])
+    lv_str = (
+        f"lv{lv:>2}→{effective_lv}"
+        if queued_targets else f"lv{lv:>2}"
+    )
+    busy_mark = ""
+    if slot.get("isBusy"):
+        busy_mark = "  *building"
+        eta = slot.get("completed")
+        if eta:
+            busy_mark += f" {getDateTime(int(eta))[8:]}"
+    if queued_targets:
+        color, note = bcolors.YELLOW, "  [QUEUED]"
+    elif slot.get("isMaxLevel"):
+        color, note = bcolors.BLACK, "  MAX"
+    elif slot.get("canUpgrade"):
+        color, note = bcolors.GREEN, ""
+    else:
+        color, note = bcolors.RED, "  (res missing)"
+    return (
+        f"Slot {i:>2}  [{lv_str}]  "
+        f"{color}{name}{bcolors.ENDC}"
+        f"{note}{busy_mark}"
+    )
+
+
 def _render_slot_grid(city, pending_by_slot=None):
-    """Print a one-line-per-slot summary of the city's building positions.
+    """Print a 2-column slot grid so all 24 positions fit on screen.
+
+    Left column = first half (slots 0..N/2-1), right column = second half.
+    Reading top-to-bottom, left-to-right walks the slot numbers in order.
 
     If *pending_by_slot* is provided ({slot_pos: [{action, building,
     target_level}]}) the grid overlays the queue: empty slots with a
     queued build show the future building + level, occupied slots with
-    queued upgrades show ``current → target``, both in yellow + [QUEUED]
-    so the user can plan around what's already staged.
+    queued upgrades show ``current → target``, both in yellow + [QUEUED].
     """
     pending_by_slot = pending_by_slot or {}
     positions = city.get("position", [])
+    lines = [_format_slot_line(i, slot, pending_by_slot.get(i, []))
+             for i, slot in enumerate(positions)]
+
+    n = len(lines)
+    half = (n + 1) // 2  # left column gets the extra slot if odd
+    col_width = max((_visible_len(l) for l in lines), default=0) + 3
     print("")
-    for i, slot in enumerate(positions):
-        queued = pending_by_slot.get(i, [])
-        name = slot.get("name", "empty")
-        if name == "empty":
-            slot_type = slot.get("type", "")
-            build_q = next((q for q in queued if q["action"] == "build"), None)
-            if build_q is not None:
-                # The build queues lv 1; subsequent rows for the same slot are
-                # upgrades on top of it, so the effective target is the max.
-                effective_lv = max(q["target_level"] for q in queued)
-                label = (
-                    f"[QUEUED]  lv 1→{effective_lv:>2}  {build_q['building']} "
-                    f"(planned, {slot_type})"
-                )
-                print(f"  Slot {i:>2}  {bcolors.YELLOW}{label}{bcolors.ENDC}")
-            else:
-                label = f"[ -- ]  (empty, {slot_type})"
-                print(f"  Slot {i:>2}  {label}")
-        else:
-            lv = slot.get("level", 0)
-            queued_targets = [q["target_level"] for q in queued
-                              if q["action"] == "upgrade"]
-            effective_lv = max(queued_targets + [lv])
-            lv_str = (
-                f"lv{lv:>2}→{effective_lv}"
-                if queued_targets else f"lv{lv:>2}"
-            )
-            busy_mark = ""
-            if slot.get("isBusy"):
-                busy_mark = "  * building..."
-                eta = slot.get("completed")
-                if eta:
-                    busy_mark += f" → done {getDateTime(int(eta))[8:]}"
-            if queued_targets:
-                color = bcolors.YELLOW
-                note = "  [QUEUED]"
-            elif slot.get("isMaxLevel"):
-                color = bcolors.BLACK
-                note = "  MAX"
-            elif slot.get("canUpgrade"):
-                color = bcolors.GREEN
-                note = ""
-            else:
-                color = bcolors.RED
-                note = "  (resources missing)"
-            print(
-                f"  Slot {i:>2}  [{lv_str}]  "
-                f"{color}{name}{bcolors.ENDC}"
-                f"{note}{busy_mark}"
-            )
+    for i in range(half):
+        left = lines[i]
+        right = lines[i + half] if i + half < n else ""
+        pad = " " * max(0, col_width - _visible_len(left))
+        print(f"  {left}{pad}{right}")
     print("")
 
 
@@ -857,23 +872,39 @@ def _add_to_queue(session):
     )
     _render_slot_grid(city, _gather_pending_for_city(session, city_id))
 
+    print(
+        f"  {bcolors.WARNING if hasattr(bcolors, 'WARNING') else ''}"
+        f"Tip: at any prompt below, '=' restarts the current cycle "
+        f"(re-prompts for slot), and ' (apostrophe) exits to the main menu."
+        f"{bcolors.ENDC}\n"
+    )
+
     positions     = city.get("position", [])
     max_slot      = len(positions) - 1
     slot_targets  = 0          # distinct slot-target picks this session
     added_ids     = []         # queue_ids added; kept for rollback
     cost_cache    = {}         # building_slug → costs dict (per add-session cache)
     session_totals = [0] * 5  # running grand total of costs added this session
+    exit_to_menu  = False     # set when user presses ' at any prompt
 
-    while slot_targets < ADD_SESSION_SLOT_CAP:
+    while not exit_to_menu and slot_targets < ADD_SESSION_SLOT_CAP:
         remaining = ADD_SESSION_SLOT_CAP - slot_targets
         print(
-            f"  Enter slot number (0–{max_slot}), 'S' to re-show slots "
-            f"with pending overlay, or press Enter to finish "
-            f"[{remaining} slot-target(s) remaining]:"
+            f"  Enter slot number (0–{max_slot})  |  S=re-show  |  "
+            f"'=exit  |  Enter=finish   [{remaining} left]:"
         )
         raw = read(empty=True).strip()
         if raw == "":
             break
+        if raw == "'":
+            exit_to_menu = True
+            break
+        if raw == "=":
+            # No-op at the top of the cycle — equivalent to a re-show.
+            _render_slot_grid(
+                city, _gather_pending_for_city(session, city_id)
+            )
+            continue
         if raw.lower() == "s":
             _render_slot_grid(
                 city, _gather_pending_for_city(session, city_id)
@@ -882,7 +913,7 @@ def _add_to_queue(session):
         try:
             slot_pos = int(raw)
         except ValueError:
-            print(f"  Invalid input — enter a number 0–{max_slot}, 'S', or Enter.")
+            print(f"  Invalid input — enter a number 0–{max_slot}, 'S', '=', ', or Enter.")
             continue
         if not 0 <= slot_pos <= max_slot:
             print(f"  Slot {slot_pos} out of range (0–{max_slot}).")
@@ -907,7 +938,15 @@ def _add_to_queue(session):
             print(f"  Slot {slot_pos} is empty. Choose a building to construct:\n")
             for idx, o in enumerate(opts, 1):
                 print(f"  ({idx}) {o['name']}")
-            chosen = opts[read(min=1, max=len(opts)) - 1]
+            chosen_idx = read(
+                min=1, max=len(opts), additionalValues=["'", "="]
+            )
+            if chosen_idx == "'":
+                exit_to_menu = True
+                break
+            if chosen_idx == "=":
+                continue
+            chosen = opts[chosen_idx - 1]
             building_slug = chosen["building"]
             building_name = chosen["name"]
             building_id   = chosen["buildingId"]
@@ -944,7 +983,13 @@ def _add_to_queue(session):
                 min=queued_max + 1,
                 max=HARD_LEVEL_CAP,
                 msg=f"  Extend to level: ",
+                additionalValues=["'", "="],
             )
+            if target_level == "'":
+                exit_to_menu = True
+                break
+            if target_level == "=":
+                continue
             rows_to_add = [
                 (lv, "upgrade")
                 for lv in range(queued_max + 1, target_level + 1)
@@ -987,8 +1032,14 @@ def _add_to_queue(session):
                     f"\n  {bcolors.YELLOW}Warning: slot {slot_pos} "
                     f"({building_name}) is already at max level.{bcolors.ENDC}"
                 )
-                print("  Continue anyway? [y/N]")
-                if read(values=["y", "Y", "n", "N", ""], default="N").lower() != "y":
+                print("  Continue anyway? [y/N]   '=exit  ==restart")
+                ans = read(
+                    values=["y", "Y", "n", "N", "", "'", "="], default="N"
+                )
+                if ans == "'":
+                    exit_to_menu = True
+                    break
+                if ans.lower() != "y":
                     continue
 
             if effective_lv >= HARD_LEVEL_CAP:
@@ -1014,7 +1065,13 @@ def _add_to_queue(session):
                 min=effective_lv + 1,
                 max=HARD_LEVEL_CAP,
                 msg=f"  Upgrade to level (effective {effective_lv}): ",
+                additionalValues=["'", "="],
             )
+            if target_level == "'":
+                exit_to_menu = True
+                break
+            if target_level == "=":
+                continue
 
             # fetch costs for all levels in one shot, cache for this session
             if building_slug not in cost_cache:
@@ -1051,7 +1108,15 @@ def _add_to_queue(session):
             "  (2) bulk — ship all pending costs upfront\n"
             "  (3) none — rely on existing stock only"
         )
-        tm_choice = read(min=1, max=3, digit=True, empty=True)
+        tm_choice = read(
+            min=1, max=3, digit=True, empty=True,
+            additionalValues=["'", "="],
+        )
+        if tm_choice == "'":
+            exit_to_menu = True
+            break
+        if tm_choice == "=":
+            continue
         transport_mode = {1: "jit", 2: "bulk", 3: "none", "": "jit"}.get(
             tm_choice, "jit"
         )
@@ -1113,13 +1178,40 @@ def _add_to_queue(session):
             print(f"\n  Slot-target cap ({ADD_SESSION_SLOT_CAP}) reached for this session.")
             break
 
-        print("\n  Add another slot-target? [Y/n]")
-        again = read(values=["y", "Y", "n", "N", ""], default="Y")
+        print("\n  Add another slot-target? [Y/n]   '=exit to main menu")
+        again = read(
+            values=["y", "Y", "n", "N", "", "'"], default="Y"
+        )
+        if again == "'":
+            exit_to_menu = True
+            break
         if again.lower() == "n":
             break
 
     if not added_ids:
-        print("\n  Nothing added.")
+        if exit_to_menu:
+            print("\n  Exited via '. Nothing was added.")
+        else:
+            print("\n  Nothing added.")
+        enter()
+        return
+
+    # If user exited via ', skip the slow cross-city analysis but still
+    # offer rollback so an accidental ' doesn't lock in unwanted rows.
+    if exit_to_menu:
+        banner()
+        print(
+            f"  Exited via '. {len(added_ids)} row(s) staged for "
+            f"{city_name}.\n"
+            "  [C] Confirm and keep   [R] Rollback and discard"
+        )
+        choice = read(values=["C", "c", "R", "r"])
+        if choice.upper() == "R":
+            for qid in added_ids:
+                csv_delete(session, qid)
+            print("  Rolled back — no rows saved.")
+        else:
+            print(f"  Confirmed. {len(added_ids)} row(s) queued.")
         enter()
         return
 
