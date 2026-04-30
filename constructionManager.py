@@ -738,8 +738,8 @@ def _format_slot_line(i, slot, queued):
                 f"[QUEUED] lv 1→{effective_lv:>2} {build_q['building']} "
                 f"({slot_type})"
             )
-            return f"Slot {i:>2}  {bcolors.YELLOW}{label}{bcolors.ENDC}"
-        return f"Slot {i:>2}  [ -- ]  (empty, {slot_type})"
+            return f"{i:>2}  {bcolors.YELLOW}{label}{bcolors.ENDC}"
+        return f"{i:>2}  [ -- ]  (empty, {slot_type})"
 
     lv = slot.get("level", 0)
     queued_targets = [q["target_level"] for q in queued
@@ -764,7 +764,7 @@ def _format_slot_line(i, slot, queued):
     else:
         color, note = bcolors.RED, "  (res missing)"
     return (
-        f"Slot {i:>2}  [{lv_str}]  "
+        f"{i:>2}  [{lv_str}]  "
         f"{color}{name}{bcolors.ENDC}"
         f"{note}{busy_mark}"
     )
