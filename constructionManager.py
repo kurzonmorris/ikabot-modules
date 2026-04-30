@@ -31,7 +31,7 @@ from ikabot.config import (
 from ikabot.helpers.botComm import checkTelegramData, sendToBot, sendToBotDebug
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import banner, bcolors, enter
-from ikabot.helpers.pedirInfo import chooseCity, getIdsOfCities, read
+from ikabot.helpers.pedirInfo import chooseCity, read
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import addThousandSeparator, getDateTime, wait
@@ -884,7 +884,6 @@ def _add_to_queue(session):
     slot_targets  = 0          # distinct slot-target picks this session
     added_ids     = []         # queue_ids added; kept for rollback
     cost_cache    = {}         # building_slug → costs dict (per add-session cache)
-    session_totals = [0] * 5  # running grand total of costs added this session
     exit_to_menu  = False     # set when user presses ' at any prompt
 
     while not exit_to_menu and slot_targets < ADD_SESSION_SLOT_CAP:
@@ -1156,8 +1155,6 @@ def _add_to_queue(session):
             added_ids.append(qid)
             for i in range(5):
                 row_total[i] += cost[i]
-        for i in range(5):
-            session_totals[i] += row_total[i]
 
         slot_targets += 1
 
@@ -1215,61 +1212,48 @@ def _add_to_queue(session):
         enter()
         return
 
-    # ---- grand totals + feasibility ----
+    # ---- queue summary for this city ----
     banner()
     print(f"  Session summary for {city_name}\n")
 
     city = fetch_city(session, city_id)   # re-fetch for fresh stock
     avail = city.get("availableResources", [0] * 5)
-    free  = city.get("freeSpaceForResources", [0] * 5)
-    missing = [max(0, t - a) for t, a in zip(session_totals, avail)]
-    warehouse_warn = any(t > f for t, f in zip(session_totals, free))
+
+    # Total cost across the *whole* pending queue for this city (not just the
+    # rows added this session) — gives an accurate picture of what still has
+    # to be shipped or produced before the queue clears.
+    all_pending = sorted(
+        (r for r in csv_load(session)
+         if r["city_id"] == city_id and r["status"] == "pending"),
+        key=lambda r: r["queue_id"],
+    )
+    queue_total = [0] * 5
+    for r in all_pending:
+        for i, k in enumerate(RESOURCE_COLS):
+            queue_total[i] += int(r.get(k, 0) or 0)
 
     _print_cost_table(
-        "Grand totals",
+        f"Resources for {len(all_pending)} pending row(s)",
         [
-            ("Total cost (all rows)",  session_totals),
-            ("In city now",            avail),
-            ("Shortfall (needs ship)", missing),
+            ("Total queue cost", queue_total),
+            ("In city now",      avail),
         ],
     )
-    if warehouse_warn:
-        print(
-            f"\n  {bcolors.YELLOW}Warning: total cost exceeds free warehouse "
-            f"space — resources may need to be staged across multiple "
-            f"shipments.{bcolors.ENDC}"
-        )
 
-    # cross-city check: sum available across all owned cities
-    if any(missing):
-        print("\n  Computing cross-city resource totals…")
-        try:
-            city_ids, _ = getIdsOfCities(session)
-            cross = [0] * 5
-            for cid in city_ids:
-                c = fetch_city(session, cid)
-                for i in range(5):
-                    cross[i] += c.get("availableResources", [0]*5)[i]
-            can_cover = all(cross[i] >= missing[i] for i in range(5))
-            if can_cover:
-                print(
-                    f"  {bcolors.GREEN}Cross-city totals cover the shortfall "
-                    f"— auto-transport should succeed.{bcolors.ENDC}"
-                )
-            else:
-                shortfalls = [
-                    f"{materials_names[i]} (need {addThousandSeparator(missing[i])}, "
-                    f"available {addThousandSeparator(cross[i])})"
-                    for i in range(5)
-                    if cross[i] < missing[i]
-                ]
-                print(
-                    f"  {bcolors.RED}Insufficient resources across all cities: "
-                    f"{', '.join(shortfalls)}.{bcolors.ENDC}"
-                )
-                print("  Rows will be skipped at execution time unless you acquire more.")
-        except Exception:
-            print("  (Could not fetch cross-city data.)")
+    # Simple green/red flag: can the next pending row run right now?
+    if all_pending:
+        next_cost = [int(all_pending[0].get(k, 0) or 0) for k in RESOURCE_COLS]
+        if all(avail[i] >= next_cost[i] for i in range(5)):
+            print(
+                f"\n  {bcolors.GREEN}✓ Resources are ready for at least one "
+                f"upgrade.{bcolors.ENDC}"
+            )
+        else:
+            print(
+                f"\n  {bcolors.RED}✗ Not enough resources for the next "
+                f"upgrade — auto-transport will ship if enabled."
+                f"{bcolors.ENDC}"
+            )
 
     # ---- confirm or rollback ----
     print(
