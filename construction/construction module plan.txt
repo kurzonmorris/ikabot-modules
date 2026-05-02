@@ -20,7 +20,7 @@ Goals:
 
 ## Design decisions (confirmed with user)
 
-- **CSV is the only persistent state.** No JSON state file. One global CSV at `~/.ikabot_construction_<server>_<username>.csv`.
+- **CSV is the only persistent state.** No JSON state file. One per-account CSV at `~/.ikabot_construction_<server>_<username>.csv`. **Every** file the module creates includes `<server>_<username>` in its name to prevent cross-account collisions.
 - **Row granularity = one building level.** A "+3 upgrade" expands into 3 rows; each row lifts the slot by exactly one level. This keeps cost math game-accurate (each level has a fresh cost) and makes per-row status transitions atomic.
 - **10-item cap is per add-session, per city, by *slot-target* — not by row count.** I.e. a single +5 upgrade counts as 1 toward the cap and inserts 5 rows.
 - **Single scheduler thread (not one-per-city).** A single background scheduler runs a per-city state machine, using an **ETA column in the CSV** to wake up exactly when a construction is due to finish. This minimises HTTP hits to the game and cuts thread overhead. Ephemeral daemon threads are used **only** for blocking `send_shipment` dispatches, never for construction logic.
@@ -29,8 +29,16 @@ Goals:
 - **Hot-reload CSV every scheduler tick.** Add/edit/delete from the menu (or external edits) take effect on the very next wake-up, without a worker restart.
 - **Pre-existing in-game construction is honoured.** If a city is already busy when the scheduler first sees it (manual in-game build, another tool), the scheduler records the `completed` timestamp as a synthetic `expected_finish` for that city and waits before pulling the first CSV row.
 - **Auto-transport: per-row column in CSV.** Default `jit` (ship current row + prefetch next), optional `bulk` (ship as much of remaining queue as warehouse allows, top-up as space frees), optional `none` (rely on existing stock). Editable per row; the editor also offers "set all rows for city X to <mode>" for city-specific bulk changes.
-- **Skip-city-if-resources-lacking.** If a shipment has been dispatched but hasn't arrived by its 60 s arrival-check and the shipment-wait timeout expires, the row is marked `skipped`, Telegram fires, and the scheduler moves on to other cities.
-- **Skip on total-shortage.** If `allocate_from_suppliers` returns `None`, notify via Telegram, mark row `skipped`, and move on.
+- **Skip-city-if-resources-lacking.** If a shipment has been dispatched but hasn't arrived by its 60 s arrival-check and the shipment-wait timeout expires, the row is marked `skipped`, Telegram fires (rate-limited; see below), and the scheduler moves on to other cities.
+- **Skip on total-shortage with 15 min cooldown.** If `allocate_from_suppliers` returns `None`, mark row `skipped` and place that city in a 15 min cooldown before the scheduler tries the next pending row for that city. **At most one Telegram message per city per cooldown window** — the scheduler keeps a `last_shortage_notify_ts` per city and suppresses duplicate notifications until the cooldown elapses. Cooldown reset (i.e. the next shortage after the window can notify again).
+- **Costs computed via the in-game `ikipedia / buildingDetail` view.** The legacy `getResourcesNeeded` (research/constructionList.py:186) parses the per-building **buildingDetail** view which lists costs for **every level** in one HTML response. The new module uses this same approach (one HTTP fetch per building per add-session, levels filtered locally), so multi-level upgrade previews and pre-execution cost recomputes are both accurate. We **drop the `checkhash` PNG-matching step**: the column order in that HTML is fixed (`wood, wine, marble, crystal, sulphur`), so we read by index. Research-discount + costs-reducer-building math is ported verbatim from `getResourcesNeeded` (including the `reduccion_inv_max` session-data cache).
+- **Notification + log preferences captured once.** `get_notification_config` and `get_log_path` are interactive (they call `read()`). They are invoked **once at main-menu option 4 (Activate worker)**, before `set_child_mode` forks the worker, and the resulting `notif_config` / `log_path` are passed to every `send_shipment` call inside the worker. This avoids stdin in daemon shipment threads.
+- **Hard upgrade cap = 150.** The game removed the displayed level cap, but the add-flow `read(min=current+1, max=150)` is the safety net. Per-slot UI-side max (`isMaxLevel`) is still surfaced as a warning if the slot reports it.
+- **Slot index range is per-city.** The add-flow prompt uses `read(min=0, max=len(city["position"]) - 1)`; renderer iterates `city["position"]` in its actual length, not a hard 0..80.
+- **`resourceTransportManager*.py` version compare is numeric.** Filename suffix is parsed as `(major, minor)` integer tuples; preferred order is (1) unversioned, (2) highest `(major, minor)`, (3) newest mtime. Avoids the lexicographic `v7.10 < v7.2` bug.
+- **Shipments are never aborted.** On stop, the scheduler sets `stop_event`, then `join()`s every active shipment thread **without a timeout** before releasing the worker lock and exiting the child process. Shipment threads use `Thread(daemon=False)` so the interpreter cannot reap them mid-flight. KeyboardInterrupt in the menu only rolls back un-committed add rows; it does not affect a worker that is already forked.
+- **CSV schema versioning.** A `schema_version` column on every row + a sidecar `schema_version` line in a separate `~/.ikabot_construction_<server>_<username>.schema` file pins the format. Mismatch on load aborts with a clear message instructing the user to rename / archive the old CSV; we do not silently migrate.
+- **`predetermined_input` (non-interactive add) is deferred from v1.** Best practice "less hassle for user": the module's `add` and `edit queue` flows are interactive only. If `predetermined_input` is supplied, the menu still works for items 4 (activate worker), 5 (stop worker), and 6 (back) — but options 1–3 print "interactive-only" and return. v2 may add a parseable `add` command form.
 - **Repeat mode, warehouse auto-upgrade, happiness guardrails** deferred from v1.
 
 ---
@@ -39,12 +47,18 @@ Goals:
 
 - **New**: `/home/user/ikabot-modules/constructionManager.py` (~700 lines).
 - **CSV** (created/managed by the new module): `~/.ikabot_construction_<server>_<username>.csv`.
-- **Lock files** (created/managed): `~/.ikabot_construction.lock` (CSV writer lock, brief holds), `~/.ikabot_construction_worker.lock` (one worker per account, stale-cleared).
+- **Schema sidecar** (created/managed): `~/.ikabot_construction_<server>_<username>.schema` — single line of the form `schema_version=1`. Read at scheduler / menu startup; mismatch aborts with instructions to archive the old CSV.
+- **Lock files** (created/managed, all per-account):
+  - `~/.ikabot_construction_<server>_<username>.lock` — CSV writer lock, brief holds only.
+  - `~/.ikabot_construction_worker_<server>_<username>.lock` — one worker per (server, username), stale-PID cleared via the same pattern as `acquire_shipping_lock` (resourceTransportManager_v7.0.py:194).
+- **Stop flag**: `~/.ikabot_construction_stop_<server>_<username>` — main-menu option 5 touches this file; scheduler checks for its existence between ticks; scheduler removes it on graceful exit.
+- **Notify-cooldown state**: kept in scheduler memory only (per-city `last_shortage_notify_ts`). Not persisted — on restart, the first shortage notifies fresh. Acceptable because shortages already imply the user is paying attention.
 - **Reused (read-only / dynamic-import)**:
-  - `resourceTransportManager*.py` in the same directory as `constructionManager.py` — dynamic import via `importlib.util.spec_from_file_location`. The filename is variable: users commonly strip the version suffix so it can appear as `resourceTransportManager_v7.0.py`, `resourceTransportManager_v7.1.py`, or simply `resourceTransportManager.py`. The loader:
+  - `resourceTransportManager*.py` in the same directory as `constructionManager.py` — dynamic import via `importlib.util.spec_from_file_location`. The filename is variable: users commonly strip the version suffix so it can appear as `resourceTransportManager_v7.0.py`, `resourceTransportManager_v7.1.py`, `resourceTransportManager_v7.10.py`, or simply `resourceTransportManager.py`. The loader:
     1. `glob.glob(os.path.join(module_dir, "resourceTransportManager*.py"))` in the construction module's directory.
-    2. Prefer the unversioned `resourceTransportManager.py` if present; otherwise pick the highest version suffix lexicographically; otherwise fall back to `os.path.getmtime` newest.
-    3. If no match is found, print a clear error telling the user to place a copy of `resourceTransportManager*.py` alongside `constructionManager.py` and exit.
+    2. Prefer the unversioned `resourceTransportManager.py` if present; otherwise pick the highest version suffix using **numeric (major, minor) tuple comparison** (regex `_v(\d+)\.(\d+)\.py$`). This avoids the lexicographic bug where `v7.10` would sort below `v7.2`. Files whose suffix doesn't match the pattern fall through to mtime tie-break.
+    3. Fallback: `os.path.getmtime` newest.
+    4. If no match is found, print a clear error telling the user to place a copy of `resourceTransportManager*.py` alongside `constructionManager.py` and exit.
   - Symbols imported from the discovered module:
     - `allocate_from_suppliers` (line 1978 in v7.0) — splits `[w,wi,m,c,s]` shortfall across supplier cities; returns route tuples or `None`.
     - `send_shipment` (line 302 in v7.0) — synchronous, lock-safe, waits for ships, splits cargo, logs.
@@ -88,6 +102,7 @@ Path: `~/.ikabot_construction_<server>_<username>.csv`. Header on row 1. UTF-8. 
 | `expected_finish` | int or "" | unix timestamp of game-authoritative `completed` value captured the moment the build POST confirms. Empty for rows that haven't started. This is the **only** value the scheduler consults to decide when to wake up — no continuous polling. |
 | `added_at` | int | unix timestamp; used for tie-breaking and audit. |
 | `notes` | str | free-text. Set by the editor or by the worker (e.g. `"shortfall: 1500 marble; skipped"`). |
+| `schema_version` | int | format pin. Currently `1`. Mismatch on load aborts with a clear error. |
 
 **Order of execution:** within one `city_id`, rows execute in ascending `queue_id`. Across cities, rows execute in parallel (via the single scheduler's per-city state machine, not via per-city threads).
 
@@ -101,19 +116,29 @@ Path: `~/.ikabot_construction_<server>_<username>.csv`. Header on row 1. UTF-8. 
 def constructionManager(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
+    interactive = predetermined_input is None or len(predetermined_input) == 0
+
+    # Schema gate: refuse to load a CSV from an incompatible version.
+    enforce_schema_version_or_abort()
+
     try:
         while True:
             banner()
             print("Construction Manager")
             print("  CSV: {}  ({} pending rows across {} cities)".format(
                 csv_path, count_pending(), count_cities_with_work()))
-            print("1) Add construction(s) to queue")
+            print("1) Add construction(s) to queue        [interactive only]")
             print("2) View queue")
-            print("3) Edit queue (modify / delete / reorder)")
+            print("3) Edit queue (modify / delete / reorder) [interactive only]")
             print("4) Activate construction worker (background, all cities)")
             print("5) Stop construction worker")
             print("6) Back")
             choice = read(min=1, max=6)
+            if choice in (1, 3) and not interactive:
+                print("Option {} requires an interactive session "
+                      "(predetermined_input is set). Skipping.".format(choice))
+                enter()
+                continue
             ...
     except KeyboardInterrupt:
         event.set()
@@ -122,20 +147,36 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
         event.set()
 ```
 
+**Predetermined-input policy (v1).** Add and edit are interactive-only. View
+(2), Activate (4), Stop (5), Back (6) all work in both modes. v2 may add a
+parseable `add city_id slot target_level transport_mode` form for headless /
+Telegram use.
+
 ### 2. Add to queue (interactive)
 
 ```
 - chooseCity(session) → city_id, city_name
 - Fetch city; show resources, free space, storage cap.
-- Render slot grid (step 2a).
+- Render slot grid (step 2a). Slot-index range is **per-city**: prompt uses
+  `read(min=0, max=len(city["position"]) - 1)`.
 - Loop until user picks "done" or 10 distinct slot-targets added this session:
-    - Prompt slot # (0 = done) → read(min=0, max=80).
+    - Prompt slot # (-1 = done; 0 is a valid slot index) → bounded read.
     - If empty: GET view=buildingGround&cityId&position → parse buildable list →
-      read() to pick building type → target_level=1 → fetch cost from game →
-      append 1 CSV row with action="build", building_id set.
-    - If occupied: default = current_level + 1; read(min=current+1, max=max_level)
-      → for each level in [current+1 .. target_level]: fetch cost via
-      `view=<building>&cityId&position&level=<L>` → append CSV row per level.
+      read() to pick building type → target_level=1 → fetch cost via the
+      ikipedia helper (§2b) for level 1 only → append 1 CSV row with
+      action="build", building_id set.
+    - If occupied: default = current_level + 1; `read(min=current+1, max=150)`
+      (game removed UI-side cap; 150 is our safety net). If the slot reports
+      `isMaxLevel=True`, warn first and require explicit confirmation.
+      → call the ikipedia helper (§2b) **once** to get the cost dict
+      `{level: [w, wi, m, c, s]}` for that building (covers every level the
+      ikipedia view exposes in one HTTP fetch).
+      → for each level L in `[current+1 .. target_level]`: look up costs[L]
+      and append a CSV row per level. Costs missing from the ikipedia HTML
+      (uncommon — only when the ikipedia table is shorter than the target)
+      are written as `0` placeholders + `notes="cost unknown at add-time;
+      will be recomputed before execution"`; the scheduler always recomputes
+      via the same helper before running each row, so this is safe.
     - Prompt transport_mode for THIS slot-target (default jit).
     - Print summary line: "Added: city X slot 7 carpentering 12→15 (3 rows, total
       cost = ...)" then "Add another? [Y/n]".
@@ -145,9 +186,65 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
   (C) cancel → roll back the rows added this session (delete by queue_id range).
 ```
 
-**Slot grid renderer:** `city["position"]` 0..80, one slot per line:
+**Slot grid renderer:** iterate `city["position"]` (per-city length), one slot per line:
 - Empty → `[ . ]  pos 12   (open land)`
 - Occupied → `[lv 14] pos 7   Carpentering` — green if `canUpgrade`, dim if `isMaxLevel`, `*` suffix if `isBusy`.
+
+### 2b. Cost helper (`fetch_costs_for_building`) — ported from getResourcesNeeded
+
+Single function, called from the add flow (covers all levels of one building in
+one fetch) and again from the scheduler right before each row executes (filtered
+to one level for accuracy):
+
+```
+fetch_costs_for_building(session, city, building_slug) -> dict[int, [w,wi,m,c,s]]
+```
+
+Implementation (mirrors research/constructionList.py:186 `getResourcesNeeded`):
+
+1. POST `view=buildingDetail&buildingId=0&helpId=1&backgroundView=city
+   &currentCityId=<id>&templateView=ikipedia&actionRequest=<a>&ajax=1`.
+2. Extract the ikipedia HTML, find the `button_building <slug>` block, follow
+   its `ajaxHandlerCall(...)` URL to the per-building cost table.
+   **If the regex returns no match (wonder buildings, palace variants, museum,
+   embassy variants, or any slug the ikipedia view doesn't expose), the helper
+   returns `{}` and logs a `notes="ikipedia: no entry for slug=<X>"` value.
+   The scheduler's existing `cost is None → skip` branch in `service_city`
+   then marks the row `skipped` cleanly instead of crashing on
+   `match.group(1)` against `None`.** Same guard applies to step 3's
+   per-building URL fetch if the response is empty.
+3. POST the per-building URL; from the returned HTML, extract every
+   `<td class="level">N</td>` row plus its sibling `<td class="costs">` cells.
+4. **Map columns to resources by reading the th image filename, not by
+   position.** The number of cost columns is per-building (carpentering = 1,
+   barracks = 2, town hall = 3, only a handful of buildings show all 5), so
+   a positional read would mis-bucket costs. We extract the th headers with
+   `re.findall(r'<th class="costs"><img src="(.*?)\.png"`, html_costs)[:-1]`
+   (the trailing `-1` drops the "total time" header) and string-match each
+   filename against `materials_names_tec` (`["wood","wine","marble","glass",
+   "sulfur"]`) to get the resource index 0–4. We deliberately do NOT use
+   `checkhash` / PNG hashing — the URL filename already carries the resource
+   identity, so no HTTP fetch and no MD5 are needed.
+5. Apply research-discount math from `getResourcesNeeded`:
+   - cache `reduccion_inv_max` flag in `session.getSessionData()`
+   - sum economy-research discounts (2020 → +2%, 2060 → +4%, 2100 → +8%)
+6. Apply per-resource costs-reducer-building math (`getCostsReducers`,
+   research/constructionList.py:156) — discount = reducer_level percent
+   off the post-research cost.
+7. Return `{level: [w, wi, m, c, s]}` for every level the table exposes.
+   Each list always has length 5; resources the building doesn't use are
+   left as 0 (because step 4 only writes into the indices that have a
+   matching column header).
+
+The scheduler's pre-execution recompute (used in `service_city`'s `idle`
+branch) calls the same helper, picks the entry for `target_level`, and
+overwrites the row's cost columns before issuing the build POST.
+
+Performance: one `getCostsReducers(city)` walk + 2 HTTP POSTs per
+add-session-per-building (often the same building for a multi-level
+upgrade — cache the dict for the duration of the add session). The
+scheduler's per-row recompute is one extra `fetch_city` + 2 POSTs
+per executed row (small relative to a build that takes minutes).
 
 ### 3. View queue
 
@@ -203,11 +300,24 @@ def csv_next_queue_id() -> int: ...
 
 Triggered by main-menu option 4.
 
-1. Acquire `~/.ikabot_construction_worker.lock` (exclusive, with stale-PID detection mirroring `acquire_shipping_lock`). If another worker is already running, refuse with a clear message.
+0. **Capture interactive prefs in the parent process, before forking:**
+   - `notif_config = get_notification_config(telegram_enabled, event)` — uses
+     `read()`, valid only in the menu's stdin context. If the user picks
+     "back", we abort activation cleanly (don't fork).
+   - `log_path = get_log_path(session)` — same constraint.
+   - Stash both on a module-level singleton (`WORKER_PREFS = {...}`) the child
+     inherits across the fork. Daemon shipment threads pull from this, never
+     prompting.
+1. Acquire `~/.ikabot_construction_worker_<server>_<username>.lock`
+   (exclusive, with stale-PID detection mirroring
+   resourceTransportManager_v7.0.py:194 `acquire_shipping_lock`). If another
+   worker is already running for this account, refuse with a clear message.
 2. `set_child_mode(session)` → fork off as a child process.
 3. `setInfoSignal(session, ...)` to expose status.
-4. Enter the scheduler loop (§7). Only **one** long-lived thread runs construction logic. Shipment dispatches happen in short-lived daemon threads (§8).
-5. Stop semantics: main-menu option 5 writes a stop flag file → scheduler checks between ticks → sets `stop_event` → daemon shipment threads complete naturally (their own lock prevents corruption) → release worker lock → child exits.
+4. Enter the scheduler loop (§7). Only **one** long-lived thread runs
+   construction logic. Shipment dispatches happen in short-lived
+   `Thread(daemon=False)` threads (§8) so they cannot be reaped mid-flight.
+5. Stop semantics: see §12 (drain-without-timeout, never abort a shipment).
 
 ### 7. Scheduler loop + per-city state machine
 
@@ -223,6 +333,7 @@ city_state = {
         "ship_deadline": int | None,          # timeout for arrival polling
         "shipment_thread": threading.Thread | None,
         "next_check": int,                    # unix seconds; when to next service this city
+        "last_shortage_notify_ts": int | None,  # rate-limit Telegram (one per cooldown window)
     }, ...
 }
 ```
@@ -234,11 +345,17 @@ TICK_BUDGET_SECONDS = 60          # hard cap on sleep duration
 ETA_FUDGE_SECONDS = 15            # server propagation wait after CSV says "finished"
 SHIP_RETRY_SECONDS = 60           # arrival re-check
 SHIP_TIMEOUT_SECONDS = 2 * 3600   # cap on total shipment-wait
+SHORTAGE_COOLDOWN_SECONDS = 15 * 60  # per-city pause after a total-shortage skip
+SHORTAGE_NOTIFY_TTL = SHORTAGE_COOLDOWN_SECONDS  # one Telegram per cooldown window
 
 def scheduler_loop(session, stop_event):
     reconcile_on_startup(session)   # §7a
 
     while not stop_event.is_set():
+        # Drain the shortage-event queue from daemon shipment threads before
+        # the per-city sweep, so cooldowns are reflected in this tick.
+        drain_shortage_events(session)
+
         # Hot-reload: read CSV once per tick.
         rows_by_city = group_by_city(csv_load())
 
@@ -257,6 +374,11 @@ def scheduler_loop(session, stop_event):
 
     cleanup()
 ```
+
+`drain_shortage_events` pops queued events posted by daemon shipment threads
+and applies `maybe_notify_shortage(...)` on the scheduler thread. This is the
+ONLY way daemon threads communicate state changes back — they never touch
+`city_state` directly.
 
 **`service_city`** dispatches on `st["phase"]`:
 
@@ -289,7 +411,17 @@ def service_city(session, city_id, st, rows, stop_event):
             csv_update(row["queue_id"], status="running", expected_finish=st["expected_finish"])
             return
 
-        cost = fetch_cost_for_row(session, city, row)
+        # Recompute cost via §2b helper (returns dict keyed by level).
+        all_costs = fetch_costs_for_building(session, city, row["building"])
+        cost = all_costs.get(row["target_level"])
+        if cost is None:
+            csv_update(row["queue_id"], status="skipped",
+                       notes="cost unavailable at execution time")
+            sendToBot(session, f"City {city_id} slot {row['slot_position']}: "
+                              f"no cost row for level {row['target_level']}")
+            st["phase"] = "skip-cooldown"
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            return
         csv_update(row["queue_id"], wood=cost[0], wine=cost[1], marble=cost[2],
                                      crystal=cost[3], sulphur=cost[4])
 
@@ -351,10 +483,33 @@ def service_city(session, city_id, st, rows, stop_event):
 
     if st["phase"] == "skip-cooldown":
         # After marking a row skipped, pause this city briefly then try the next pending row.
+        # The actual cooldown duration was set by whoever entered this phase
+        # (60 s for arrival timeouts, 15 min for total-shortage skips).
         st["phase"] = "idle"
         st["next_check"] = now
         return
 ```
+
+**Telegram rate-limiting on shortage skips.** When the daemon shipment thread
+or the scheduler detects `allocate_from_suppliers is None` (or any "city out
+of resources" condition), it calls a helper:
+
+```python
+def maybe_notify_shortage(session, city_id, st, message, now):
+    last = st.get("last_shortage_notify_ts") or 0
+    if now - last >= SHORTAGE_NOTIFY_TTL:
+        sendToBot(session, message)
+        st["last_shortage_notify_ts"] = now
+    # Always set the cooldown, regardless of whether we sent.
+    st["phase"] = "skip-cooldown"
+    st["next_check"] = now + SHORTAGE_COOLDOWN_SECONDS
+```
+
+This guarantees:
+- One Telegram per city per 15 min window.
+- Subsequent rows that fail with the same shortage in the window stay silent
+  but still get marked `skipped` in the CSV with their own `notes` value
+  (so the user can still audit each row via the queue view).
 
 **`issue_and_confirm`** (inline in scheduler thread; the game POST itself is fast):
 
@@ -415,20 +570,41 @@ def spawn_shipment(session, city_id, row, cost) -> threading.Thread | None:
         if not any(need):
             return
 
-        suppliers = build_supplier_list(session, city_id)
+        suppliers = build_supplier_list(session, city_id)  # see helper below
         routes = allocate_from_suppliers(need, suppliers, city, fetch_island(session, city))
         if routes is None:
             csv_update(row["queue_id"], status="skipped",
                        notes="insufficient supply across all cities")
-            sendToBot(session, f"City {city_id}: total shortage; row {row['queue_id']} skipped")
+            # Hand off to the scheduler thread via a small thread-safe queue
+            # so st["last_shortage_notify_ts"] / st["phase"] mutations stay
+            # on the scheduler thread. (Daemon threads must NOT mutate
+            # city_state directly.)
+            shortage_event_queue.put({
+                "city_id": city_id,
+                "row_id": row["queue_id"],
+                "msg": f"City {city_id}: total shortage; row {row['queue_id']} skipped",
+            })
             return
 
+        # send_shipment signature (verified against
+        # resourceTransportManager_v7.0.py:302):
+        #   send_shipment(session, route, useFreighters, notif_config,
+        #                 log_path, mode_name, dest_island_coords="",
+        #                 dest_player="", max_lock_retries=3,
+        #                 next_shipment_str=None)
+        # All five required positionals + the optional kwargs we care about:
         for route in routes:
-            send_shipment(session, route, useFreighters=False,
-                          notif_config=get_notification_config(session),
-                          log_path=get_log_path(session),
-                          mode_name="construction",
-                          max_lock_retries=3)
+            send_shipment(
+                session,
+                route,
+                useFreighters=False,
+                notif_config=WORKER_PREFS["notif_config"],   # captured pre-fork
+                log_path=WORKER_PREFS["log_path"],           # captured pre-fork
+                mode_name="construction",
+                dest_island_coords=f"[{dest_island['x']}:{dest_island['y']}]",
+                dest_player=destination_city.get("ownerName", ""),
+                max_lock_retries=3,
+            )
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
@@ -440,6 +616,33 @@ def spawn_shipment(session, city_id, row, cost) -> threading.Thread | None:
 **`bulk`** — ships the sum of all pending rows' shortfalls, capped by warehouse free space. As construction consumes resources and frees warehouse space, the next scheduler iteration that enters `shipping` re-runs `bulk` and tops up.
 
 **`none`** — no shipment; scheduler proceeds directly to `issue_and_confirm` and the POST will fail if stock is insufficient (which the verify step catches and marks skipped).
+
+**`build_supplier_list(session, dest_city_id)`** — there is no exposed helper in
+resourceTransportManager_v7.0.py; the same loop is **inlined** in `autoSendMode`
+(line 1852). We port that pattern verbatim:
+
+```python
+def build_supplier_list(session, dest_city_id):
+    html = session.get()  # main page lists every owned city
+    city_ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
+    suppliers = []
+    for cid in city_ids:
+        if str(cid) == str(dest_city_id):
+            continue
+        cdata = getCity(session.get(city_url + str(cid)))
+        suppliers.append(cdata)
+    return suppliers
+```
+
+Cost: N - 1 city-view HTTP requests every time the scheduler enters
+`shipping`. To keep the rate sensible:
+- Cache the supplier list in scheduler memory keyed by `dest_city_id` with
+  a **120 s TTL**. A new shipment for the same destination within that
+  window reuses the cached list.
+- Bypass the cache (force-refresh) right before calling
+  `allocate_from_suppliers` so we don't ship from stale stock numbers.
+  In practice we cache the *city ids* (cheap) and re-fetch each
+  supplier's `availableResources` on the call that actually allocates.
 
 ### 9. Wake-up discipline (replaces periodic polling)
 
@@ -454,7 +657,18 @@ def spawn_shipment(session, city_id, row, cost) -> threading.Thread | None:
 
 - **Build new** (action=build): mirror `constructBuilding.py`'s `view=buildingGround` fetch + `action=CityScreen&function=build` POST with `position`, `building` = `building_id`, `actionRequest`.
 - **Upgrade** (action=upgrade): mirror `constructionList.py`'s upgrade URL: `action=CityScreen&function=upgradeBuilding&actionRequest&cityId&position&level=<current_level>&activeTab=tabSendTransporter&backgroundView=city&currentCityId&templateView=<building_slug>&ajax=1`.
-- Both: re-fetch city after the POST and confirm the slot is now `isBusy` with a `completed` timestamp; if not, mark row `skipped`.
+- **Verify with a small settle delay.** After the POST, sleep
+  `BUILD_POST_VERIFY_DELAY_SECONDS = 2` (constant, defined alongside the
+  other tick budgets in chunk 1) before the verifying `fetch_city` call.
+  The game flips `isBusy` and writes the `completed` timestamp on the
+  slot only after the build event is committed server-side; without the
+  short settle the verify can fire too early and false-flag a successful
+  build as `skipped`. Two seconds is short enough to add no meaningful
+  latency vs. a build that takes minutes-to-hours, and long enough to
+  avoid the race in practice.
+- If the slot is **still not** `isBusy` after the verify, mark the row
+  `skipped` with note `"POST did not start construction"` and let the
+  scheduler enter `skip-cooldown`.
 
 ### 11. Locking summary
 
@@ -464,8 +678,34 @@ def spawn_shipment(session, city_id, row, cost) -> threading.Thread | None:
 
 ### 12. Stop / cleanup
 
-- Main-menu option 5 writes to a stop file → scheduler sees it between ticks → sets `stop_event` → in-flight daemon shipment threads finish naturally (their own file lock prevents log corruption) → release worker lock → child exits.
-- `KeyboardInterrupt` in interactive flow rolls back any rows added this session.
+- Main-menu option 5 touches `~/.ikabot_construction_stop_<server>_<username>`.
+- The scheduler checks for that file's existence between ticks (cheap stat).
+  When seen, it sets `stop_event`, **then drains every active shipment
+  thread**:
+
+  ```python
+  for st in city_state.values():
+      t = st.get("shipment_thread")
+      if t is not None and t.is_alive():
+          t.join()  # NO timeout — never abort a shipment
+  ```
+
+  Shipment threads use `Thread(daemon=False)` (not daemon) so the Python
+  interpreter cannot reap them when the child process exits. They each hold
+  the resourceTransportManager shipping lock for the duration of the
+  send, so concurrent stop and shipment cleanup is already safe.
+
+- After every shipment has returned, the scheduler:
+  1. Removes the stop flag file.
+  2. Releases the worker lock.
+  3. Exits the child cleanly via the `event` machinery used by other ikabot modules.
+
+- `KeyboardInterrupt` in the parent menu rolls back un-committed add rows
+  for the current session only. It does **not** signal the worker child;
+  the user must use main-menu option 5 to stop a running worker. (We don't
+  hook KeyboardInterrupt to the stop flag because Ctrl+C in the menu is
+  routinely used to back out of a sub-prompt without intending to kill
+  the worker.)
 
 ---
 
@@ -494,3 +734,10 @@ def spawn_shipment(session, city_id, row, cost) -> threading.Thread | None:
 - Happiness / wine guardrails before queueing.
 - Per-row scheduled start time (e.g. "don't start before 03:00 server time").
 - Telegram /add command to add rows remotely.
+- **Session / `actionRequest` re-auth.** A long-running scheduler is exposed
+  to session-cookie or `actionRequest`-token expiry mid-run; every cost
+  fetch, build POST, and shipment dispatch silently fails after that point.
+  Neither legacy module handles this either, so we inherit the behaviour
+  in v1 — the user must restart the bot. v2 should detect the
+  login-redirect HTML in any response and trigger a fresh login before
+  retrying the failed POST.
