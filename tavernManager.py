@@ -155,11 +155,9 @@ class TavernManager:
             re.search(r'class="[^"]*shortage[^"]*"', th_html, re.IGNORECASE)
         )
 
-        sat_str = re.sub(r'[^\d]', '', satisfaction_match.group(1))
-
         return {
             'growth_rate': self._parse_decimal(growth_match.group(1)),
-            'total_satisfaction': int(sat_str) if sat_str else 0,
+            'total_satisfaction': self._parse_signed_int(satisfaction_match.group(1)),
             'resource_shortage': resource_shortage,
             'current_pop': self._parse_int(occupied_match.group(1)) if occupied_match else None,
             'max_pop': self._parse_int(max_inhabitants_match.group(1)) if max_inhabitants_match else None,
@@ -167,8 +165,18 @@ class TavernManager:
 
     @staticmethod
     def _parse_int(s):
-        digits = re.sub(r'[^\d]', '', s)
+        digits = re.sub(r'\D', '', s)
         return int(digits) if digits else 0
+
+    @staticmethod
+    def _parse_signed_int(s):
+        # Integer that may carry a sign and thousands separators; e.g. "-1,234"
+        negative = '-' in s
+        digits = re.sub(r'\D', '', s)
+        if not digits:
+            return 0
+        n = int(digits)
+        return -n if negative else n
 
     @staticmethod
     def _parse_decimal(s):
