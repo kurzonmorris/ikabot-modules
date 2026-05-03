@@ -87,7 +87,7 @@ class TavernManager:
         return result
 
     def _wine_at_level(self, consumption_values, level):
-        return next((w for l, w in consumption_values if l == level), level * 10)
+        return next((w for l, w in consumption_values if l == level), 0)
 
     def _apply_level(self, city, tavern, target_level, tavern_data):
         params = {
@@ -141,6 +141,12 @@ class TavernManager:
         satisfaction_match = re.search(
             r'id="js_TownHallHappinessLargeValue"[^>]*>([0-9,.\xa0\s-]+)', th_html
         )
+        occupied_match = re.search(
+            r'id="js_TownHallOccupiedSpace"[^>]*>([0-9,.\xa0\s]+)', th_html
+        )
+        max_inhabitants_match = re.search(
+            r'id="js_TownHallMaxInhabitants"[^>]*>([0-9,.\xa0\s]+)', th_html
+        )
 
         if not growth_match or not satisfaction_match:
             return None
@@ -149,22 +155,39 @@ class TavernManager:
             re.search(r'class="[^"]*shortage[^"]*"', th_html, re.IGNORECASE)
         )
 
-        growth_str = growth_match.group(1).strip()
-        # Strip non-breaking and regular spaces (thousands separators in some locales)
-        growth_str = growth_str.replace('\xa0', '').replace(' ', '')
-        # Normalise decimal separator: comma-as-decimal vs comma-as-thousands
-        if ',' in growth_str and '.' not in growth_str:
-            growth_str = growth_str.replace(',', '.')
-        else:
-            growth_str = growth_str.replace(',', '')
-
         sat_str = re.sub(r'[^\d]', '', satisfaction_match.group(1))
 
         return {
-            'growth_rate': float(growth_str) if growth_str and growth_str not in ('-', '.') else 0.0,
+            'growth_rate': self._parse_decimal(growth_match.group(1)),
             'total_satisfaction': int(sat_str) if sat_str else 0,
             'resource_shortage': resource_shortage,
+            'current_pop': self._parse_int(occupied_match.group(1)) if occupied_match else None,
+            'max_pop': self._parse_int(max_inhabitants_match.group(1)) if max_inhabitants_match else None,
         }
+
+    @staticmethod
+    def _parse_int(s):
+        digits = re.sub(r'[^\d]', '', s)
+        return int(digits) if digits else 0
+
+    @staticmethod
+    def _parse_decimal(s):
+        s = s.strip().replace('\xa0', '').replace(' ', '')
+        if not s or s in ('-', '.'):
+            return 0.0
+        # Decide which separator is the decimal mark: whichever comes last.
+        last_dot = s.rfind('.')
+        last_comma = s.rfind(',')
+        if last_comma > last_dot:
+            # comma is decimal mark
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            # dot is decimal mark (or no decimal mark)
+            s = s.replace(',', '')
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
 
     def _optimize_for_satisfaction(self, city, tavern, tavern_data, current_satisfaction):
         sat_per_wine = tavern_data['sat_per_wine']
@@ -181,8 +204,6 @@ class TavernManager:
 
         optimal_level = current_level
         for level in range(len(sat_per_wine)):
-            if not (0 <= level < len(sat_per_wine)):
-                break
             projected = base_satisfaction + sat_per_wine[level]
             if projected >= SATISFACTION_BUFFER:
                 optimal_level = level
@@ -224,20 +245,19 @@ class TavernManager:
                     results.append(result)
                     continue
 
-                citizens_match = re.search(
-                    r'id="js_GlobalMenu_citizens">([0-9,.\xa0\s]+)</span>[^<]*'
-                    r'<[^>]*id="js_GlobalMenu_population">([0-9,.\xa0\s]+)',
-                    html
-                )
-
-                if not citizens_match:
-                    result.update({'status': 'SKIP', 'note': 'Could not read population'})
+                th_data = self._get_town_hall_data(city_id, city_data)
+                if not th_data:
+                    result.update({'status': 'SKIP', 'note': 'Could not load town hall'})
                     results.append(result)
                     continue
 
-                current_citizens = int(re.sub(r'[^\d]', '', citizens_match.group(1)))
-                max_citizens = int(re.sub(r'[^\d]', '', citizens_match.group(2)))
-                result['pop'] = f"{current_citizens}/{max_citizens}"
+                current_pop = th_data['current_pop']
+                max_pop = th_data['max_pop']
+                if current_pop is None or max_pop is None:
+                    result.update({'status': 'SKIP', 'note': 'Could not read population'})
+                    results.append(result)
+                    continue
+                result['pop'] = f"{current_pop}/{max_pop}"
 
                 tavern_data = self._get_tavern_data(city, tavern)
                 if not tavern_data or not tavern_data['action_code']:
@@ -245,7 +265,7 @@ class TavernManager:
                     results.append(result)
                     continue
 
-                if current_citizens < max_citizens:
+                if current_pop < max_pop:
                     consumption_values = tavern_data['consumption_values']
                     max_level = max((l for l, w in consumption_values), default=tavern['level'])
                     current_level = tavern_data['current_level']
@@ -260,13 +280,6 @@ class TavernManager:
                             'status': 'CHANGED',
                             'note': f"L{current_level}({current_wine}/h)→L{max_level}({new_wine}/h) [MAX]",
                         })
-                    results.append(result)
-                    continue
-
-                th_data = self._get_town_hall_data(city_id, city_data)
-
-                if not th_data:
-                    result.update({'status': 'SKIP', 'note': 'Could not load town hall'})
                     results.append(result)
                     continue
 
@@ -344,6 +357,9 @@ class TavernManager:
 
         current_wine = self._wine_at_level(consumption_values, current_level)
         new_wine = self._wine_at_level(consumption_values, target_level)
+        if target_level == current_level:
+            print(f"  {city['name']}: already at L{current_level}({current_wine}/h)")
+            return True
         self._apply_level(city, tavern, target_level, tavern_data)
         print(f"  {city['name']}: L{current_level}({current_wine}/h) → L{target_level}({new_wine}/h)")
         return True
@@ -576,8 +592,9 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
             wait(run_hours * 3600)
             run_check()
             session.setStatus(f"Equilibrium check @{getDateTime()}")
-    except Exception as e:
+    except Exception:
         msg = f"Error in:\n{info}\nCause:\n{traceback.format_exc()}"
+        traceback.print_exc()
         if notification_mode in (1, 2):
             sendToBot(session, msg)
     finally:
