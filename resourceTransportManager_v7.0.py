@@ -295,6 +295,51 @@ def wait_for_ships(session, useFreighters, status_prefix="", max_wait=3600):
         time.sleep(20 + random.randint(-5, 5))
 
 
+def getActionPoints(html):
+    """Parse action points from full page HTML (global menu element)."""
+    match = re.search(r'js_GlobalMenu_maxActionPoints"[^>]*>(\d+)<', html)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def wait_for_action_points(session, origin_city_id, status_prefix="",
+                           max_wait=1800):
+    """Navigate to source city and wait until action points are available.
+    Returns the AP count (>0) on success, 0 on timeout, None if unparseable."""
+    start = time.time()
+    while True:
+        html = session.get()
+        current = getCity(html)
+        if str(current["id"]) != str(origin_city_id):
+            session.post(params={
+                "action": "header",
+                "function": "changeCurrentCity",
+                "actionRequest": actionRequest,
+                "oldView": "city",
+                "cityId": origin_city_id,
+                "backgroundView": "city",
+                "currentCityId": current["id"],
+                "ajax": "1",
+            })
+            html = session.get()
+
+        ap = getActionPoints(html)
+        if ap is None:
+            return None
+        if ap > 0:
+            return ap
+
+        elapsed = int(time.time() - start)
+        if elapsed > max_wait:
+            return 0
+        session.setStatus(
+            f"{status_prefix}Waiting for action points (0 available, "
+            f"{elapsed}s elapsed)..."
+        )
+        time.sleep(60 + random.randint(-5, 5))
+
+
 # ============================================================================
 #  SHARED SEND SHIPMENT  (lock → verify → send → verify → unlock → log)
 # ============================================================================
@@ -315,6 +360,22 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
     available = wait_for_ships(session, useFreighters, prefix)
     if available == 0:
         result["error"] = f"No {ship_type_name} available (timed out)"
+        if should_notify(notif_config, "error"):
+            sendToBot(session,
+                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+        log_shipment(log_path, session, mode_name,
+                     origin_city["name"], "", dest_city["name"],
+                     dest_island_coords, dest_player, resources,
+                     0, ship_type_name, "SKIPPED", result["error"],
+                     next_shipment_str)
+        return result
+
+    # 1b. Wait for action points on source city
+    ap = wait_for_action_points(session, origin_city["id"], prefix)
+    if ap == 0:
+        result["error"] = (
+            f"No action points available for {origin_city['name']} (timed out)"
+        )
         if should_notify(notif_config, "error"):
             sendToBot(session,
                       f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
@@ -2517,6 +2578,22 @@ def do_it_bulk_distribution(session, csv_path, interval_hours,
                     expected_player, x, y, src_city["name"], src_idx,
                     row_use_freighters, parsed_resources
                 ))
+
+        # Interleave routes by source city to spread action point usage
+        if len(routes) > 1:
+            from collections import defaultdict
+            groups = defaultdict(list)
+            for route_info in routes:
+                src_id = str(route_info[1][0]["id"])
+                groups[src_id].append(route_info)
+            interleaved = []
+            while any(groups.values()):
+                for src_id in list(groups.keys()):
+                    if groups[src_id]:
+                        interleaved.append(groups[src_id].pop(0))
+                    else:
+                        del groups[src_id]
+            routes = interleaved
 
         if not routes:
             if should_notify(notif_config, "error"):
