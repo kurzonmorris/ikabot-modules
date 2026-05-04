@@ -248,6 +248,356 @@ def release_shipping_lock(session, use_freighters=False):
 
 
 # ============================================================================
+#  TRANSPORT SCHEDULE CSV  — persistent state for all shipping modes
+# ============================================================================
+
+SCHEDULE_SCHEMA_VERSION = 1
+
+SCHEDULE_COLUMNS = [
+    "schedule_id",
+    "mode",
+    "ship_type",
+    "source_city_ids",
+    "dest_city_ids",
+    "resource_config",
+    "send_mode",
+    "dest_targets",
+    "source_reserves",
+    "dest_minimums",
+    "bulk_csv_path",
+    "bulk_run_column",
+    "interval_hours",
+    "notif_level",
+    "status",
+    "last_run",
+    "next_run",
+    "total_shipments",
+    "created_at",
+    "notes",
+    "schema_version",
+]
+
+SCHEDULE_INT_COLS = {
+    "schedule_id", "interval_hours", "total_shipments",
+    "created_at", "schema_version",
+}
+SCHEDULE_INT_OR_BLANK_COLS = {"last_run", "next_run"}
+SCHEDULE_JSON_COLS = {
+    "source_city_ids", "dest_city_ids", "resource_config",
+    "dest_targets", "source_reserves", "dest_minimums",
+}
+VALID_SCHEDULE_MODES = (
+    "consolidate", "distribute", "even", "autosend", "bulk", "topup",
+)
+VALID_SCHEDULE_STATUSES = (
+    "pending", "active", "paused", "completed", "error",
+)
+
+
+def _safe(value):
+    return re.sub(r'[^\w.-]', '_', str(value))
+
+
+def _account_suffix(session):
+    return f"{_safe(session.servidor)}_{_safe(session.username)}"
+
+
+def transport_csv_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_transport_{_account_suffix(session)}.csv",
+    )
+
+
+def transport_csv_lock_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_transport_{_account_suffix(session)}.lock",
+    )
+
+
+def transport_schema_sidecar_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_transport_{_account_suffix(session)}.schema",
+    )
+
+
+def transport_worker_lock_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_transport_worker_{_account_suffix(session)}.lock",
+    )
+
+
+def transport_stop_flag_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_transport_stop_{_account_suffix(session)}",
+    )
+
+
+# --- Lock helpers (reusable for both shipping lock and CSV lock) ---
+
+def _lock_acquire(lock_path, timeout=30, stale_after=60):
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, json.dumps({
+                    "pid": os.getpid(),
+                    "timestamp": time.time(),
+                }).encode())
+            finally:
+                os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                with open(lock_path, "r") as f:
+                    data = json.load(f)
+                    if time.time() - data.get("timestamp", 0) > stale_after:
+                        os.remove(lock_path)
+                        continue
+            except Exception:
+                try:
+                    os.remove(lock_path)
+                except Exception:
+                    pass
+                continue
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def _lock_release(lock_path):
+    try:
+        if os.path.exists(lock_path):
+            with open(lock_path, "r") as f:
+                data = json.load(f)
+                if data.get("pid") == os.getpid():
+                    os.remove(lock_path)
+                    return
+            os.remove(lock_path)
+    except Exception:
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
+
+
+class _transport_csv_lock:
+    def __init__(self, session):
+        self.path = transport_csv_lock_path(session)
+
+    def __enter__(self):
+        if not _lock_acquire(self.path, timeout=30, stale_after=60):
+            raise RuntimeError(
+                f"Could not acquire transport CSV lock at {self.path}"
+            )
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _lock_release(self.path)
+
+
+# --- Schema enforcement ---
+
+def enforce_transport_schema_or_abort(session):
+    sidecar = transport_schema_sidecar_path(session)
+    if not os.path.exists(sidecar):
+        with open(sidecar, "w", encoding="utf-8") as f:
+            json.dump({
+                "version": SCHEDULE_SCHEMA_VERSION,
+                "columns": SCHEDULE_COLUMNS,
+            }, f)
+        return True
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        print("Cannot read transport schema sidecar.")
+        return False
+    on_disk = int(data.get("version", -1))
+    if on_disk != SCHEDULE_SCHEMA_VERSION:
+        print(f"Transport CSV schema version mismatch: file={on_disk}, "
+              f"module={SCHEDULE_SCHEMA_VERSION}.")
+        print(f"  CSV : {transport_csv_path(session)}")
+        print(f"  Side: {sidecar}")
+        print("  Move/rename both files to start fresh, then reopen.")
+        return False
+    return True
+
+
+# --- Row coercion ---
+
+def _coerce_schedule_in(raw):
+    row = dict(raw)
+    for col in SCHEDULE_INT_COLS:
+        v = row.get(col, "")
+        try:
+            row[col] = int(v) if str(v) != "" else 0
+        except (TypeError, ValueError):
+            row[col] = 0
+    for col in SCHEDULE_INT_OR_BLANK_COLS:
+        v = row.get(col, "")
+        if v in ("", None):
+            row[col] = ""
+        else:
+            try:
+                row[col] = int(v)
+            except (TypeError, ValueError):
+                row[col] = ""
+    for col in SCHEDULE_JSON_COLS:
+        v = row.get(col, "")
+        if isinstance(v, str) and v.strip():
+            try:
+                row[col] = json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                row[col] = None
+        elif not isinstance(v, (list, dict)):
+            row[col] = None
+    if row.get("mode", "") not in VALID_SCHEDULE_MODES:
+        row["mode"] = ""
+    if row.get("status", "") not in VALID_SCHEDULE_STATUSES:
+        row["status"] = "pending"
+    return row
+
+
+def _coerce_schedule_out(row):
+    out = {}
+    for col in SCHEDULE_COLUMNS:
+        v = row.get(col, "")
+        if v is None:
+            out[col] = ""
+        elif col in SCHEDULE_JSON_COLS and isinstance(v, (list, dict)):
+            out[col] = json.dumps(v)
+        else:
+            out[col] = str(v)
+    return out
+
+
+# --- CRUD operations ---
+
+def transport_csv_load(session):
+    with _transport_csv_lock(session):
+        try:
+            with open(transport_csv_path(session), "r",
+                       newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                return [_coerce_schedule_in(r) for r in reader]
+        except FileNotFoundError:
+            return []
+
+
+def transport_csv_save_all(session, rows):
+    path = transport_csv_path(session)
+    tmp = path + ".tmp"
+    with _transport_csv_lock(session):
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=SCHEDULE_COLUMNS)
+            w.writeheader()
+            for r in rows:
+                w.writerow(_coerce_schedule_out(r))
+        os.replace(tmp, path)
+
+
+def _transport_csv_modify(session, fn):
+    path = transport_csv_path(session)
+    tmp = path + ".tmp"
+    with _transport_csv_lock(session):
+        try:
+            with open(path, "r", newline="", encoding="utf-8") as f:
+                rows = [_coerce_schedule_in(r) for r in csv.DictReader(f)]
+        except FileNotFoundError:
+            rows = []
+        fn(rows)
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=SCHEDULE_COLUMNS)
+            w.writeheader()
+            for r in rows:
+                w.writerow(_coerce_schedule_out(r))
+        os.replace(tmp, path)
+
+
+def transport_csv_append(session, row):
+    _transport_csv_modify(session, lambda rows: rows.append(row))
+
+
+def transport_csv_delete(session, schedule_id):
+    sid = int(schedule_id)
+    def _delete(rows):
+        rows[:] = [r for r in rows if r["schedule_id"] != sid]
+    _transport_csv_modify(session, _delete)
+
+
+def transport_csv_update(session, schedule_id, **fields):
+    sid = int(schedule_id)
+    def _apply(rows):
+        for r in rows:
+            if r["schedule_id"] == sid:
+                for k, v in fields.items():
+                    r[k] = v
+                break
+    _transport_csv_modify(session, _apply)
+
+
+def next_schedule_id(rows):
+    if not rows:
+        return 1
+    return max(r.get("schedule_id", 0) for r in rows) + 1
+
+
+def transport_csv_count_active(session):
+    rows = transport_csv_load(session)
+    return sum(1 for r in rows if r.get("status") == "active")
+
+
+def transport_csv_count_by_status(session):
+    rows = transport_csv_load(session)
+    counts = {}
+    for r in rows:
+        s = r.get("status", "pending")
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
+def build_schedule_row(schedule_id, mode, ship_type="m",
+                       source_city_ids=None, dest_city_ids=None,
+                       resource_config=None, send_mode="na",
+                       dest_targets=None, source_reserves=None,
+                       dest_minimums=None, bulk_csv_path="",
+                       bulk_run_column="", interval_hours=0,
+                       notif_level="none", status="pending",
+                       notes=""):
+    now_ts = int(time.time())
+    return {
+        "schedule_id":     schedule_id,
+        "mode":            mode,
+        "ship_type":       ship_type,
+        "source_city_ids": source_city_ids or [],
+        "dest_city_ids":   dest_city_ids or [],
+        "resource_config": resource_config or [0, 0, 0, 0, 0],
+        "send_mode":       send_mode,
+        "dest_targets":    dest_targets or {},
+        "source_reserves": source_reserves or {},
+        "dest_minimums":   dest_minimums or [0, 0, 0, 0, 0],
+        "bulk_csv_path":   bulk_csv_path,
+        "bulk_run_column": bulk_run_column,
+        "interval_hours":  interval_hours,
+        "notif_level":     notif_level,
+        "status":          status,
+        "last_run":        "",
+        "next_run":        now_ts if interval_hours > 0 else "",
+        "total_shipments": 0,
+        "created_at":      now_ts,
+        "notes":           notes,
+        "schema_version":  SCHEDULE_SCHEMA_VERSION,
+    }
+
+
+# ============================================================================
 #  SHIP HELPERS
 # ============================================================================
 
