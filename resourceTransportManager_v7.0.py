@@ -2134,23 +2134,19 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         event.set()
         return
 
-    set_child_mode(session)
-    event.set()
-
-    info = f"\nBalancing {selected_names} across {len(all_cities)} cities\n"
-    setInfoSignal(session, info)
-
-    try:
-        # Execute sequentially per resource
-        for res_idx in resource_indices:
-            res_name = materials_names[res_idx]
-            shipments = all_shipments[res_idx]
-            do_even_distribution(session, shipments, res_idx, res_name,
-                                 useFreighters, notif_config, log_path)
-    except Exception:
-        sendToBot(session, f"Error in:\n{info}\nCause:\n{traceback.format_exc()}")
-    finally:
-        session.logout()
+    city_ids_for_balance = [str(c["id"]) for c in all_cities]
+    schedule_row = build_schedule_row(
+        schedule_id=0,
+        mode="even",
+        ship_type="f" if useFreighters else "m",
+        source_city_ids=city_ids_for_balance,
+        resource_config=resource_indices,
+        interval_hours=0,
+        notif_level=notif_config.get("level", "none"),
+        notes=f"Balance {selected_names}",
+    )
+    _save_and_maybe_activate(session, event, schedule_row, notif_config,
+                             log_path)
 
 
 # ============================================================================
@@ -2377,18 +2373,20 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                     if notif_config is None:
                         return
 
-                    set_child_mode(session)
-                    event.set()
-                    info = f"\nAuto Send to {destination_city['name']}\n"
-                    setInfoSignal(session, info)
-                    try:
-                        do_it_auto_send(session, routes, useFreighters,
-                                        notif_config, log_path)
-                    except Exception:
-                        sendToBot(session,
-                                  f"Error:\n{info}\n{traceback.format_exc()}")
-                    finally:
-                        session.logout()
+                    schedule_row = build_schedule_row(
+                        schedule_id=0,
+                        mode="autosend",
+                        ship_type="f" if useFreighters else "m",
+                        dest_city_ids=[str(destination_city["id"])],
+                        resource_config=list(requested),
+                        interval_hours=0,
+                        notif_level=notif_config.get("level", "none"),
+                        notes=f"Auto Send -> {destination_city['name']}",
+                    )
+                    _save_and_maybe_activate(
+                        session, event, schedule_row,
+                        notif_config, log_path,
+                    )
                     return
 
     except KeyboardInterrupt:
@@ -3350,23 +3348,21 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         event.set()
         return
 
-    set_child_mode(session)
-    event.set()
-
     dest_names = ", ".join(d["name"] for d in destinations)
-    info = (
-        f"\nKeep Topped Up: {dest_names} "
-        f"(every {interval_hours}h)\n"
+    schedule_row = build_schedule_row(
+        schedule_id=0,
+        mode="topup",
+        ship_type="f" if useFreighters else "m",
+        source_city_ids=list(source_city_ids),
+        dest_city_ids=[str(d["id"]) for d in destinations],
+        dest_targets=dest_configs,
+        source_reserves=source_reserves,
+        interval_hours=interval_hours,
+        notif_level=notif_config.get("level", "none"),
+        notes=f"TopUp: {dest_names[:30]}",
     )
-    setInfoSignal(session, info)
-    try:
-        do_it_top_up(session, destinations, dest_configs,
-                     source_city_ids, source_reserves,
-                     useFreighters, interval_hours, notif_config, log_path)
-    except Exception:
-        sendToBot(session, f"Error in:\n{info}\nCause:\n{traceback.format_exc()}")
-    finally:
-        session.logout()
+    _save_and_maybe_activate(session, event, schedule_row, notif_config,
+                             log_path)
 
 
 def _top_up_dry_run(session, destinations, dest_configs,
@@ -3807,13 +3803,135 @@ def run_topup_cycle(session, sched, notif_config, log_path):
 
 
 def run_even_cycle(session, sched, notif_config, log_path):
-    """Even distribution — will be fully wired in Chunk 3."""
-    return 0
+    city_ids = sched.get("source_city_ids") or []
+    resource_indices = sched.get("resource_config") or []
+    ship_type = sched.get("ship_type", "m")
+    useFreighters = (ship_type == "f")
+
+    if not city_ids or not resource_indices:
+        return 0
+
+    all_cities = []
+    for cid in city_ids:
+        html = session.get(city_url + str(cid))
+        all_cities.append(getCity(html))
+
+    if not all_cities:
+        return 0
+
+    cycle_sent = 0
+
+    for res_idx in resource_indices:
+        if not isinstance(res_idx, int) or res_idx < 0 or res_idx >= len(materials_names):
+            continue
+        res_name = materials_names[res_idx]
+
+        total = sum(c["availableResources"][res_idx] for c in all_cities)
+        target = total // len(all_cities)
+
+        senders = []
+        receivers = []
+        for city in all_cities:
+            current = city["availableResources"][res_idx]
+            diff = current - target
+            if diff > 0:
+                senders.append({"from": city, "amount": diff})
+            elif diff < 0:
+                receivers.append({"to": city, "amount": abs(diff)})
+
+        if not senders or not receivers:
+            continue
+
+        si, ri = 0, 0
+        s_rem = senders[0]["amount"]
+        r_rem = receivers[0]["amount"]
+
+        while si < len(senders) and ri < len(receivers):
+            amount = min(s_rem, r_rem)
+
+            if amount > 0:
+                toSend = [0] * len(materials_names)
+                toSend[res_idx] = amount
+
+                dest_isl_id = receivers[ri]["to"]["islandId"]
+                html = session.get(island_url + str(dest_isl_id))
+                dest_island = getIsland(html)
+
+                route = (senders[si]["from"], receivers[ri]["to"],
+                         dest_island["id"], *toSend)
+                coords = f"[{dest_island['x']}:{dest_island['y']}]"
+
+                result = send_shipment(
+                    session, route, useFreighters, notif_config, log_path,
+                    "Even Distribution", coords,
+                )
+                if result["success"]:
+                    cycle_sent += 1
+
+                s_rem -= amount
+                r_rem -= amount
+
+            if s_rem == 0:
+                si += 1
+                if si < len(senders):
+                    s_rem = senders[si]["amount"]
+            if r_rem == 0:
+                ri += 1
+                if ri < len(receivers):
+                    r_rem = receivers[ri]["amount"]
+
+    return cycle_sent
 
 
 def run_autosend_cycle(session, sched, notif_config, log_path):
-    """Auto send — will be fully wired in Chunk 3."""
-    return 0
+    dest_city_ids = sched.get("dest_city_ids") or []
+    requested = sched.get("resource_config") or [0, 0, 0, 0, 0]
+    ship_type = sched.get("ship_type", "m")
+    useFreighters = (ship_type == "f")
+
+    if not dest_city_ids or sum(requested) == 0:
+        return 0
+
+    dest_city_id = str(dest_city_ids[0])
+    html = session.get(city_url + dest_city_id)
+    destination_city = getCity(html)
+    html = session.get(island_url + destination_city["islandId"])
+    destination_island = getIsland(html)
+
+    html = session.get()
+    city_ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
+    suppliers = []
+    for cid in city_ids:
+        if str(cid) == dest_city_id:
+            continue
+        html_c = session.get(city_url + str(cid))
+        suppliers.append(getCity(html_c))
+
+    if not suppliers:
+        return 0
+
+    routes = allocate_from_suppliers(
+        list(requested), suppliers, destination_city, destination_island,
+    )
+    if routes is None:
+        if should_notify(notif_config, "error"):
+            sendToBot(session,
+                      f"AUTO SEND: Could not allocate resources for "
+                      f"{destination_city['name']}")
+        return 0
+
+    cycle_sent = 0
+    for route in routes:
+        result = send_shipment(
+            session, route, useFreighters, notif_config, log_path,
+            "Auto Send",
+        )
+        if result["success"]:
+            cycle_sent += 1
+        elif result["error"] and "lock" in result["error"].lower():
+            break
+
+    return cycle_sent
 
 
 def run_bulk_cycle(session, sched, notif_config, log_path):
