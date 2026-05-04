@@ -453,7 +453,7 @@ def build_run_column_name(dt=None):
 def write_csv_atomic(csv_path, fieldnames, rows):
     directory = os.path.dirname(os.path.abspath(csv_path)) or "."
     fd, tmp_path = tempfile.mkstemp(
-        prefix=".tmp_massdist_", suffix=".csv", dir=directory
+        prefix=".tmp_bulkdist_", suffix=".csv", dir=directory
     )
     try:
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as tmp_file:
@@ -587,13 +587,15 @@ def ensure_issues_column(fieldnames, rows):
 
 
 def parse_resource_value(val):
-    """Parse a resource cell: '500' -> ('exact', 500), 'e10000' -> ('except', 10000)."""
+    """Parse a resource cell: '500' -> ('exact', 500), 'e10000' -> ('except', 10000).
+    Handles commas in numbers (e.g. '10,000' -> 10000)."""
     val = val.strip()
     if val.lower().startswith("e"):
-        num_part = val[1:].strip()
+        num_part = val[1:].replace(",", "").strip()
         match = re.search(r"\d+", num_part)
         return ("except", int(match.group()) if match else 0)
-    return ("exact", int(val) if val.isdigit() else 0)
+    val_clean = val.replace(",", "")
+    return ("exact", int(val_clean) if val_clean.isdigit() else 0)
 
 
 def resolve_resources(parsed, source_available, row, csv_resource_cols):
@@ -617,7 +619,7 @@ def resolve_resources(parsed, source_available, row, csv_resource_cols):
 
 
 def choose_run_slot(session, event, rows, run_columns):
-    print_module_banner("Mass Distribution - Run Slot")
+    print_module_banner("Bulk Distribution - Run Slot")
     print("Choose how to start:")
     print("(1) Start fresh (reuses the OLDEST run slot)")
     print("(2) Resume from existing run slot")
@@ -881,7 +883,7 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
         print("(2) Distribute: One city -> Multiple destinations")
         print("(3) Even Distribution: Balance resources across cities")
         print("(4) Auto Send: Request resources, auto-collect from all")
-        print("(5) Mass Distribution: Send from CSV file")
+        print("(5) Bulk Distribution: Persistent CSV-driven sends")
         print("(6) Keep Topped Up: Automatically top up a city's resources")
         print("(') Back to main menu")
         shipping_mode = read(min=1, max=6, digit=True, additionalValues=["'"])
@@ -903,7 +905,7 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
             autoSendMode(session, event, stdin_fd, predetermined_input,
                          telegram_enabled, log_path)
         elif shipping_mode == 5:
-            massDistributionMode(session, event, stdin_fd,
+            bulkDistributionMode(session, event, stdin_fd,
                                  predetermined_input, telegram_enabled,
                                  log_path)
         else:
@@ -2103,13 +2105,13 @@ def do_it_auto_send(session, routes, useFreighters, notif_config, log_path):
 
 
 # ============================================================================
-#  MODE 5: MASS DISTRIBUTION  (CSV-driven bulk sends)
+#  MODE 5: BULK DISTRIBUTION  (persistent CSV-driven sends)
 # ============================================================================
 
-def massDistributionMode(session, event, stdin_fd, predetermined_input,
+def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
                          telegram_enabled, log_path):
     try:
-        print_module_banner("Mass Distribution")
+        print_module_banner("Bulk Distribution")
         prefs = load_prefs()
         saved_csv = prefs.get("csv_path", "")
         if saved_csv:
@@ -2182,7 +2184,7 @@ def massDistributionMode(session, event, stdin_fd, predetermined_input,
         interval_hours = int(hours_match.group())
 
         if interval_hours <= 0:
-            print("Hours must be >= 1 for Mass Distribution.")
+            print("Hours must be >= 1 for Bulk Distribution.")
             enter()
             event.set()
             return
@@ -2215,7 +2217,7 @@ def massDistributionMode(session, event, stdin_fd, predetermined_input,
 
         # Final confirmation with dry run
         while True:
-            print_module_banner("Mass Distribution - Summary")
+            print_module_banner("Bulk Distribution - Summary")
             print(f"  CSV rows: {len(rows)}")
             print(f"  Interval: every {interval_hours}h")
             print(f"  Run slot: {run_column[4:]}\n")
@@ -2228,7 +2230,7 @@ def massDistributionMode(session, event, stdin_fd, predetermined_input,
             if rta.lower() == "d":
                 preview = _scan_csv_for_preview(session, rows, run_column)
                 if preview:
-                    run_dry_preview(preview, "Mass Distribution")
+                    run_dry_preview(preview, "Bulk Distribution")
                 else:
                     print("  No valid routes found in scan.")
                 print("Press Enter to continue...")
@@ -2245,11 +2247,11 @@ def massDistributionMode(session, event, stdin_fd, predetermined_input,
     set_child_mode(session)
     event.set()
 
-    info = f"\nMass Distribution every {interval_hours}h\n"
+    info = f"\nBulk Distribution every {interval_hours}h\n"
     setInfoSignal(session, info)
 
     try:
-        do_it_mass_distribution(session, csv_path, interval_hours,
+        do_it_bulk_distribution(session, csv_path, interval_hours,
                                 notif_config, run_column, log_path)
     except Exception:
         sendToBot(session, f"Error:\n{info}\n{traceback.format_exc()}")
@@ -2270,6 +2272,7 @@ def _scan_csv_for_preview(session, rows, run_column):
         has_resources = any(amt > 0 or mode == "except" for mode, amt in parsed)
         if not has_resources:
             continue
+        has_except = any(m == "except" for m, _ in parsed)
         resources = [amt for _, amt in parsed]
         city_name = row.get("City", "?")
         player = row.get("Player", "?")
@@ -2281,8 +2284,11 @@ def _scan_csv_for_preview(session, rows, run_column):
         else:
             src_label = f"Cities {','.join(str(i) for i in from_val)}"
         transport = "Freighters" if parse_transport_value(row.get("Transport", "m")) else "Merchant"
+        label = f"{src_label} ({transport})"
+        if has_except:
+            label += " [except mode — amounts resolved at send time]"
         preview.append({
-            "source": f"{src_label} ({transport})",
+            "source": label,
             "dest": f"{city_name} ({player})",
             "resources": resources,
         })
@@ -2290,10 +2296,10 @@ def _scan_csv_for_preview(session, rows, run_column):
 
 
 # ============================================================================
-#  MODE 5 EXECUTION: do_it_mass_distribution
+#  MODE 5 EXECUTION: do_it_bulk_distribution
 # ============================================================================
 
-def do_it_mass_distribution(session, csv_path, interval_hours,
+def do_it_bulk_distribution(session, csv_path, interval_hours,
                             notif_config, run_column, log_path):
     csv_resource_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
 
@@ -2309,7 +2315,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
         except Exception as e:
             if should_notify(notif_config, "error"):
                 sendToBot(session,
-                          f"MASS DIST ERROR\nCould not read CSV: {e}")
+                          f"BULK DIST ERROR\nCould not read CSV: {e}")
             time.sleep(3600)
             continue
 
@@ -2336,7 +2342,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
         validated_cities = {}
 
         session.setStatus(
-            f"[PRE-SCAN] Mass Distribution | "
+            f"[PRE-SCAN] Bulk Distribution | "
             f"Validating {len(rows)} rows..."
         )
 
@@ -2437,13 +2443,13 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
 
         if mismatches and should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"MASS DIST ISSUES\n"
+                      f"BULK DIST ISSUES\n"
                       + "\n".join(mismatches))
 
         # ---- PHASE 2: Build routes from validated rows ----
         routes = []
         session.setStatus(
-            f"[PROCESSING] Mass Distribution | "
+            f"[PROCESSING] Bulk Distribution | "
             f"Building routes for {len(validated_cities)} row(s)..."
         )
 
@@ -2491,6 +2497,8 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                     pass
                 continue
 
+            dest_space = dest_city.get("freeSpaceForResources",
+                                       [0] * len(materials_names))
             for src_idx, src_city in src_cities:
                 if src_idx in done_indices:
                     continue
@@ -2498,30 +2506,58 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                     parsed_resources, src_city.get("availableResources", []),
                     row, csv_resource_cols
                 )
+                for i in range(len(resources)):
+                    if i < len(dest_space):
+                        resources[i] = min(resources[i], dest_space[i])
                 if sum(resources) == 0:
                     continue
                 route = (src_city, dest_city, island["id"], *resources)
                 routes.append((
                     row_num, route, resources, dest_city["name"],
                     expected_player, x, y, src_city["name"], src_idx,
-                    row_use_freighters
+                    row_use_freighters, parsed_resources
                 ))
 
         if not routes:
             if should_notify(notif_config, "error"):
-                sendToBot(session, "MASS DIST: No valid routes found")
+                sendToBot(session, "BULK DIST: No valid routes found")
         else:
             if should_notify(notif_config, "start"):
                 sendToBot(session,
-                          f"MASS DIST SCHEDULED\n"
+                          f"BULK DIST SCHEDULED\n"
                           f"{len(routes)} shipment(s)")
 
             completed = 0
+            skipped = 0
             total = len(routes)
 
             for idx, (row_num, route, resources, dest_name,
                       player, rx, ry, src_name, src_idx,
-                      row_freighters) in enumerate(routes):
+                      row_freighters, parsed_res) in enumerate(routes):
+
+                # For "except" mode, re-resolve with fresh source data
+                has_except = any(m == "except" for m, _ in parsed_res)
+                if has_except:
+                    src_city_id = str(route[0]["id"])
+                    src_fresh = getCity(session.get(city_url + src_city_id))
+                    resources = resolve_resources(
+                        parsed_res, src_fresh.get("availableResources", []),
+                        None, csv_resource_cols
+                    )
+                    dest_city_id = str(route[1]["id"])
+                    dest_fresh = getCity(session.get(city_url + dest_city_id))
+                    dest_space = dest_fresh.get("freeSpaceForResources",
+                                                [0] * len(materials_names))
+                    for i in range(len(resources)):
+                        if i < len(dest_space):
+                            resources[i] = min(resources[i], dest_space[i])
+                    if sum(resources) == 0:
+                        print(f"\n  [{idx+1}/{total}] {src_name} -> "
+                              f"{dest_name}: SKIPPED (insufficient stock or space)")
+                        skipped += 1
+                        continue
+                    route = (src_fresh, dest_fresh, route[2], *resources)
+
                 ship_label = "F" if row_freighters else "M"
                 res_desc = ", ".join(
                     f"{addThousandSeparator(resources[i])} "
@@ -2531,22 +2567,22 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                 )
                 print(f"\n  [{idx+1}/{total}] [{ship_label}] {src_name} -> "
                       f"{dest_name} ({player}) [{rx}:{ry}]")
+                print(f"    {res_desc}")
 
                 session.setStatus(
-                    f"[SENDING] Mass Dist [{idx+1}/{total}] "
+                    f"[SENDING] Bulk Dist [{idx+1}/{total}] "
                     f"{src_name} -> {dest_name}"
                 )
 
                 coords = f"[{rx}:{ry}]"
                 result = send_shipment(
                     session, route, row_freighters, notif_config,
-                    log_path, "Mass Distribution", coords, player
+                    log_path, "Bulk Distribution", coords, player
                 )
 
                 if result["success"]:
                     completed += 1
                     print(f"    SUCCESS ({completed}/{total})")
-                    # Per-city checkpoint
                     from_val = parse_from_column(rows[row_num - 1].get("From", ""))
                     cur = rows[row_num - 1].get(run_column, "").strip()
                     done = set()
@@ -2573,30 +2609,22 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                         write_csv_atomic(csv_path, fieldnames, rows)
                     except Exception as we:
                         print(f"    WARNING: checkpoint write failed: {we}")
-                    # Re-fetch sent source city if upcoming routes use "except"
-                    sent_city_id = route[0]["id"]
-                    if any(
-                        any(parse_resource_value(rows[r[0] - 1].get(col, "0"))[0] == "except"
-                            for col in csv_resource_cols)
-                        for r in routes[idx + 1:]
-                        if str(r[1][0]["id"]) == str(sent_city_id)
-                    ):
-                        city_cache.get("objects", {})[str(sent_city_id)] = getCity(
-                            session.get(city_url + str(sent_city_id))
-                        )
                 else:
                     print(f"    FAILED: {result['error']}")
 
-            print(f"\n--- Mass Distribution complete: {completed}/{total} sent ---")
+            summary = f"{completed}/{total} sent"
+            if skipped:
+                summary += f", {skipped} skipped"
+            print(f"\n--- Bulk Distribution complete: {summary} ---")
             if should_notify(notif_config, "complete"):
                 run_done = sum(
                     1 for r in rows
                     if normalize_text(r.get(run_column, "")) == "x"
                 )
                 sendToBot(session,
-                          f"MASS DIST COMPLETE\n"
+                          f"BULK DIST COMPLETE\n"
                           f"Slot: {run_column[4:]}\n"
-                          f"Cycle: {completed}/{total}\n"
+                          f"Cycle: {summary}\n"
                           f"Progress: {run_done}/{len(rows)}")
 
         # Schedule next cycle
@@ -2604,7 +2632,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
             hours=interval_hours
         )
         session.setStatus(
-            f"[WAITING] Mass Dist | Next: "
+            f"[WAITING] Bulk Dist | Next: "
             f"{getDateTime(next_run.timestamp())}"
         )
         sleep_secs = max(
