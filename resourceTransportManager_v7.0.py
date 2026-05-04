@@ -1623,22 +1623,22 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         event.set()
         return
 
-    set_child_mode(session)
-    event.set()
-
-    info = (
-        f"\nAuto-send from {source_summary} to "
-        f"{destination_city['name']} every {interval_hours}h\n"
+    src_names = ", ".join(c["name"] for c in origin_cities)
+    schedule_row = build_schedule_row(
+        schedule_id=0,
+        mode="consolidate",
+        ship_type="f" if useFreighters else "m",
+        source_city_ids=[str(c["id"]) for c in origin_cities],
+        dest_city_ids=[str(destination_city["id"])],
+        resource_config=resource_config,
+        send_mode="keep" if send_mode == 1 else "send",
+        dest_minimums=dest_minimums or [0, 0, 0, 0, 0],
+        interval_hours=interval_hours,
+        notif_level=notif_config.get("level", "none"),
+        notes=f"{src_names} -> {destination_city['name']}",
     )
-    setInfoSignal(session, info)
-    try:
-        do_it(session, origin_cities, destination_city, island,
-              interval_hours, resource_config, useFreighters, send_mode,
-              notif_config, dest_minimums, log_path)
-    except Exception:
-        sendToBot(session, f"Error in:\n{info}\nCause:\n{traceback.format_exc()}")
-    finally:
-        session.logout()
+    _save_and_maybe_activate(session, event, schedule_row, notif_config,
+                             log_path)
 
 
 # ============================================================================
@@ -1860,22 +1860,21 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         event.set()
         return
 
-    set_child_mode(session)
-    event.set()
-
-    info = (
-        f"\nDistribute from {origin_city['name']} to "
-        f"{len(destination_cities)} cities every {interval_hours}h\n"
+    dest_names = ", ".join(c["name"] for c in destination_cities)
+    schedule_row = build_schedule_row(
+        schedule_id=0,
+        mode="distribute",
+        ship_type="f" if useFreighters else "m",
+        source_city_ids=[str(origin_city["id"])],
+        dest_city_ids=[str(c["id"]) for c in destination_cities],
+        resource_config=resource_config,
+        dest_minimums=dest_minimums or [0, 0, 0, 0, 0],
+        interval_hours=interval_hours,
+        notif_level=notif_config.get("level", "none"),
+        notes=f"{origin_city['name']} -> {dest_names[:30]}",
     )
-    setInfoSignal(session, info)
-    try:
-        do_it_distribute(session, origin_city, destination_cities,
-                         interval_hours, resource_config, useFreighters,
-                         notif_config, dest_minimums, log_path)
-    except Exception:
-        sendToBot(session, f"Error in:\n{info}\nCause:\n{traceback.format_exc()}")
-    finally:
-        session.logout()
+    _save_and_maybe_activate(session, event, schedule_row, notif_config,
+                             log_path)
 
 
 # ============================================================================
@@ -2664,19 +2663,17 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
         event.set()
         return
 
-    set_child_mode(session)
-    event.set()
-
-    info = f"\nBulk Distribution every {interval_hours}h\n"
-    setInfoSignal(session, info)
-
-    try:
-        do_it_bulk_distribution(session, csv_path, interval_hours,
-                                notif_config, run_column, log_path)
-    except Exception:
-        sendToBot(session, f"Error:\n{info}\n{traceback.format_exc()}")
-    finally:
-        session.logout()
+    schedule_row = build_schedule_row(
+        schedule_id=0,
+        mode="bulk",
+        bulk_csv_path=csv_path,
+        bulk_run_column=run_column,
+        interval_hours=interval_hours,
+        notif_level=notif_config.get("level", "none"),
+        notes=f"CSV: {os.path.basename(csv_path)}",
+    )
+    _save_and_maybe_activate(session, event, schedule_row, notif_config,
+                             log_path)
 
 
 def _scan_csv_for_preview(session, rows, run_column):
@@ -3512,10 +3509,97 @@ def do_it_top_up(session, destinations, dest_configs, source_city_ids,
 
 
 # ============================================================================
-#  TRANSPORT WORKER  — background scheduler for all active schedules
+#  SAVE SCHEDULE + ACTIVATE HELPER  (shared by all mode setup functions)
 # ============================================================================
 
-TRANSPORT_WORKER_PREFS = {}
+def _save_and_maybe_activate(session, event, schedule_row, notif_config,
+                             log_path):
+    if not enforce_transport_schema_or_abort(session):
+        event.set()
+        return
+
+    rows = transport_csv_load(session)
+    schedule_row["schedule_id"] = next_schedule_id(rows)
+    transport_csv_append(session, schedule_row)
+    sid = schedule_row["schedule_id"]
+    mode_label = schedule_row.get("mode", "?").capitalize()
+
+    worker_running = _is_transport_worker_running(session)
+
+    if worker_running:
+        transport_csv_update(session, sid, status="active")
+        print(f"\n  Schedule #{sid} ({mode_label}) saved and activated.")
+        print(f"  Worker is already running — it will pick it up within "
+              f"{TICK_BUDGET_SECONDS}s.")
+        enter()
+        event.set()
+        return
+
+    print(f"\n  Schedule #{sid} ({mode_label}) saved.")
+    print(f"  (1) Activate now (start background worker)")
+    print(f"  (2) Return to menu (activate later from Manage Schedules)")
+    choice = read(min=1, max=2, digit=True)
+
+    if choice == 2:
+        print(f"  Schedule #{sid} saved as pending. "
+              f"Activate from option 7 'Manage Schedules'.")
+        enter()
+        event.set()
+        return
+
+    transport_csv_update(session, sid, status="active")
+
+    wlock = transport_worker_lock_path(session)
+    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
+        print("  Worker started by another process — "
+              "it will pick up the schedule.")
+        enter()
+        event.set()
+        return
+
+    all_rows = transport_csv_load(session)
+    extra_activated = 0
+    for r in all_rows:
+        if r.get("status") == "pending" and r.get("schedule_id") != sid:
+            transport_csv_update(session, r["schedule_id"], status="active")
+            extra_activated += 1
+    if extra_activated > 0:
+        print(f"  Also activated {extra_activated} other pending schedule(s).")
+
+    TRANSPORT_WORKER_PREFS["notif_config"] = notif_config
+    TRANSPORT_WORKER_PREFS["log_path"] = log_path
+
+    try:
+        os.remove(transport_stop_flag_path(session))
+    except OSError:
+        pass
+
+    set_child_mode(session)
+    event.set()
+
+    info = (
+        f"\nTransport worker started (schedule #{sid} {mode_label})\n"
+        f"  CSV: {transport_csv_path(session)}\n"
+    )
+    setInfoSignal(session, info)
+
+    stop_event = threading.Event()
+    try:
+        transport_scheduler_loop(session, stop_event)
+    except Exception:
+        try:
+            sendToBot(
+                session,
+                f"Transport worker crashed:\n{traceback.format_exc()}",
+            )
+        except Exception:
+            pass
+    finally:
+        _lock_release(wlock)
+        try:
+            session.logout()
+        except Exception:
+            pass
 
 
 def _is_transport_worker_running(session):
@@ -3733,8 +3817,327 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
 
 
 def run_bulk_cycle(session, sched, notif_config, log_path):
-    """Bulk distribution — will be fully wired in Chunk 3."""
-    return 0
+    csv_path = sched.get("bulk_csv_path", "")
+    run_column = sched.get("bulk_run_column", "")
+    if not csv_path or not run_column:
+        return 0
+
+    csv_resource_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
+
+    try:
+        rows = []
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            for row in reader:
+                rows.append(row)
+    except Exception as e:
+        if should_notify(notif_config, "error"):
+            sendToBot(session, f"BULK DIST ERROR\nCould not read CSV: {e}")
+        return 0
+
+    if run_column not in (fieldnames or []):
+        fieldnames, run_columns = ensure_run_columns(fieldnames, rows)
+        if run_column not in run_columns:
+            run_column = run_columns[0] if run_columns else run_column
+        try:
+            write_csv_atomic(csv_path, fieldnames, rows)
+        except Exception:
+            return 0
+
+    fieldnames = ensure_transport_column(fieldnames, rows)
+    fieldnames = ensure_from_column(fieldnames, rows)
+    fieldnames = ensure_issues_column(fieldnames, rows)
+    for row in rows:
+        row["Issues"] = ""
+
+    city_cache = {}
+    mismatches = []
+    validated_cities = {}
+
+    session.setStatus(
+        f"[PRE-SCAN] Bulk Distribution | Validating {len(rows)} rows..."
+    )
+
+    for row_num, row in enumerate(rows, start=1):
+        try:
+            run_val = normalize_text(row.get(run_column, ""))
+            if run_val == "x":
+                continue
+
+            x = row["X"].strip()
+            y = row["Y"].strip()
+            expected_player = row["Player"].strip()
+            expected_city = row["City"].strip()
+            expected_location = str(row.get("City_Location", "")).strip()
+
+            parsed_resources = [
+                parse_resource_value(row.get(col, "0"))
+                for col in csv_resource_cols
+            ]
+            has_resources = any(
+                amt > 0 or mode == "except"
+                for mode, amt in parsed_resources
+            )
+            if not has_resources:
+                continue
+
+            from_val = parse_from_column(row.get("From", ""))
+            if from_val is None:
+                issue = "From column is empty"
+                row["Issues"] = issue
+                mismatches.append(f"Row {row_num}: {issue}")
+                continue
+            if isinstance(from_val, list):
+                if "ids" not in city_cache:
+                    ids_tmp, map_tmp = getIdsOfCities(session)
+                    city_cache["ids"] = ids_tmp
+                    city_cache["map"] = map_tmp
+                max_idx = len(city_cache["ids"])
+                bad = [str(i) for i in from_val if i > max_idx]
+                if bad:
+                    issue = f"From: city index {','.join(bad)} out of range"
+                    row["Issues"] = issue
+                    mismatches.append(f"Row {row_num}: {issue}")
+                    continue
+
+            html = session.get(f"view=island&xcoord={x}&ycoord={y}")
+            island = getIsland(html)
+            cities_on_island = [
+                c for c in island["cities"] if c.get("type") == "city"
+            ]
+
+            matched_city = None
+            candidates = []
+            exp_city_n = normalize_text(expected_city)
+            exp_player_n = normalize_text(expected_player)
+
+            for c in cities_on_island:
+                cn = normalize_text(c.get("name", ""))
+                pn = normalize_text(c.get("Name", ""))
+                if cn == exp_city_n and pn == exp_player_n:
+                    candidates.append(c)
+
+            if candidates:
+                exp_loc = normalize_text(expected_location)
+                if exp_loc:
+                    for c in candidates:
+                        loc = get_city_location_token(c)
+                        if normalize_text(loc) == exp_loc:
+                            matched_city = c
+                            break
+                if matched_city is None and len(candidates) == 1:
+                    matched_city = candidates[0]
+
+            if matched_city is None:
+                issue = (f"City not found: {expected_player}/"
+                         f"{expected_city} at [{x}:{y}]")
+                row["Issues"] = issue
+                mismatches.append(f"Row {row_num}: {issue}")
+                continue
+
+            if not expected_location:
+                loc_token = get_city_location_token(matched_city)
+                if loc_token:
+                    row["City_Location"] = loc_token
+
+            validated_cities[row_num] = (matched_city, island)
+
+        except Exception as e:
+            issue = f"Error: {e}"
+            row["Issues"] = issue
+            mismatches.append(f"Row {row_num}: {issue}")
+
+    try:
+        write_csv_atomic(csv_path, fieldnames, rows)
+    except Exception:
+        pass
+
+    if mismatches and should_notify(notif_config, "error"):
+        sendToBot(session,
+                  f"BULK DIST ISSUES\n" + "\n".join(mismatches))
+
+    routes = []
+    session.setStatus(
+        f"[PROCESSING] Bulk Distribution | "
+        f"Building routes for {len(validated_cities)} row(s)..."
+    )
+
+    city_cache.pop("objects", None)
+
+    for row_num, row in enumerate(rows, start=1):
+        run_val = normalize_text(row.get(run_column, ""))
+        if run_val == "x":
+            continue
+        if row_num not in validated_cities:
+            continue
+
+        matched_city, island = validated_cities[row_num]
+        x = row["X"].strip()
+        y = row["Y"].strip()
+        expected_player = row["Player"].strip()
+        parsed_resources = [
+            parse_resource_value(row.get(col, "0"))
+            for col in csv_resource_cols
+        ]
+
+        from_val = parse_from_column(row.get("From", ""))
+        row_use_freighters = parse_transport_value(row.get("Transport", "m"))
+        try:
+            src_cities = get_source_cities_for_row(
+                session, from_val, city_cache
+            )
+        except Exception as e:
+            row["Issues"] = f"Error resolving source cities: {e}"
+            continue
+
+        done_indices = set()
+        if run_val and run_val != "x":
+            for p in run_val.split(","):
+                p = p.strip()
+                if p.isdigit():
+                    done_indices.add(int(p))
+
+        try:
+            dest_html = session.get(city_url + str(matched_city["id"]))
+            dest_city = getCity(dest_html)
+        except Exception as e:
+            row["Issues"] = f"Error fetching city details: {e}"
+            try:
+                write_csv_atomic(csv_path, fieldnames, rows)
+            except Exception:
+                pass
+            continue
+
+        dest_space = dest_city.get(
+            "freeSpaceForResources", [0] * len(materials_names)
+        )
+        for src_idx, src_city in src_cities:
+            if src_idx in done_indices:
+                continue
+            resources = resolve_resources(
+                parsed_resources, src_city.get("availableResources", []),
+                row, csv_resource_cols,
+            )
+            for i in range(len(resources)):
+                if i < len(dest_space):
+                    resources[i] = min(resources[i], dest_space[i])
+            if sum(resources) == 0:
+                continue
+            route = (src_city, dest_city, island["id"], *resources)
+            routes.append((
+                row_num, route, resources, dest_city["name"],
+                expected_player, x, y, src_city["name"], src_idx,
+                row_use_freighters, parsed_resources,
+            ))
+
+    if len(routes) > 1:
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for route_info in routes:
+            src_id = str(route_info[1][0]["id"])
+            groups[src_id].append(route_info)
+        interleaved = []
+        while any(groups.values()):
+            for src_id in list(groups.keys()):
+                if groups[src_id]:
+                    interleaved.append(groups[src_id].pop(0))
+                else:
+                    del groups[src_id]
+        routes = interleaved
+
+    if not routes:
+        if should_notify(notif_config, "error"):
+            sendToBot(session, "BULK DIST: No valid routes found")
+        return 0
+
+    if should_notify(notif_config, "start"):
+        sendToBot(session, f"BULK DIST SCHEDULED\n{len(routes)} shipment(s)")
+
+    completed = 0
+    skipped = 0
+    total = len(routes)
+
+    for idx, (row_num, route, resources, dest_name,
+              player, rx, ry, src_name, src_idx,
+              row_freighters, parsed_res) in enumerate(routes):
+
+        has_except = any(m == "except" for m, _ in parsed_res)
+        if has_except:
+            src_city_id = str(route[0]["id"])
+            src_fresh = getCity(session.get(city_url + src_city_id))
+            resources = resolve_resources(
+                parsed_res, src_fresh.get("availableResources", []),
+                None, csv_resource_cols,
+            )
+            dest_city_id = str(route[1]["id"])
+            dest_fresh = getCity(session.get(city_url + dest_city_id))
+            dest_space = dest_fresh.get(
+                "freeSpaceForResources", [0] * len(materials_names)
+            )
+            for i in range(len(resources)):
+                if i < len(dest_space):
+                    resources[i] = min(resources[i], dest_space[i])
+            if sum(resources) == 0:
+                skipped += 1
+                continue
+            route = (src_fresh, dest_fresh, route[2], *resources)
+
+        session.setStatus(
+            f"[SENDING] Bulk Dist [{idx+1}/{total}] "
+            f"{src_name} -> {dest_name}"
+        )
+
+        coords = f"[{rx}:{ry}]"
+        result = send_shipment(
+            session, route, row_freighters, notif_config,
+            log_path, "Bulk Distribution", coords, player,
+        )
+
+        if result["success"]:
+            completed += 1
+            from_val = parse_from_column(rows[row_num - 1].get("From", ""))
+            cur = rows[row_num - 1].get(run_column, "").strip()
+            done = set()
+            if cur and cur.upper() != "X":
+                for p in cur.split(","):
+                    p = p.strip()
+                    if p.isdigit():
+                        done.add(int(p))
+            done.add(src_idx)
+            try:
+                expected = get_source_cities_for_row(
+                    session, from_val, city_cache
+                )
+                expected_indices = {i for i, _ in expected}
+            except Exception:
+                expected_indices = done
+            if done >= expected_indices:
+                rows[row_num - 1][run_column] = "X"
+            else:
+                rows[row_num - 1][run_column] = ",".join(
+                    str(d) for d in sorted(done)
+                )
+            try:
+                write_csv_atomic(csv_path, fieldnames, rows)
+            except Exception:
+                pass
+
+    if should_notify(notif_config, "complete"):
+        summary = f"{completed}/{total} sent"
+        if skipped:
+            summary += f", {skipped} skipped"
+        run_done = sum(
+            1 for r in rows
+            if normalize_text(r.get(run_column, "")) == "x"
+        )
+        sendToBot(session,
+                  f"BULK DIST COMPLETE\n"
+                  f"Slot: {run_column[4:]}\n"
+                  f"Cycle: {summary}\n"
+                  f"Progress: {run_done}/{len(rows)}")
+
+    return completed
 
 
 MODE_HANDLERS = {
