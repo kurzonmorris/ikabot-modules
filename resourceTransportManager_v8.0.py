@@ -297,6 +297,7 @@ VALID_SCHEDULE_STATUSES = (
 
 WORKER_LOCK_STALE_SECONDS = 600   # 10 min — stale lock threshold
 TICK_BUDGET_SECONDS = 60          # max sleep between scheduler checks
+TRANSPORT_WORKER_PREFS = {}       # runtime state shared with worker process
 
 
 def _safe(value):
