@@ -4563,13 +4563,14 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
         print(f"  Worker: {'RUNNING' if worker_running else 'stopped'}\n")
 
         print("(1) View schedules")
-        print("(2) Pause/resume schedule")
-        print("(3) Delete schedule(s)")
-        print("(4) Activate transport worker")
-        print("(5) Stop transport worker")
+        print("(2) Modify schedule")
+        print("(3) Pause/resume schedule")
+        print("(4) Delete schedule(s)")
+        print("(5) Activate transport worker")
+        print("(6) Stop transport worker")
         print("(') Back")
 
-        choice = read(min=1, max=5, digit=True, additionalValues=["'"])
+        choice = read(min=1, max=6, digit=True, additionalValues=["'"])
         if choice == "'":
             event.set()
             return
@@ -4577,13 +4578,15 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
         if choice == 1:
             _view_schedules(session)
         elif choice == 2:
-            _toggle_schedule_pause(session)
+            _modify_schedule(session)
         elif choice == 3:
-            _delete_schedules(session)
+            _toggle_schedule_pause(session)
         elif choice == 4:
+            _delete_schedules(session)
+        elif choice == 5:
             _activate_transport_worker(session, event)
             return
-        elif choice == 5:
+        elif choice == 6:
             _stop_transport_worker(session)
 
 
@@ -4623,6 +4626,253 @@ def _view_schedules(session):
 
     print(f"\n  Total: {len(rows)} schedule(s)\n")
     enter()
+
+
+def _view_schedule_detail(sched):
+    sid = sched.get("schedule_id", "?")
+    mode = sched.get("mode", "?")
+    status = sched.get("status", "?")
+    interval = sched.get("interval_hours", 0)
+    ship = "Freighters" if sched.get("ship_type", "m") == "f" else "Merchant"
+    total_sent = sched.get("total_shipments", 0)
+    notes = sched.get("notes", "") or ""
+    notif = sched.get("notif_level", "none")
+
+    print(f"\n  Schedule #{sid}")
+    print(f"  {'─' * 40}")
+    print(f"  Mode:          {mode.capitalize()}")
+    print(f"  Status:        {status}")
+    print(f"  Ship type:     {ship}")
+    print(f"  Interval:      {'one-shot' if interval == 0 else f'{interval}h'}")
+    print(f"  Notifications: {notif}")
+    print(f"  Total sent:    {total_sent}")
+    print(f"  Notes:         {notes or '(none)'}")
+
+    last_run = sched.get("last_run", "")
+    if isinstance(last_run, int) and last_run > 0:
+        try:
+            print(f"  Last run:      {getDateTime(last_run)}")
+        except Exception:
+            pass
+
+    next_run = sched.get("next_run", "")
+    if isinstance(next_run, int) and next_run > 0:
+        try:
+            print(f"  Next run:      {getDateTime(next_run)}")
+        except Exception:
+            pass
+
+    src_ids = sched.get("source_city_ids") or []
+    if src_ids:
+        print(f"  Source IDs:    {src_ids}")
+    dest_ids = sched.get("dest_city_ids") or []
+    if dest_ids:
+        print(f"  Dest IDs:      {dest_ids}")
+    res_cfg = sched.get("resource_config")
+    if res_cfg:
+        print(f"  Resources:     {res_cfg}")
+    send_mode = sched.get("send_mode", "na")
+    if send_mode != "na":
+        print(f"  Send mode:     {send_mode}")
+    dest_min = sched.get("dest_minimums")
+    if dest_min and any(d for d in dest_min if d):
+        print(f"  Dest minimums: {dest_min}")
+    dest_tgt = sched.get("dest_targets")
+    if dest_tgt:
+        print(f"  Dest targets:  {dest_tgt}")
+    src_res = sched.get("source_reserves")
+    if src_res:
+        print(f"  Src reserves:  {src_res}")
+    bulk_csv = sched.get("bulk_csv_path", "")
+    if bulk_csv:
+        print(f"  Bulk CSV:      {bulk_csv}")
+    bulk_col = sched.get("bulk_run_column", "")
+    if bulk_col:
+        print(f"  Run column:    {bulk_col}")
+
+    print(f"  {'─' * 40}")
+
+
+def _modify_schedule(session):
+    rows = transport_csv_load(session)
+    if not rows:
+        print("\n  No schedules found.\n")
+        enter()
+        return
+
+    _view_schedules_compact(rows)
+    print("  Enter schedule ID to modify (or ' to cancel):")
+    sid_input = read(additionalValues=["'"])
+    if sid_input == "'":
+        return
+
+    try:
+        sid = int(sid_input)
+    except ValueError:
+        print("  Invalid ID.")
+        enter()
+        return
+
+    target = None
+    for r in rows:
+        if r.get("schedule_id") == sid:
+            target = r
+            break
+
+    if not target:
+        print(f"  Schedule #{sid} not found.")
+        enter()
+        return
+
+    while True:
+        _view_schedule_detail(target)
+
+        print("\n  What to modify?")
+        print("  (1) Interval (hours)")
+        print("  (2) Ship type")
+        print("  (3) Notes")
+        print("  (4) Notification level")
+        print("  (5) Resources")
+        print("  (6) Send mode (consolidate only)")
+        print("  (7) Destination minimums")
+        print("  (') Back")
+
+        choice = read(min=1, max=7, digit=True, additionalValues=["'"])
+        if choice == "'":
+            return
+
+        if choice == 1:
+            print(f"\n  Current interval: {target.get('interval_hours', 0)}h")
+            print("  New interval (0 = one-shot, 1+ = recurring):")
+            val = read(min=0, digit=True, additionalValues=["'"])
+            if val == "'":
+                continue
+            transport_csv_update(session, sid, interval_hours=val)
+            target["interval_hours"] = val
+            if val > 0 and target.get("next_run", "") in ("", 0):
+                next_ts = int(time.time()) + val * 3600
+                transport_csv_update(session, sid, next_run=next_ts)
+                target["next_run"] = next_ts
+            print(f"  Interval updated to {val}h.")
+
+        elif choice == 2:
+            current = "Freighters" if target.get("ship_type") == "f" else "Merchant"
+            print(f"\n  Current: {current}")
+            print("  (1) Merchant ships  (2) Freighters")
+            st = read(min=1, max=2, digit=True, additionalValues=["'"])
+            if st == "'":
+                continue
+            new_type = "f" if st == 2 else "m"
+            transport_csv_update(session, sid, ship_type=new_type)
+            target["ship_type"] = new_type
+            label = "Freighters" if new_type == "f" else "Merchant ships"
+            print(f"  Ship type updated to {label}.")
+
+        elif choice == 3:
+            current = target.get("notes", "") or "(none)"
+            print(f"\n  Current notes: {current}")
+            print("  New notes (or Enter to clear):")
+            new_notes = read(msg="  > ", empty=True, additionalValues=["'"])
+            if new_notes == "'":
+                continue
+            transport_csv_update(session, sid, notes=new_notes)
+            target["notes"] = new_notes
+            print(f"  Notes updated.")
+
+        elif choice == 4:
+            current = target.get("notif_level", "none")
+            print(f"\n  Current: {current}")
+            print("  (1) Partial  (2) All  (3) None")
+            nl = read(min=1, max=3, digit=True, additionalValues=["'"])
+            if nl == "'":
+                continue
+            levels = {1: "partial", 2: "all", 3: "none"}
+            new_level = levels[nl]
+            transport_csv_update(session, sid, notif_level=new_level)
+            target["notif_level"] = new_level
+            print(f"  Notification level updated to {new_level}.")
+
+        elif choice == 5:
+            current = target.get("resource_config") or []
+            mode = target.get("mode", "")
+            if mode == "even":
+                print(f"\n  Current resource indices: {current}")
+                print("  Enter new indices (comma-separated, e.g. 0,2,4):")
+                print("  0=Wood, 1=Wine, 2=Marble, 3=Crystal, 4=Sulphur")
+                raw = read(additionalValues=["'"])
+                if raw == "'":
+                    continue
+                try:
+                    indices = [int(x.strip()) for x in raw.split(",")]
+                    indices = [i for i in indices if 0 <= i < len(materials_names)]
+                except ValueError:
+                    print("  Invalid input.")
+                    enter()
+                    continue
+                transport_csv_update(session, sid, resource_config=indices)
+                target["resource_config"] = indices
+            else:
+                print(f"\n  Current resources: {current}")
+                print("  Enter new amounts (5 values, comma-separated):")
+                print("  Wood,Wine,Marble,Crystal,Sulphur")
+                print("  (Use 0 to skip, blank=keep current)")
+                raw = read(msg="  > ", empty=True, additionalValues=["'"])
+                if raw == "'" or not raw.strip():
+                    continue
+                try:
+                    vals = [int(x.strip().replace(",", ""))
+                            for x in raw.split(",")]
+                    while len(vals) < 5:
+                        vals.append(0)
+                    vals = vals[:5]
+                except ValueError:
+                    print("  Invalid input.")
+                    enter()
+                    continue
+                transport_csv_update(session, sid, resource_config=vals)
+                target["resource_config"] = vals
+            print(f"  Resources updated.")
+
+        elif choice == 6:
+            if target.get("mode") != "consolidate":
+                print("  Send mode only applies to consolidate.")
+                enter()
+                continue
+            current = target.get("send_mode", "send")
+            print(f"\n  Current: {current}")
+            print("  (1) Keep reserves (send all except X)")
+            print("  (2) Send specific amounts")
+            sm = read(min=1, max=2, digit=True, additionalValues=["'"])
+            if sm == "'":
+                continue
+            new_sm = "keep" if sm == 1 else "send"
+            transport_csv_update(session, sid, send_mode=new_sm)
+            target["send_mode"] = new_sm
+            print(f"  Send mode updated to {new_sm}.")
+
+        elif choice == 7:
+            current = target.get("dest_minimums") or [0, 0, 0, 0, 0]
+            print(f"\n  Current minimums: {current}")
+            print("  Enter new minimums (5 values, comma-separated):")
+            print("  Wood,Wine,Marble,Crystal,Sulphur (0 = no minimum)")
+            raw = read(msg="  > ", empty=True, additionalValues=["'"])
+            if raw == "'" or not raw.strip():
+                continue
+            try:
+                vals = [int(x.strip().replace(",", ""))
+                        for x in raw.split(",")]
+                while len(vals) < 5:
+                    vals.append(0)
+                vals = vals[:5]
+            except ValueError:
+                print("  Invalid input.")
+                enter()
+                continue
+            transport_csv_update(session, sid, dest_minimums=vals)
+            target["dest_minimums"] = vals
+            print(f"  Destination minimums updated.")
+
+        enter()
 
 
 def _toggle_schedule_pause(session):
