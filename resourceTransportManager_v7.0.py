@@ -2525,6 +2525,457 @@ def do_it_auto_send(session, routes, useFreighters, notif_config, log_path):
 #  MODE 5: BULK DISTRIBUTION  (persistent CSV-driven sends)
 # ============================================================================
 
+BULK_CSV_COLUMNS = [
+    "Transport", "X", "Y", "Player", "City", "City_Location",
+    "Wood", "Wine", "Marble", "Crystal", "Sulphur", "From", "Hours", "Issues",
+]
+
+
+# ----------------------------------------------------------------------------
+#  Bulk Distribution In-App Editor
+# ----------------------------------------------------------------------------
+
+def _bulk_editor_menu(session, csv_path, event):
+    try:
+        rows = []
+        fieldnames = list(BULK_CSV_COLUMNS)
+        if os.path.isfile(csv_path):
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or BULK_CSV_COLUMNS)
+                for row in reader:
+                    rows.append(row)
+    except Exception as e:
+        print(f"  Error reading CSV: {e}")
+        enter()
+        return
+
+    while True:
+        print_module_banner("Bulk Distribution CSV Editor")
+        print(f"  CSV: {csv_path}")
+        print(f"  Rows: {len(rows)}\n")
+
+        print("(1) Add cities")
+        print("(2) View all rows")
+        print("(3) Edit row(s)")
+        print("(4) Delete row(s)")
+        print("(5) Set resources for rows")
+        print("(6) Set transport/from for rows")
+        print("(7) Save and back")
+        print("(') Cancel without saving")
+
+        choice = read(min=1, max=7, digit=True, additionalValues=["'"])
+        if choice == "'":
+            print("  Discarded changes.")
+            enter()
+            return
+        if choice == 1:
+            _bulk_editor_add_cities(session, rows, fieldnames)
+        elif choice == 2:
+            _bulk_editor_view(rows)
+        elif choice == 3:
+            _bulk_editor_edit_row(rows)
+        elif choice == 4:
+            _bulk_editor_delete_rows(rows)
+        elif choice == 5:
+            _bulk_editor_set_resources(rows)
+        elif choice == 6:
+            _bulk_editor_set_transport_from(rows)
+        elif choice == 7:
+            for col in BULK_CSV_COLUMNS:
+                if col not in fieldnames:
+                    fieldnames.append(col)
+            try:
+                write_csv_atomic(csv_path, fieldnames, rows)
+                print(f"  Saved {len(rows)} rows to {csv_path}")
+            except Exception as e:
+                print(f"  Error saving: {e}")
+            enter()
+            return
+
+
+def _bulk_editor_add_cities(session, rows, fieldnames):
+    print_module_banner("Add Cities — Fast Entry")
+    print("  Enter island coordinates (two numbers with space, e.g. 44 03)")
+    print("  Then select city positions from the island.")
+    print("  Type 'done' when finished adding cities.\n")
+
+    while True:
+        raw = read(msg="  Island coords (or 'done'): ",
+                   empty=True, additionalValues=["done", "Done", "'"])
+        if raw in ("done", "Done", "'", ""):
+            if raw == "":
+                print("  (Enter 'done' to finish, or island coords)")
+                continue
+            break
+
+        parts = raw.strip().split()
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            print("  Invalid. Enter two numbers separated by space (e.g. 44 03)")
+            continue
+
+        x_coord, y_coord = parts[0], parts[1]
+        try:
+            html = session.get(
+                f"view=island&xcoord={x_coord}&ycoord={y_coord}"
+            )
+            island = getIsland(html)
+        except Exception as e:
+            print(f"  Error fetching island: {e}")
+            continue
+
+        cities_on_island = [
+            c for c in island["cities"] if c.get("type") == "city"
+        ]
+        if not cities_on_island:
+            print(f"  No cities found on island [{x_coord}:{y_coord}]")
+            continue
+
+        tradegood = materials_names[int(island.get("tradegood", 0))]
+        print(f"\n  Island [{x_coord}:{y_coord}] — {island.get('name', '?')}"
+              f" ({tradegood})")
+        print(f"  {'Pos':<4} {'City':<20} {'Player':<15} {'Loc'}")
+        print(f"  {'─'*4} {'─'*20} {'─'*15} {'─'*5}")
+        for i, c in enumerate(cities_on_island, 1):
+            cn = c.get("name", "?")[:20]
+            pn = c.get("Name", "?")[:15]
+            loc = get_city_location_token(c) or ""
+            print(f"  {i:<4} {cn:<20} {pn:<15} {loc}")
+
+        selected_positions = set()
+        print(f"\n  Select positions (comma-sep), d# to remove, Enter=next island:")
+
+        while True:
+            sel = read(msg="  > ", empty=True, additionalValues=["'"])
+            if sel == "'":
+                break
+            if sel == "":
+                break
+
+            if sel.lower().startswith("d"):
+                nums = sel[1:].strip()
+                try:
+                    to_remove = [int(x.strip()) for x in nums.split(",")]
+                    removed = []
+                    for p in to_remove:
+                        if p in selected_positions:
+                            selected_positions.discard(p)
+                            removed.append(
+                                cities_on_island[p - 1].get("name", "?")
+                                if 1 <= p <= len(cities_on_island) else "?"
+                            )
+                    if removed:
+                        print(f"  Removed: {', '.join(removed)}")
+                    else:
+                        print("  Nothing to remove.")
+                except ValueError:
+                    print("  Invalid. Use d1 or d1,3,5")
+                continue
+
+            try:
+                positions = [int(x.strip()) for x in sel.split(",")]
+                added = []
+                for p in positions:
+                    if 1 <= p <= len(cities_on_island):
+                        if p not in selected_positions:
+                            selected_positions.add(p)
+                            added.append(
+                                cities_on_island[p - 1].get("name", "?")
+                            )
+                    else:
+                        print(f"  Position {p} out of range "
+                              f"(1-{len(cities_on_island)})")
+                if added:
+                    print(f"  Added: {', '.join(added)}")
+            except ValueError:
+                print("  Invalid. Enter numbers comma-separated (e.g. 1,4,5)")
+
+        if selected_positions:
+            for p in sorted(selected_positions):
+                c = cities_on_island[p - 1]
+                row = {col: "" for col in BULK_CSV_COLUMNS}
+                row["X"] = x_coord
+                row["Y"] = y_coord
+                row["Player"] = c.get("Name", "")
+                row["City"] = c.get("name", "")
+                row["City_Location"] = get_city_location_token(c) or ""
+                row["Transport"] = "m"
+                row["From"] = "a"
+                row["Hours"] = "1"
+                rows.append(row)
+            print(f"  {len(selected_positions)} city/cities added from "
+                  f"[{x_coord}:{y_coord}].\n")
+
+    print(f"\n  Total rows: {len(rows)}")
+
+
+def _bulk_editor_set_resources(rows):
+    if not rows:
+        print("  No rows to configure.\n")
+        enter()
+        return
+
+    print_module_banner("Set Resources")
+    print(f"  {len(rows)} row(s) in CSV.\n")
+    print("  (1) Same resources for all rows")
+    print("  (2) Set per-row")
+    print("  (') Cancel")
+
+    choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+    if choice == "'":
+        return
+
+    if choice == 1:
+        print("\n  Enter resource amounts for ALL rows:")
+        print("  (Formats: 5000, e0=send all, e10000=except 10k, "
+              "0 or blank=skip)")
+        res_names = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
+        values = []
+        for rn in res_names:
+            val = read(msg=f"  {rn}: ", empty=True, additionalValues=["'"])
+            if val == "'":
+                return
+            values.append(val.strip() if val else "0")
+        for row in rows:
+            for i, rn in enumerate(res_names):
+                row[rn] = values[i]
+        print(f"  Resources set for all {len(rows)} rows.")
+        enter()
+
+    elif choice == 2:
+        res_names = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
+        print("\n  Enter row numbers to edit (comma-sep or range, e.g. 1,3,5-8):")
+        print("  (or 'a' for all)")
+        raw = read(additionalValues=["'", "a", "A"])
+        if raw == "'":
+            return
+        if raw.lower() == "a":
+            indices = list(range(len(rows)))
+        else:
+            indices = _parse_row_selection(raw, len(rows))
+            if indices is None:
+                print("  Invalid selection.")
+                enter()
+                return
+
+        for idx in indices:
+            row = rows[idx]
+            city = row.get("City", "?")
+            player = row.get("Player", "?")
+            print(f"\n  Row {idx+1}: {player}/{city} "
+                  f"[{row.get('X', '?')}:{row.get('Y', '?')}]")
+            for rn in res_names:
+                current = row.get(rn, "0")
+                val = read(msg=f"    {rn} [{current}]: ",
+                           empty=True, additionalValues=["'"])
+                if val == "'":
+                    return
+                if val.strip():
+                    row[rn] = val.strip()
+        print("  Resources updated.")
+        enter()
+
+
+def _bulk_editor_set_transport_from(rows):
+    if not rows:
+        print("  No rows to configure.\n")
+        enter()
+        return
+
+    print_module_banner("Set Transport & From")
+    print(f"  {len(rows)} row(s) in CSV.\n")
+
+    print("  Ship type for all rows:")
+    print("  (1) Merchant ships (m)")
+    print("  (2) Freighters (f)")
+    print("  (3) Keep current / set per-row later")
+    print("  (') Cancel")
+    st = read(min=1, max=3, digit=True, additionalValues=["'"])
+    if st == "'":
+        return
+    if st == 1:
+        for row in rows:
+            row["Transport"] = "m"
+        print("  All rows set to merchant ships.")
+    elif st == 2:
+        for row in rows:
+            row["Transport"] = "f"
+        print("  All rows set to freighters.")
+
+    print("\n  From (source cities) for all rows:")
+    print("  (1) All cities (a)")
+    print("  (2) Specific indices (enter value)")
+    print("  (3) Keep current / set per-row later")
+    fc = read(min=1, max=3, digit=True, additionalValues=["'"])
+    if fc == "'":
+        return
+    if fc == 1:
+        for row in rows:
+            row["From"] = "a"
+        print("  All rows set to 'a' (all cities).")
+    elif fc == 2:
+        print("  Enter From value (e.g. 1,3,5):")
+        val = read(msg="  > ", additionalValues=["'"])
+        if val == "'":
+            return
+        for row in rows:
+            row["From"] = val.strip()
+        print(f"  All rows set to '{val.strip()}'.")
+
+    print("\n  Hours (interval) for all rows:")
+    print("  (Enter a number, or ' to skip)")
+    hrs = read(msg="  Hours: ", empty=True, additionalValues=["'"])
+    if hrs != "'" and hrs.strip():
+        for row in rows:
+            row["Hours"] = hrs.strip()
+        print(f"  All rows set to {hrs.strip()} hours.")
+
+    enter()
+
+
+def _bulk_editor_view(rows):
+    if not rows:
+        print("\n  No rows.\n")
+        enter()
+        return
+
+    print(f"\n  {'#':<4} {'X':>3} {'Y':>3} {'Player':<14} {'City':<16} "
+          f"{'W':>6} {'V':>6} {'M':>6} {'C':>6} {'S':>6} {'T'} {'From':<5}")
+    print(f"  {'─'*4} {'─'*3} {'─'*3} {'─'*14} {'─'*16} "
+          f"{'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'} {'─'*5}")
+
+    for i, row in enumerate(rows, 1):
+        x = row.get("X", "")[:3]
+        y = row.get("Y", "")[:3]
+        player = (row.get("Player", "") or "")[:14]
+        city = (row.get("City", "") or "")[:16]
+        w = (row.get("Wood", "0") or "0")[:6]
+        v = (row.get("Wine", "0") or "0")[:6]
+        m = (row.get("Marble", "0") or "0")[:6]
+        c = (row.get("Crystal", "0") or "0")[:6]
+        s = (row.get("Sulphur", "0") or "0")[:6]
+        t = (row.get("Transport", "m") or "m")[0]
+        fr = (row.get("From", "a") or "a")[:5]
+        print(f"  {i:<4} {x:>3} {y:>3} {player:<14} {city:<16} "
+              f"{w:>6} {v:>6} {m:>6} {c:>6} {s:>6} {t} {fr:<5}")
+
+    print(f"\n  {len(rows)} row(s)\n")
+    enter()
+
+
+def _bulk_editor_edit_row(rows):
+    if not rows:
+        print("  No rows.\n")
+        enter()
+        return
+
+    print("  Enter row number to edit (or ' to cancel):")
+    raw = read(additionalValues=["'"])
+    if raw == "'":
+        return
+    try:
+        idx = int(raw) - 1
+    except ValueError:
+        print("  Invalid row number.")
+        enter()
+        return
+    if idx < 0 or idx >= len(rows):
+        print(f"  Out of range (1-{len(rows)}).")
+        enter()
+        return
+
+    row = rows[idx]
+    editable = ["Transport", "X", "Y", "Player", "City", "City_Location",
+                "Wood", "Wine", "Marble", "Crystal", "Sulphur", "From", "Hours"]
+
+    print(f"\n  Row {idx+1}:")
+    for col in editable:
+        print(f"    {col}: {row.get(col, '')}")
+    print("")
+    print("  Enter field name to edit (or ' to go back):")
+
+    while True:
+        field = read(msg="  Field: ", additionalValues=["'"])
+        if field == "'":
+            return
+        matched = None
+        for col in editable:
+            if col.lower() == field.lower():
+                matched = col
+                break
+        if not matched:
+            print(f"  Unknown field. Options: {', '.join(editable)}")
+            continue
+        current = row.get(matched, "")
+        val = read(msg=f"  {matched} [{current}]: ",
+                   empty=True, additionalValues=["'"])
+        if val == "'":
+            return
+        if val.strip():
+            row[matched] = val.strip()
+            print(f"  {matched} updated.")
+        else:
+            print(f"  {matched} unchanged.")
+        print("  Edit another field? (Enter field name or ' to finish)")
+
+
+def _bulk_editor_delete_rows(rows):
+    if not rows:
+        print("  No rows.\n")
+        enter()
+        return
+
+    print(f"  {len(rows)} row(s). Enter row numbers to delete:")
+    print("  (comma-separated or range, e.g. 1,3,5-8, or ' to cancel)")
+    raw = read(additionalValues=["'"])
+    if raw == "'":
+        return
+
+    indices = _parse_row_selection(raw, len(rows))
+    if indices is None:
+        print("  Invalid selection.")
+        enter()
+        return
+
+    if not indices:
+        print("  Nothing selected.")
+        enter()
+        return
+
+    print(f"  Delete {len(indices)} row(s)? [y/N]")
+    confirm = read(values=["y", "Y", "n", "N", ""])
+    if confirm.lower() != "y":
+        return
+
+    for idx in sorted(indices, reverse=True):
+        rows.pop(idx)
+    print(f"  Deleted {len(indices)} row(s). {len(rows)} remaining.")
+    enter()
+
+
+def _parse_row_selection(raw, total):
+    indices = set()
+    try:
+        for part in raw.split(","):
+            part = part.strip()
+            if "-" in part:
+                start, end = part.split("-", 1)
+                start = int(start.strip())
+                end = int(end.strip())
+                for i in range(start, end + 1):
+                    if 1 <= i <= total:
+                        indices.add(i - 1)
+            elif part.isdigit():
+                i = int(part)
+                if 1 <= i <= total:
+                    indices.add(i - 1)
+            else:
+                return None
+    except (ValueError, TypeError):
+        return None
+    return sorted(indices)
+
+
 def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
                          telegram_enabled, log_path):
     try:
@@ -2558,8 +3009,22 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
 
         if not os.path.isfile(csv_path):
             print(f"File not found: {csv_path}")
-            enter()
-            event.set()
+            print("\n(1) Create new CSV with in-app editor")
+            print("(') Back\n")
+            choice = read(values=["1", "'"], additionalValues=["'"])
+            if choice == "'":
+                event.set()
+                return
+            _bulk_editor_menu(session, csv_path, event)
+            if not os.path.isfile(csv_path):
+                print("No CSV created. Returning.")
+                enter()
+                event.set()
+                return
+            # Re-enter to load the newly created file
+            bulkDistributionMode(session, event, stdin_fd,
+                                 predetermined_input, telegram_enabled,
+                                 log_path)
             return
 
         try:
@@ -2638,11 +3103,19 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
             print(f"  CSV rows: {len(rows)}")
             print(f"  Interval: every {interval_hours}h")
             print(f"  Run slot: {run_column[4:]}\n")
-            print("(Y) Proceed  (D) Dry run preview  (N) Cancel")
-            rta = read(values=["y", "Y", "n", "N", "d", "D", "", "'"],
+            print("(Y) Proceed  (D) Dry run preview  (E) Edit CSV  (N) Cancel")
+            rta = read(values=["y", "Y", "n", "N", "d", "D", "e", "E",
+                               "", "'"],
                        additionalValues=["'"])
             if rta == "'" or rta.lower() == "n":
                 event.set()
+                return
+            if rta.lower() == "e":
+                _bulk_editor_menu(session, csv_path, event)
+                # Reload CSV after editing
+                bulkDistributionMode(session, event, stdin_fd,
+                                     predetermined_input,
+                                     telegram_enabled, log_path)
                 return
             if rta.lower() == "d":
                 preview = _scan_csv_for_preview(session, rows, run_column)
