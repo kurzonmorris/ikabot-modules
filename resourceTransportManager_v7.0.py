@@ -11,6 +11,8 @@ import random
 import re
 import csv
 import tempfile
+import threading
+import pathlib
 
 from ikabot.config import *
 from ikabot.helpers.botComm import *
@@ -292,6 +294,9 @@ VALID_SCHEDULE_MODES = (
 VALID_SCHEDULE_STATUSES = (
     "pending", "active", "paused", "completed", "error",
 )
+
+WORKER_LOCK_STALE_SECONDS = 600   # 10 min — stale lock threshold
+TICK_BUDGET_SECONDS = 60          # max sleep between scheduler checks
 
 
 def _safe(value):
@@ -1296,8 +1301,9 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
         print("(4) Auto Send: Request resources, auto-collect from all")
         print("(5) Bulk Distribution: Persistent CSV-driven sends")
         print("(6) Keep Topped Up: Automatically top up a city's resources")
+        print("(7) Manage Schedules")
         print("(') Back to main menu")
-        shipping_mode = read(min=1, max=6, digit=True, additionalValues=["'"])
+        shipping_mode = read(min=1, max=7, digit=True, additionalValues=["'"])
         if shipping_mode == "'":
             event.set()
             return
@@ -1319,10 +1325,13 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
             bulkDistributionMode(session, event, stdin_fd,
                                  predetermined_input, telegram_enabled,
                                  log_path)
-        else:
+        elif shipping_mode == 6:
             topUpMode(session, event, stdin_fd,
                       predetermined_input, telegram_enabled,
                       log_path)
+        elif shipping_mode == 7:
+            manage_schedules_menu(session, event, telegram_enabled,
+                                  log_path)
 
     except KeyboardInterrupt:
         event.set()
@@ -3500,3 +3509,694 @@ def do_it_top_up(session, destinations, dest_configs, source_city_ids,
         first_run = False
         sleep_secs = max(0, (next_run_time - datetime.datetime.now()).total_seconds())
         time.sleep(sleep_secs)
+
+
+# ============================================================================
+#  TRANSPORT WORKER  — background scheduler for all active schedules
+# ============================================================================
+
+TRANSPORT_WORKER_PREFS = {}
+
+
+def _is_transport_worker_running(session):
+    wlock = transport_worker_lock_path(session)
+    if not os.path.exists(wlock):
+        return False
+    try:
+        with open(wlock, "r") as f:
+            data = json.load(f)
+        if time.time() - data.get("timestamp", 0) > WORKER_LOCK_STALE_SECONDS:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+# ----------------------------------------------------------------------------
+#  Mode-specific single-cycle handlers
+# ----------------------------------------------------------------------------
+
+def run_consolidate_cycle(session, sched, notif_config, log_path):
+    source_city_ids = sched.get("source_city_ids") or []
+    dest_city_ids = sched.get("dest_city_ids") or []
+    resource_config = sched.get("resource_config") or [0, 0, 0, 0, 0]
+    send_mode_str = sched.get("send_mode", "send")
+    send_mode = 1 if send_mode_str == "keep" else 2
+    dest_minimums = sched.get("dest_minimums")
+    ship_type = sched.get("ship_type", "m")
+    useFreighters = (ship_type == "f")
+
+    if not source_city_ids or not dest_city_ids:
+        return 0
+
+    dest_city_id = str(dest_city_ids[0])
+    html = session.get(city_url + dest_city_id)
+    destination_city = getCity(html)
+    dest_isl_id = destination_city["islandId"]
+    html_isl = session.get(island_url + str(dest_isl_id))
+    island = getIsland(html_isl)
+    coords = f"[{island['x']}:{island['y']}]"
+
+    cycle_sent = 0
+    for cid in source_city_ids:
+        html = session.get(city_url + str(cid))
+        oc_fresh = getCity(html)
+
+        toSend = [0] * len(materials_names)
+        total = 0
+        for i in range(len(materials_names)):
+            if i >= len(resource_config) or resource_config[i] is None:
+                continue
+            avail = oc_fresh["availableResources"][i]
+            if send_mode == 1:
+                s = (avail if resource_config[i] == 0
+                     else max(0, avail - resource_config[i]))
+            else:
+                s = (0 if resource_config[i] == 0
+                     else min(resource_config[i], avail))
+            try:
+                s = min(s, destination_city["freeSpaceForResources"][i])
+            except (KeyError, IndexError):
+                pass
+            if dest_minimums and i < len(dest_minimums) and dest_minimums[i]:
+                s = apply_dest_minimums(
+                    s, destination_city["availableResources"][i],
+                    dest_minimums[i],
+                )
+            toSend[i] = s
+            total += s
+
+        if total > 0:
+            route = (oc_fresh, destination_city, island["id"], *toSend)
+            result = send_shipment(
+                session, route, useFreighters, notif_config, log_path,
+                "Consolidate", coords,
+            )
+            if result["success"]:
+                cycle_sent += 1
+                html = session.get(city_url + dest_city_id)
+                destination_city = getCity(html)
+
+    return cycle_sent
+
+
+def run_distribute_cycle(session, sched, notif_config, log_path):
+    source_city_ids = sched.get("source_city_ids") or []
+    dest_city_ids = sched.get("dest_city_ids") or []
+    resource_config = sched.get("resource_config") or [0, 0, 0, 0, 0]
+    dest_minimums = sched.get("dest_minimums")
+    ship_type = sched.get("ship_type", "m")
+    useFreighters = (ship_type == "f")
+
+    if not source_city_ids or not dest_city_ids:
+        return 0
+
+    src_city_id = str(source_city_ids[0])
+    cycle_sent = 0
+
+    for dcid in dest_city_ids:
+        html = session.get(city_url + str(dcid))
+        dest_city = getCity(html)
+        dest_isl_id = dest_city["islandId"]
+        html_isl = session.get(island_url + str(dest_isl_id))
+        dest_island = getIsland(html_isl)
+        coords = f"[{dest_island['x']}:{dest_island['y']}]"
+
+        html = session.get(city_url + src_city_id)
+        origin_city = getCity(html)
+
+        toSend = [0] * len(materials_names)
+        total = 0
+        for i in range(len(materials_names)):
+            if i >= len(resource_config) or resource_config[i] is None:
+                continue
+            avail = origin_city["availableResources"][i]
+            s = (0 if resource_config[i] == 0
+                 else min(resource_config[i], avail))
+            try:
+                s = min(s, dest_city["freeSpaceForResources"][i])
+            except (KeyError, IndexError):
+                pass
+            if dest_minimums and i < len(dest_minimums) and dest_minimums[i]:
+                s = apply_dest_minimums(
+                    s, dest_city["availableResources"][i],
+                    dest_minimums[i],
+                )
+            toSend[i] = s
+            total += s
+
+        if total > 0:
+            route = (origin_city, dest_city, dest_island["id"], *toSend)
+            result = send_shipment(
+                session, route, useFreighters, notif_config, log_path,
+                "Distribute", coords,
+            )
+            if result["success"]:
+                cycle_sent += 1
+
+    return cycle_sent
+
+
+def run_topup_cycle(session, sched, notif_config, log_path):
+    dest_city_ids = sched.get("dest_city_ids") or []
+    source_city_ids = sched.get("source_city_ids") or []
+    dest_targets = sched.get("dest_targets") or {}
+    source_reserves = sched.get("source_reserves") or {}
+    ship_type = sched.get("ship_type", "m")
+    useFreighters = (ship_type == "f")
+
+    if not dest_city_ids or not source_city_ids:
+        return 0
+
+    cycle_sent = 0
+    for dcid in dest_city_ids:
+        dcid_str = str(dcid)
+        targets = dest_targets.get(dcid_str)
+        if not targets:
+            continue
+
+        html = session.get(city_url + dcid_str)
+        dest_fresh = getCity(html)
+        dest_isl_id = dest_fresh["islandId"]
+        html_isl = session.get(island_url + str(dest_isl_id))
+        dest_island = getIsland(html_isl)
+        coords = f"[{dest_island['x']}:{dest_island['y']}]"
+
+        for cid in source_city_ids:
+            cid_str = str(cid)
+            needed = [0] * len(materials_names)
+            for i in range(len(materials_names)):
+                if i >= len(targets) or targets[i] is None:
+                    continue
+                gap = targets[i] - dest_fresh["availableResources"][i]
+                needed[i] = max(
+                    0, min(gap, dest_fresh["freeSpaceForResources"][i])
+                )
+
+            if all(n <= 0 for n in needed):
+                break
+
+            html = session.get(city_url + cid_str)
+            src_fresh = getCity(html)
+            reserves = source_reserves.get(cid_str, [0] * len(materials_names))
+            to_send = [0] * len(materials_names)
+            for i in range(len(materials_names)):
+                if needed[i] <= 0:
+                    continue
+                avail = src_fresh["availableResources"][i]
+                reserve = reserves[i] if i < len(reserves) else 0
+                sendable = max(0, avail - reserve)
+                to_send[i] = min(needed[i], sendable)
+
+            if sum(to_send) > 0:
+                route = (src_fresh, dest_fresh, dest_island["id"], *to_send)
+                result = send_shipment(
+                    session, route, useFreighters, notif_config, log_path,
+                    "TopUp", coords,
+                )
+                if result["success"]:
+                    cycle_sent += 1
+                    html = session.get(city_url + dcid_str)
+                    dest_fresh = getCity(html)
+
+    return cycle_sent
+
+
+def run_even_cycle(session, sched, notif_config, log_path):
+    """Even distribution — will be fully wired in Chunk 3."""
+    return 0
+
+
+def run_autosend_cycle(session, sched, notif_config, log_path):
+    """Auto send — will be fully wired in Chunk 3."""
+    return 0
+
+
+def run_bulk_cycle(session, sched, notif_config, log_path):
+    """Bulk distribution — will be fully wired in Chunk 3."""
+    return 0
+
+
+MODE_HANDLERS = {
+    "consolidate": run_consolidate_cycle,
+    "distribute":  run_distribute_cycle,
+    "even":        run_even_cycle,
+    "autosend":    run_autosend_cycle,
+    "bulk":        run_bulk_cycle,
+    "topup":       run_topup_cycle,
+}
+
+
+# ----------------------------------------------------------------------------
+#  Schedule dispatcher
+# ----------------------------------------------------------------------------
+
+def execute_schedule(session, sched, notif_config, log_path):
+    mode = sched.get("mode", "")
+    handler = MODE_HANDLERS.get(mode)
+    if handler is None:
+        return 0
+
+    sid = sched.get("schedule_id", "?")
+    mode_label = mode.capitalize()
+    session.setStatus(f"Schedule #{sid} ({mode_label}): executing cycle...")
+
+    if should_notify(notif_config, "start"):
+        sendToBot(
+            session,
+            f"SCHEDULE #{sid} CYCLE STARTING\n"
+            f"Account: {session.username}\n"
+            f"Mode: {mode_label}",
+        )
+
+    try:
+        cycle_sent = handler(session, sched, notif_config, log_path)
+    except Exception:
+        if should_notify(notif_config, "error"):
+            sendToBot(
+                session,
+                f"SCHEDULE #{sid} ERROR\n"
+                f"Mode: {mode_label}\n"
+                f"Error: {traceback.format_exc()}",
+            )
+        return 0
+
+    if should_notify(notif_config, "complete"):
+        sendToBot(
+            session,
+            f"SCHEDULE #{sid} CYCLE COMPLETE\n"
+            f"Mode: {mode_label}\n"
+            f"Shipments: {cycle_sent}",
+        )
+
+    return cycle_sent
+
+
+# ----------------------------------------------------------------------------
+#  Scheduler main loop
+# ----------------------------------------------------------------------------
+
+def transport_scheduler_loop(session, stop_event):
+    notif_config = TRANSPORT_WORKER_PREFS.get(
+        "notif_config", {"level": "none", "telegram": False}
+    )
+    log_path = TRANSPORT_WORKER_PREFS.get("log_path", "")
+
+    while not stop_event.is_set():
+        if os.path.exists(transport_stop_flag_path(session)):
+            stop_event.set()
+            break
+
+        now = int(time.time())
+        schedules = transport_csv_load(session)
+        active = [s for s in schedules if s.get("status") == "active"]
+
+        if not active:
+            session.setStatus("Transport worker: no active schedules, sleeping...")
+            stop_event.wait(TICK_BUDGET_SECONDS)
+            continue
+
+        for sched in active:
+            if stop_event.is_set():
+                break
+
+            next_run = sched.get("next_run", "")
+            if isinstance(next_run, int) and next_run > now:
+                continue
+
+            sid = sched["schedule_id"]
+            cycle_sent = execute_schedule(session, sched, notif_config, log_path)
+
+            total = sched.get("total_shipments", 0) + cycle_sent
+            interval = sched.get("interval_hours", 0)
+
+            if interval > 0:
+                next_ts = now + interval * 3600
+                transport_csv_update(
+                    session, sid,
+                    last_run=now, next_run=next_ts,
+                    total_shipments=total, status="active",
+                )
+            else:
+                transport_csv_update(
+                    session, sid,
+                    last_run=now, status="completed",
+                    total_shipments=total,
+                )
+
+        schedules = transport_csv_load(session)
+        active = [s for s in schedules if s.get("status") == "active"]
+        now_ts = int(time.time())
+        next_dues = []
+        for s in active:
+            nr = s.get("next_run", "")
+            if isinstance(nr, int) and nr > now_ts:
+                next_dues.append(nr)
+
+        if next_dues:
+            sleep_for = max(1, min(TICK_BUDGET_SECONDS, min(next_dues) - now_ts))
+        else:
+            sleep_for = TICK_BUDGET_SECONDS
+
+        try:
+            session.setStatus(
+                f"Transport worker: {len(active)} schedule(s), "
+                f"sleeping {sleep_for}s"
+            )
+        except Exception:
+            pass
+
+        stop_event.wait(sleep_for)
+
+    # Cleanup
+    try:
+        os.remove(transport_stop_flag_path(session))
+    except OSError:
+        pass
+    _lock_release(transport_worker_lock_path(session))
+
+
+# ----------------------------------------------------------------------------
+#  Worker activation / stop
+# ----------------------------------------------------------------------------
+
+def _activate_transport_worker(session, event):
+    try:
+        telegram_enabled = checkTelegramData(session)
+    except Exception:
+        telegram_enabled = False
+
+    notif_config = get_notification_config(telegram_enabled, event)
+    if notif_config is None:
+        return
+
+    log_path = get_log_path(session)
+
+    wlock = transport_worker_lock_path(session)
+    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
+        print("  Another transport worker is already running for this account.")
+        print(f"  Lock file: {wlock}")
+        print("  Use 'Stop worker' to stop it, or remove the lock file")
+        print("  if you're sure no worker is running.")
+        enter()
+        return
+
+    if not enforce_transport_schema_or_abort(session):
+        _lock_release(wlock)
+        enter()
+        return
+
+    schedules = transport_csv_load(session)
+    activatable = [
+        s for s in schedules
+        if s.get("status") in ("active", "pending")
+    ]
+
+    if not activatable:
+        print("  No active or pending schedules found.")
+        print("  Create schedules first using modes 1-6.")
+        _lock_release(wlock)
+        enter()
+        return
+
+    print(f"\n  {len(activatable)} schedule(s) to activate:\n")
+    for s in activatable:
+        sid = s.get("schedule_id", "?")
+        mode = s.get("mode", "?").capitalize()
+        interval = s.get("interval_hours", 0)
+        notes = s.get("notes", "")
+        status = s.get("status", "?")
+        interval_str = f"every {interval}h" if interval > 0 else "one-shot"
+        line = f"  #{sid} {mode} ({interval_str})"
+        if notes:
+            line += f" - {notes}"
+        if status == "pending":
+            line += " [NEW]"
+        print(line)
+
+    print(f"\n  Resume mode:")
+    print(f"  (1) Continue as scheduled")
+    print(f"      Missed runs execute immediately.")
+    print(f"  (2) Start from now")
+    print(f"      Reset all schedules to run from current time.")
+    print(f"  (') Cancel")
+
+    choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+    if choice == "'":
+        _lock_release(wlock)
+        return
+
+    resume_mode = "continue" if choice == 1 else "from_now"
+
+    now = int(time.time())
+    for s in activatable:
+        sid = s["schedule_id"]
+        updates = {}
+        if s.get("status") == "pending":
+            updates["status"] = "active"
+        if resume_mode == "from_now":
+            interval = s.get("interval_hours", 0)
+            updates["next_run"] = (now + interval * 3600) if interval > 0 else now
+        elif resume_mode == "continue":
+            nr = s.get("next_run", "")
+            if nr == "" or nr == 0:
+                updates["next_run"] = now
+        if updates:
+            transport_csv_update(session, sid, **updates)
+
+    TRANSPORT_WORKER_PREFS["notif_config"] = notif_config
+    TRANSPORT_WORKER_PREFS["log_path"] = log_path
+
+    try:
+        os.remove(transport_stop_flag_path(session))
+    except OSError:
+        pass
+
+    set_child_mode(session)
+    event.set()
+
+    info = (
+        f"\nTransport worker\n"
+        f"  CSV: {transport_csv_path(session)}\n"
+        f"  Schedules: {len(activatable)}\n"
+        f"  Resume: {resume_mode}\n"
+    )
+    setInfoSignal(session, info)
+
+    stop_event = threading.Event()
+    try:
+        transport_scheduler_loop(session, stop_event)
+    except Exception:
+        try:
+            sendToBot(
+                session,
+                f"Transport worker crashed:\n{traceback.format_exc()}",
+            )
+        except Exception:
+            pass
+    finally:
+        _lock_release(wlock)
+        try:
+            session.logout()
+        except Exception:
+            pass
+
+
+def _stop_transport_worker(session):
+    flag = transport_stop_flag_path(session)
+    wlock = transport_worker_lock_path(session)
+    if not os.path.exists(wlock):
+        print("  No transport worker appears to be running.")
+        enter()
+        return
+    pathlib.Path(flag).touch()
+    print(
+        f"  Stop flag written. The worker will exit within "
+        f"{TICK_BUDGET_SECONDS}s after finishing any active shipments."
+    )
+    enter()
+
+
+# ----------------------------------------------------------------------------
+#  Schedule management menu  (Option 7)
+# ----------------------------------------------------------------------------
+
+def manage_schedules_menu(session, event, telegram_enabled, log_path):
+    while True:
+        if not enforce_transport_schema_or_abort(session):
+            enter()
+            event.set()
+            return
+
+        counts = transport_csv_count_by_status(session)
+        total = sum(counts.values())
+        active_ct = counts.get("active", 0)
+        pending_ct = counts.get("pending", 0)
+        paused_ct = counts.get("paused", 0)
+        worker_running = _is_transport_worker_running(session)
+
+        print_module_banner("Transport Schedule Manager")
+        print(f"  CSV: {transport_csv_path(session)}")
+        print(f"  Schedules: {total} total "
+              f"({active_ct} active, {pending_ct} pending, {paused_ct} paused)")
+        print(f"  Worker: {'RUNNING' if worker_running else 'stopped'}\n")
+
+        print("(1) View schedules")
+        print("(2) Pause/resume schedule")
+        print("(3) Delete schedule(s)")
+        print("(4) Activate transport worker")
+        print("(5) Stop transport worker")
+        print("(') Back")
+
+        choice = read(min=1, max=5, digit=True, additionalValues=["'"])
+        if choice == "'":
+            event.set()
+            return
+
+        if choice == 1:
+            _view_schedules(session)
+        elif choice == 2:
+            _toggle_schedule_pause(session)
+        elif choice == 3:
+            _delete_schedules(session)
+        elif choice == 4:
+            _activate_transport_worker(session, event)
+            return
+        elif choice == 5:
+            _stop_transport_worker(session)
+
+
+def _view_schedules(session):
+    rows = transport_csv_load(session)
+    if not rows:
+        print("\n  No schedules found.\n")
+        enter()
+        return
+
+    print(f"\n  {'ID':>4} {'Mode':<13} {'Status':<10} {'Interval':<10} "
+          f"{'Ship':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}")
+    print(f"  {'---':>4} {'---':<13} {'---':<10} {'---':<10} "
+          f"{'---':<5} {'---':>6} {'---':<12} {'---'}")
+
+    for r in rows:
+        sid = r.get("schedule_id", "?")
+        mode = r.get("mode", "?").capitalize()
+        status = r.get("status", "?")
+        interval = r.get("interval_hours", 0)
+        ship = "F" if r.get("ship_type", "m") == "f" else "M"
+        total_sent = r.get("total_shipments", 0)
+        notes = (r.get("notes", "") or "")[:20]
+        interval_str = f"{interval}h" if interval > 0 else "once"
+
+        last_run = r.get("last_run", "")
+        if isinstance(last_run, int) and last_run > 0:
+            try:
+                last_str = getDateTime(last_run)[5:16]
+            except Exception:
+                last_str = ""
+        else:
+            last_str = "never"
+
+        print(f"  {sid:>4} {mode:<13} {status:<10} {interval_str:<10} "
+              f"{ship:<5} {total_sent:>6} {last_str:<12} {notes}")
+
+    print(f"\n  Total: {len(rows)} schedule(s)\n")
+    enter()
+
+
+def _toggle_schedule_pause(session):
+    rows = transport_csv_load(session)
+    if not rows:
+        print("\n  No schedules found.\n")
+        enter()
+        return
+
+    _view_schedules_compact(rows)
+    print("  Enter schedule ID to pause/resume (or ' to cancel):")
+    sid_input = read(additionalValues=["'"])
+    if sid_input == "'":
+        return
+
+    try:
+        sid = int(sid_input)
+    except ValueError:
+        print("  Invalid ID.")
+        enter()
+        return
+
+    target = None
+    for r in rows:
+        if r.get("schedule_id") == sid:
+            target = r
+            break
+
+    if not target:
+        print(f"  Schedule #{sid} not found.")
+        enter()
+        return
+
+    current_status = target.get("status", "")
+    if current_status == "active":
+        transport_csv_update(session, sid, status="paused")
+        print(f"  Schedule #{sid} paused.")
+    elif current_status == "paused":
+        transport_csv_update(session, sid, status="active")
+        print(f"  Schedule #{sid} resumed.")
+    elif current_status == "pending":
+        transport_csv_update(session, sid, status="active")
+        print(f"  Schedule #{sid} activated.")
+    else:
+        print(f"  Schedule #{sid} has status '{current_status}' and cannot be toggled.")
+    enter()
+
+
+def _delete_schedules(session):
+    rows = transport_csv_load(session)
+    if not rows:
+        print("\n  No schedules found.\n")
+        enter()
+        return
+
+    _view_schedules_compact(rows)
+    print("  Enter schedule ID(s) to delete (comma-separated, or ' to cancel):")
+    sid_input = read(additionalValues=["'"])
+    if sid_input == "'":
+        return
+
+    try:
+        sids = [int(x.strip()) for x in sid_input.split(",")]
+    except ValueError:
+        print("  Invalid input.")
+        enter()
+        return
+
+    existing = {r.get("schedule_id") for r in rows}
+    to_delete = [s for s in sids if s in existing]
+    not_found = [s for s in sids if s not in existing]
+
+    if not_found:
+        print(f"  Not found: {not_found}")
+    if not to_delete:
+        print("  Nothing to delete.")
+        enter()
+        return
+
+    print(f"  Delete schedule(s) {to_delete}? [y/N]")
+    confirm = read(values=["y", "Y", "n", "N", ""])
+    if confirm.lower() != "y":
+        return
+
+    for sid in to_delete:
+        transport_csv_delete(session, sid)
+    print(f"  Deleted {len(to_delete)} schedule(s).")
+    enter()
+
+
+def _view_schedules_compact(rows):
+    for r in rows:
+        sid = r.get("schedule_id", "?")
+        mode = r.get("mode", "?").capitalize()
+        status = r.get("status", "?")
+        interval = r.get("interval_hours", 0)
+        interval_str = f"every {interval}h" if interval > 0 else "once"
+        print(f"    #{sid} {mode} ({interval_str}) [{status}]")
