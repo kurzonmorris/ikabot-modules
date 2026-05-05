@@ -33,7 +33,7 @@ from ikabot.helpers.varios import addThousandSeparator, getDateTime
 def print_module_banner(page_title=None):
     print("\n")
     print("\u2554" + "\u2550" * 58 + "\u2557")
-    print("\u2551            RESOURCE TRANSPORT MANAGER v8.0                  \u2551")
+    print("\u2551          RESOURCE TRANSPORT MANAGER v8.1.0                  \u2551")
     print("\u255a" + "\u2550" * 58 + "\u255d")
     if page_title:
         print(f"\n{page_title}")
@@ -58,9 +58,9 @@ def get_notification_config(telegram_enabled, event):
 
     print_module_banner("Notification Preferences")
     print("When do you want to receive Telegram notifications?")
-    print("(1) Partial - Summary when each cycle starts + errors")
+    print("(1) Partial - Summary when each batch starts + errors")
     print("(2) All - Every individual shipment")
-    print("(3) None - No notifications")
+    print("(3) Errors only - Only notify on failures")
     print("(') Back to main menu")
     choice = read(min=1, max=3, digit=True, additionalValues=["'"])
     if choice == "'":
@@ -297,6 +297,7 @@ VALID_SCHEDULE_STATUSES = (
 
 WORKER_LOCK_STALE_SECONDS = 600   # 10 min — stale lock threshold
 TICK_BUDGET_SECONDS = 60          # max sleep between scheduler checks
+TRANSPORT_WORKER_PREFS = {}       # runtime state shared with worker process
 
 
 def _safe(value):
@@ -426,11 +427,12 @@ def enforce_transport_schema_or_abort(session):
         return False
     on_disk = int(data.get("version", -1))
     if on_disk != SCHEDULE_SCHEMA_VERSION:
-        print(f"Transport CSV schema version mismatch: file={on_disk}, "
-              f"module={SCHEDULE_SCHEMA_VERSION}.")
-        print(f"  CSV : {transport_csv_path(session)}")
-        print(f"  Side: {sidecar}")
-        print("  Move/rename both files to start fresh, then reopen.")
+        print(f"Schedule data format has changed (was v{on_disk}, now v{SCHEDULE_SCHEMA_VERSION}).")
+        print(f"  Your existing schedules can't be loaded with this version.")
+        print(f"  To start fresh, delete or rename these two files:")
+        print(f"    {transport_csv_path(session)}")
+        print(f"    {sidecar}")
+        print(f"  WARNING: This will erase all saved schedules.")
         return False
     return True
 
@@ -1035,10 +1037,11 @@ def resolve_resources(parsed, source_available, row, csv_resource_cols):
 
 
 def choose_run_slot(session, event, rows, run_columns):
-    print_module_banner("Bulk Distribution - Run Slot")
+    print_module_banner("Bulk Distribution - Progress Tracking")
+    print("Each run tracks which cities have been sent to.")
     print("Choose how to start:")
-    print("(1) Start fresh (reuses the OLDEST run slot)")
-    print("(2) Resume from existing run slot")
+    print("(1) Start fresh (clears progress from the oldest run)")
+    print("(2) Resume a previous run (continue where you left off)")
     print("(') Back to main menu")
     mode = read(min=1, max=2, digit=True, additionalValues=["'"])
     if mode == "'":
@@ -1110,7 +1113,7 @@ def readResourceAmount(resource_name):
     while True:
         user_input = read(
             msg=f"{resource_name}: ", empty=True,
-            additionalValues=["'", "="]
+            additionalValues=["'", "=", "e", "E"]
         )
         if user_input == "'":
             return "EXIT"
@@ -1118,13 +1121,17 @@ def readResourceAmount(resource_name):
             return "RESTART"
         if user_input == "":
             return None
+        if user_input.lower() == "e":
+            print(f"  -> Send ALL")
+            return "SEND_ALL"
         cleaned = user_input.replace(",", "").replace(" ", "")
         if cleaned.isdigit():
             amount = int(cleaned)
-            if amount > 0:
-                print(f"  -> Set to: {addThousandSeparator(amount)}")
+            if amount == 0:
+                return None
+            print(f"  -> Set to: {addThousandSeparator(amount)}")
             return amount
-        print("  Please enter a number, 0, leave blank, or press ' to exit")
+        print("  Enter a number, e = send all, blank = skip, ' = exit, = = restart")
 
 
 def get_resource_config(send_mode=2):
@@ -1139,7 +1146,9 @@ def get_resource_config(send_mode=2):
                 print("\nRestarting resource configuration...\n")
                 restart = True
                 break
-            if send_mode == 2 and amount is None:
+            if amount == "SEND_ALL":
+                amount = 0  # 0 = send everything (keep nothing)
+            elif send_mode == 2 and amount is None:
                 amount = 0
             config.append(amount)
         if not restart:
@@ -1148,19 +1157,22 @@ def get_resource_config(send_mode=2):
 
 def get_dest_minimums():
     print("")
-    print("Set minimum thresholds for destination?")
-    print("(Only send if destination has LESS than the minimum)")
-    print("(1) Yes - set minimums per resource")
-    print("(2) No - send regardless")
+    print("Skip sending if the destination already has enough?")
+    print("  If set, resources are only sent when the destination")
+    print("  has LESS than the target amount.")
+    print("(1) Yes - set a target amount per resource")
+    print("(2) No - always send")
     choice = read(min=1, max=2, digit=True)
     if choice == 2:
         return None
     print("")
-    print("Enter minimum for each resource (blank = no minimum):")
+    print("Enter target amount for each resource.")
+    print("(Only sends when destination has less than this)")
+    print("(blank = no limit, always send this resource)\n")
     minimums = []
     for resource in materials_names:
-        amount = readResourceAmount(f"Min {resource}")
-        if amount in ("EXIT", "RESTART"):
+        amount = readResourceAmount(f"Target {resource}")
+        if amount in ("EXIT", "RESTART", "SEND_ALL"):
             return None
         minimums.append(amount if amount is not None else 0)
     return minimums
@@ -1173,6 +1185,17 @@ def apply_dest_minimums(sendable, dest_current, minimum):
         return 0
     needed = minimum - dest_current
     return min(sendable, needed)
+
+
+def _format_resource_list(values, skip_zero=True):
+    """Format a list of 5 resource values as 'Wood: 5,000 | Wine: 3,000'."""
+    parts = []
+    for i, res in enumerate(materials_names):
+        v = values[i] if i < len(values) else 0
+        if skip_zero and (v is None or v == 0):
+            continue
+        parts.append(f"{res}: {addThousandSeparator(v)}")
+    return " | ".join(parts) if parts else "(none)"
 
 
 # ============================================================================
@@ -1206,36 +1229,91 @@ def rtm_chooseCity(session):
     return getCity(html)
 
 
-def rtm_ignoreCities(session, msg=None):
-    """Replacement for ignoreCities that shows full resource names + coords."""
-    (cities_ids, cities) = getIdsOfCities(session)
-    ignored_cities = []
+def rtm_ignoreCities(session, msg=None, exclude_mode=False):
+    """City picker. By default: positive selection (click to add).
+    With exclude_mode=True: click to remove (old behavior)."""
+    (all_ids, all_cities) = getIdsOfCities(session)
+    selected_ids = [] if not exclude_mode else list(all_ids)
+    selected_names = [] if not exclude_mode else []
+
     while True:
         print_module_banner()
         if msg is not None:
             print(f"{msg}")
-        if ignored_cities:
-            print(f'(currently ignoring: {", ".join(ignored_cities)})')
-        print("(0) Continue")
-        longest = max(len(cities[cid]["name"]) for cid in cities_ids) if cities_ids else 0
-        choice_to_cityid_map = []
-        for i, city_id in enumerate(cities_ids, 1):
-            city = cities[city_id]
-            choice_to_cityid_map.append(city["id"])
+        if not exclude_mode and selected_names:
+            print(f'  Selected: {", ".join(selected_names)}')
+        if exclude_mode and selected_names:
+            print(f'  Excluded: {", ".join(selected_names)}')
+        print("")
+
+        longest = max(
+            len(all_cities[cid]["name"]) for cid in all_ids
+        ) if all_ids else 0
+        for i, city_id in enumerate(all_ids, 1):
+            city = all_cities[city_id]
             name = city["name"]
             pad = " " * (longest - len(name) + 2)
-            resource = _TRADEGOOD_NAMES.get(int(city.get("tradegood", 0)), "???")
+            resource = _TRADEGOOD_NAMES.get(
+                int(city.get("tradegood", 0)), "???")
             coords = city.get("coords", "").strip()
-            print(f"{i}) {name}{pad}{resource:<9} {coords}")
-        choice = read(min=0, max=len(cities_ids))
+            cid_str = str(city["id"])
+            if not exclude_mode:
+                marker = " [+]" if cid_str in selected_ids else ""
+            else:
+                marker = " [-]" if cid_str not in selected_ids else ""
+            print(f"  {i}) {name}{pad}{resource:<9} {coords}{marker}")
+
+        if not exclude_mode:
+            ct = len(selected_ids)
+            print(f"\n  (0) Done ({ct} selected)  |  (a) Select all")
+        else:
+            remaining = len(selected_ids)
+            print(f"\n  (0) Done ({remaining} remaining)")
+
+        choice = read(min=0, max=len(all_ids),
+                      additionalValues=["a", "A"] if not exclude_mode else [])
+
         if choice == 0:
             break
-        city_id = choice_to_cityid_map[choice - 1]
-        cities_ids = list(filter(lambda x: x != str(city_id), cities_ids))
-        ignored_cities.append(cities[str(city_id)]["name"])
-        del cities[str(city_id)]
 
-    return cities_ids, cities
+        if isinstance(choice, str) and choice.lower() == "a":
+            selected_ids = [str(all_cities[cid]["id"]) for cid in all_ids]
+            selected_names = [all_cities[cid]["name"] for cid in all_ids]
+            print(f"  All {len(selected_ids)} cities selected.")
+            continue
+
+        city_id = str(all_cities[all_ids[choice - 1]]["id"])
+        city_name = all_cities[all_ids[choice - 1]]["name"]
+
+        if not exclude_mode:
+            if city_id in selected_ids:
+                selected_ids.remove(city_id)
+                selected_names.remove(city_name)
+                print(f"  Removed: {city_name}")
+            else:
+                selected_ids.append(city_id)
+                selected_names.append(city_name)
+                print(f"  Added: {city_name}")
+        else:
+            if city_id in selected_ids:
+                selected_ids.remove(city_id)
+                selected_names.append(city_name)
+                print(f"  Excluded: {city_name}")
+            else:
+                selected_ids.append(city_id)
+                if city_name in selected_names:
+                    selected_names.remove(city_name)
+                print(f"  Restored: {city_name}")
+
+    result_cities = {
+        cid: all_cities[cid] for cid in all_ids
+        if str(all_cities[cid]["id"]) in selected_ids
+    }
+    result_ids = [
+        cid for cid in all_ids
+        if str(all_cities[cid]["id"]) in selected_ids
+    ]
+    return result_ids, result_cities
 
 
 # ============================================================================
@@ -1295,13 +1373,13 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
 
         print_module_banner("Shipping Mode Selection")
         print("Select shipping mode:")
-        print("(1) Consolidate: Multiple cities -> One destination")
-        print("(2) Distribute: One city -> Multiple destinations")
-        print("(3) Even Distribution: Balance resources across cities")
-        print("(4) Auto Send: Request resources, auto-collect from all")
-        print("(5) Bulk Distribution: Persistent CSV-driven sends")
-        print("(6) Keep Topped Up: Automatically top up a city's resources")
-        print("(7) Manage Schedules")
+        print("(1) Consolidate: Collect from multiple cities into one")
+        print("(2) Distribute: Send from one city to multiple cities")
+        print("(3) Even Distribution: Balance resources across your cities")
+        print("(4) Auto Send: Specify what you need, auto-collect from others")
+        print("(5) Bulk Distribution: Send to many cities using a CSV file")
+        print("(6) Keep Topped Up: Maintain target resource levels in cities")
+        print("(7) Manage Schedules: View, edit, start, or stop schedules")
         print("(') Back to main menu")
         shipping_mode = read(min=1, max=7, digit=True, additionalValues=["'"])
         if shipping_mode == "'":
@@ -1403,14 +1481,18 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         print(f"Source cities: {source_summary}\n")
         if send_mode == 1:
             print("Configure resource reserves (KEEP mode):")
-            print("(Number = keep that amount, 0 = send ALL, blank = IGNORE)")
-            print("(Commas optional: 6000 or 6,000)")
-            print("(= restart | ' exit)\n")
+            print("  Number = keep that amount in reserve, send the rest")
+            print("  e = send ALL of this resource (keep nothing)")
+            print("  blank = skip (don't touch this resource)")
+            print("  Commas OK: 6000 or 6,000")
+            print("  = restart | ' exit\n")
         else:
             print("Configure resource amounts to send:")
-            print("(Number = send that amount, 0 or blank = skip)")
-            print("(Commas optional: 6000 or 6,000)")
-            print("(= restart | ' exit)\n")
+            print("  Number = send exactly that amount")
+            print("  e = send ALL of this resource")
+            print("  blank = skip (don't send this resource)")
+            print("  Commas OK: 6000 or 6,000")
+            print("  = restart | ' exit\n")
             if len(origin_cities) == 1:
                 html = session.get(city_url + str(origin_cities[0]["id"]))
                 cdata = getCity(html)
@@ -1563,6 +1645,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
 
         # --- Calculate preview ---
         total_send = [0] * len(materials_names)
+        space_warnings = []
         preview_routes = []
         for oc in origin_cities:
             html = session.get(city_url + str(oc["id"]))
@@ -1577,7 +1660,14 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 else:
                     s = 0 if resource_config[i] == 0 else min(resource_config[i], avail)
                 if destination_city.get("isOwnCity", False):
-                    s = min(s, destination_city["freeSpaceForResources"][i])
+                    free = destination_city["freeSpaceForResources"][i]
+                    if s > free:
+                        space_warnings.append(
+                            f"    {materials_names[i]}: reduced "
+                            f"{addThousandSeparator(s)} -> "
+                            f"{addThousandSeparator(free)} "
+                            f"(destination full)")
+                    s = min(s, free)
                 if dest_minimums:
                     s = apply_dest_minimums(
                         s, destination_city["availableResources"][i],
@@ -1602,9 +1692,14 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             print(f"  Sources ({len(origin_cities)}): {source_summary}")
             print(f"  Destination: {destination_city['name']}")
             if dest_minimums:
-                print(f"  Dest minimums: {dest_minimums}")
+                print(f"  Send only if below: {_format_resource_list(dest_minimums)}")
             print(f"  Interval: {'One-time' if interval_hours == 0 else f'{interval_hours}h'}")
-            print(f"  Total: {addThousandSeparator(sum(total_send))} resources\n")
+            print(f"  Total: {addThousandSeparator(sum(total_send))} resources")
+            if space_warnings:
+                print(f"\n  NOTE: Some amounts reduced due to warehouse space:")
+                for w in space_warnings:
+                    print(w)
+            print("")
             print("(Y) Proceed  (D) Dry run preview  (N) Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", ""])
             if rta.lower() == "n":
@@ -1838,7 +1933,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
             print(f"  Source: {origin_city['name']}")
             print(f"  Destinations ({len(destination_cities)}): {dest_summary}")
             if dest_minimums:
-                print(f"  Dest minimums: {dest_minimums}")
+                print(f"  Send only if below: {_format_resource_list(dest_minimums)}")
             print(f"  Total resources: {addThousandSeparator(grand)}")
             int_label = "One-time" if interval_hours == 0 else f"{interval_hours}h"
             print(f"  Interval: {int_label}\n")
@@ -2026,16 +2121,13 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         # Select cities
         print_module_banner("City Selection")
         print(f"Balancing: {selected_names}\n")
-        print("Select cities to EXCLUDE from balancing:")
-        excluded_ids, _ = rtm_ignoreCities(session, msg="Select cities to EXCLUDE:")
+        balance_msg = "Select cities to include in balancing:"
+        included_ids, _ = rtm_ignoreCities(session, msg=balance_msg)
 
-        html = session.get()
-        city_ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
         all_cities = []
-        for cid in city_ids:
-            if cid not in excluded_ids:
-                html_c = session.get(city_url + cid)
-                all_cities.append(getCity(html_c))
+        for cid in included_ids:
+            html_c = session.get(city_url + cid)
+            all_cities.append(getCity(html_c))
 
         if not all_cities:
             print("No cities available for balancing!")
@@ -2293,7 +2385,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
 
             while True:
                 print("  Enter how much of each resource to collect:")
-                print("  (blank = skip, ' = exit, = = restart)\n")
+                print("  (blank = skip, e = collect all, ' = exit, '=' = restart)\n")
 
                 requested = [0] * len(materials_names)
                 restart = False
@@ -2643,7 +2735,9 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
             print(f"  {i:<4} {cn:<20} {pn:<15} {loc}")
 
         selected_positions = set()
-        print(f"\n  Select positions (comma-sep), d# to remove, Enter=next island:")
+        print(f"\n  Type position numbers to add (e.g. 1,4,5)")
+        print(f"  Type d + number to deselect (e.g. d3 or d1,4)")
+        print(f"  Press Enter when done with this island:")
 
         while True:
             sel = read(msg="  > ", empty=True, additionalValues=["'"])
@@ -2840,9 +2934,9 @@ def _bulk_editor_view(rows):
         return
 
     print(f"\n  {'#':<4} {'X':>3} {'Y':>3} {'Player':<14} {'City':<16} "
-          f"{'W':>6} {'V':>6} {'M':>6} {'C':>6} {'S':>6} {'T'} {'From':<5}")
+          f"{'Wood':>6} {'Wine':>6} {'Marb':>6} {'Crys':>6} {'Sulp':>6} {'Ship'} {'From':<5}")
     print(f"  {'─'*4} {'─'*3} {'─'*3} {'─'*14} {'─'*16} "
-          f"{'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'} {'─'*5}")
+          f"{'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'*4} {'─'*5}")
 
     for i, row in enumerate(rows, 1):
         x = row.get("X", "")[:3]
@@ -2854,10 +2948,11 @@ def _bulk_editor_view(rows):
         m = (row.get("Marble", "0") or "0")[:6]
         c = (row.get("Crystal", "0") or "0")[:6]
         s = (row.get("Sulphur", "0") or "0")[:6]
-        t = (row.get("Transport", "m") or "m")[0]
+        t_raw = (row.get("Transport", "m") or "m")[0].lower()
+        t = "M" if t_raw == "m" else "F"
         fr = (row.get("From", "a") or "a")[:5]
         print(f"  {i:<4} {x:>3} {y:>3} {player:<14} {city:<16} "
-              f"{w:>6} {v:>6} {m:>6} {c:>6} {s:>6} {t} {fr:<5}")
+              f"{w:>6} {v:>6} {m:>6} {c:>6} {s:>6} {t:>4} {fr:<5}")
 
     print(f"\n  {len(rows)} row(s)\n")
     enter()
@@ -2986,12 +3081,12 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
             print(f"CSV file (Enter to reuse last: {saved_csv}):")
         else:
             print("Enter the full path to your CSV file:")
-        print("(Columns: Transport, X, Y, Player, City, City_Location, "
-              "Wood, Wine, Marble, Crystal, Sulphur, From, Hours, Issues)")
-        print("(Transport: m = merchant ships, f = freighters)")
-        print("(Resource values: 500 = send 500, e0 = send all, "
-              "e10000 = send all except 10k)")
-        print("(From: a = all cities, 1,3,5 = specific cities)")
+        print("CSV columns: Transport, X, Y, Player, City, City_Location,")
+        print("  Wood, Wine, Marble, Crystal, Sulphur, From, Hours, Issues")
+        print("  Transport: m = merchant ships, f = freighters")
+        print("  Resources: 500 = send 500, e0 = send all,")
+        print("             e10000 = send all except 10,000")
+        print("  From: a = all your cities, or city numbers like 1,3,5")
         print("(') Back to main menu\n")
         csv_input = read(msg="CSV path: ", empty=True, additionalValues=["'"])
         if csv_input == "'":
@@ -3664,7 +3759,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         src_confirmed = False
         while not src_confirmed:
             src_msg = ("Select source cities to send from.\n"
-                       "  (Exclude cities you don't want to use.)\n"
+                       "  Click a city to add or remove it.\n"
                        "  After confirming, you can set reserve protection per city.")
             source_city_ids, source_cities = rtm_ignoreCities(session, msg=src_msg)
             if not source_city_ids:
@@ -3998,15 +4093,15 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
     if worker_running:
         transport_csv_update(session, sid, status="active")
         print(f"\n  Schedule #{sid} ({mode_label}) saved and activated.")
-        print(f"  Worker is already running — it will pick it up within "
-              f"{TICK_BUDGET_SECONDS}s.")
+        print(f"  Background scheduler is running — it will start this "
+              f"within {TICK_BUDGET_SECONDS}s.")
         enter()
         event.set()
         return
 
     print(f"\n  Schedule #{sid} ({mode_label}) saved.")
-    print(f"  (1) Activate now (start background worker)")
-    print(f"  (2) Return to menu (activate later from Manage Schedules)")
+    print(f"  (1) Start now (launches background scheduler)")
+    print(f"  (2) Return to menu (start later from Manage Schedules)")
     choice = read(min=1, max=2, digit=True)
 
     if choice == 2:
@@ -4020,7 +4115,7 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
     wlock = transport_worker_lock_path(session)
     if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
-        print("  Worker started by another process — "
+        print("  Scheduler started by another process — "
               "it will pick up the schedule.")
         enter()
         event.set()
@@ -4888,10 +4983,10 @@ def _activate_transport_worker(session, event):
 
     wlock = transport_worker_lock_path(session)
     if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
-        print("  Another transport worker is already running for this account.")
-        print(f"  Lock file: {wlock}")
-        print("  Use 'Stop worker' to stop it, or remove the lock file")
-        print("  if you're sure no worker is running.")
+        print("  A background scheduler is already running for this account.")
+        print("  Use option 6 'Stop background scheduler' first.")
+        print("  If you're sure nothing is running, delete this file:")
+        print(f"    {wlock}")
         enter()
         return
 
@@ -5029,18 +5124,18 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
         paused_ct = counts.get("paused", 0)
         worker_running = _is_transport_worker_running(session)
 
-        print_module_banner("Transport Schedule Manager")
-        print(f"  CSV: {transport_csv_path(session)}")
+        print_module_banner("Schedule Manager")
         print(f"  Schedules: {total} total "
-              f"({active_ct} active, {pending_ct} pending, {paused_ct} paused)")
-        print(f"  Worker: {'RUNNING' if worker_running else 'stopped'}\n")
+              f"({active_ct} active, {pending_ct} waiting, {paused_ct} paused)")
+        status_label = "RUNNING" if worker_running else "NOT RUNNING"
+        print(f"  Background scheduler: {status_label}\n")
 
         print("(1) View schedules")
         print("(2) Modify schedule")
         print("(3) Pause/resume schedule")
         print("(4) Delete schedule(s)")
-        print("(5) Activate transport worker")
-        print("(6) Stop transport worker")
+        print("(5) Start background scheduler")
+        print("(6) Stop background scheduler")
         print("(') Back")
 
         choice = read(min=1, max=6, digit=True, additionalValues=["'"])
@@ -5070,15 +5165,18 @@ def _view_schedules(session):
         enter()
         return
 
-    print(f"\n  {'ID':>4} {'Mode':<13} {'Status':<10} {'Interval':<10} "
-          f"{'Ship':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}")
+    print(f"\n  {'ID':>4} {'Mode':<13} {'Status':<10} {'Repeat':<10} "
+          f"{'Ships':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}")
     print(f"  {'---':>4} {'---':<13} {'---':<10} {'---':<10} "
           f"{'---':<5} {'---':>6} {'---':<12} {'---'}")
 
+    _status_display = {"pending": "waiting", "active": "active",
+                        "paused": "paused", "completed": "done",
+                        "error": "error"}
     for r in rows:
         sid = r.get("schedule_id", "?")
         mode = r.get("mode", "?").capitalize()
-        status = r.get("status", "?")
+        status = _status_display.get(r.get("status", "?"), r.get("status", "?"))
         interval = r.get("interval_hours", 0)
         ship = "F" if r.get("ship_type", "m") == "f" else "M"
         total_sent = r.get("total_shipments", 0)
@@ -5111,10 +5209,12 @@ def _view_schedule_detail(sched):
     notes = sched.get("notes", "") or ""
     notif = sched.get("notif_level", "none")
 
+    _sd = {"pending": "waiting", "active": "active", "paused": "paused",
+           "completed": "done", "error": "error"}
     print(f"\n  Schedule #{sid}")
     print(f"  {'─' * 40}")
     print(f"  Mode:          {mode.capitalize()}")
-    print(f"  Status:        {status}")
+    print(f"  Status:        {_sd.get(status, status)}")
     print(f"  Ship type:     {ship}")
     print(f"  Interval:      {'one-shot' if interval == 0 else f'{interval}h'}")
     print(f"  Notifications: {notif}")
@@ -5137,25 +5237,47 @@ def _view_schedule_detail(sched):
 
     src_ids = sched.get("source_city_ids") or []
     if src_ids:
-        print(f"  Source IDs:    {src_ids}")
+        count = len(src_ids) if isinstance(src_ids, list) else 1
+        print(f"  Sources:       {count} city/cities (IDs: {', '.join(str(s) for s in src_ids)})")
     dest_ids = sched.get("dest_city_ids") or []
     if dest_ids:
-        print(f"  Dest IDs:      {dest_ids}")
+        count = len(dest_ids) if isinstance(dest_ids, list) else 1
+        print(f"  Destinations:  {count} city/cities (IDs: {', '.join(str(d) for d in dest_ids)})")
     res_cfg = sched.get("resource_config")
     if res_cfg:
-        print(f"  Resources:     {res_cfg}")
+        mode = sched.get("mode", "")
+        if mode == "even" and isinstance(res_cfg, list):
+            named = [materials_names[i] if i < len(materials_names) else f"#{i}"
+                     for i in res_cfg]
+            print(f"  Balancing:     {', '.join(named)}")
+        elif isinstance(res_cfg, list) and len(res_cfg) == len(materials_names):
+            print(f"  Resources:     {_format_resource_list(res_cfg)}")
+        else:
+            print(f"  Resources:     {res_cfg}")
     send_mode = sched.get("send_mode", "na")
     if send_mode != "na":
-        print(f"  Send mode:     {send_mode}")
+        labels = {"keep": "Keep reserves (send all except X)",
+                  "send": "Send specific amounts"}
+        print(f"  Send mode:     {labels.get(send_mode, send_mode)}")
     dest_min = sched.get("dest_minimums")
     if dest_min and any(d for d in dest_min if d):
-        print(f"  Dest minimums: {dest_min}")
+        print(f"  Send if below: {_format_resource_list(dest_min)}")
     dest_tgt = sched.get("dest_targets")
     if dest_tgt:
-        print(f"  Dest targets:  {dest_tgt}")
+        print(f"  Top-up targets:")
+        if isinstance(dest_tgt, dict):
+            for cid, vals in dest_tgt.items():
+                print(f"    City {cid}: {_format_resource_list(vals)}")
+        else:
+            print(f"    {dest_tgt}")
     src_res = sched.get("source_reserves")
     if src_res:
-        print(f"  Src reserves:  {src_res}")
+        print(f"  Src reserves:")
+        if isinstance(src_res, dict):
+            for cid, vals in src_res.items():
+                print(f"    City {cid}: {_format_resource_list(vals)}")
+        else:
+            print(f"    {src_res}")
     bulk_csv = sched.get("bulk_csv_path", "")
     if bulk_csv:
         print(f"  Bulk CSV:      {bulk_csv}")
@@ -5206,8 +5328,10 @@ def _modify_schedule(session):
         print("  (3) Notes")
         print("  (4) Notification level")
         print("  (5) Resources")
-        print("  (6) Send mode (consolidate only)")
-        print("  (7) Destination minimums")
+        is_consolidate = target.get("mode") == "consolidate"
+        if is_consolidate:
+            print("  (6) Send mode")
+        print("  (7) Send-only-if-below targets")
         print("  (') Back")
 
         choice = read(min=1, max=7, digit=True, additionalValues=["'"])
@@ -5255,7 +5379,7 @@ def _modify_schedule(session):
         elif choice == 4:
             current = target.get("notif_level", "none")
             print(f"\n  Current: {current}")
-            print("  (1) Partial  (2) All  (3) None")
+            print("  (1) Partial  (2) All  (3) Errors only")
             nl = read(min=1, max=3, digit=True, additionalValues=["'"])
             if nl == "'":
                 continue
@@ -5269,14 +5393,16 @@ def _modify_schedule(session):
             current = target.get("resource_config") or []
             mode = target.get("mode", "")
             if mode == "even":
-                print(f"\n  Current resource indices: {current}")
-                print("  Enter new indices (comma-separated, e.g. 0,2,4):")
-                print("  0=Wood, 1=Wine, 2=Marble, 3=Crystal, 4=Sulphur")
+                named = [materials_names[i] if i < len(materials_names)
+                         else f"#{i}" for i in (current or [])]
+                print(f"\n  Currently balancing: {', '.join(named) or '(none)'}")
+                print("  Enter resource numbers (comma-separated, e.g. 1,3,5):")
+                print("  1=Wood, 2=Wine, 3=Marble, 4=Crystal, 5=Sulphur")
                 raw = read(additionalValues=["'"])
                 if raw == "'":
                     continue
                 try:
-                    indices = [int(x.strip()) for x in raw.split(",")]
+                    indices = [int(x.strip()) - 1 for x in raw.split(",")]
                     indices = [i for i in indices if 0 <= i < len(materials_names)]
                 except ValueError:
                     print("  Invalid input.")
@@ -5285,10 +5411,10 @@ def _modify_schedule(session):
                 transport_csv_update(session, sid, resource_config=indices)
                 target["resource_config"] = indices
             else:
-                print(f"\n  Current resources: {current}")
+                print(f"\n  Current: {_format_resource_list(current) if isinstance(current, list) and len(current) == len(materials_names) else current}")
                 print("  Enter new amounts (5 values, comma-separated):")
                 print("  Wood,Wine,Marble,Crystal,Sulphur")
-                print("  (Use 0 to skip, blank=keep current)")
+                print("  (0 = skip this resource, blank = keep current)")
                 raw = read(msg="  > ", empty=True, additionalValues=["'"])
                 if raw == "'" or not raw.strip():
                     continue
@@ -5307,8 +5433,8 @@ def _modify_schedule(session):
             print(f"  Resources updated.")
 
         elif choice == 6:
-            if target.get("mode") != "consolidate":
-                print("  Send mode only applies to consolidate.")
+            if not is_consolidate:
+                print("  Send mode is only available for Consolidate schedules.")
                 enter()
                 continue
             current = target.get("send_mode", "send")
@@ -5325,9 +5451,10 @@ def _modify_schedule(session):
 
         elif choice == 7:
             current = target.get("dest_minimums") or [0, 0, 0, 0, 0]
-            print(f"\n  Current minimums: {current}")
-            print("  Enter new minimums (5 values, comma-separated):")
-            print("  Wood,Wine,Marble,Crystal,Sulphur (0 = no minimum)")
+            print(f"\n  Current: {_format_resource_list(current)}")
+            print("  Enter new targets (5 values, comma-separated):")
+            print("  Wood,Wine,Marble,Crystal,Sulphur")
+            print("  (Only sends when destination has less than this, 0 = always send)")
             raw = read(msg="  > ", empty=True, additionalValues=["'"])
             if raw == "'" or not raw.strip():
                 continue
@@ -5382,15 +5509,17 @@ def _toggle_schedule_pause(session):
     current_status = target.get("status", "")
     if current_status == "active":
         transport_csv_update(session, sid, status="paused")
-        print(f"  Schedule #{sid} paused.")
+        print(f"  Schedule #{sid} paused. It won't run until you resume it.")
     elif current_status == "paused":
         transport_csv_update(session, sid, status="active")
-        print(f"  Schedule #{sid} resumed.")
+        print(f"  Schedule #{sid} resumed. It will run on its next scheduled time.")
     elif current_status == "pending":
         transport_csv_update(session, sid, status="active")
-        print(f"  Schedule #{sid} activated.")
+        print(f"  Schedule #{sid} activated. Start the background scheduler to run it.")
     else:
-        print(f"  Schedule #{sid} has status '{current_status}' and cannot be toggled.")
+        _sd = {"completed": "done", "error": "error"}
+        label = _sd.get(current_status, current_status)
+        print(f"  Schedule #{sid} is '{label}' and cannot be paused/resumed.")
     enter()
 
 
