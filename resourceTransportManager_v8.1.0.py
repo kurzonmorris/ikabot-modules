@@ -4199,7 +4199,15 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
 
     dest_city_id = str(dest_city_ids[0])
     html = session.get(city_url + dest_city_id)
-    destination_city = getCity(html)
+    try:
+        destination_city = getCity(html)
+    except (AttributeError, TypeError, KeyError):
+        if should_notify(notif_config, "error"):
+            sendToBot(session,
+                      f"CONSOLIDATE ERROR\n"
+                      f"Could not load destination city (ID: {dest_city_id}).\n"
+                      f"Session may have expired or city no longer exists.")
+        return 0
     dest_isl_id = destination_city["islandId"]
     html_isl = session.get(island_url + str(dest_isl_id))
     island = getIsland(html_isl)
@@ -4208,7 +4216,10 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
     cycle_sent = 0
     for cid in source_city_ids:
         html = session.get(city_url + str(cid))
-        oc_fresh = getCity(html)
+        try:
+            oc_fresh = getCity(html)
+        except (AttributeError, TypeError, KeyError):
+            continue
 
         toSend = [0] * len(materials_names)
         total = 0
@@ -4264,14 +4275,20 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
 
     for dcid in dest_city_ids:
         html = session.get(city_url + str(dcid))
-        dest_city = getCity(html)
+        try:
+            dest_city = getCity(html)
+        except (AttributeError, TypeError, KeyError):
+            continue
         dest_isl_id = dest_city["islandId"]
         html_isl = session.get(island_url + str(dest_isl_id))
         dest_island = getIsland(html_isl)
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
 
         html = session.get(city_url + src_city_id)
-        origin_city = getCity(html)
+        try:
+            origin_city = getCity(html)
+        except (AttributeError, TypeError, KeyError):
+            return cycle_sent
 
         toSend = [0] * len(materials_names)
         total = 0
@@ -4324,7 +4341,10 @@ def run_topup_cycle(session, sched, notif_config, log_path):
             continue
 
         html = session.get(city_url + dcid_str)
-        dest_fresh = getCity(html)
+        try:
+            dest_fresh = getCity(html)
+        except (AttributeError, TypeError, KeyError):
+            continue
         dest_isl_id = dest_fresh["islandId"]
         html_isl = session.get(island_url + str(dest_isl_id))
         dest_island = getIsland(html_isl)
@@ -4345,7 +4365,10 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                 break
 
             html = session.get(city_url + cid_str)
-            src_fresh = getCity(html)
+            try:
+                src_fresh = getCity(html)
+            except (AttributeError, TypeError, KeyError):
+                continue
             reserves = source_reserves.get(cid_str, [0] * len(materials_names))
             to_send = [0] * len(materials_names)
             for i in range(len(materials_names)):
@@ -4364,8 +4387,11 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                 )
                 if result["success"]:
                     cycle_sent += 1
-                    html = session.get(city_url + dcid_str)
-                    dest_fresh = getCity(html)
+                    try:
+                        html = session.get(city_url + dcid_str)
+                        dest_fresh = getCity(html)
+                    except (AttributeError, TypeError, KeyError):
+                        break
 
     return cycle_sent
 
@@ -4382,7 +4408,10 @@ def run_even_cycle(session, sched, notif_config, log_path):
     all_cities = []
     for cid in city_ids:
         html = session.get(city_url + str(cid))
-        all_cities.append(getCity(html))
+        try:
+            all_cities.append(getCity(html))
+        except (AttributeError, TypeError, KeyError):
+            continue
 
     if not all_cities:
         return 0
@@ -4462,7 +4491,10 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
 
     dest_city_id = str(dest_city_ids[0])
     html = session.get(city_url + dest_city_id)
-    destination_city = getCity(html)
+    try:
+        destination_city = getCity(html)
+    except (AttributeError, TypeError, KeyError):
+        return 0
     html = session.get(island_url + destination_city["islandId"])
     destination_island = getIsland(html)
 
@@ -4473,7 +4505,10 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
         if str(cid) == dest_city_id:
             continue
         html_c = session.get(city_url + str(cid))
-        suppliers.append(getCity(html_c))
+        try:
+            suppliers.append(getCity(html_c))
+        except (AttributeError, TypeError, KeyError):
+            continue
 
     if not suppliers:
         return 0
