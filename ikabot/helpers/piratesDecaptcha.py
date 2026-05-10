@@ -6,12 +6,11 @@ import requests
 
 try:
     from onnxruntime_inference_collection import InferenceSession # Ignore, this only works if you have the onnxruntime_pybind11_state.pyd file for win
-except:                                                           # or onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so for linux
+except Exception:                                                 # or onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so for linux
     try:
         from onnxruntime import InferenceSession
-    except:
-        print('ERROR: COULD NOT FIND ONNXRUNTIME INFERENCE SESSION!')
-        raise
+    except Exception:
+        InferenceSession = None
 
 if os.name == 'nt':
     _temp = os.getenv('temp') or os.getenv('TMP') or os.getenv('TEMP') or '.'
@@ -25,6 +24,11 @@ session = None
 
 def _load_model():
     global session
+    if InferenceSession is None:
+        raise RuntimeError(
+            'onnxruntime is not installed — pirates captcha solving is unavailable.\n'
+            'Fix: pip install onnxruntime'
+        )
     if session is not None:
         return session
 
