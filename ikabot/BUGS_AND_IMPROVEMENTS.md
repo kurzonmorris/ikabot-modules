@@ -1,7 +1,7 @@
 # Ikabot — Bugs, Issues & Improvement Plan
 
 Working branch: `ikafixed`
-All fixes go into `/ikafixed/` (copy of `ikabot-master`).
+All fixes go into `/ikabot/` (copy of `ikabot-master`).
 
 ---
 

@@ -1,9 +1,9 @@
 """
-Credential vault for ikafixed.
+Credential vault for ikabot.
 
 Stores game account credentials (email, password, blackbox token, lobby
 cookie) encrypted under a master-password-derived PBKDF2 key. The vault
-file lives at ~/.ikafixed_vault and is never shared with .ikabot.
+file lives at ~/.ikabot_vault and is never shared with .ikabot.
 
 Master password is NEVER written to disk. Wrong password is detected
 automatically by AES-GCM authentication-tag failure on first decrypt.
@@ -48,7 +48,7 @@ def _vault_path() -> str:
         base = os.environ.get("USERPROFILE", os.path.expanduser("~"))
     else:
         base = os.path.expanduser("~")
-    return os.path.join(base, ".ikafixed_vault")
+    return os.path.join(base, ".ikabot_vault")
 
 
 def _derive_key(master_pw: str, salt_bytes: bytes) -> bytes:
@@ -210,7 +210,7 @@ class VaultSession:
 # ---------------------------------------------------------------------------
 
 def vault_exists() -> bool:
-    """Return True if an ikafixed vault file is present."""
+    """Return True if an ikabot vault file is present."""
     return os.path.isfile(_vault_path())
 
 

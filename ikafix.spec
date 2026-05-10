@@ -6,14 +6,14 @@
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
-# Collect every file inside the ikafixed package (submodules, locale, etc.)
-datas, binaries, hiddenimports = collect_all('ikafixed')
+# Collect every file inside the ikabot package (submodules, locale, etc.)
+datas, binaries, hiddenimports = collect_all('ikabot')
 
 # Also pull in the locale data files explicitly
-datas += collect_data_files('ikafixed', includes=['locale/**/*'])
+datas += collect_data_files('ikabot', includes=['locale/**/*'])
 
 a = Analysis(
-    ['ikafixed/__main__.py'],
+    ['ikabot/__main__.py'],
     pathex=['.'],
     binaries=binaries,
     datas=datas,
