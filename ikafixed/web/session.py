@@ -30,15 +30,28 @@ from ikabot.helpers.lobbyDecaptcha import break_interactive_captcha
 
 
 class Session:
-    def __init__(self):
+    def __init__(self, mail: str = None, password: str = None,
+                 blackbox: str = None, lobby_token: str = None):
         self.padre = True
         self.logged = False
         self.blackbox = None
+        self._vault_blackbox = blackbox      # stored blackbox token from vault (may be None)
+        self._vault_lobby_token = lobby_token  # stored lobby token from vault (may be None)
         self.logger = getLogger(__name__)
         self.requestHistory = deque(maxlen=5)  # keep last 5 requests in history
         # disable ssl verification warning
         requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
-        self.__login()
+        self.__login(mail=mail, password=password)
+
+    @property
+    def current_blackbox(self) -> str:
+        """The blackbox token used or generated during the most recent login."""
+        return self.blackbox
+
+    @property
+    def current_lobby_token(self) -> str:
+        """The gf-token-production cookie active after login, or None."""
+        return self.s.cookies.get("gf-token-production") if hasattr(self, "s") else None
 
     def setStatus(self, message):
         """This function will modify the current tasks status message that appears in the table on the main menu
@@ -156,22 +169,26 @@ class Session:
 
     def __test_server_maintenace(self, html):
         match = re.search(
-            r'\[\["provideFeedback",\[{"location":1,"type":11,"text":([\S\s]*)}\]\]\]',
+            r'\[\["provideFeedback",\[{"location":1,"type":11,"text":([\S\s]*)\}\]\]\]',
             html,
         )
         if (
             match
             and '[["provideFeedback",[{"location":1,"type":11,"text":'
             + match.group(1)
-            + "}]]]"
-            == html
+            + "}]]]" == html
         ):
             return True
         if "backupLockTimer" in html:
             return True
         return False
 
-    def __load_new_blackbox_token(self):
+    def __load_new_blackbox_token(self, stored_blackbox: str = None):
+        # Fast-path: use a stored token from the vault (no API call needed).
+        if stored_blackbox:
+            self.logger.info("Using stored blackbox token from vault.")
+            self.blackbox = stored_blackbox
+            return
         try:
             if self.padre:
                 print("Obtaining new blackbox token, please wait...")
@@ -199,16 +216,21 @@ class Session:
             self.blackbox = 'tra:' + token
             enter()
 
-    def __login(self, retries=0):
+    def __login(self, retries=0, mail: str = None, password: str = None):
         if not self.logged:
             banner()
 
-            self.mail = read(msg="Mail:")
-
-            if len(config.predetermined_input) != 0:
-                self.password = config.predetermined_input.pop(0)
+            if mail is not None and password is not None:
+                # Vault fast-path: credentials supplied programmatically.
+                self.mail = mail
+                self.password = password
             else:
-                self.password = getpass.getpass("Password:")
+                self.mail = read(msg="Mail:")
+
+                if len(config.predetermined_input) != 0:
+                    self.password = config.predetermined_input.pop(0)
+                else:
+                    self.password = getpass.getpass("Password:")
 
             banner()
 
@@ -218,6 +240,15 @@ class Session:
         self.s = requests.Session()
         self.cipher = AESCipher(self.mail, self.password)
         self.logger.info("__login()")
+
+        # If the vault supplied a lobby token, try it before the .ikabot cache.
+        if self._vault_lobby_token and not self.logged:
+            cookie_obj = requests.cookies.create_cookie(
+                domain=".gameforge.com",
+                name="gf-token-production",
+                value=self._vault_lobby_token,
+            )
+            self.s.cookies.set_cookie(cookie_obj)
 
         # test to see if the lobby cookie in the session file is valid, this will save time on login and will reduce use of blackbox token
         sessionData = self.getSessionData()
@@ -232,7 +263,9 @@ class Session:
         if not self.__test_lobby_cookie():
 
             self.logger.warning("Getting new lobby cookie")
-            self.__load_new_blackbox_token()
+            # Try the stored vault blackbox first; if Gameforge rejects it the
+            # auth block below will detect the failure and retry without it.
+            self.__load_new_blackbox_token(stored_blackbox=self._vault_blackbox)
 
             # get gameEnvironmentId and platformGameId
             self.headers = {
@@ -602,6 +635,17 @@ class Session:
                             continue
                         else:
                             break
+
+            if 'token' not in r.text and self._vault_blackbox:
+                # Stored blackbox token was rejected by Gameforge; discard it
+                # and retry once with a freshly fetched token from the API.
+                self.logger.warning("Stored vault blackbox token rejected; fetching fresh token from API.")
+                self._vault_blackbox = None
+                self.__load_new_blackbox_token()
+                data["blackbox"] = self.blackbox
+                r = self.s.post(
+                    "https://spark-web.gameforge.com/api/v2/authProviders/mauth/sessions", json=data
+                )
 
             if 'token' not in r.text:
                 print("Failed to log in...")

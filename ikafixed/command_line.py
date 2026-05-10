@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import datetime
+import getpass
 import multiprocessing
 import os
 import sys
@@ -55,6 +56,10 @@ from ikabot.function.UpgradeUnits import UpgradeUnits
 from ikabot.function.modifyProduction import modifyProduction
 from ikabot.function.developer import developer
 from ikabot.helpers.pluginLoader import discover_plugins
+from ikabot.helpers.credentialStore import (
+    vault_exists, create_vault, open_vault,
+    VaultWrongPasswordError, VaultCorruptError, VaultVersionError,
+)
 
 
 def menu(session, checkUpdate=True):
@@ -287,10 +292,15 @@ def menu(session, checkUpdate=True):
         print("(7) Import / Export cookie")
         print("(8) Load custom ikabot module")
         print("(9) Developer Data")
+        print("(10) Manage credential vault")
 
-        selected = read(min=0, max=9, digit=True)
+        selected = read(min=0, max=10, digit=True)
         if selected == 0:
             menu(session)
+            return
+        if selected == 10:
+            _manage_vault_menu(session)
+            menu(session, checkUpdate=False)
             return
         if selected > 0:
             selected += 2100
@@ -367,6 +377,222 @@ def init():
         os.chmod(ikaFile, 0o600)
 
 
+# ---------------------------------------------------------------------------
+# Credential vault helpers
+# ---------------------------------------------------------------------------
+
+def _prompt_vault_login():
+    """Prompt for master password, show account list, return (creds, vault_session, index).
+
+    Returns (None, None, None) if the user chooses manual login or the vault
+    cannot be opened.
+    """
+    MAX_ATTEMPTS = 3
+    vault_session = None
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        master_pw = getpass.getpass(
+            f"Vault master password (attempt {attempt}/{MAX_ATTEMPTS}): "
+        )
+        try:
+            vault_session = open_vault(master_pw)
+            break
+        except VaultWrongPasswordError:
+            print("Wrong master password.")
+            if attempt == MAX_ATTEMPTS:
+                print("\n(M) Log in manually    (Q) Quit")
+                choice = read(values=["m", "M", "q", "Q"])
+                if choice.lower() == "q":
+                    sys.exit(0)
+                return None, None, None
+        except (VaultCorruptError, VaultVersionError) as exc:
+            print(f"Vault error: {exc}")
+            print("Falling back to manual login.")
+            return None, None, None
+
+    accounts = vault_session.list_accounts()
+    if not accounts:
+        print("Vault is empty — falling back to manual login.")
+        enter()
+        return None, None, None
+
+    banner()
+    print("Stored accounts:\n")
+    for idx, label in accounts:
+        print(f"  ({idx + 1}) {label}")
+    print(f"  (0) Log in manually\n")
+
+    choice = read(min=0, max=len(accounts), digit=True)
+    if choice == 0:
+        return None, None, None
+
+    acct_idx = choice - 1
+    try:
+        creds = vault_session.get_credentials(acct_idx)
+    except VaultWrongPasswordError:
+        print("Credential decryption failed — vault may be corrupt.")
+        enter()
+        return None, None, None
+
+    return creds, vault_session, acct_idx
+
+
+def _offer_save_to_vault(session):
+    """After a manual login, offer to save credentials + tokens to the vault."""
+    if not session.padre:
+        return
+
+    print("\nWould you like to save these credentials to the vault for auto-login? [y/N]")
+    choice = read(values=["y", "Y", "n", "N", ""], empty=True, default="n")
+    if choice.lower() != "y":
+        return
+
+    if not vault_exists():
+        print("\nCreating a new vault. Choose a master password.")
+        print("This password protects all stored accounts — do not forget it.\n")
+        master_pw = getpass.getpass("New master password: ")
+        confirm_pw = getpass.getpass("Confirm master password: ")
+        if master_pw != confirm_pw:
+            print("Passwords do not match. Vault not created.")
+            enter()
+            return
+        try:
+            vault_session = create_vault(master_pw)
+        except Exception as exc:
+            print(f"Failed to create vault: {exc}")
+            enter()
+            return
+    else:
+        master_pw = getpass.getpass("Vault master password: ")
+        try:
+            vault_session = open_vault(master_pw)
+        except VaultWrongPasswordError:
+            print("Wrong master password. Credentials not saved.")
+            enter()
+            return
+        except (VaultCorruptError, VaultVersionError) as exc:
+            print(f"Vault error: {exc}. Credentials not saved.")
+            enter()
+            return
+
+    default_label = f"{session.username} - {session.servidor} {session.mundo}"
+    label_input = read(empty=True, default=default_label,
+                       msg=f"Account label (default: '{default_label}'): ")
+    label = label_input if label_input else default_label
+
+    vault_session.add_account(
+        label,
+        session.mail,
+        session.password,
+        blackbox=session.current_blackbox,
+        lobby_token=session.current_lobby_token,
+    )
+    print(f"\nCredentials saved to vault as '{label}'.")
+    enter()
+
+
+def _manage_vault_menu(session):
+    """Settings sub-menu for vault management."""
+    while True:
+        banner()
+        print("Credential Vault")
+        print("(0) Back")
+        print("(1) List stored accounts")
+        print("(2) Add current account to vault")
+        print("(3) Remove an account from vault")
+        print("(4) Change master password")
+
+        choice = read(min=0, max=4, digit=True)
+        if choice == 0:
+            return
+        elif choice == 1:
+            _vault_list_accounts()
+        elif choice == 2:
+            _offer_save_to_vault(session)
+        elif choice == 3:
+            _vault_remove_account()
+        elif choice == 4:
+            _vault_change_master_password()
+
+
+def _vault_list_accounts():
+    if not vault_exists():
+        print("No vault found.")
+        enter()
+        return
+    master_pw = getpass.getpass("Master password: ")
+    try:
+        vs = open_vault(master_pw)
+    except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
+        print(f"Could not open vault: {exc}")
+        enter()
+        return
+    accounts = vs.list_accounts()
+    if not accounts:
+        print("Vault is empty.")
+    else:
+        print()
+        for idx, label in accounts:
+            print(f"  ({idx + 1}) {label}")
+    enter()
+
+
+def _vault_remove_account():
+    if not vault_exists():
+        print("No vault found.")
+        enter()
+        return
+    master_pw = getpass.getpass("Master password: ")
+    try:
+        vs = open_vault(master_pw)
+    except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
+        print(f"Could not open vault: {exc}")
+        enter()
+        return
+    accounts = vs.list_accounts()
+    if not accounts:
+        print("Vault is empty.")
+        enter()
+        return
+    print("\nSelect account to remove:")
+    print("  (0) Cancel")
+    for idx, label in accounts:
+        print(f"  ({idx + 1}) {label}")
+    choice = read(min=0, max=len(accounts), digit=True)
+    if choice == 0:
+        return
+    vs.remove_account(choice - 1)
+    print("Account removed.")
+    enter()
+
+
+def _vault_change_master_password():
+    if not vault_exists():
+        print("No vault found.")
+        enter()
+        return
+    old_pw = getpass.getpass("Current master password: ")
+    try:
+        vs = open_vault(old_pw)
+    except VaultWrongPasswordError:
+        print("Wrong master password.")
+        enter()
+        return
+    except (VaultCorruptError, VaultVersionError) as exc:
+        print(f"Vault error: {exc}")
+        enter()
+        return
+    new_pw = getpass.getpass("New master password: ")
+    confirm_pw = getpass.getpass("Confirm new master password: ")
+    if new_pw != confirm_pw:
+        print("Passwords do not match. Password not changed.")
+        enter()
+        return
+    vs.change_master_password(new_pw)
+    print("Master password changed successfully.")
+    enter()
+
+
 def start():
     init()
     config.has_params = len(sys.argv) > 1
@@ -377,7 +603,28 @@ def start():
             config.predetermined_input.append(arg)
     config.predetermined_input.pop(0)
 
-    session = Session()
+    creds, vault_session, acct_idx = None, None, None
+    if vault_exists():
+        creds, vault_session, acct_idx = _prompt_vault_login()
+
+    if creds is not None:
+        session = Session(
+            mail=creds["email"],
+            password=creds["password"],
+            blackbox=creds.get("blackbox"),
+            lobby_token=creds.get("lobby_token"),
+        )
+        # Refresh stored tokens with the ones actually used / generated during login.
+        if vault_session is not None:
+            vault_session.update_tokens(
+                acct_idx,
+                blackbox=session.current_blackbox,
+                lobby_token=session.current_lobby_token,
+            )
+    else:
+        session = Session()
+        _offer_save_to_vault(session)
+
     try:
         menu(session)
     finally:
