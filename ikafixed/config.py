@@ -6,9 +6,10 @@ import os
 
 # Version is changed automatically by the release pipeline
 IKABOT_VERSION = "7.3.0"
-
-
 IKABOT_VERSION_TAG = "v" + IKABOT_VERSION
+
+IKAFIX_VERSION = "0.1.0"
+IKAFIX_VERSION_TAG = "ikafix v" + IKAFIX_VERSION
 
 
 
