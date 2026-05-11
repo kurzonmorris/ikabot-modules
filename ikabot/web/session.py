@@ -891,7 +891,7 @@ class Session:
             skipGetCookie = False
             if "url" not in respJson:
                 if retries > 0:
-                    return self.__login(retries - 1)
+                    return self.__login(retries - 1, mail=self.mail, password=self.password)
                 else:  # 403 is for bad user/pass and 400 is bad blackbox token?
                     msg = (
                         "Login Error: "
@@ -986,14 +986,14 @@ class Session:
                 print(msg)
             else:
                 sendToBot(self, msg)
-            os._exit(0)
+            sys.exit(0)
         if self.__isExpired(html):
             if retries > 0:
-                return self.__login(retries - 1)
+                return self.__login(retries - 1, mail=self.mail, password=self.password)
             if self.padre:
                 msg = "Login error."
                 print(msg)
-                os._exit(0)
+                sys.exit(msg)
             raise Exception("Couldn't log in")
 
         if not used_old_cookies:
@@ -1040,7 +1040,7 @@ class Session:
                 print(msg)
             else:
                 sendToBot(self, msg)
-            os._exit(1)
+            sys.exit(1)
 
         self.__backoff()
         sessionData = self.getSessionData()
