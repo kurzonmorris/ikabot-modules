@@ -52,7 +52,13 @@ class Session:
     @property
     def current_lobby_token(self) -> str:
         """The gf-token-production cookie active after login, or None."""
-        return self.s.cookies.get("gf-token-production") if hasattr(self, "s") else None
+        if not hasattr(self, "s"):
+            return None
+        # Use iteration to avoid CookieConflictError when duplicate cookies exist
+        for cookie in self.s.cookies:
+            if cookie.name == "gf-token-production":
+                return cookie.value
+        return None
 
     def setStatus(self, message):
         """This function will modify the current tasks status message that appears in the table on the main menu
