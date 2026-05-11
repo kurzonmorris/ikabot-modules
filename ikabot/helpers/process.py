@@ -26,10 +26,12 @@ def run(command):
     ret = subprocess.Popen(
         command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     ).stdout.read()
-    try:
-        return ret.decode("utf-8").strip()
-    except Exception:
-        return ret
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            return ret.decode(enc).strip()
+        except Exception:
+            continue
+    return ret
 
 
 def updateProcessList(session, programprocesslist=[]):

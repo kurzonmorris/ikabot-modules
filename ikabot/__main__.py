@@ -1,3 +1,8 @@
-from ikabot.command_line import main
+import multiprocessing
+import sys
 
-main()
+if __name__ == '__main__':
+    if sys.platform.startswith('win'):
+        multiprocessing.freeze_support()
+    from ikabot.command_line import main
+    main()
