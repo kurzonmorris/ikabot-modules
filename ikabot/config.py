@@ -19,7 +19,9 @@ update_msg = ""
 isWindows = os.name == "nt"
 
 
-LOGS_DIRECTORY = os.getenv("temp", "") if isWindows else os.path.expanduser("~/.ikabot/logs")
+IKABOT_DATA_DIR = os.getenv("APPDATA", os.path.expanduser("~")) + "\\.ikabot" if isWindows else os.path.expanduser("~/.ikabot")
+IKABOT_SESSIONS_DIR = os.path.join(IKABOT_DATA_DIR, "sessions")
+LOGS_DIRECTORY = os.path.join(IKABOT_DATA_DIR, "logs")
 DEFAULT_LOG_LEVEL = 30  # Warning
 
 publicAPIServerDomain = "ikagod.twilightparadox.com"
@@ -29,7 +31,7 @@ cities_cache = None
 has_params = False
 menu_cities = ""
 infoUser = ""
-ikaFile = ".ikabot"
+ikaFile = ".ikabot"  # legacy — no longer used; kept to avoid import errors in old code
 city_url = "view=city&cityId="
 island_url = "view=island&islandId="
 prompt = " >>  "

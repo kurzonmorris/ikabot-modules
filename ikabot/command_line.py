@@ -372,9 +372,7 @@ def menu(session, checkUpdate=True):
 def init():
     home = "USERPROFILE" if isWindows else "HOME"
     os.chdir(os.getenv(home))
-    if not os.path.isfile(ikaFile):
-        open(ikaFile, "w")
-        os.chmod(ikaFile, 0o600)
+    os.makedirs(IKABOT_SESSIONS_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------

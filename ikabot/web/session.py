@@ -993,6 +993,10 @@ class Session:
         # are no-ops because setup_file_logging guards with a flag.
         setup_file_logging(self.username, self.servidor, self.mundo)
 
+        # Rename the session file from the hash-only name to the human-readable
+        # {hash}_{username}_{server}{mundo}.session name now that we have all parts.
+        self.cipher.upgrade_filename(self)
+
         # --- Developer runtime info ---
         self.dev_api_host = self.host
         self.dev_url_base = self.urlBase
