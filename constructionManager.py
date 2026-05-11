@@ -368,6 +368,39 @@ def csv_count_pending(session):
     return sum(1 for r in csv_load(session) if r["status"] == "pending")
 
 
+def _csv_insert_at(session, city_id, new_row_dicts, insert_idx):
+    """Atomically insert new_row_dicts at insert_idx in city_id's pending queue.
+
+    Locked rows (running/shipping) keep their existing queue_ids.
+    All pending rows for the city (existing + new) are renumbered with fresh
+    qids above the global max, in the new desired order.
+    Returns the list of queue_ids assigned to the new rows.
+    """
+    assigned = []
+
+    def _do_insert(rows):
+        city_pending = sorted(
+            [r for r in rows if r["city_id"] == city_id and r["status"] == "pending"],
+            key=lambda r: r["queue_id"],
+        )
+        other = [r for r in rows if not (r["city_id"] == city_id and r["status"] == "pending")]
+
+        clamp = max(0, min(insert_idx, len(city_pending)))
+        new_order = city_pending[:clamp] + list(new_row_dicts) + city_pending[clamp:]
+
+        base_qid = (max(r["queue_id"] for r in rows) + 1) if rows else 1
+        for i, row in enumerate(new_order):
+            row["queue_id"] = base_qid + i
+
+        # Indices of new rows in new_order:  clamp .. clamp+len(new_row_dicts)-1
+        assigned[:] = [base_qid + clamp + i for i in range(len(new_row_dicts))]
+
+        rows[:] = other + new_order
+
+    _csv_modify(session, _do_insert)
+    return assigned
+
+
 def csv_count_cities_with_work(session):
     return len({r["city_id"] for r in csv_load(session)
                 if r["status"] in ("pending", "shipping", "running")})
@@ -849,6 +882,31 @@ def _print_cost_table(header, rows):
 # Interactive add-to-queue flow (menu option 1)
 # ---------------------------------------------------------------------------
 
+def _prompt_insert_position(pending_rows, city_name):
+    """Show numbered pending rows and ask where to insert the new block.
+
+    Returns (insert_idx, None) on success, or (None, 'exit'/'restart').
+    insert_idx=0 means before all pending rows (top); insert_idx=len means append.
+    """
+    n = len(pending_rows)
+    print(f"\n  Where to insert? (pending queue for {city_name})\n")
+    print(f"    0) [top — run right after in-progress]")
+    for i, r in enumerate(pending_rows):
+        print(f"    {i + 1}) after  {r['building']} → lv {r['target_level']}")
+    print(f"    {n + 1}) [bottom — append after all pending]")
+    print(f"\n  Choice [0–{n + 1}, default 0]:")
+    raw = read(min=0, max=n + 1, digit=True, empty=True, additionalValues=["'", "="])
+    if raw == "'":
+        return None, "exit"
+    if raw == "=":
+        return None, "restart"
+    idx = 0 if raw == "" else int(raw)
+    # position n+1 (bottom) = insert after all pending = same as len(pending)
+    if idx == n + 1:
+        idx = n
+    return idx, None
+
+
 def _add_to_queue(session):
     """Interactive: pick a city, pick slots + targets, append rows to CSV."""
     banner()
@@ -1120,23 +1178,22 @@ def _add_to_queue(session):
             tm_choice, "jit"
         )
 
-        # ---- append rows to CSV ----
+        # ---- build row dicts (qid placeholder 0; assigned by _csv_insert_at) ----
         now_ts = int(time.time())
         row_total = [0] * 5
-        next_qid = csv_next_queue_id(session)
-        for i, ((lv, action), cost) in enumerate(zip(rows_to_add, row_costs)):
-            qid = next_qid + i
+        new_row_dicts = []
+        for (lv, action_type), cost in zip(rows_to_add, row_costs):
             notes_val = ""
-            if action == "upgrade" and costs_dict.get(lv) is None:
+            if action_type == "upgrade" and costs_dict.get(lv) is None:
                 notes_val = "cost unknown at add-time; will be recomputed before execution"
-            new_row = {
-                "queue_id":             qid,
+            new_row_dicts.append({
+                "queue_id":             0,
                 "city_id":              city_id,
                 "city_name":            city_name,
                 "slot_position":        slot_pos,
-                "action":               action,
+                "action":               action_type,
                 "building":             building_slug,
-                "building_id":          building_id if action == "build" else "",
+                "building_id":          building_id if action_type == "build" else "",
                 "target_level":         lv,
                 "wood":                 cost[0],
                 "wine":                 cost[1],
@@ -1150,11 +1207,29 @@ def _add_to_queue(session):
                 "added_at":             now_ts,
                 "notes":                notes_val,
                 "schema_version":       SCHEMA_VERSION,
-            }
-            csv_append(session, new_row)
-            added_ids.append(qid)
-            for i in range(5):
-                row_total[i] += cost[i]
+            })
+            for j in range(5):
+                row_total[j] += cost[j]
+
+        # ---- position prompt ----
+        pending_city_rows = sorted(
+            [r for r in csv_load(session)
+             if r["city_id"] == city_id and r["status"] == "pending"],
+            key=lambda r: r["queue_id"],
+        )
+        if pending_city_rows:
+            insert_idx, pos_action = _prompt_insert_position(pending_city_rows, city_name)
+            if pos_action == "exit":
+                exit_to_menu = True
+                break
+            if pos_action == "restart":
+                continue
+        else:
+            insert_idx = 0
+
+        # ---- write to CSV atomically ----
+        assigned_qids = _csv_insert_at(session, city_id, new_row_dicts, insert_idx)
+        added_ids.extend(assigned_qids)
 
         slot_targets += 1
 
