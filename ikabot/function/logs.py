@@ -46,20 +46,16 @@ def logs(session, event, stdin_fd, predetermined_input):
                 print("2) WARNING")
                 print("3) ERROR")
                 choice = read(min=0, max=3, digit=True)
-                if choice == 0:
-                    logging.getLogger().setLevel(logging.DEBUG)
-                elif choice == 1:
-                    logging.getLogger().setLevel(logging.INFO)
-                elif choice == 2:
-                    logging.getLogger().setLevel(logging.WARNING)
-                elif choice == 3:
-                    logging.getLogger().setLevel(logging.ERROR)
+                level_map = {0: logging.DEBUG, 1: logging.INFO, 2: logging.WARNING, 3: logging.ERROR}
+                new_level = level_map[choice]
+                logging.getLogger().setLevel(new_level)
+                session.setSessionData({"logLevel": new_level}, shared=True)
                 print(
-                    "The log level for this session has been set to: "
-                    + logging.getLevelName(logging.getLogger().getEffectiveLevel())
+                    "The log level has been set to: "
+                    + logging.getLevelName(new_level)
                     + "\n"
                 )
-                print(bcolors.WARNING + "Note: this only affects the current interactive session, not background tasks." + bcolors.ENDC)
+                print(bcolors.WARNING + "Note: already-running background tasks are unaffected. New instances and tasks started after this change will use the new level." + bcolors.ENDC)
                 enter()
             else:
                 viewLogs()

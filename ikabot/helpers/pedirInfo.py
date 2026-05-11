@@ -8,6 +8,8 @@ import sys
 from decimal import *
 
 from ikabot import config
+from ikabot.helpers.logging import getLogger
+_logger = getLogger(__name__)
 from ikabot.config import *
 from ikabot.helpers.getJson import *
 from ikabot.helpers.gui import *
@@ -62,7 +64,7 @@ def read(
         if len(config.predetermined_input) != 0:
             return config.predetermined_input.pop(0)
     except Exception:
-        pass
+        _logger.debug("Failed to read predetermined_input", exc_info=True)
     
     def _invalid():
         print("\033[1A\033[K", end="")  # remove line

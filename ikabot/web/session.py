@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import logging
 from ikabot.helpers.logging import getLogger, setup_file_logging
 import base64
 import datetime
@@ -395,7 +396,7 @@ class Session:
                     "https://pixelzirkus.gameforge.com/do/simple", data=data
                 )
             except Exception:
-                pass  # These cookies are not required and sometimes cause issues for people logging in
+                self.logger.debug("Optional pixelzirkus cookie not set (non-fatal)", exc_info=True)
 
             # options req (not really needed)
             self.headers = {
@@ -761,8 +762,8 @@ class Session:
                         for srv in servers
                         if srv["accountGroup"] == account_group
                     ][0]
-                    try: lastlogin =  lastloginTimetoString(account["lastLogin"])
-                    except: lastlogin = 'Unknown'
+                    try: lastlogin = lastloginTimetoString(account["lastLogin"])
+                    except Exception: lastlogin = 'Unknown'
                     
                     i += 1
                     pad = " " * (max_name - len(account["name"]))
@@ -997,6 +998,14 @@ class Session:
         # {hash}_{username}_{server}{mundo}.session name now that we have all parts.
         self.cipher.upgrade_filename(self)
 
+        # Apply the user's saved log level (stored in shared session data).
+        try:
+            saved_level = self.getSessionData().get("shared", {}).get("logLevel")
+            if saved_level is not None:
+                logging.getLogger().setLevel(int(saved_level))
+        except Exception:
+            self.logger.debug("Could not apply saved log level", exc_info=True)
+
         # --- Developer runtime info ---
         self.dev_api_host = self.host
         self.dev_url_base = self.urlBase
@@ -1175,7 +1184,7 @@ class Session:
                     self.dev_ikariam_cookie = cookies.get("ikariam")
                     self.dev_gf_token = cookies.get("gf-token-production")
                 except Exception:
-                    pass
+                    self.logger.debug("Failed to capture dev cookie snapshot", exc_info=True)
 
                 if fullResponse:
                     return response
@@ -1297,7 +1306,7 @@ class Session:
                     self.dev_ikariam_cookie = cookies.get("ikariam")
                     self.dev_gf_token = cookies.get("gf-token-production")
                 except Exception:
-                    pass
+                    self.logger.debug("Failed to capture dev cookie snapshot", exc_info=True)
                     
                 return resp if not fullResponse else response
             except AssertionError:
