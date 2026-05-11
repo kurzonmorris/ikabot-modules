@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
 # Build command (run from the ikabot-modules directory):
-#   Windows:  python -m PyInstaller ikafix.spec
-#   Linux:    pyinstaller ikafix.spec
+#   Windows:  python -m PyInstaller ikabot.spec
+#   Linux:    pyinstaller ikabot.spec
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
@@ -40,7 +40,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='ikafix',
+    name='ikabot',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

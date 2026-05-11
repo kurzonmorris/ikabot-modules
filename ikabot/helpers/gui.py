@@ -40,7 +40,7 @@ def banner():
       MM      MM `Mb.   8M   MM          MM    ,9   YA.   ,A9     MM
     .JMML.  .JMML. YA.  `Moo9^Yo.      .JMMmmmd9     `Ybmd9'      `Mbmo
                                                             {IKABOT_VERSION_TAG}
-                                                            {IKAFIX_VERSION_TAG}"""
+                                                            {IKABOT_MOD_VERSION_TAG}"""
     print("\n{}\n\n{}\n{}".format(bner, config.infoUser, config.update_msg))
 
 
