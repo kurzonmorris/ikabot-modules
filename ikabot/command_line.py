@@ -627,8 +627,11 @@ def start():
 
     try:
         menu(session)
-    finally:
         clear()
+    except KeyboardInterrupt:
+        clear()
+        raise
+    finally:
         session.logout()
 
 
