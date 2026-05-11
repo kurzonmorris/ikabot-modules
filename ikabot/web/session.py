@@ -472,7 +472,9 @@ class Session:
                 )
 
             if "gf-challenge-id" in r.headers and 'token' not in r.text:
-                while True:
+                _captcha_attempts = 0
+                _captcha_max = 5
+                while _captcha_attempts < _captcha_max:
                     self.headers = {
                         "Accept": "*/*",
                         "Accept-Language": "en-US,en;q=0.5",
@@ -605,6 +607,7 @@ class Session:
                         ),
                         json=data,
                     ).json()
+                    _captcha_attempts += 1
                     if captcha_sent["status"] == "solved":
                         self.headers = {
                             "Accept": "*/*",
@@ -642,6 +645,9 @@ class Session:
                             continue
                         else:
                             break
+                else:
+                    self.logger.error("Captcha failed after %d attempts; aborting login.", _captcha_max)
+                    sys.exit("Captcha error! (Too many failed attempts)")
 
             if 'token' not in r.text and self._vault_blackbox:
                 # Stored blackbox token was rejected by Gameforge; discard it

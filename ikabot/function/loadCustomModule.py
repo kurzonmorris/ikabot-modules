@@ -7,6 +7,7 @@ from ikabot.helpers.pedirInfo import read, enter
 from ikabot.helpers.gui import *
 from ikabot.config import *
 from importlib.machinery import SourceFileLoader
+import importlib.util
 
 def loadCustomModule(session, event, stdin_fd, predetermined_input):
     """
@@ -101,8 +102,10 @@ def loadCustomModule(session, event, stdin_fd, predetermined_input):
                 banner()
                 print(f'Running module: {name}...\n')
                 
-                # Dynamic module loading
-                module = SourceFileLoader(name, path).load_module()
+                # Dynamic module loading (importlib.util replaces deprecated load_module)
+                spec = importlib.util.spec_from_file_location(name, path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
                 
                 # Execute the function (must match filename)
                 getattr(module, name)(session, event, stdin_fd, predetermined_input)

@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from ikabot.config import IKABOT_SESSIONS_DIR
 from ikabot.helpers.botComm import *
+from ikabot.helpers.pedirInfo import read
 
 
 def _safe(s):
