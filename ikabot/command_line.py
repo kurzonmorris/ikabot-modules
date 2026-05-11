@@ -69,60 +69,6 @@ def menu(session, checkUpdate=True):
     session : ikabot.web.session.Session
     checkUpdate : bool
     """
-    if checkUpdate:
-        checkForUpdate()
-
-    show_proxy(session)
-
-    banner()
-
-    process_list = updateProcessList(session)
-    if len(process_list) > 0:
-        # Insert table header
-        table = process_list.copy()
-        table.insert(
-            0, {"pid": "pid", "action": "task", "date": "date", "status": "status"}
-        )
-        # Get max length of strings in each category (date is always going to be 15)
-        maxPid, maxAction, maxStatus = [
-            max(i)
-            for i in [
-                [len(str(r["pid"])) for r in table],
-                [len(str(r["action"])) for r in table],
-                [len(str(r["status"])) for r in table],
-            ]
-        ]
-        # Print header
-        print(
-            "|{:^{maxPid}}|{:^{maxAction}}|{:^15}|{:^{maxStatus}}|".format(
-                table[0]["pid"],
-                table[0]["action"],
-                table[0]["date"],
-                table[0]["status"],
-                maxPid=maxPid,
-                maxAction=maxAction,
-                maxStatus=maxStatus,
-            )
-        )
-        # Print process list
-        [
-            print(
-                "|{:^{maxPid}}|{:^{maxAction}}|{:^15}|{:^{maxStatus}}|".format(
-                    r["pid"],
-                    r["action"],
-                    datetime.datetime.fromtimestamp(r["date"]).strftime(
-                        "%b %d %H:%M:%S"
-                    ),
-                    r["status"],
-                    maxPid=maxPid,
-                    maxAction=maxAction,
-                    maxStatus=maxStatus,
-                )
-            )
-            for r in process_list
-        ]
-        print("")
-
     menu_actions = {
         1: constructionList,
         2: sendResources,
@@ -161,182 +107,218 @@ def menu(session, checkUpdate=True):
         2108: loadCustomModule,
         2109: developer,
         22: consolidateResources,
-        23: modifyProduction
+        23: modifyProduction,
     }
 
-    print("(0)  Exit")
-    print("(1)  Construction list")
-    print("(2)  Send resources")
-    print("(3)  Distribute resources")
-    print("(4)  Account status")
-    print("(5)  Activate Shrine")
-    print("(6)  Login daily")
-    print("(7)  Alerts / Notifications")
-    print("(8)  Marketplace")
-    print("(9)  Donate")
-    print("(10) Activate vacation mode")
-    print("(11) Activate miracle")
-    print("(12) Military actions")
-    print("(13) See movements")
-    print("(14) Construct building")
-    print("(15) Update Ikabot")
-    print("(16) Ikabot Web Server")
-    print("(17) Auto-Pirate")
-    print("(18) Research")
-    print("(19) Attack / Grind barbarians")
-    print("(20) Dump / Monitor world")
-    print("(21) Options / Settings")
-    print("(22) Consolidate resources")
-    print("(23) Set Production of Saw mill / Luxury good")
+    while True:
+        if checkUpdate:
+            checkForUpdate()
+            checkUpdate = False
 
-    plugins = discover_plugins()
-    if plugins:
-        print("(24) Plugins")
-
-    # Accept 0-24; sub-menu choices narrow further once selected.
-    top_max = 24 if plugins else 23
-    selected = read(min=0, max=top_max, digit=True, empty=True)
-    
-    # refresh main menu on hitting enter
-    if selected == '':
-        return menu(session)
-
-    if selected == 7:
+        show_proxy(session)
         banner()
-        print("(0) Back")
-        print("(1) Alert attacks")
-        print("(2) Alert wine running out")
 
-        selected = read(min=0, max=2, digit=True)
-        if selected == 0:
-            menu(session)
-            return
-        if selected > 0:
+        process_list = updateProcessList(session)
+        if len(process_list) > 0:
+            table = process_list.copy()
+            table.insert(
+                0, {"pid": "pid", "action": "task", "date": "date", "status": "status"}
+            )
+            maxPid, maxAction, maxStatus = [
+                max(i)
+                for i in [
+                    [len(str(r["pid"])) for r in table],
+                    [len(str(r["action"])) for r in table],
+                    [len(str(r["status"])) for r in table],
+                ]
+            ]
+            print(
+                "|{:^{maxPid}}|{:^{maxAction}}|{:^15}|{:^{maxStatus}}|".format(
+                    table[0]["pid"],
+                    table[0]["action"],
+                    table[0]["date"],
+                    table[0]["status"],
+                    maxPid=maxPid,
+                    maxAction=maxAction,
+                    maxStatus=maxStatus,
+                )
+            )
+            [
+                print(
+                    "|{:^{maxPid}}|{:^{maxAction}}|{:^15}|{:^{maxStatus}}|".format(
+                        r["pid"],
+                        r["action"],
+                        datetime.datetime.fromtimestamp(r["date"]).strftime(
+                            "%b %d %H:%M:%S"
+                        ),
+                        r["status"],
+                        maxPid=maxPid,
+                        maxAction=maxAction,
+                        maxStatus=maxStatus,
+                    )
+                )
+                for r in process_list
+            ]
+            print("")
+
+        print("(0)  Exit")
+        print("(1)  Construction list")
+        print("(2)  Send resources")
+        print("(3)  Distribute resources")
+        print("(4)  Account status")
+        print("(5)  Activate Shrine")
+        print("(6)  Login daily")
+        print("(7)  Alerts / Notifications")
+        print("(8)  Marketplace")
+        print("(9)  Donate")
+        print("(10) Activate vacation mode")
+        print("(11) Activate miracle")
+        print("(12) Military actions")
+        print("(13) See movements")
+        print("(14) Construct building")
+        print("(15) Update Ikabot")
+        print("(16) Ikabot Web Server")
+        print("(17) Auto-Pirate")
+        print("(18) Research")
+        print("(19) Attack / Grind barbarians")
+        print("(20) Dump / Monitor world")
+        print("(21) Options / Settings")
+        print("(22) Consolidate resources")
+        print("(23) Set Production of Saw mill / Luxury good")
+
+        plugins = discover_plugins()
+        if plugins:
+            print("(24) Plugins")
+
+        top_max = 24 if plugins else 23
+        selected = read(min=0, max=top_max, digit=True, empty=True)
+
+        if selected == '':
+            continue
+
+        if selected == 7:
+            banner()
+            print("(0) Back")
+            print("(1) Alert attacks")
+            print("(2) Alert wine running out")
+            selected = read(min=0, max=2, digit=True)
+            if selected == 0:
+                continue
             selected += 700
 
-    if selected == 8:
-        banner()
-        print("(0) Back")
-        print("(1) Buy resources")
-        print("(2) Sell resources")
-
-        selected = read(min=0, max=2, digit=True)
-        if selected == 0:
-            menu(session)
-            return
-        if selected > 0:
+        if selected == 8:
+            banner()
+            print("(0) Back")
+            print("(1) Buy resources")
+            print("(2) Sell resources")
+            selected = read(min=0, max=2, digit=True)
+            if selected == 0:
+                continue
             selected += 800
 
-    if selected == 9:
-        banner()
-        print("(0) Back")
-        print("(1) Donate once")
-        print("(2) Donate automatically")
-
-        selected = read(min=0, max=2, digit=True)
-        if selected == 0:
-            menu(session)
-            return
-        if selected > 0:
+        if selected == 9:
+            banner()
+            print("(0) Back")
+            print("(1) Donate once")
+            print("(2) Donate automatically")
+            selected = read(min=0, max=2, digit=True)
+            if selected == 0:
+                continue
             selected += 900
 
-    if selected == 19:
-        banner()
-        print("(0) Back")
-        print("(1) Simple Attack")
-        print("(2) Auto Grind")
-        selected = read(min=0, max=2, digit=True)
-        if selected == 0:
-            menu(session)
-            return
-        if selected > 0:
-            selected += 1900
-
-    if selected == 12:
-        banner()
-        print("(0) Back")
-        print("(1) Train Army")
-        print("(2) Send Troops/Ships")
-        print("(3) Upgrade Army")
-        selected = read(min=0, max=3, digit=True)
-        if selected == 0:
-            menu(session)
-            return
-        if selected > 0:
+        if selected == 12:
+            banner()
+            print("(0) Back")
+            print("(1) Train Army")
+            print("(2) Send Troops/Ships")
+            print("(3) Upgrade Army")
+            selected = read(min=0, max=3, digit=True)
+            if selected == 0:
+                continue
             selected += 1200
 
-    if selected == 20:
-        print("(0) Back")
-        print("(1) Monitor islands")
-        print("(2) Dump & Search world")
-        
-        selected = read(min=0, max=2, digit=True)
-        if selected == 0:
-            menu(session)
-            return
-        if selected > 0:
+        if selected == 19:
+            banner()
+            print("(0) Back")
+            print("(1) Simple Attack")
+            print("(2) Auto Grind")
+            selected = read(min=0, max=2, digit=True)
+            if selected == 0:
+                continue
+            selected += 1900
+
+        if selected == 20:
+            banner()
+            print("(0) Back")
+            print("(1) Monitor islands")
+            print("(2) Dump & Search world")
+            selected = read(min=0, max=2, digit=True)
+            if selected == 0:
+                continue
             selected += 2000
 
-    if selected == 21:
-        banner()
-        print("(0) Back")
-        print("(1) Configure Proxy")
-        if telegramDataIsValid(session):
-            print("(2) Change the Telegram data")
-        else:
-            print("(2) Enter the Telegram data")
-        print("(3) Kill tasks")
-        print("(4) Configure captcha resolver")
-        print("(5) Logs")
-        print("(6) Message Telegram Bot")
-        print("(7) Import / Export cookie")
-        print("(8) Load custom ikabot module")
-        print("(9) Developer Data")
-        print("(10) Manage credential vault")
-
-        selected = read(min=0, max=10, digit=True)
-        if selected == 0:
-            menu(session)
-            return
-        if selected == 10:
-            _manage_vault_menu(session)
-            menu(session, checkUpdate=False)
-            return
-        if selected > 0:
+        if selected == 21:
+            banner()
+            print("(0) Back")
+            print("(1) Configure Proxy")
+            if telegramDataIsValid(session):
+                print("(2) Change the Telegram data")
+            else:
+                print("(2) Enter the Telegram data")
+            print("(3) Kill tasks")
+            print("(4) Configure captcha resolver")
+            print("(5) Logs")
+            print("(6) Message Telegram Bot")
+            print("(7) Import / Export cookie")
+            print("(8) Load custom ikabot module")
+            print("(9) Developer Data")
+            print("(10) Manage credential vault")
+            selected = read(min=0, max=10, digit=True)
+            if selected == 0:
+                continue
+            if selected == 10:
+                _manage_vault_menu(session)
+                continue
             selected += 2100
 
-    if selected == 24 and plugins:
-        banner()
-        print("(0) Back")
-        for i, plugin in enumerate(plugins, start=1):
-            print(f"({i}) {plugin.label}")
-        plugin_choice = read(min=0, max=len(plugins), digit=True)
-        if plugin_choice == 0:
-            menu(session, checkUpdate=False)
-            return
-        chosen_plugin = plugins[plugin_choice - 1]
-        event = multiprocessing.Event()
-        config.has_params = len(config.predetermined_input) > 0
-        process = multiprocessing.Process(
-            target=chosen_plugin.entrypoint,
-            args=(session, event, sys.stdin.fileno(), config.predetermined_input),
-            name=chosen_plugin.name,
-        )
-        process.start()
-        process_list.append({
-            "pid": process.pid,
-            "action": chosen_plugin.name,
-            "date": time.time(),
-            "status": "started",
-        })
-        updateProcessList(session, programprocesslist=process_list)
-        event.wait()
-        menu(session, checkUpdate=False)
-        return
+        if selected == 24 and plugins:
+            banner()
+            print("(0) Back")
+            for i, plugin in enumerate(plugins, start=1):
+                print(f"({i}) {plugin.label}")
+            plugin_choice = read(min=0, max=len(plugins), digit=True)
+            if plugin_choice == 0:
+                continue
+            chosen_plugin = plugins[plugin_choice - 1]
+            event = multiprocessing.Event()
+            config.has_params = len(config.predetermined_input) > 0
+            process = multiprocessing.Process(
+                target=chosen_plugin.entrypoint,
+                args=(session, event, sys.stdin.fileno(), config.predetermined_input),
+                name=chosen_plugin.name,
+            )
+            process.start()
+            process_list.append({
+                "pid": process.pid,
+                "action": chosen_plugin.name,
+                "date": time.time(),
+                "status": "started",
+            })
+            updateProcessList(session, programprocesslist=process_list)
+            event.wait()
+            continue
 
-    if selected != 0:
+        if selected == 0:
+            if isWindows:
+                # in unix, you can exit ikabot and close the terminal and the
+                # processes will continue to execute; in windows they will die
+                print("Closing this console will kill the processes.")
+                enter()
+            clear()
+            os._exit(0)
+
         try:
-            event = multiprocessing.Event()  # creates a new event
+            event = multiprocessing.Event()
             config.has_params = len(config.predetermined_input) > 0
             process = multiprocessing.Process(
                 target=menu_actions[selected],
@@ -353,20 +335,9 @@ def menu(session, checkUpdate=True):
                 }
             )
             updateProcessList(session, programprocesslist=process_list)
-            event.wait()  # waits for the process to fire the event that's been given to it. When it does  this process gets back control of the command line and asks user for more input
+            event.wait()
         except KeyboardInterrupt:
             pass
-        menu(session, checkUpdate=False)
-    else:
-        if isWindows:
-            # in unix, you can exit ikabot and close the terminal and the processes will continue to execute
-            # in windows, you can exit ikabot but if you close the terminal, the processes will die
-            print("Closing this console will kill the processes.")
-            enter()
-        clear()
-        os._exit(
-            0
-        )  # kills the process which executes this statement, but it does not kill it's child processes
 
 
 def init():

@@ -1010,10 +1010,18 @@ class Session:
         if self.padre is False:
             time.sleep(5 * random.randint(0, 10))
 
-    def __sessionExpired(self):
+    def __sessionExpired(self, _retries=5):
         self.logger.info("__sessionExpired()")
-        self.__backoff()
+        if _retries <= 0:
+            msg = "Session could not be restored after multiple attempts. Exiting."
+            self.logger.error(msg)
+            if self.padre:
+                print(msg)
+            else:
+                sendToBot(self, msg)
+            os._exit(1)
 
+        self.__backoff()
         sessionData = self.getSessionData()
 
         try:
@@ -1023,12 +1031,12 @@ class Session:
                 try:
                     self.__login(3)
                 except Exception:
-                    self.__sessionExpired()
+                    self.__sessionExpired(_retries - 1)
         except KeyError:
             try:
                 self.__login(3)
             except Exception:
-                self.__sessionExpired()
+                self.__sessionExpired(_retries - 1)
 
     def __proxy_error(self):
         sessionData = self.getSessionData()

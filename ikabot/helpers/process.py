@@ -75,11 +75,8 @@ def updateProcessList(session, programprocesslist=[]):
         if process not in runningIkabotProcessList:
             runningIkabotProcessList.append(process)
 
-    # check if all proceses have new status field
-    if len([p for p in runningIkabotProcessList if "status" not in p]) == len(
-        runningIkabotProcessList
-    ) and len(runningIkabotProcessList):
-        runningIkabotProcessList[0]["status"] = "running"
+    for p in runningIkabotProcessList:
+        p.setdefault("status", "running")
 
     # write to file
     sessionData["processList"] = runningIkabotProcessList
