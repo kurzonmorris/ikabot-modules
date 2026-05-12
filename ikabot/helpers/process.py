@@ -8,6 +8,7 @@ import subprocess
 import psutil
 
 from ikabot.config import *
+from ikabot.helpers.logging import getLogger, setup_file_logging
 from ikabot.helpers.signals import deactivate_sigint
 from ikabot.helpers.varios import normalizeDicts
 
@@ -20,6 +21,10 @@ def set_child_mode(session):
     """
     session.padre = False
     deactivate_sigint()
+    # On spawn (Windows) or when fork didn't carry the handler, the child
+    # process starts with only the bootstrap stderr handler. Re-run
+    # setup_file_logging so all child log output goes to the per-account file.
+    setup_file_logging(session.username, session.servidor, session.mundo)
 
 
 def run(command):
