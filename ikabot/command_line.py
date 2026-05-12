@@ -41,6 +41,12 @@ from ikabot.function.sendResources import sendResources
 from ikabot.function.shipMovements import shipMovements
 from ikabot.function.stationArmy import stationArmy
 from ikabot.function.notificationSetup import notificationSetup
+from ikabot.function.externalModules import (
+    get_external_modules,
+    get_dirs,
+    configure_directories,
+    _run_external_module_child,
+)
 from ikabot.function.trainArmy import trainArmy
 from ikabot.function.update import update
 from ikabot.function.vacationMode import vacationMode
@@ -189,7 +195,9 @@ def menu(session, checkUpdate=True):
         if plugins:
             print("(24) Plugins")
 
-        top_max = 24 if plugins else 23
+        print("(30) External Modules")
+
+        top_max = 30
         selected = read(min=0, max=top_max, digit=True, empty=True)
 
         if selected == '':
@@ -279,6 +287,56 @@ def menu(session, checkUpdate=True):
                 continue
             selected += 2100
 
+        if selected == 30:
+            while True:
+                banner()
+                global_dir, account_dir = get_dirs(session)
+                modules = get_external_modules(session)
+
+                print("  External Modules")
+                print("  ================\n")
+                if global_dir:
+                    print(f"  Global:  {global_dir}")
+                if account_dir:
+                    print(f"  Account: {account_dir}")
+                if global_dir or account_dir:
+                    print()
+
+                print("  (0) Back")
+                for i, (name, _path) in enumerate(modules):
+                    print(f"  ({i + 31}) {name}")
+                print("  (99) Configure directories")
+
+                valid_choices = {0, 99} | set(range(31, 31 + len(modules)))
+                while True:
+                    sub = read(min=0, max=99, digit=True)
+                    if sub in valid_choices:
+                        break
+
+                if sub == 0:
+                    break
+                elif sub == 99:
+                    configure_directories(session)
+                else:
+                    mod_name, mod_path = modules[sub - 31]
+                    event = multiprocessing.Event()
+                    config.has_params = len(config.predetermined_input) > 0
+                    process = multiprocessing.Process(
+                        target=_run_external_module_child,
+                        args=(mod_path, session, event, sys.stdin.fileno(), config.predetermined_input),
+                        name=mod_name,
+                    )
+                    process.start()
+                    process_list.append({
+                        "pid": process.pid,
+                        "action": mod_name,
+                        "date": time.time(),
+                        "status": "started",
+                    })
+                    updateProcessList(session, programprocesslist=process_list)
+                    event.wait()
+            continue
+
         if selected == 24 and plugins:
             banner()
             print("(0) Back")
@@ -314,6 +372,9 @@ def menu(session, checkUpdate=True):
                 enter()
             clear()
             os._exit(0)
+
+        if selected not in menu_actions:
+            continue
 
         try:
             event = multiprocessing.Event()
