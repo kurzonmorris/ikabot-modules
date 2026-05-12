@@ -174,6 +174,14 @@ class VaultSession:
         entries[index]["encrypted"] = _encrypt(self._key, creds)
         self._save()
 
+    def rename_account(self, index: int, new_label: str) -> None:
+        """Rename the label of account at *index* and save."""
+        entries = self._data["accounts"]
+        if index < 0 or index >= len(entries):
+            raise IndexError(f"No vault account at index {index}.")
+        entries[index]["label"] = new_label
+        self._save()
+
     def remove_account(self, index: int) -> None:
         """Remove account by index and save."""
         entries = self._data["accounts"]

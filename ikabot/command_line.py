@@ -532,8 +532,9 @@ def _manage_vault_menu(session):
         print("(2) Add current account to vault")
         print("(3) Remove an account from vault")
         print("(4) Change master password")
+        print("(5) Rename an account")
 
-        choice = read(min=0, max=4, digit=True)
+        choice = read(min=0, max=5, digit=True)
         if choice == 0:
             return
         elif choice == 1:
@@ -544,6 +545,8 @@ def _manage_vault_menu(session):
             _vault_remove_account()
         elif choice == 4:
             _vault_change_master_password()
+        elif choice == 5:
+            _vault_rename_account()
 
 
 def _vault_list_accounts():
@@ -594,6 +597,41 @@ def _vault_remove_account():
         return
     vs.remove_account(choice - 1)
     print("Account removed.")
+    enter()
+
+
+def _vault_rename_account():
+    if not vault_exists():
+        print("No vault found.")
+        enter()
+        return
+    master_pw = getpass.getpass("Master password: ")
+    try:
+        vs = open_vault(master_pw)
+    except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
+        print(f"Could not open vault: {exc}")
+        enter()
+        return
+    accounts = vs.list_accounts()
+    if not accounts:
+        print("Vault is empty.")
+        enter()
+        return
+    print("\nSelect account to rename:")
+    print("  (0) Cancel")
+    for idx, label in accounts:
+        print(f"  ({idx + 1}) {label}")
+    choice = read(min=0, max=len(accounts), digit=True)
+    if choice == 0:
+        return
+    current_label = accounts[choice - 1][1]
+    new_label = read(msg=f"New name (current: '{current_label}'): ").strip()
+    if not new_label:
+        print("Name unchanged.")
+        enter()
+        return
+    vs.rename_account(choice - 1, new_label)
+    print(f"Account renamed to '{new_label}'.")
     enter()
 
 
