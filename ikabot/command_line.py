@@ -40,14 +40,14 @@ from ikabot.function.sellResources import sellResources
 from ikabot.function.sendResources import sendResources
 from ikabot.function.shipMovements import shipMovements
 from ikabot.function.stationArmy import stationArmy
-from ikabot.function.testTelegramBot import testTelegramBot
+from ikabot.function.notificationSetup import notificationSetup
 from ikabot.function.trainArmy import trainArmy
 from ikabot.function.update import update
 from ikabot.function.vacationMode import vacationMode
 from ikabot.function.webServer import webServer
 from ikabot.function.loadCustomModule import loadCustomModule
 from ikabot.function.activateShrine import activateShrine
-from ikabot.helpers.botComm import telegramDataIsValid, updateTelegramData
+from ikabot.helpers.botComm import telegramDataIsValid, notificationDataIsValid
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.process import updateProcessList
@@ -98,14 +98,13 @@ def menu(session, checkUpdate=True):
         2001: searchForIslandSpaces,
         2002: dumpWorld,
         2101: proxyConf,
-        2102: updateTelegramData,
+        2102: notificationSetup,
         2103: killTasks,
         2104: decaptchaConf,
         2105: logs,
-        2106: testTelegramBot,
-        2107: importExportCookie,
-        2108: loadCustomModule,
-        2109: developer,
+        2106: importExportCookie,
+        2107: loadCustomModule,
+        2108: developer,
         22: consolidateResources,
         23: modifyProduction,
     }
@@ -261,22 +260,21 @@ def menu(session, checkUpdate=True):
             banner()
             print("(0) Back")
             print("(1) Configure Proxy")
-            if telegramDataIsValid(session):
-                print("(2) Change the Telegram data")
+            if notificationDataIsValid(session):
+                print("(2) Notification Setup")
             else:
-                print("(2) Enter the Telegram data")
+                print("(2) Notification Setup (not configured)")
             print("(3) Kill tasks")
             print("(4) Configure captcha resolver")
             print("(5) Logs")
-            print("(6) Message Telegram Bot")
-            print("(7) Import / Export cookie")
-            print("(8) Load custom ikabot module")
-            print("(9) Developer Data")
-            print("(10) Manage credential vault")
-            selected = read(min=0, max=10, digit=True)
+            print("(6) Import / Export cookie")
+            print("(7) Load custom ikabot module")
+            print("(8) Developer Data")
+            print("(9) Manage credential vault")
+            selected = read(min=0, max=9, digit=True)
             if selected == 0:
                 continue
-            if selected == 10:
+            if selected == 9:
                 _manage_vault_menu(session)
                 continue
             selected += 2100
@@ -593,6 +591,17 @@ def start():
     else:
         session = Session()
         _offer_save_to_vault(session)
+
+    if not notificationDataIsValid(session):
+        banner()
+        print("No notification backend is configured.")
+        print("ikabot can alert you via Telegram, Discord, or ntfy.sh when")
+        print("tasks complete, attacks are detected, or other events occur.\n")
+        choice = read(values=["y", "Y", "n", "N", ""], empty=True, default="n",
+                      msg="Set up notifications now? [y/N]: ")
+        if choice.lower() == "y":
+            from ikabot.function.notificationSetup import _notification_menu
+            _notification_menu(session)
 
     try:
         menu(session)

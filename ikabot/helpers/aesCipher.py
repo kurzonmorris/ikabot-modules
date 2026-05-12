@@ -9,7 +9,7 @@ import time
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from ikabot.config import IKABOT_SESSIONS_DIR
+from ikabot.config import IKABOT_SESSIONS_DIR, DEFAULT_LOG_LEVEL
 from ikabot.helpers.botComm import *
 from ikabot.helpers.pedirInfo import read
 
@@ -207,7 +207,7 @@ class AESCipher:
             if shared:
                 session_data.setdefault("shared", {})
                 if "logLevel" not in session_data["shared"]:
-                    session_data["shared"]["logLevel"] = 2
+                    session_data["shared"]["logLevel"] = DEFAULT_LOG_LEVEL
                 session_data["shared"] = {**session_data["shared"], **data}
             else:
                 username = session.username
