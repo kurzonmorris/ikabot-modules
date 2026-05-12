@@ -98,18 +98,31 @@ def loadCustomModule(session, event, stdin_fd, predetermined_input):
                 # Execution logic
                 path = modules[choice - 3]
                 name = os.path.basename(path).replace('.py', '')
-                
+
                 banner()
                 print(f'Running module: {name}...\n')
-                
+
+                # Rename this process's entry in processList so the main
+                # menu shows the actual module name instead of 'loadCustomModule'
+                try:
+                    sd = session.getSessionData()
+                    my_pid = os.getpid()
+                    for p in sd.get('processList', []):
+                        if p.get('pid') == my_pid:
+                            p['action'] = name
+                            break
+                    session.setSessionData(sd)
+                except Exception:
+                    pass
+
                 # Dynamic module loading (importlib.util replaces deprecated load_module)
                 spec = importlib.util.spec_from_file_location(name, path)
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
-                
+
                 # Execute the function (must match filename)
                 getattr(module, name)(session, event, stdin_fd, predetermined_input)
-                
+
                 event.set()
                 return
 
