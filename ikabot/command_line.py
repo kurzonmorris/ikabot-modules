@@ -449,8 +449,8 @@ def _prompt_vault_login():
 
     banner()
     print("Stored accounts:\n")
-    for idx, label in accounts:
-        print(f"  ({idx + 1}) {label}")
+    for pos, (idx, label) in enumerate(accounts, start=1):
+        print(f"  ({pos}) {label}")
     print(f"  (0) Log in manually\n")
 
     choice = read(min=0, max=len(accounts), digit=True)
@@ -566,8 +566,8 @@ def _vault_list_accounts():
         print("Vault is empty.")
     else:
         print()
-        for idx, label in accounts:
-            print(f"  ({idx + 1}) {label}")
+        for pos, (idx, label) in enumerate(accounts, start=1):
+            print(f"  ({pos}) {label}")
     enter()
 
 
@@ -590,8 +590,8 @@ def _vault_remove_account():
         return
     print("\nSelect account to remove:")
     print("  (0) Cancel")
-    for idx, label in accounts:
-        print(f"  ({idx + 1}) {label}")
+    for pos, (idx, label) in enumerate(accounts, start=1):
+        print(f"  ({pos}) {label}")
     choice = read(min=0, max=len(accounts), digit=True)
     if choice == 0:
         return
@@ -619,8 +619,8 @@ def _vault_rename_account():
         return
     print("\nSelect account to rename:")
     print("  (0) Cancel")
-    for idx, label in accounts:
-        print(f"  ({idx + 1}) {label}")
+    for pos, (idx, label) in enumerate(accounts, start=1):
+        print(f"  ({pos}) {label}")
     choice = read(min=0, max=len(accounts), digit=True)
     if choice == 0:
         return
