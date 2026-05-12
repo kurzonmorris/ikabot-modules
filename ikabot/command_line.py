@@ -306,10 +306,11 @@ def menu(session, checkUpdate=True):
                 for i, (name, _path) in enumerate(modules):
                     print(f"  ({i + 31}) {name}")
                 print("  (99) Configure directories")
+                print("  (100) Refresh")
 
-                valid_choices = {0, 99} | set(range(31, 31 + len(modules)))
+                valid_choices = {0, 99, 100} | set(range(31, 31 + len(modules)))
                 while True:
-                    sub = read(min=0, max=99, digit=True)
+                    sub = read(min=0, max=100, digit=True)
                     if sub in valid_choices:
                         break
 
@@ -317,6 +318,8 @@ def menu(session, checkUpdate=True):
                     break
                 elif sub == 99:
                     configure_directories(session)
+                elif sub == 100:
+                    continue
                 else:
                     mod_name, mod_path = modules[sub - 31]
                     event = multiprocessing.Event()
