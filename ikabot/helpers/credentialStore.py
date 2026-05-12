@@ -115,8 +115,9 @@ class VaultSession:
     # ------------------------------------------------------------------ #
 
     def list_accounts(self) -> list:
-        """Return [(index, label), ...] for display."""
-        return [(i, a["label"]) for i, a in enumerate(self._data["accounts"])]
+        """Return [(index, label), ...] sorted alphabetically by label."""
+        accounts = [(i, a["label"]) for i, a in enumerate(self._data["accounts"])]
+        return sorted(accounts, key=lambda x: x[1].lower())
 
     def get_credentials(self, index: int) -> dict:
         """Return the decrypted account dict for *index*.

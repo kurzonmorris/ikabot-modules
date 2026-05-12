@@ -457,7 +457,7 @@ def _prompt_vault_login():
     if choice == 0:
         return None, None, None
 
-    acct_idx = choice - 1
+    acct_idx = accounts[choice - 1][0]
     try:
         creds = vault_session.get_credentials(acct_idx)
     except VaultWrongPasswordError:
@@ -595,7 +595,7 @@ def _vault_remove_account():
     choice = read(min=0, max=len(accounts), digit=True)
     if choice == 0:
         return
-    vs.remove_account(choice - 1)
+    vs.remove_account(accounts[choice - 1][0])
     print("Account removed.")
     enter()
 
@@ -630,7 +630,7 @@ def _vault_rename_account():
         print("Name unchanged.")
         enter()
         return
-    vs.rename_account(choice - 1, new_label)
+    vs.rename_account(accounts[choice - 1][0], new_label)
     print(f"Account renamed to '{new_label}'.")
     enter()
 
