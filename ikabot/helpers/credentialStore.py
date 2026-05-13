@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -115,9 +116,12 @@ class VaultSession:
     # ------------------------------------------------------------------ #
 
     def list_accounts(self) -> list:
-        """Return [(index, label), ...] sorted alphabetically by label."""
+        """Return [(index, label), ...] sorted in natural order (1, 2, 10 not 1, 10, 2)."""
+        def _natural_key(item):
+            return [int(c) if c.isdigit() else c.lower()
+                    for c in re.split(r'(\d+)', item[1])]
         accounts = [(i, a["label"]) for i, a in enumerate(self._data["accounts"])]
-        return sorted(accounts, key=lambda x: x[1].lower())
+        return sorted(accounts, key=_natural_key)
 
     def get_credentials(self, index: int) -> dict:
         """Return the decrypted account dict for *index*.
