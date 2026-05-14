@@ -452,16 +452,19 @@ class TavernManager:
 
         return results
 
-    def set_tavern_simple(self, city, set_to_max):
+    def set_tavern_pct(self, city, pct):
+        """Set this city's wine consumption to `pct`% of the tavern's
+        maximum available level, rounded to the nearest integer level
+        the dropdown actually offers. pct is an int in [0, 100]."""
         try:
-            return self._set_tavern_simple_once(city, set_to_max)
+            return self._set_tavern_pct_once(city, pct)
         except _StaleCacheError as stale:
             # Force-refresh paths above already fetched fresh data, so a
             # _StaleCacheError here means the server rejected the apply
             # (e.g. stale session token). Clear and retry once.
             self.clear_caches(city['id'])
             try:
-                ok = self._set_tavern_simple_once(city, set_to_max)
+                ok = self._set_tavern_pct_once(city, pct)
                 if ok:
                     print(f"  {city['name']}: (cache refreshed)")
                 return ok
@@ -469,7 +472,7 @@ class TavernManager:
                 print(f"  {city['name']}: stale after refresh ({stale2})")
                 return False
 
-    def _set_tavern_simple_once(self, city, set_to_max):
+    def _set_tavern_pct_once(self, city, pct):
         city_id = city['id']
 
         # Manual mode: always refresh so the user sees current state.
@@ -491,18 +494,23 @@ class TavernManager:
         consumption_values = tavern_data['consumption_values']
         current_level = tavern_data['current_level']
 
-        if set_to_max:
-            target_level = max((l for l, w in consumption_values), default=0)
-        else:
-            target_level = 0
+        if not consumption_values:
+            print(f"  {city['name']}: tavern has no selectable levels")
+            return False
+
+        max_level = max(l for l, w in consumption_values)
+        # Map percentage -> nearest integer level in the dropdown.
+        available_levels = sorted({l for l, _ in consumption_values})
+        target_raw = pct * max_level / 100.0
+        target_level = min(available_levels, key=lambda l: (abs(l - target_raw), l))
 
         current_wine = self._wine_at_level(consumption_values, current_level)
         new_wine = self._wine_at_level(consumption_values, target_level)
         if target_level == current_level:
-            print(f"  {city['name']}: already at L{current_level}({current_wine}/h)")
+            print(f"  {city['name']}: already at L{current_level}({current_wine}/h) [{pct}%]")
             return True
         self._apply_level(city_id, tavern['position'], target_level, tavern_data)
-        print(f"  {city['name']}: L{current_level}({current_wine}/h) → L{target_level}({new_wine}/h)")
+        print(f"  {city['name']}: L{current_level}({current_wine}/h) → L{target_level}({new_wine}/h) [{pct}%]")
         return True
 
 
@@ -563,7 +571,7 @@ def tavernManager(session, event, stdin_fd, predetermined_input):
         print()
         print("Select operation mode:")
         print()
-        print("1. Set tavern level (single city or all cities)")
+        print("1. Set tavern wine consumption (% of max)")
         print("2. Equilibrium mode (optimize wine usage)")
         print()
         print("(') Back to main menu")
@@ -589,42 +597,25 @@ def tavernManager(session, event, stdin_fd, predetermined_input):
 
 def _run_set_mode(session):
     print("=" * 60)
-    print("SET TAVERN LEVELS")
+    print("SET TAVERN WINE CONSUMPTION")
     print("=" * 60)
     print()
 
-    print("Which cities?")
-    print("1. Single city")
-    print("2. All cities")
-    print()
-    print("(') Back to main menu")
-    city_choice = read(msg="Select (1 or 2): ", min=1, max=2, digit=True, additionalValues=["'"])
+    cities_to_process = _select_cities(session)
+    if cities_to_process is None:
+        return
+    if not cities_to_process:
+        print("No cities selected.")
+        print()
+        enter()
+        return
 
-    if city_choice == "'":
+    pct = _select_percentage()
+    if pct is None:
         return
 
     print()
-
-    if city_choice == 1:
-        cities_to_process = [chooseCity(session)]
-    else:
-        cities_ids, cities = getIdsOfCities(session)
-        cities_to_process = [cities[cid] for cid in cities_ids]
-
-    print("Set to:")
-    print("1. Maximum consumption")
-    print("2. Zero consumption")
-    print()
-    print("(') Back to main menu")
-    level_choice = read(msg="Select (1 or 2): ", min=1, max=2, digit=True, additionalValues=["'"])
-
-    if level_choice == "'":
-        return
-
-    target_is_max = (level_choice == 1)
-    print()
-
-    print(f"Will set {len(cities_to_process)} cities to {'MAXIMUM' if target_is_max else 'ZERO'}")
+    print(f"Will set {len(cities_to_process)} city/cities to {pct}% wine consumption")
     print()
     print("Proceed? [Y/n]")
     confirm = read(values=["y", "Y", "n", "N", ""])
@@ -639,13 +630,67 @@ def _run_set_mode(session):
     print()
 
     mgr = TavernManager(session)
-    success_count = sum(1 for city in cities_to_process if mgr.set_tavern_simple(city, target_is_max))
+    success_count = sum(1 for city in cities_to_process if mgr.set_tavern_pct(city, pct))
 
     print()
     print(f"{bcolors.GREEN}✓ Complete!{bcolors.ENDC}")
     print(f"Successfully updated {success_count}/{len(cities_to_process)} cities")
     print()
     enter()
+
+
+def _select_cities(session):
+    """Prompt for city selection. Returns a list of city dicts (each
+    with at least 'id' and 'name'), [] if the user picked an empty
+    set, or None if they backed out."""
+    print("Which cities?")
+    print("(1) Single city")
+    print("(2) Multiple cities (pick which to exclude)")
+    print("(3) All cities")
+    print()
+    print("(') Back to main menu")
+    choice = read(msg="Select (1-3): ", min=1, max=3, digit=True, additionalValues=["'"])
+    if choice == "'":
+        return None
+
+    print()
+
+    if choice == 1:
+        city = chooseCity(session)
+        return [city] if city else []
+    if choice == 2:
+        cities_ids, cities = ignoreCities(session, msg="Exclude any cities you DON'T want to update:")
+        return [cities[cid] for cid in cities_ids]
+    cities_ids, cities = getIdsOfCities(session)
+    return [cities[cid] for cid in cities_ids]
+
+
+def _select_percentage():
+    """Prompt for a wine consumption percentage. Returns an int in
+    [0, 100], or None if the user backed out."""
+    pct_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    manual_idx = len(pct_options) + 1
+
+    print("Set wine consumption to:")
+    for i, p in enumerate(pct_options, 1):
+        suffix = " (no wine)" if p == 0 else " (max)" if p == 100 else ""
+        print(f"({i:>2}) {p:>3}%{suffix}")
+    print(f"({manual_idx:>2}) Enter manual percentage")
+    print()
+    print("(') Back to main menu")
+
+    choice = read(
+        msg=f"Select (1-{manual_idx}): ",
+        min=1, max=manual_idx, digit=True,
+        additionalValues=["'"],
+    )
+    if choice == "'":
+        return None
+
+    if choice == manual_idx:
+        print()
+        return read(msg="Enter percentage (0-100): ", min=0, max=100, digit=True)
+    return pct_options[choice - 1]
 
 
 def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
