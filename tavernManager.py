@@ -329,19 +329,19 @@ class TavernManager:
 
         positions = self._get_positions(city_id)
         if positions is None:
-            result.update({'status': 'SKIP', 'note': 'Could not load city'})
+            result.update({'status': 'SKIP', 'note': "couldn't read city — will retry next cycle"})
             return result
 
         tavern = positions['tavern']
         th_pos = positions['th_pos']
 
         if not tavern:
-            result.update({'status': 'SKIP', 'note': 'No tavern'})
+            result.update({'status': 'SKIP', 'note': 'no tavern in this city'})
             return result
 
         th_data = self._get_town_hall_data(city_id, th_pos)
         if not th_data:
-            result.update({'status': 'SKIP', 'note': 'Could not load town hall'})
+            result.update({'status': 'SKIP', 'note': "couldn't read town hall — will retry next cycle"})
             return result
 
         current_pop = th_data['current_pop']
@@ -350,13 +350,13 @@ class TavernManager:
         # unreadable rather than letting "0 < max_pop" decide we should
         # blast wine to max.
         if current_pop is None or not max_pop:
-            result.update({'status': 'SKIP', 'note': 'Could not read population'})
+            result.update({'status': 'SKIP', 'note': "couldn't read population — will retry next cycle"})
             return result
         result['pop'] = f"{current_pop}/{max_pop}"
 
         tavern_data = self._get_tavern_data(city_id, tavern['position'])
         if not tavern_data or not tavern_data['action_code']:
-            result.update({'status': 'SKIP', 'note': 'Could not load tavern data'})
+            result.update({'status': 'SKIP', 'note': "couldn't read tavern — will retry next cycle"})
             return result
 
         tavern_pos = tavern['position']
@@ -367,14 +367,18 @@ class TavernManager:
             current_level = tavern_data['current_level']
 
             if current_level == max_level:
-                result.update({'status': 'OK', 'note': 'Growing, already MAX'})
+                result.update({'status': 'OK', 'note': 'still growing, wine already at MAX'})
             else:
                 current_wine = self._wine_at_level(consumption_values, current_level)
                 new_wine = self._wine_at_level(consumption_values, max_level)
                 self._apply_level(city_id, tavern_pos, max_level, tavern_data)
                 result.update({
                     'status': 'CHANGED',
-                    'note': f"L{current_level}({current_wine}/h)→L{max_level}({new_wine}/h) [MAX]",
+                    'note': (
+                        f"still growing — wine raised to MAX: "
+                        f"L{current_level} ({current_wine}/h) -> "
+                        f"L{max_level} ({new_wine}/h)"
+                    ),
                 })
             return result
 
@@ -383,25 +387,31 @@ class TavernManager:
         result['satisfaction'] = str(total_satisfaction)
 
         if growth_rate > 0:
-            result.update({'status': 'OK', 'note': f"Growth {growth_rate:+.1f}/h"})
+            result.update({'status': 'OK', 'note': f"happy + growing ({growth_rate:+.1f}/h)"})
             return result
 
         if th_data['resource_shortage']:
-            result.update({'status': 'WARN', 'note': 'Growth=0 due to resource shortage'})
+            result.update({
+                'status': 'WARN',
+                'note': 'growth stalled by a resource shortage — wine left unchanged',
+            })
             return result
 
         if total_satisfaction < SATISFACTION_BUFFER:
             result.update({
                 'status': 'WARN',
-                'note': f"Satisfaction {total_satisfaction} below buffer {SATISFACTION_BUFFER}, not reducing wine",
+                'note': (
+                    f"happiness {total_satisfaction} is below the safety buffer "
+                    f"of +{SATISFACTION_BUFFER}; keeping wine where it is"
+                ),
             })
             return result
 
         change = self._optimize_for_satisfaction(city_id, tavern_pos, tavern_data, total_satisfaction)
         if change:
-            result.update({'status': 'CHANGED', 'note': change})
+            result.update({'status': 'CHANGED', 'note': f"wine lowered: {change}"})
         else:
-            result.update({'status': 'OK', 'note': 'Already optimal'})
+            result.update({'status': 'OK', 'note': 'wine already at the lowest safe level'})
         return result
 
     def process_equilibrium(self, cities_ids, cities):
@@ -420,17 +430,20 @@ class TavernManager:
                 try:
                     result = self._process_one_city(city_id, city)
                     note = result.get('note', '')
-                    result['note'] = f"{note} (cache refreshed)".strip()
+                    result['note'] = f"{note} (refreshed)".strip()
                 except _StaleCacheError as stale2:
                     result = {
                         'name': city['name'], 'status': 'ERROR',
                         'pop': '', 'satisfaction': '',
-                        'note': f"stale after refresh: {stale2}",
+                        'note': (
+                            "city looked stale, still couldn't read it after a "
+                            f"refresh — building may have changed ({stale2})"
+                        ),
                     }
                     if self.notification_mode in (1, 2):
                         sendToBot(
                             self.session,
-                            f"❌ Tavern Equilibrium Error\n{city['name']}: stale after refresh ({stale2})"
+                            f"❌ Wine auto-tune error\n{city['name']}: still stale after refresh ({stale2})"
                         )
                 except Exception as e:
                     self.clear_caches(city_id)
@@ -440,7 +453,7 @@ class TavernManager:
                         'note': str(e),
                     }
                     if self.notification_mode in (1, 2):
-                        sendToBot(self.session, f"❌ Tavern Equilibrium Error\n{city['name']}: {str(e)}")
+                        sendToBot(self.session, f"❌ Wine auto-tune error\n{city['name']}: {str(e)}")
             except Exception as e:
                 self.clear_caches(city_id)
                 result = {
@@ -449,13 +462,13 @@ class TavernManager:
                     'note': str(e),
                 }
                 if self.notification_mode in (1, 2):
-                    sendToBot(self.session, f"❌ Tavern Equilibrium Error\n{city['name']}: {str(e)}")
+                    sendToBot(self.session, f"❌ Wine auto-tune error\n{city['name']}: {str(e)}")
 
             results.append(result)
 
         changes = [r for r in results if r['status'] == 'CHANGED']
         if self.notification_mode == 1 and changes:
-            msg = "🍷 Tavern Equilibrium Changes\n\n"
+            msg = "🍷 Wine auto-tune — changes this cycle\n\n"
             for r in changes:
                 msg += f"📍 {r['name']}: {r['note']}\n"
             sendToBot(self.session, msg)
@@ -476,10 +489,13 @@ class TavernManager:
             try:
                 ok = self._set_tavern_pct_once(city, pct)
                 if ok:
-                    print(f"  {city['name']}: (cache refreshed)")
+                    print(f"  {city['name']}: (cached data was stale, refreshed and retried successfully)")
                 return ok
             except _StaleCacheError as stale2:
-                print(f"  {city['name']}: stale after refresh ({stale2})")
+                print(
+                    f"  {city['name']}: failed — cached data was stale and the "
+                    f"refresh didn't help ({stale2})"
+                )
                 return False
 
     def _set_tavern_pct_once(self, city, pct):
@@ -488,24 +504,24 @@ class TavernManager:
         # Manual mode: always refresh so the user sees current state.
         positions = self._get_positions(city_id, force_refresh=True)
         if positions is None:
-            print(f"  {city['name']}: Could not load city")
+            print(f"  {city['name']}: skipped — couldn't read city data from the server")
             return False
 
         tavern = positions['tavern']
         if not tavern:
-            print(f"  {city['name']}: No tavern")
+            print(f"  {city['name']}: skipped — no tavern built in this city")
             return False
 
         tavern_data = self._get_tavern_data(city_id, tavern['position'], force_refresh=True)
         if not tavern_data or not tavern_data['action_code']:
-            print(f"  {city['name']}: Could not load tavern data")
+            print(f"  {city['name']}: skipped — couldn't read tavern data from the server")
             return False
 
         consumption_values = tavern_data['consumption_values']
         current_level = tavern_data['current_level']
 
         if not consumption_values:
-            print(f"  {city['name']}: tavern has no selectable levels")
+            print(f"  {city['name']}: skipped — tavern has no wine settings available")
             return False
 
         max_level = max(l for l, w in consumption_values)
@@ -517,10 +533,14 @@ class TavernManager:
         current_wine = self._wine_at_level(consumption_values, current_level)
         new_wine = self._wine_at_level(consumption_values, target_level)
         if target_level == current_level:
-            print(f"  {city['name']}: already at L{current_level}({current_wine}/h) [{pct}%]")
+            print(f"  {city['name']}: already at level {current_level} ({current_wine} wine/hr) — no change needed")
             return True
         self._apply_level(city_id, tavern['position'], target_level, tavern_data)
-        print(f"  {city['name']}: L{current_level}({current_wine}/h) → L{target_level}({new_wine}/h) [{pct}%]")
+        print(
+            f"  {city['name']}: set to {pct}% — "
+            f"level {current_level} ({current_wine} wine/hr) -> "
+            f"level {target_level} ({new_wine} wine/hr)"
+        )
         return True
 
 
@@ -536,7 +556,7 @@ def _print_results_table(results):
         'ERROR':   bcolors.RED,
     }
 
-    header = f"{'City':<{col_city}}  {'Status':<7}  {'Pop':<11}  {'Sat':>5}  Note"
+    header = f"{'City':<{col_city}}  {'Result':<7}  {'Pop':<11}  {'Happy':>5}  What happened"
     divider = "─" * (col_city + 7 + 11 + 5 + 4 * 4 + 30)
 
     print()
@@ -552,10 +572,20 @@ def _print_results_table(results):
     changed = sum(1 for r in results if r['status'] == 'CHANGED')
     ok      = sum(1 for r in results if r['status'] == 'OK')
     warned  = sum(1 for r in results if r['status'] in ('WARN', 'ERROR', 'SKIP'))
+    # Plain-English legend so first-timers don't have to guess.
     print(
-        f"{bcolors.GREEN}{changed} changed{bcolors.ENDC}  "
-        f"{ok} ok  "
-        f"{bcolors.WARNING}{warned} skipped/warned{bcolors.ENDC}"
+        f"{bcolors.GREEN}OK     = nothing to change{bcolors.ENDC}   "
+        f"{bcolors.BLUE}CHANGED = wine level adjusted{bcolors.ENDC}"
+    )
+    print(
+        f"{bcolors.WARNING}WARN   = something off, no change made{bcolors.ENDC}   "
+        f"{bcolors.STONE}SKIP   = couldn't read this city{bcolors.ENDC}   "
+        f"{bcolors.RED}ERROR  = failed{bcolors.ENDC}"
+    )
+    print(
+        f"Summary: {bcolors.BLUE}{changed} changed{bcolors.ENDC}, "
+        f"{bcolors.GREEN}{ok} already fine{bcolors.ENDC}, "
+        f"{bcolors.WARNING}{warned} skipped/warned/errored{bcolors.ENDC}"
     )
     print()
 
@@ -576,17 +606,28 @@ def tavernManager(session, event, stdin_fd, predetermined_input):
         banner()
 
         print("=" * 60)
-        print("ADVANCED TAVERN WINE CONSUMPTION MANAGER")
+        print("TAVERN WINE MANAGER")
         print("=" * 60)
         print()
-        print("Select operation mode:")
+        print("Your tavern serves wine to keep citizens happy. More wine")
+        print("= more happiness = faster population growth, but it also")
+        print("burns through your wine stockpile.")
         print()
-        print("1. Set tavern wine consumption (% of max)")
-        print("2. Equilibrium mode (optimize wine usage)")
+        print("Pick what you want to do:")
         print()
-        print("(') Back to main menu")
+        print("  (1) Set a wine level by hand")
+        print("      Apply a fixed percentage (0-100%) to chosen cities.")
+        print("      Good for one-off changes or emergencies.")
+        print()
+        print("  (2) Auto-tune wine (runs in the background)")
+        print("      Sets MAX wine while cities are still growing, then")
+        print("      drops wine to the lowest level that keeps them happy")
+        print("      once they hit max population.")
+        print()
+        print("  (') Back to the main ikabot menu")
+        print()
 
-        mode = read(msg="Select mode (1 or 2): ", min=1, max=2, digit=True, additionalValues=["'"])
+        mode = read(msg="Pick 1 or 2: ", min=1, max=2, digit=True, additionalValues=["'"])
 
         if mode == "'":
             event.set()
@@ -607,15 +648,17 @@ def tavernManager(session, event, stdin_fd, predetermined_input):
 
 def _run_set_mode(session):
     print("=" * 60)
-    print("SET TAVERN WINE CONSUMPTION")
+    print("SET WINE LEVEL BY HAND")
     print("=" * 60)
+    print()
+    print("Two quick questions: which cities, and what percentage.")
     print()
 
     cities_to_process = _select_cities(session)
     if cities_to_process is None:
         return
     if not cities_to_process:
-        print("No cities selected.")
+        print("No cities chosen — nothing to do.")
         print()
         enter()
         return
@@ -625,26 +668,28 @@ def _run_set_mode(session):
         return
 
     print()
-    print(f"Will set {len(cities_to_process)} city/cities to {pct}% wine consumption")
+    city_word = "city" if len(cities_to_process) == 1 else "cities"
+    print(f"About to set wine to {pct}% in {len(cities_to_process)} {city_word}.")
     print()
-    print("Proceed? [Y/n]")
-    confirm = read(values=["y", "Y", "n", "N", ""])
+    confirm = read(msg="Go ahead? [Y/n]: ", values=["y", "Y", "n", "N", ""])
     if confirm.lower() == "n":
-        print("Cancelled.")
+        print("Cancelled, nothing was changed.")
         print()
         enter()
         return
 
     print()
-    print("Processing cities...")
+    print("Working through your cities...")
     print()
 
     mgr = TavernManager(session)
     success_count = sum(1 for city in cities_to_process if mgr.set_tavern_pct(city, pct))
 
     print()
-    print(f"{bcolors.GREEN}✓ Complete!{bcolors.ENDC}")
-    print(f"Successfully updated {success_count}/{len(cities_to_process)} cities")
+    print(f"{bcolors.GREEN}Done.{bcolors.ENDC}")
+    print(f"{success_count} of {len(cities_to_process)} cities updated successfully.")
+    if success_count < len(cities_to_process):
+        print("(Cities that failed are listed above with the reason.)")
     print()
     enter()
 
@@ -653,13 +698,20 @@ def _select_cities(session):
     """Prompt for city selection. Returns a list of city dicts (each
     with at least 'id' and 'name'), [] if the user picked an empty
     set, or None if they backed out."""
-    print("Which cities?")
-    print("(1) Single city")
-    print("(2) Multiple cities (pick which to exclude)")
-    print("(3) All cities")
+    print("Which cities should this apply to?")
     print()
-    print("(') Back to main menu")
-    choice = read(msg="Select (1-3): ", min=1, max=3, digit=True, additionalValues=["'"])
+    print("  (1) Just one city")
+    print("      Pick a single city from a list.")
+    print()
+    print("  (2) Some of my cities")
+    print("      Start with every city, then remove the ones you")
+    print("      don't want included.")
+    print()
+    print("  (3) Every city I own")
+    print()
+    print("  (') Go back")
+    print()
+    choice = read(msg="Pick 1, 2, or 3: ", min=1, max=3, digit=True, additionalValues=["'"])
     if choice == "'":
         return None
 
@@ -669,7 +721,10 @@ def _select_cities(session):
         city = chooseCity(session)
         return [city] if city else []
     if choice == 2:
-        cities_ids, cities = ignoreCities(session, msg="Exclude any cities you DON'T want to update:")
+        cities_ids, cities = ignoreCities(
+            session,
+            msg="Type a number to remove that city, then 0 when you're done:",
+        )
         return [cities[cid] for cid in cities_ids]
     cities_ids, cities = getIdsOfCities(session)
     return [cities[cid] for cid in cities_ids]
@@ -681,16 +736,31 @@ def _select_percentage():
     pct_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     manual_idx = len(pct_options) + 1
 
-    print("Set wine consumption to:")
-    for i, p in enumerate(pct_options, 1):
-        suffix = " (no wine)" if p == 0 else " (max)" if p == 100 else ""
-        print(f"({i:>2}) {p:>3}%{suffix}")
-    print(f"({manual_idx:>2}) Enter manual percentage")
+    print("How much wine should each tavern serve?")
     print()
-    print("(') Back to main menu")
+    print("  0%   = no wine (citizens get unhappy, population can shrink)")
+    print("  100% = the highest setting your tavern allows (most growth,")
+    print("         most wine consumed per hour)")
+    print()
+    print("Pick a percentage:")
+    print()
+    for i, p in enumerate(pct_options, 1):
+        if p == 0:
+            suffix = "  (no wine)"
+        elif p == 100:
+            suffix = "  (maximum)"
+        elif p == 50:
+            suffix = "  (half)"
+        else:
+            suffix = ""
+        print(f"  ({i:>2}) {p:>3}%{suffix}")
+    print(f"  ({manual_idx:>2}) Type a custom number")
+    print()
+    print("  (') Go back")
+    print()
 
     choice = read(
-        msg=f"Select (1-{manual_idx}): ",
+        msg=f"Pick 1-{manual_idx}: ",
         min=1, max=manual_idx, digit=True,
         additionalValues=["'"],
     )
@@ -699,38 +769,63 @@ def _select_percentage():
 
     if choice == manual_idx:
         print()
-        return read(msg="Enter percentage (0-100): ", min=0, max=100, digit=True)
+        return read(msg="Enter a percentage from 0 to 100: ", min=0, max=100, digit=True)
     return pct_options[choice - 1]
 
 
 def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     print("=" * 60)
-    print("EQUILIBRIUM MODE")
+    print("AUTO-TUNE WINE")
     print("=" * 60)
     print()
-    print("This mode optimizes wine consumption when population is maxed.")
-    print(f"It maintains satisfaction above +{SATISFACTION_BUFFER}.")
+    print("How auto-tune decides what to do for each city:")
     print()
-
-    print("Telegram notifications:")
-    print("1. Notify on every change")
-    print("2. Notify only on errors")
-    print("3. No notifications")
+    print("  - Population still growing? -> serve MAX wine (fastest")
+    print("    growth).")
+    print("  - Population at the cap and citizens are happy? -> drop")
+    print(f"    wine to the lowest level that keeps happiness above +{SATISFACTION_BUFFER}")
+    print("    so you stop wasting wine.")
+    print("  - Growth stuck because you're short on a resource? -> leave")
+    print("    wine alone and flag the city so you can investigate.")
     print()
-    print("(') Back to main menu")
-    notification_mode = read(msg="Select (1-3): ", min=1, max=3, digit=True, additionalValues=["'"])
+    print("Three quick questions: Telegram alerts, which cities, schedule.")
+    print()
+    print("-" * 60)
+    print("Question 1 of 3: Telegram alerts")
+    print("-" * 60)
+    print()
+    print("Should the bot text you on Telegram?")
+    print("(Needs Telegram set up in ikabot already — otherwise just")
+    print("pick option 3.)")
+    print()
+    print("  (1) Every wine change AND every error")
+    print("      Most notifications. Good when you're tuning settings.")
+    print("  (2) Only when something goes wrong")
+    print("      Quiet most of the time; pings you if a city errors.")
+    print("  (3) Don't text me")
+    print()
+    print("  (') Go back")
+    print()
+    notification_mode = read(msg="Pick 1, 2, or 3: ", min=1, max=3, digit=True, additionalValues=["'"])
 
     if notification_mode == "'":
         return
 
     print()
-
-    print("Which cities?")
-    print("1. Select specific cities")
-    print("2. All cities")
+    print("-" * 60)
+    print("Question 2 of 3: Which cities")
+    print("-" * 60)
     print()
-    print("(') Back to main menu")
-    city_choice = read(msg="Select (1 or 2): ", min=1, max=2, digit=True, additionalValues=["'"])
+    print("Which cities should auto-tune?")
+    print()
+    print("  (1) Choose a subset")
+    print("      Start with every city, then remove the ones you don't")
+    print("      want auto-tuned.")
+    print("  (2) Every city I own")
+    print()
+    print("  (') Go back")
+    print()
+    city_choice = read(msg="Pick 1 or 2: ", min=1, max=2, digit=True, additionalValues=["'"])
 
     if city_choice == "'":
         return
@@ -738,17 +833,28 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     print()
 
     if city_choice == 1:
-        cities_ids, cities = ignoreCities(session, msg="Select cities:")
+        cities_ids, cities = ignoreCities(
+            session,
+            msg="Type a number to remove that city, then 0 when you're done:",
+        )
     else:
         cities_ids, cities = getIdsOfCities(session)
 
-    print("Run mode:")
-    print("0. Run once and exit")
-    print("1-24. Run continuously, checking every X hours")
     print()
-    print("(') Back to main menu")
+    print("-" * 60)
+    print("Question 3 of 3: Schedule")
+    print("-" * 60)
+    print()
+    print("Run once now, or keep running on a schedule?")
+    print()
+    print("    0     Run a single check right now, then exit")
+    print("  1-24    Run continuously in the background, checking")
+    print("          every N hours")
+    print()
+    print("  (') Go back")
+    print()
     run_hours = read(
-        msg="Enter hours (0 for once, 1-24 for continuous): ",
+        msg="Enter a number from 0 to 24: ",
         min=0, max=24, digit=True, additionalValues=["'"]
     )
 
@@ -765,14 +871,17 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
         return results
 
     if run_hours == 0:
-        print(f"Processing {len(cities_ids)} cities...")
+        print(f"Checking {len(cities_ids)} cities once...")
         print()
         run_check()
         enter()
         return
 
-    print(f"Will check {len(cities_ids)} cities every {run_hours} hour(s)")
-    print("Running first check...")
+    print(f"Auto-tune will check {len(cities_ids)} cities every {run_hours} hour(s).")
+    print("Press Ctrl+C in the parent ikabot to stop it.")
+    print()
+    print("Running the first check now (so you can see the result")
+    print("before it disappears into the background)...")
     print()
     run_check()
     enter()
@@ -780,7 +889,7 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     set_child_mode(session)
     event.set()
 
-    info = f"\nTavern Equilibrium: {len(cities_ids)} cities, every {run_hours}h\n"
+    info = f"\nWine auto-tune: {len(cities_ids)} cities, every {run_hours}h\n"
     setInfoSignal(session, info)
 
     try:
@@ -792,11 +901,15 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
             # the daemon. Print it, optionally telegram it, and continue.
             try:
                 run_check()
-                session.setStatus(f"Equilibrium check @{getDateTime()}")
+                session.setStatus(f"Wine auto-tune ran at {getDateTime()}")
             except KeyboardInterrupt:
                 raise
             except Exception:
-                cycle_err = f"Cycle error in:\n{info}\nCause:\n{traceback.format_exc()}"
+                cycle_err = (
+                    f"Wine auto-tune had a problem this cycle, but it will keep running.\n"
+                    f"Task: {info}"
+                    f"Details:\n{traceback.format_exc()}"
+                )
                 traceback.print_exc()
                 if notification_mode in (1, 2):
                     try:
@@ -808,7 +921,11 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     except Exception:
         # Fatal: wait() or some non-cycle code raised. Surface it
         # locally and via telegram before logging out.
-        msg = f"Fatal error in:\n{info}\nCause:\n{traceback.format_exc()}"
+        msg = (
+            f"Wine auto-tune stopped because of a fatal error.\n"
+            f"Task: {info}"
+            f"Details:\n{traceback.format_exc()}"
+        )
         traceback.print_exc()
         if notification_mode in (1, 2):
             try:
