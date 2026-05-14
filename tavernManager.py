@@ -70,6 +70,13 @@ class TavernManager:
             None
         )
         info = {'tavern': tavern, 'th_pos': th_pos}
+        # If we found neither tavern nor town hall, the city HTML was
+        # almost certainly a bad fetch (login redirect, partial page,
+        # wrong city in flight). Don't cache the empty result — the
+        # next call will retry. Caching it would lock the city out
+        # of every subsequent cycle until process restart.
+        if tavern is None and th_pos is None:
+            return info
         self._positions[city_id] = info
         return info
 
@@ -339,7 +346,10 @@ class TavernManager:
 
         current_pop = th_data['current_pop']
         max_pop = th_data['max_pop']
-        if current_pop is None or max_pop is None:
+        # max_pop = 0 means the parse hit a non-numeric span — treat as
+        # unreadable rather than letting "0 < max_pop" decide we should
+        # blast wine to max.
+        if current_pop is None or not max_pop:
             result.update({'status': 'SKIP', 'note': 'Could not read population'})
             return result
         result['pop'] = f"{current_pop}/{max_pop}"
@@ -776,12 +786,34 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     try:
         while True:
             wait(run_hours * 3600)
-            run_check()
-            session.setStatus(f"Equilibrium check @{getDateTime()}")
+            # Per-cycle error firewall: a transient failure inside a
+            # single cycle (network blip, table-print bug, anything
+            # process_equilibrium didn't catch internally) must NOT kill
+            # the daemon. Print it, optionally telegram it, and continue.
+            try:
+                run_check()
+                session.setStatus(f"Equilibrium check @{getDateTime()}")
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                cycle_err = f"Cycle error in:\n{info}\nCause:\n{traceback.format_exc()}"
+                traceback.print_exc()
+                if notification_mode in (1, 2):
+                    try:
+                        sendToBot(session, cycle_err)
+                    except Exception:
+                        traceback.print_exc()
+    except KeyboardInterrupt:
+        pass
     except Exception:
-        msg = f"Error in:\n{info}\nCause:\n{traceback.format_exc()}"
+        # Fatal: wait() or some non-cycle code raised. Surface it
+        # locally and via telegram before logging out.
+        msg = f"Fatal error in:\n{info}\nCause:\n{traceback.format_exc()}"
         traceback.print_exc()
         if notification_mode in (1, 2):
-            sendToBot(session, msg)
+            try:
+                sendToBot(session, msg)
+            except Exception:
+                traceback.print_exc()
     finally:
         session.logout()
