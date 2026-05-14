@@ -17,6 +17,15 @@ from ikabot.helpers.varios import *
 SATISFACTION_BUFFER = 5
 
 
+class _StaleCacheError(Exception):
+    """Raised when a cached position or token no longer matches the server.
+
+    Triggers cache invalidation + a single retry for the affected city,
+    so the bot self-heals when a building is upgraded, demolished, or
+    rebuilt between cycles.
+    """
+
+
 class TavernManager:
     def __init__(self, session, notification_mode=3):
         self.session = session
@@ -32,6 +41,17 @@ class TavernManager:
         #     successful apply; action_code is a session CSRF token.
         self._positions = {}
         self._cache = {}
+
+    def clear_caches(self, city_id=None):
+        """Drop cached data. Pass a city_id to invalidate one city, or
+        None to invalidate everything. Use after manual building changes
+        you want the next cycle to pick up immediately."""
+        if city_id is None:
+            self._positions.clear()
+            self._cache.clear()
+        else:
+            self._positions.pop(city_id, None)
+            self._cache.pop(city_id, None)
 
     def _get_positions(self, city_id, force_refresh=False):
         if not force_refresh and city_id in self._positions:
@@ -105,6 +125,16 @@ class TavernManager:
                 if "actionRequest" in item[1]:
                     action_code = item[1]["actionRequest"]
 
+        # A valid tavern response always has both the dropdown options
+        # (consumption_values) and a CSRF token. If either is missing the
+        # cached tavern_pos almost certainly points at a different building
+        # now — refuse to cache and signal the caller to refresh.
+        if not consumption_values or not action_code:
+            raise _StaleCacheError(
+                f"city {city_id} tavern@{tavern_pos}: response missing "
+                f"{'consumption_values' if not consumption_values else 'action_code'}"
+            )
+
         result = {
             'current_level': current_level,
             'action_code': action_code,
@@ -130,11 +160,32 @@ class TavernManager:
             'actionRequest': tavern_data['action_code'],
             'ajax': '1',
         }
-        self.session.post(params=params)
+        response = self.session.post(params=params)
+        if not self._apply_response_ok(response):
+            raise _StaleCacheError(
+                f"city {city_id} apply L{target_level} rejected — "
+                f"likely stale position or CSRF token"
+            )
         # Update the cached current_level instead of invalidating the
         # whole entry so we keep consumption_values/sat_per_wine/action_code.
         if city_id in self._cache:
             self._cache[city_id]['current_level'] = target_level
+
+    @staticmethod
+    def _apply_response_ok(response):
+        """Lenient apply-response check: only declare failure on clear
+        error markers. If the response is not parseable JSON or contains
+        an ['error', ...] item, treat it as failure."""
+        try:
+            data = json.loads(response)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return False
+        if not isinstance(data, list):
+            return False
+        for item in data:
+            if isinstance(item, list) and item and item[0] == 'error':
+                return False
+        return True
 
     def _get_town_hall_data(self, city_id, th_pos):
         if th_pos is None:
@@ -176,7 +227,11 @@ class TavernManager:
         )
 
         if not growth_match or not satisfaction_match:
-            return None
+            # The server returned a view but it isn't the Town Hall —
+            # cached th_pos is pointing at the wrong building.
+            raise _StaleCacheError(
+                f"city {city_id} townHall@{th_pos}: response is not the town hall view"
+            )
 
         resource_shortage = bool(
             re.search(r'class="[^"]*shortage[^"]*"', th_html, re.IGNORECASE)
@@ -252,109 +307,137 @@ class TavernManager:
         self._apply_level(city_id, tavern_pos, optimal_level, tavern_data)
         return f"L{current_level}({current_wine}/h)→L{optimal_level}({new_wine}/h)"
 
+    def _process_one_city(self, city_id, city):
+        """Run the equilibrium decision for a single city. Returns the
+        result dict. May raise _StaleCacheError if the cached positions
+        or token no longer match the server — the caller will refresh
+        and retry."""
+        result = {
+            'name': city['name'],
+            'status': None,
+            'pop': '',
+            'satisfaction': '',
+            'note': '',
+        }
+
+        positions = self._get_positions(city_id)
+        if positions is None:
+            result.update({'status': 'SKIP', 'note': 'Could not load city'})
+            return result
+
+        tavern = positions['tavern']
+        th_pos = positions['th_pos']
+
+        if not tavern:
+            result.update({'status': 'SKIP', 'note': 'No tavern'})
+            return result
+
+        th_data = self._get_town_hall_data(city_id, th_pos)
+        if not th_data:
+            result.update({'status': 'SKIP', 'note': 'Could not load town hall'})
+            return result
+
+        current_pop = th_data['current_pop']
+        max_pop = th_data['max_pop']
+        if current_pop is None or max_pop is None:
+            result.update({'status': 'SKIP', 'note': 'Could not read population'})
+            return result
+        result['pop'] = f"{current_pop}/{max_pop}"
+
+        tavern_data = self._get_tavern_data(city_id, tavern['position'])
+        if not tavern_data or not tavern_data['action_code']:
+            result.update({'status': 'SKIP', 'note': 'Could not load tavern data'})
+            return result
+
+        tavern_pos = tavern['position']
+
+        if current_pop < max_pop:
+            consumption_values = tavern_data['consumption_values']
+            max_level = max((l for l, w in consumption_values), default=tavern['level'])
+            current_level = tavern_data['current_level']
+
+            if current_level == max_level:
+                result.update({'status': 'OK', 'note': 'Growing, already MAX'})
+            else:
+                current_wine = self._wine_at_level(consumption_values, current_level)
+                new_wine = self._wine_at_level(consumption_values, max_level)
+                self._apply_level(city_id, tavern_pos, max_level, tavern_data)
+                result.update({
+                    'status': 'CHANGED',
+                    'note': f"L{current_level}({current_wine}/h)→L{max_level}({new_wine}/h) [MAX]",
+                })
+            return result
+
+        growth_rate = th_data['growth_rate']
+        total_satisfaction = th_data['total_satisfaction']
+        result['satisfaction'] = str(total_satisfaction)
+
+        if growth_rate > 0:
+            result.update({'status': 'OK', 'note': f"Growth {growth_rate:+.1f}/h"})
+            return result
+
+        if th_data['resource_shortage']:
+            result.update({'status': 'WARN', 'note': 'Growth=0 due to resource shortage'})
+            return result
+
+        if total_satisfaction < SATISFACTION_BUFFER:
+            result.update({
+                'status': 'WARN',
+                'note': f"Satisfaction {total_satisfaction} below buffer {SATISFACTION_BUFFER}, not reducing wine",
+            })
+            return result
+
+        change = self._optimize_for_satisfaction(city_id, tavern_pos, tavern_data, total_satisfaction)
+        if change:
+            result.update({'status': 'CHANGED', 'note': change})
+        else:
+            result.update({'status': 'OK', 'note': 'Already optimal'})
+        return result
+
     def process_equilibrium(self, cities_ids, cities):
         results = []
 
         for city_id in cities_ids:
             city = cities[city_id]
-            result = {
-                'name': city['name'],
-                'status': None,
-                'pop': '',
-                'satisfaction': '',
-                'note': '',
-            }
-
             try:
-                positions = self._get_positions(city_id)
-                if positions is None:
-                    result.update({'status': 'SKIP', 'note': 'Could not load city'})
-                    results.append(result)
-                    continue
-
-                tavern = positions['tavern']
-                th_pos = positions['th_pos']
-
-                if not tavern:
-                    result.update({'status': 'SKIP', 'note': 'No tavern'})
-                    results.append(result)
-                    continue
-
-                th_data = self._get_town_hall_data(city_id, th_pos)
-                if not th_data:
-                    result.update({'status': 'SKIP', 'note': 'Could not load town hall'})
-                    results.append(result)
-                    continue
-
-                current_pop = th_data['current_pop']
-                max_pop = th_data['max_pop']
-                if current_pop is None or max_pop is None:
-                    result.update({'status': 'SKIP', 'note': 'Could not read population'})
-                    results.append(result)
-                    continue
-                result['pop'] = f"{current_pop}/{max_pop}"
-
-                tavern_data = self._get_tavern_data(city_id, tavern['position'])
-                if not tavern_data or not tavern_data['action_code']:
-                    result.update({'status': 'SKIP', 'note': 'Could not load tavern data'})
-                    results.append(result)
-                    continue
-
-                tavern_pos = tavern['position']
-
-                if current_pop < max_pop:
-                    consumption_values = tavern_data['consumption_values']
-                    max_level = max((l for l, w in consumption_values), default=tavern['level'])
-                    current_level = tavern_data['current_level']
-
-                    if current_level == max_level:
-                        result.update({'status': 'OK', 'note': 'Growing, already MAX'})
-                    else:
-                        current_wine = self._wine_at_level(consumption_values, current_level)
-                        new_wine = self._wine_at_level(consumption_values, max_level)
-                        self._apply_level(city_id, tavern_pos, max_level, tavern_data)
-                        result.update({
-                            'status': 'CHANGED',
-                            'note': f"L{current_level}({current_wine}/h)→L{max_level}({new_wine}/h) [MAX]",
-                        })
-                    results.append(result)
-                    continue
-
-                growth_rate = th_data['growth_rate']
-                total_satisfaction = th_data['total_satisfaction']
-                result['satisfaction'] = str(total_satisfaction)
-
-                if growth_rate > 0:
-                    result.update({'status': 'OK', 'note': f"Growth {growth_rate:+.1f}/h"})
-                    results.append(result)
-                    continue
-
-                if th_data['resource_shortage']:
-                    result.update({'status': 'WARN', 'note': 'Growth=0 due to resource shortage'})
-                    results.append(result)
-                    continue
-
-                if total_satisfaction < SATISFACTION_BUFFER:
-                    result.update({
-                        'status': 'WARN',
-                        'note': f"Satisfaction {total_satisfaction} below buffer {SATISFACTION_BUFFER}, not reducing wine",
-                    })
-                    results.append(result)
-                    continue
-
-                change = self._optimize_for_satisfaction(city_id, tavern_pos, tavern_data, total_satisfaction)
-                if change:
-                    result.update({'status': 'CHANGED', 'note': change})
-                else:
-                    result.update({'status': 'OK', 'note': 'Already optimal'})
-
+                result = self._process_one_city(city_id, city)
+            except _StaleCacheError as stale:
+                # Something on the server moved out from under us
+                # (building upgrade/demolition, token expiry, etc.).
+                # Drop this city's caches and try one more time with
+                # freshly fetched positions and tavern data.
+                self.clear_caches(city_id)
+                try:
+                    result = self._process_one_city(city_id, city)
+                    note = result.get('note', '')
+                    result['note'] = f"{note} (cache refreshed)".strip()
+                except _StaleCacheError as stale2:
+                    result = {
+                        'name': city['name'], 'status': 'ERROR',
+                        'pop': '', 'satisfaction': '',
+                        'note': f"stale after refresh: {stale2}",
+                    }
+                    if self.notification_mode in (1, 2):
+                        sendToBot(
+                            self.session,
+                            f"❌ Tavern Equilibrium Error\n{city['name']}: stale after refresh ({stale2})"
+                        )
+                except Exception as e:
+                    self.clear_caches(city_id)
+                    result = {
+                        'name': city['name'], 'status': 'ERROR',
+                        'pop': '', 'satisfaction': '',
+                        'note': str(e),
+                    }
+                    if self.notification_mode in (1, 2):
+                        sendToBot(self.session, f"❌ Tavern Equilibrium Error\n{city['name']}: {str(e)}")
             except Exception as e:
-                # Building positions or tavern state may have shifted (e.g.
-                # construction completed). Drop caches for this city so the
-                # next cycle re-fetches from scratch.
-                self._positions.pop(city_id, None)
-                self._cache.pop(city_id, None)
-                result.update({'status': 'ERROR', 'note': str(e)})
+                self.clear_caches(city_id)
+                result = {
+                    'name': city['name'], 'status': 'ERROR',
+                    'pop': '', 'satisfaction': '',
+                    'note': str(e),
+                }
                 if self.notification_mode in (1, 2):
                     sendToBot(self.session, f"❌ Tavern Equilibrium Error\n{city['name']}: {str(e)}")
 
@@ -370,6 +453,23 @@ class TavernManager:
         return results
 
     def set_tavern_simple(self, city, set_to_max):
+        try:
+            return self._set_tavern_simple_once(city, set_to_max)
+        except _StaleCacheError as stale:
+            # Force-refresh paths above already fetched fresh data, so a
+            # _StaleCacheError here means the server rejected the apply
+            # (e.g. stale session token). Clear and retry once.
+            self.clear_caches(city['id'])
+            try:
+                ok = self._set_tavern_simple_once(city, set_to_max)
+                if ok:
+                    print(f"  {city['name']}: (cache refreshed)")
+                return ok
+            except _StaleCacheError as stale2:
+                print(f"  {city['name']}: stale after refresh ({stale2})")
+                return False
+
+    def _set_tavern_simple_once(self, city, set_to_max):
         city_id = city['id']
 
         # Manual mode: always refresh so the user sees current state.
