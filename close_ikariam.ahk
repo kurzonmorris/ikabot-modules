@@ -1,14 +1,20 @@
-; Closes all running processes whose name contains "ikariam", "ikabot", or "ambrosia".
+; Closes all windows whose title contains "ikariam", "ikabot", or "ambrosia".
 ; Requires AutoHotkey v2.x  (https://www.autohotkey.com/)
 
 #Requires AutoHotkey v2.0
 
-result := MsgBox("Close all Ikariam / Ikabot / Ambrosia processes?", "Confirm", "YesNo Icon?")
+result := MsgBox("Close all Ikariam / Ikabot / Ambrosia windows?", "Confirm", "YesNo Icon?")
 if result = "No"
     ExitApp
 
-psCmd := "Get-Process | Where-Object { $_.Name -like '*ikariam*' -or $_.Name -like '*ikabot*' -or $_.Name -like '*ambrosia*' } | Stop-Process -Force"
-cmd := 'powershell -WindowStyle Hidden -Command "' . psCmd . '"'
-RunWait cmd,, "Hide"
+keywords := ["ikariam", "ikabot", "ambrosia"]
+count := 0
 
-MsgBox "All Ikariam / Ikabot / Ambrosia processes have been closed."
+for _, kw in keywords {
+    for hwnd in WinGetList("*" kw "*") {
+        WinClose hwnd
+        count++
+    }
+}
+
+MsgBox count " window(s) closed."
