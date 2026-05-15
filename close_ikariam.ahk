@@ -1,20 +1,12 @@
-; Closes all windows whose title contains "ikariam", "ikabot", or "ambrosia".
+; Closes all running ikabot.exe processes.
 ; Requires AutoHotkey v2.x  (https://www.autohotkey.com/)
 
 #Requires AutoHotkey v2.0
 
-result := MsgBox("Close all Ikariam / Ikabot / Ambrosia windows?", "Confirm", "YesNo Icon?")
+result := MsgBox("Close all Ikabot windows?", "Confirm", "YesNo Icon?")
 if result = "No"
     ExitApp
 
-keywords := ["ikariam", "ikabot", "ambrosia"]
-count := 0
+RunWait 'taskkill /F /IM ikabot.exe',, "Hide"
 
-for _, kw in keywords {
-    for hwnd in WinGetList("*" kw "*") {
-        WinClose hwnd
-        count++
-    }
-}
-
-MsgBox count " window(s) closed."
+MsgBox "All Ikabot windows have been closed."
