@@ -26,6 +26,49 @@ class _StaleCacheError(Exception):
     """
 
 
+class _ApplyRejectedError(Exception):
+    """Raised when an apply POST succeeds at the HTTP level but the
+    server didn't actually change wineServeLevel.
+
+    The classic trigger is "city has no wine in stock" — Ikariam returns
+    a normal-looking ajax response in that case but quietly keeps the
+    old level. We detect the mismatch and surface it to the operator
+    instead of pretending the change worked.
+    """
+    def __init__(self, target_level, actual_level):
+        self.target_level = target_level
+        self.actual_level = actual_level
+        if target_level > actual_level:
+            msg = (
+                f"server kept wine at level {actual_level} — we asked for "
+                f"level {target_level}. The city is probably out of wine "
+                f"in stock (or producing less than that level requires)."
+            )
+        elif target_level < actual_level:
+            msg = (
+                f"server kept wine at level {actual_level} — we asked for "
+                f"level {target_level}. The change was rejected."
+            )
+        else:
+            msg = f"server kept wine at level {actual_level} as requested."
+        super().__init__(msg)
+
+
+def _setup_stdio():
+    """Make sure stdout/stderr can render non-ASCII city names without
+    UnicodeEncodeError on POSIX/C locales or Windows cp1252 terminals.
+
+    Falls back to replacement characters (e.g. 'K?ln' for 'Köln') rather
+    than crashing if the terminal really can't encode a character. Safe
+    on Python 3.7+ and silently a no-op if reconfigure isn't available.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, OSError):
+            pass
+
+
 class TavernManager:
     def __init__(self, session, notification_mode=3):
         self.session = session
@@ -173,10 +216,31 @@ class TavernManager:
                 f"city {city_id} apply L{target_level} rejected — "
                 f"likely stale position or CSRF token"
             )
-        # Update the cached current_level instead of invalidating the
-        # whole entry so we keep consumption_values/sat_per_wine/action_code.
+
+        # Ikariam will quietly refuse to raise wineServeLevel when the
+        # city has no wine in stock — HTTP 200, no error item, but the
+        # level didn't actually change. So don't just trust the POST:
+        # read back the level the server now has, and if it doesn't
+        # match what we asked for, treat it as a rejected apply.
+        actual_level = self._extract_applied_level(response)
+        if actual_level is None:
+            # Apply response didn't include the new level; refresh to
+            # find out. The wasted POST is only paid on actual changes.
+            try:
+                verify = self._get_tavern_data(city_id, tavern_pos, force_refresh=True)
+                actual_level = verify['current_level'] if verify else None
+            except _StaleCacheError:
+                actual_level = None
+
+        # Sync the cache to whatever the server actually has (or, if
+        # we couldn't determine it, optimistically to target_level).
         if city_id in self._cache:
-            self._cache[city_id]['current_level'] = target_level
+            self._cache[city_id]['current_level'] = (
+                actual_level if actual_level is not None else target_level
+            )
+
+        if actual_level is not None and actual_level != target_level:
+            raise _ApplyRejectedError(target_level, actual_level)
 
     @staticmethod
     def _apply_response_ok(response):
@@ -193,6 +257,31 @@ class TavernManager:
             if isinstance(item, list) and item and item[0] == 'error':
                 return False
         return True
+
+    @staticmethod
+    def _extract_applied_level(response):
+        """Parse an apply response for the post-apply wineServeLevel.
+        Returns the integer level or None if the response didn't
+        include one."""
+        try:
+            data = json.loads(response)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return None
+        if not isinstance(data, list):
+            return None
+        for item in data:
+            if not (isinstance(item, list) and len(item) >= 2):
+                continue
+            if item[0] == 'updateTemplateData' and isinstance(item[1], dict):
+                load_js = item[1].get('load_js', {})
+                if isinstance(load_js, dict) and 'params' in load_js:
+                    try:
+                        js_data = json.loads(load_js['params'])
+                        if 'wineServeLevel' in js_data:
+                            return int(js_data['wineServeLevel'])
+                    except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+                        pass
+        return None
 
     def _get_town_hall_data(self, city_id, th_pos):
         if th_pos is None:
@@ -318,7 +407,25 @@ class TavernManager:
         """Run the equilibrium decision for a single city. Returns the
         result dict. May raise _StaleCacheError if the cached positions
         or token no longer match the server — the caller will refresh
-        and retry."""
+        and retry.
+
+        _ApplyRejectedError (apply succeeded HTTP-wise but the server
+        kept the old wine level — usually because the city is out of
+        wine) is caught locally so we still surface the population /
+        happiness numbers we already fetched."""
+        try:
+            return self._process_one_city_inner(city_id, city)
+        except _ApplyRejectedError as rejected:
+            # We already filled in pop/sat on the partial result that
+            # was lost when the exception unwound — rebuild a WARN row
+            # with as much context as we have.
+            return {
+                'name': city['name'], 'status': 'WARN',
+                'pop': '', 'satisfaction': '',
+                'note': f"wine NOT changed — {rejected}",
+            }
+
+    def _process_one_city_inner(self, city_id, city):
         result = {
             'name': city['name'],
             'status': None,
@@ -473,6 +580,18 @@ class TavernManager:
                 msg += f"📍 {r['name']}: {r['note']}\n"
             sendToBot(self.session, msg)
 
+        # Out-of-wine WARN rows are operationally important even when
+        # the operator only asked for "errors only" — flag them too.
+        wine_blocked = [
+            r for r in results
+            if r['status'] == 'WARN' and 'wine NOT changed' in r['note']
+        ]
+        if wine_blocked and self.notification_mode in (1, 2):
+            msg = "⚠️ Wine auto-tune — couldn't apply wine in some cities\n\n"
+            for r in wine_blocked:
+                msg += f"📍 {r['name']}: {r['note']}\n"
+            sendToBot(self.session, msg)
+
         return results
 
     def set_tavern_pct(self, city, pct):
@@ -481,6 +600,11 @@ class TavernManager:
         the dropdown actually offers. pct is an int in [0, 100]."""
         try:
             return self._set_tavern_pct_once(city, pct)
+        except _ApplyRejectedError as rejected:
+            # No retry: an "out of wine" rejection won't be fixed by
+            # trying again, so report it and move on.
+            print(f"  {city['name']}: NOT CHANGED — {rejected}")
+            return False
         except _StaleCacheError as stale:
             # Force-refresh paths above already fetched fresh data, so a
             # _StaleCacheError here means the server rejected the apply
@@ -491,6 +615,9 @@ class TavernManager:
                 if ok:
                     print(f"  {city['name']}: (cached data was stale, refreshed and retried successfully)")
                 return ok
+            except _ApplyRejectedError as rejected:
+                print(f"  {city['name']}: NOT CHANGED — {rejected}")
+                return False
             except _StaleCacheError as stale2:
                 print(
                     f"  {city['name']}: failed — cached data was stale and the "
@@ -601,6 +728,7 @@ def tavernManager(session, event, stdin_fd, predetermined_input):
     """
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
+    _setup_stdio()
 
     try:
         banner()
