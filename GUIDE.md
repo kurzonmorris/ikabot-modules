@@ -24,14 +24,17 @@ SETUP
         then choose to save credentials to the vault.
         ALL FUTURE LAUNCHES: enter your vault master password, pick your account.
 
-[ ] 4. Set a proxy  →  21 → 1
+[ ] 4. Set up notifications  (prompted automatically after login)
+        ikabot asks about this before you reach the main menu.
+        Connect Telegram, Discord or ntfy.sh so ikabot can alert you
+        when tasks finish, attacks happen or wine runs low.
+        You can also do this later via  21 → 2.
+
+[ ] 5. Set a proxy  →  21 → 1
+        Do this once you reach the main menu.
         Use a dedicated proxy per account if accounts will trade with each other.
         Use shared proxies if accounts are independent (cheaper).
         See Section 9 for the recommended provider.
-
-[ ] 5. Set up notifications  →  21 → 2
-        Connect Telegram, Discord or ntfy.sh so ikabot can alert you
-        when tasks finish, attacks happen or wine runs low.
 
 TASKS TO START IMMEDIATELY (leave running in background)
 ─────────────────────────────────────────────────────────────
