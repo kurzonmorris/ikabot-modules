@@ -41,6 +41,28 @@ from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import *
 
 # =============================================================================
+# RESOURCE RESERVATION SYSTEM (RRS) — optional integration
+# =============================================================================
+
+MODULE_NAME = "autoRecruitment"
+
+try:
+    from resourceReservationSystem import (
+        is_city_excluded,
+        get_excluded_cities,
+        get_summary        as rrs_get_summary,
+        get_reservation_snapshot,
+        reserve            as rrs_reserve,
+        release            as rrs_release,
+        release_all_for_module,
+        update_reservation as rrs_update_reservation,
+        rrs_get_config,
+    )
+    RRS_AVAILABLE = True
+except ImportError:
+    RRS_AVAILABLE = False
+
+# =============================================================================
 # UNIT AND SHIP DEFINITIONS
 # =============================================================================
 
@@ -426,11 +448,24 @@ def _find_resource_surpluses(session, dest_city_id, needed, all_city_ids, cities
     """
     Return a list of {city_id, city_name, can_send: [w,wi,mb,cr,su]}
     for cities that can spare resources needed by dest_city.
-    Keeps 30% as a local buffer (reservation module will refine this later).
+
+    With RRS: uses get_summary() once (not per-city get_available()), respects
+    excluded cities, and honours minimum-ship-capacity from config.
+    Without RRS: keeps a 30% local buffer as a conservative fallback.
     """
+    # Fetch RRS state once for the whole scan — avoids repeated per-city API calls
+    if RRS_AVAILABLE:
+        rrs_summary  = rrs_get_summary(session)          # {city_id: {res_idx: reserved}}
+        excluded     = {e["city_id"] for e in get_excluded_cities(session)}
+        min_take     = rrs_get_config(session)["min_ship_capacity"]
+    else:
+        rrs_summary, excluded, min_take = {}, set(), 500
+
     surpluses = []
     for cid in all_city_ids:
         if cid == dest_city_id:
+            continue
+        if cid in excluded:
             continue
         try:
             html = session.get(city_url + str(cid))
@@ -440,14 +475,26 @@ def _find_resource_surpluses(session, dest_city_id, needed, all_city_ids, cities
         avail = city_data.get('availableResources', [0] * 5)
         if len(avail) < 5:
             avail = avail + [0] * (5 - len(avail))
-        # Offer only 70% of available; 30% kept as buffer
-        can_send = [int(v * 0.70) for v in avail]
-        if any(can_send[i] > 0 and needed[i] > 0 for i in range(5)):
-            surpluses.append({
-                'city_id':   cid,
-                'city_name': cities[cid]['name'],
-                'can_send':  can_send,
-            })
+
+        can_send = []
+        for i in range(5):
+            if RRS_AVAILABLE:
+                reserved = rrs_summary.get(cid, {}).get(i, 0)
+                free = max(0, avail[i] - reserved)
+            else:
+                # 30% local buffer when RRS is unavailable
+                free = int(avail[i] * 0.70)
+            can_send.append(free)
+
+        # Skip cities where no resource meets the minimum-take threshold
+        if not any(can_send[i] >= min_take and needed[i] > 0 for i in range(5)):
+            continue
+
+        surpluses.append({
+            'city_id':   cid,
+            'city_name': cities[cid]['name'],
+            'can_send':  can_send,
+        })
     return surpluses
 
 
@@ -1375,10 +1422,21 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                         citizens = int(m.group(1).replace(',', ''))
                         break
 
+                # Apply RRS snapshot so we don't count resources reserved by
+                # other modules.  Citizens have no RRS resource index — kept raw.
+                if RRS_AVAILABLE:
+                    res_avail = []
+                    for i in range(5):
+                        snap, _ = get_reservation_snapshot(session, cid, i, avail[i])
+                        res_avail.append(snap)
+                else:
+                    res_avail = list(avail[:5])
+
                 city_resources[cid] = {
                     'citizens': citizens,
-                    'wood': avail[0], 'wine': avail[1],
-                    'marble': avail[2], 'crystal': avail[3], 'sulfur': avail[4],
+                    'wood':    res_avail[0], 'wine':    res_avail[1],
+                    'marble':  res_avail[2], 'crystal': res_avail[3],
+                    'sulfur':  res_avail[4],
                 }
                 consecutive_errors = 0
             except Exception as e:
@@ -1502,7 +1560,16 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                 if b.get('is_busy') and qt > 0:
                     soonest_queue = min(soonest_queue or qt, qt)
 
-            sleep_secs = min((soonest_queue + 30) if soonest_queue else 300, 1800)
+            if any_busy:
+                # Wake up just after the soonest queue finishes; cap at 30 min
+                sleep_secs = min((soonest_queue + 30) if soonest_queue else 300, 1800)
+            else:
+                # Resource shortage: honour RRS retry_hours if available
+                if RRS_AVAILABLE:
+                    retry_secs = int(rrs_get_config(session)["retry_hours"] * 3600)
+                else:
+                    retry_secs = 300
+                sleep_secs = min(retry_secs, 1800)
 
             label = "Waiting for queues..." if any_busy else "Waiting for resources..."
             session.setStatus(f"{label} {total_remaining:,} units remaining")
@@ -1524,6 +1591,31 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                 print(f"  {b['city_name']}: Failed to get action code, skipping")
                 continue
 
+            # --- Reserve resources with RRS before touching city stocks ---
+            # release_at gives the game 5 minutes to process the POST;
+            # release_all_for_module in the finally block covers any edge case.
+            reservation_ids = []
+            if RRS_AVAILABLE:
+                _RES_KEYS = ('wood', 'wine', 'marble', 'crystal', 'sulfur')
+                for uid, qty in to_recruit.items():
+                    ud = b.get('unit_data', {}).get(uid, {})
+                    unit_label = ud.get('name', str(uid))
+                    for res_idx, res_key in enumerate(_RES_KEYS):
+                        cost = ud.get(res_key, 0) * qty
+                        if cost <= 0:
+                            continue
+                        rid = rrs_reserve(
+                            session,
+                            city_id=cid,
+                            city_name=b['city_name'],
+                            resource_index=res_idx,
+                            amount=cost,
+                            module_name=MODULE_NAME,
+                            reason=f"Recruit {unit_label} x{qty}",
+                            release_at=time.time() + 300,
+                        )
+                        reservation_ids.append(rid)
+
             params = {
                 'action':        'BuildUnits',
                 'actionRequest': action_code,
@@ -1539,6 +1631,13 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                 pct = placed / info['bldg_total'] * 100
                 print(f"  {b['city_name']} L{b['building_level']}: "
                       f"Placed {placed:,} units ({pct:.0f}% of remaining)")
+
+                # Resources consumed by the game — release reservations
+                if RRS_AVAILABLE:
+                    for rid in reservation_ids:
+                        result = rrs_release(session, rid, MODULE_NAME)
+                        # True = released OK, None = wrong owner (shouldn't happen),
+                        # False = already expired (fine, POST took <5 min)
 
                 # Update in-memory remaining
                 for uid, qty in to_recruit.items():
@@ -1566,6 +1665,10 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
 
             except Exception as e:
                 print(f"  {b['city_name']}: POST failed — {e}")
+                # POST failed — release reservations so resources aren't locked
+                if RRS_AVAILABLE:
+                    for rid in reservation_ids:
+                        rrs_release(session, rid, MODULE_NAME)
 
         # Brief pause, then check progress reports
         wait(30)
@@ -1998,6 +2101,11 @@ def autoRecruitment(session, event, stdin_fd, predetermined_input):
             except Exception:
                 sendToBot(session, f"Error in:\n{info}\n{traceback.format_exc()}")
             finally:
+                if RRS_AVAILABLE:
+                    try:
+                        release_all_for_module(session, MODULE_NAME)
+                    except Exception:
+                        pass
                 session.logout()
 
         else:
