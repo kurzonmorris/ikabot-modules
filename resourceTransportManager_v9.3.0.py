@@ -4610,11 +4610,13 @@ def _activate_transport_worker(session, event):
         print(f"  {C.DIM}If you're sure nothing is running, delete:{C.RESET}")
         print(f"    {wlock}")
         enter()
+        event.set()
         return
 
     if not enforce_transport_schema_or_abort(session):
         _lock_release(wlock)
         enter()
+        event.set()
         return
 
     schedules = transport_csv_load(session)
@@ -4628,6 +4630,7 @@ def _activate_transport_worker(session, event):
         print(f"  {C.DIM}Create a schedule first using options 1-6.{C.RESET}")
         _lock_release(wlock)
         enter()
+        event.set()
         return
 
     print(f"\n  {C.BOLD}{len(activatable)} schedule(s) to activate:{C.RESET}\n")
@@ -4655,6 +4658,7 @@ def _activate_transport_worker(session, event):
     choice = read(min=1, max=2, digit=True, additionalValues=["'"])
     if choice == "'":
         _lock_release(wlock)
+        event.set()
         return
 
     resume_mode = "continue" if choice == 1 else "from_now"
