@@ -2,6 +2,66 @@
 
 ---
 
+## QUICK-START CHECKLIST
+
+Work through this list top to bottom on each account before doing anything else.
+
+```
+SETUP
+─────────────────────────────────────────────────────────────
+[ ] 1. Create one folder per account, e.g.:
+        C:\ikabot\account-alice\   (copy the full dist\ikabot\ folder here)
+        C:\ikabot\account-bob\
+        C:\ikabot\account-charlie\
+
+[ ] 2. Create a desktop shortcut for each folder
+        Right-click ikabot.exe → Send to → Desktop (create shortcut)
+        Right-click shortcut → Properties → set "Start in" to the account folder
+        Rename the shortcut, e.g.  "Ikabot – Alice"
+
+[ ] 3. Double-click the shortcut to launch
+        FIRST LAUNCH: enter your Ikariam email and password when asked,
+        then choose to save credentials to the vault.
+        ALL FUTURE LAUNCHES: enter your vault master password, pick your account.
+
+[ ] 4. Set a proxy  →  21 → 1
+        Use a dedicated proxy per account if accounts will trade with each other.
+        Use shared proxies if accounts are independent (cheaper).
+        See Section 9 for the recommended provider.
+
+[ ] 5. Set up notifications  →  21 → 2
+        Connect Telegram, Discord or ntfy.sh so ikabot can alert you
+        when tasks finish, attacks happen or wine runs low.
+
+TASKS TO START IMMEDIATELY (leave running in background)
+─────────────────────────────────────────────────────────────
+[ ] 6. Start Web Server          →  16
+        Opens the browser dashboard so you can see all running tasks.
+        Do this before starting anything else.
+
+[ ] 7. Start Shrine bot          →   5
+        Donates to the shrine every 12 hours automatically.
+
+[ ] 8. Start Login Daily         →   6
+        Collects your daily reward and handles recurring wine deliveries.
+
+[ ] 9. Start Miracle (if any)    →  11
+        Activates your island's miracle on a timer.
+
+EXTERNAL MODULES (optional but very useful)
+─────────────────────────────────────────────────────────────
+[ ] 10. Configure module folder  →  30 → 99
+         Point ikabot at the folder containing the .py module files.
+
+[ ] 11. Start Construction Manager  →  30 → (its number after refresh)
+         Define your build queue and let it work through upgrades automatically.
+
+[ ] 12. Start Resource Transport Manager  →  30 → (its number)
+         Automate bulk resource shipping between cities.
+```
+
+---
+
 ## 1. Storage Layout — Multiple Instances
 
 Each ikabot instance needs its **own folder** so the processes don't collide.
@@ -12,17 +72,20 @@ C:\ikabot\
 │
 ├── account-alice\        ← copy of the dist\ikabot\ folder
 │   └── ikabot.exe
+│   └── _internal\
 │
 ├── account-bob\          ← another copy
 │   └── ikabot.exe
+│   └── _internal\
 │
 └── account-charlie\      ← another copy
     └── ikabot.exe
+    └── _internal\
 ```
 
 > **Why separate folders?**  The `_internal\` folder next to the exe contains
-> all supporting files.  Sharing it between instances causes file-lock conflicts.
-> Just copy the whole `dist\ikabot\` output folder once per account.
+> all supporting Python files.  Sharing it between instances causes file-lock
+> conflicts.  Copy the whole `dist\ikabot\` output folder once per account.
 
 ---
 
@@ -42,11 +105,20 @@ console window, all running at the same time independently.
 
 ---
 
-## 3. First-Time Login
+## 3. Logging In
 
-On first launch you will be asked for your **Ikariam email and password**.
+### First-ever launch
+You will be asked for your **Ikariam email and password** directly.
 After a successful login ikabot will offer to save those credentials to the
-**credential vault** (recommended — see section 4).
+**credential vault** — say yes.  You only need to type the game password once.
+
+### Every launch after that
+The first prompt you see is the **vault master password** — this is the password
+you chose when the vault was created, *not* your Ikariam password.  Enter it,
+pick your account from the list, and ikabot logs you in automatically.
+
+> **Tip:** the vault master password protects all stored accounts.  Choose
+> something strong but memorable — ikabot never writes it to disk.
 
 ---
 
@@ -57,8 +129,9 @@ On future launches you just enter your **vault master password** once and pick
 your account from the list — no typing the game password every time.
 
 - Vault file: `%APPDATA%\.ikabot_vault`
-- Multiple accounts can be stored in one vault
+- Multiple accounts can be stored in a single vault
 - Accounts are listed in natural alphabetical order
+- Manage accounts via **21 → 9** (add, remove, rename, change master password)
 
 ---
 
@@ -183,7 +256,8 @@ the rest.
 
 External modules are community-built `.py` files dropped into a folder you
 configure via **30 → 99 (Configure directories)**.  Ikabot detects them
-automatically.
+automatically and lists them from number 31 upwards.  Hit **100** to refresh
+the list after adding new files.
 
 ### Construction Manager
 A powerful multi-city build queue backed by a CSV file.  You define a list of
@@ -208,10 +282,11 @@ how many; the manager spreads the order across all available barracks or
 shipyards so everything finishes at roughly the same time.  Handles resource
 shortages with intelligent retry logic.
 
-### Sequence Runner
+### Sequence Runner *(work in progress)*
 Record a list of menu inputs (e.g. `16, enter, 5, 1`) and replay them with one
 keypress.  Useful for repeating a fixed startup routine across multiple accounts
-without typing the same inputs every time.
+without typing the same inputs every time.  Note: this module is still being
+developed and some edge cases may not be fully handled yet.
 
 ---
 
@@ -226,6 +301,9 @@ Go to **21 → 1 (Configure Proxy)** and enter your proxy in the format:
 ```
 http://username:password@proxy-host:port
 ```
+
+Webshare gives credentials in `host:port:user:pass` format — just rearrange
+them to `http://user:pass@host:port` when entering into ikabot.
 
 ### Recommended proxy provider — Webshare
 A cost-effective option for residential/datacenter proxies is
@@ -256,20 +334,3 @@ Go to **21 → 2 (Notification Setup)** to connect one or more alert backends:
 
 Once configured, ikabot will message you when tasks complete, attacks are
 detected, or wine runs critically low — even if your PC is locked.
-
----
-
-## Quick-Start Checklist
-
-```
-[ ] Create one folder per account under C:\ikabot\
-[ ] Create a desktop shortcut for each folder
-[ ] Launch each shortcut, log in, save to vault
-[ ] 21 → 1  Set proxy (dedicated if accounts will trade)
-[ ] 21 → 2  Set up notifications (Telegram / Discord / ntfy)
-[ ] 16      Start Web Server
-[ ]  5      Start Shrine bot
-[ ]  6      Start Login Daily
-[ ] 11      Start Miracle (if applicable)
-[ ] 30      Load external modules (Construction Manager etc.)
-```
