@@ -27,6 +27,8 @@ a = Analysis(
         # cryptography for the credential vault
         'cryptography',
         'cryptography.hazmat.primitives.ciphers.aead',
+        # dotenv used at startup in command_line.py
+        'dotenv',
     ],
     hookspath=[],
     hooksconfig={},
