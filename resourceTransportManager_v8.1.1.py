@@ -131,7 +131,11 @@ def _rrs_load_summary(session):
 
 def _rrs_free_from_summary(summary, city_id, resource_index, actual):
     """Compute free amount using a pre-loaded summary dict."""
-    reserved = summary.get(int(city_id), {}).get(resource_index, 0)
+    try:
+        cid = int(city_id)
+    except (TypeError, ValueError):
+        return actual
+    reserved = summary.get(cid, {}).get(resource_index, 0)
     return max(0, actual - reserved)
 
 
@@ -511,14 +515,15 @@ def transport_stop_flag_path(session):
 
 def _lock_acquire(lock_path, timeout=30, stale_after=60):
     start = time.time()
+    my_payload = json.dumps({
+        "pid": os.getpid(),
+        "timestamp": time.time(),
+    }).encode()
     while time.time() - start < timeout:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
-                os.write(fd, json.dumps({
-                    "pid": os.getpid(),
-                    "timestamp": time.time(),
-                }).encode())
+                os.write(fd, my_payload)
             finally:
                 os.close(fd)
             return True
@@ -526,19 +531,39 @@ def _lock_acquire(lock_path, timeout=30, stale_after=60):
             try:
                 with open(lock_path, "r") as f:
                     data = json.load(f)
-                    if time.time() - data.get("timestamp", 0) > stale_after:
-                        os.remove(lock_path)
-                        continue
-            except Exception:
-                try:
-                    os.remove(lock_path)
-                except Exception:
-                    pass
-                continue
+                if time.time() - data.get("timestamp", 0) > stale_after:
+                    tmp = lock_path + f".{os.getpid()}.tmp"
+                    try:
+                        fd2 = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        try:
+                            os.write(fd2, my_payload)
+                        finally:
+                            os.close(fd2)
+                        os.replace(tmp, lock_path)
+                        with open(lock_path, "r") as f2:
+                            check = json.load(f2)
+                        if check.get("pid") == os.getpid():
+                            return True
+                    except Exception:
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
+            except (json.JSONDecodeError, IOError, OSError):
+                pass
         except Exception:
             pass
         time.sleep(1)
     return False
+
+
+def _lock_refresh(lock_path):
+    """Rewrite the lock file with a fresh timestamp to prevent stale detection."""
+    try:
+        with open(lock_path, "w") as f:
+            json.dump({"pid": os.getpid(), "timestamp": time.time()}, f)
+    except Exception:
+        pass
 
 
 def _lock_release(lock_path):
@@ -546,15 +571,10 @@ def _lock_release(lock_path):
         if os.path.exists(lock_path):
             with open(lock_path, "r") as f:
                 data = json.load(f)
-                if data.get("pid") == os.getpid():
-                    os.remove(lock_path)
-                    return
-            os.remove(lock_path)
+            if data.get("pid") == os.getpid():
+                os.remove(lock_path)
     except Exception:
-        try:
-            os.remove(lock_path)
-        except Exception:
-            pass
+        pass
 
 
 class _transport_csv_lock:
@@ -671,6 +691,8 @@ def transport_csv_save_all(session, rows):
             w.writeheader()
             for r in rows:
                 w.writerow(_coerce_schedule_out(r))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
 
 
@@ -689,6 +711,8 @@ def _transport_csv_modify(session, fn):
             w.writeheader()
             for r in rows:
                 w.writerow(_coerce_schedule_out(r))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
 
 
@@ -824,6 +848,11 @@ def getActionPoints(html):
     return None
 
 
+def _extract_action_request(html):
+    m = re.search(r'"actionRequest"\s*:\s*"([^"]+)"', html)
+    return m.group(1) if m else ""
+
+
 def wait_for_action_points(session, origin_city_id, status_prefix="",
                            max_wait=1800):
     """Navigate to source city and wait until action points are available.
@@ -833,10 +862,11 @@ def wait_for_action_points(session, origin_city_id, status_prefix="",
         html = session.get()
         current = getCity(html)
         if str(current["id"]) != str(origin_city_id):
+            ar = _extract_action_request(html)
             session.post(params={
                 "action": "header",
                 "function": "changeCurrentCity",
-                "actionRequest": actionRequest,
+                "actionRequest": ar,
                 "oldView": "city",
                 "cityId": origin_city_id,
                 "backgroundView": "city",
@@ -1043,6 +1073,8 @@ def write_csv_atomic(csv_path, fieldnames, rows):
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
         os.replace(tmp_path, csv_path)
     except Exception:
         try:
@@ -1984,98 +2016,6 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                              log_path)
 
 
-# ============================================================================
-#  MODE 1 EXECUTION: do_it (Consolidate)
-# ============================================================================
-
-def do_it(session, origin_cities, destination_city, island,
-          interval_hours, resource_config, useFreighters, send_mode,
-          notif_config, dest_minimums, log_path):
-
-    total_shipments = 0
-    consecutive_failures = 0
-    first_run = True
-    next_run_time = datetime.datetime.now()
-
-    while True:
-        now = datetime.datetime.now()
-        if not first_run and now < next_run_time:
-            sleep_secs = max(0, (next_run_time - now).total_seconds())
-            time.sleep(min(sleep_secs, 60))
-            continue
-
-        # Refresh destination
-        html = session.get(city_url + str(destination_city["id"]))
-        destination_city = getCity(html)
-
-        # Start notification
-        if should_notify(notif_config, "start"):
-            src_names = ", ".join(c["name"] for c in origin_cities)
-            sendToBot(session,
-                      f"SHIPMENT CYCLE STARTING\n"
-                      f"Account: {session.username}\n"
-                      f"From: {src_names}\n"
-                      f"To: [{island['x']}:{island['y']}] "
-                      f"{destination_city['name']}")
-
-        for oc in origin_cities:
-            html = session.get(city_url + str(oc["id"]))
-            oc_fresh = getCity(html)
-
-            toSend = [0] * len(materials_names)
-            total = 0
-            for i in range(len(materials_names)):
-                if resource_config[i] is None:
-                    continue
-                avail = oc_fresh["availableResources"][i]
-                if send_mode == 1:
-                    s = avail if resource_config[i] == 0 else max(0, avail - resource_config[i])
-                else:
-                    s = 0 if resource_config[i] == 0 else min(resource_config[i], avail)
-                if destination_city.get("isOwnCity", False):
-                    s = min(s, destination_city["freeSpaceForResources"][i])
-                if dest_minimums:
-                    s = apply_dest_minimums(
-                        s, destination_city["availableResources"][i],
-                        dest_minimums[i]
-                    )
-                toSend[i] = s
-                total += s
-
-            if total > 0:
-                route = (oc_fresh, destination_city, island["id"], *toSend)
-                coords = f"[{island['x']}:{island['y']}]"
-                result = send_shipment(
-                    session, route, useFreighters, notif_config, log_path,
-                    "Consolidate", coords
-                )
-                if result["success"]:
-                    total_shipments += 1
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3 and should_notify(notif_config, "error"):
-                        sendToBot(session,
-                                  f"WARNING: {consecutive_failures} consecutive failures")
-
-        if interval_hours == 0:
-            src_names = ", ".join(c["name"] for c in origin_cities)
-            session.setStatus(
-                f"One-time shipment done: {src_names} -> "
-                f"{destination_city['name']}"
-            )
-            return
-
-        next_run_time = datetime.datetime.now() + datetime.timedelta(
-            hours=interval_hours
-        )
-        session.setStatus(
-            f"Shipments: {total_shipments} | "
-            f"Next: {getDateTime(next_run_time.timestamp())}"
-        )
-        first_run = False
-        sleep_secs = max(0, (next_run_time - datetime.datetime.now()).total_seconds())
-        time.sleep(sleep_secs)
 
 
 # ============================================================================
@@ -2221,101 +2161,6 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
-
-
-# ============================================================================
-#  MODE 2 EXECUTION: do_it_distribute
-# ============================================================================
-
-def do_it_distribute(session, origin_city, destination_cities,
-                     interval_hours, resource_config, useFreighters,
-                     notif_config, dest_minimums, log_path):
-
-    total_shipments = 0
-    consecutive_failures = 0
-    first_run = True
-    next_run_time = datetime.datetime.now()
-
-    while True:
-        now = datetime.datetime.now()
-        if not first_run and now < next_run_time:
-            sleep_secs = max(0, (next_run_time - now).total_seconds())
-            time.sleep(min(sleep_secs, 60))
-            continue
-
-        # Refresh origin
-        html = session.get(city_url + str(origin_city["id"]))
-        origin_fresh = getCity(html)
-        origin_island_id = origin_fresh["islandId"]
-        html_isl = session.get(island_url + str(origin_island_id))
-        origin_island = getIsland(html_isl)
-
-        if should_notify(notif_config, "start"):
-            dest_names = ", ".join(c["name"] for c in destination_cities)
-            sendToBot(session,
-                      f"DISTRIBUTION CYCLE STARTING\n"
-                      f"Account: {session.username}\n"
-                      f"From: {origin_fresh['name']}\n"
-                      f"To: {len(destination_cities)} cities ({dest_names})")
-
-        for dc in destination_cities:
-            html = session.get(city_url + str(dc["id"]))
-            dc_fresh = getCity(html)
-            dest_isl_id = dc_fresh["islandId"]
-            html_di = session.get(island_url + str(dest_isl_id))
-            dest_island = getIsland(html_di)
-
-            toSend = [0] * len(materials_names)
-            total = 0
-            for i in range(len(materials_names)):
-                if resource_config[i] == 0:
-                    continue
-                avail = origin_fresh["availableResources"][i]
-                s = min(resource_config[i], avail)
-                dest_space = dc_fresh.get("freeSpaceForResources", [0] * len(materials_names))
-                if i < len(dest_space):
-                    s = min(s, dest_space[i])
-                if dest_minimums:
-                    s = apply_dest_minimums(
-                        s, dc_fresh["availableResources"][i],
-                        dest_minimums[i]
-                    )
-                toSend[i] = s
-                total += s
-
-            if total > 0:
-                route = (origin_fresh, dc_fresh, dest_island["id"], *toSend)
-                coords = f"[{dest_island['x']}:{dest_island['y']}]"
-                result = send_shipment(
-                    session, route, useFreighters, notif_config, log_path,
-                    "Distribute", coords
-                )
-                if result["success"]:
-                    total_shipments += 1
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3 and should_notify(notif_config, "error"):
-                        sendToBot(session,
-                                  f"WARNING: {consecutive_failures} consecutive failures")
-
-        if interval_hours == 0:
-            session.setStatus(
-                f"One-time distribution done: {origin_fresh['name']}"
-            )
-            return
-
-        next_run_time = datetime.datetime.now() + datetime.timedelta(
-            hours=interval_hours
-        )
-        session.setStatus(
-            f"{origin_fresh['name']} -> {len(destination_cities)} cities | "
-            f"Shipments: {total_shipments} | "
-            f"Next: {getDateTime(next_run_time.timestamp())}"
-        )
-        first_run = False
-        sleep_secs = max(0, (next_run_time - datetime.datetime.now()).total_seconds())
-        time.sleep(sleep_secs)
 
 
 # ============================================================================
@@ -2491,88 +2336,6 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
                              log_path)
 
 
-# ============================================================================
-#  MODE 3 EXECUTION: do_even_distribution
-# ============================================================================
-
-def do_even_distribution(session, shipments, resource_index, resource_name,
-                         useFreighters, notif_config, log_path):
-    senders = [s for s in shipments if s["type"] == "sender"]
-    receivers = [s for s in shipments if s["type"] == "receiver"]
-
-    # FIX: check for empty lists
-    if not senders or not receivers:
-        msg = f"{resource_name}: Already balanced (no shipments needed)"
-        if should_notify(notif_config, "complete"):
-            sendToBot(session, msg)
-        return
-
-    if should_notify(notif_config, "start"):
-        plan_lines = []
-        si, ri = 0, 0
-        s_rem, r_rem = senders[0]["amount"], receivers[0]["amount"]
-        while si < len(senders) and ri < len(receivers):
-            amt = min(s_rem, r_rem)
-            if amt > 0:
-                plan_lines.append(
-                    f"{senders[si]['from']['name']} -> "
-                    f"{receivers[ri]['to']['name']}: "
-                    f"{addThousandSeparator(amt)} {resource_name}"
-                )
-            s_rem -= amt
-            r_rem -= amt
-            if s_rem == 0:
-                si += 1
-                s_rem = senders[si]["amount"] if si < len(senders) else 0
-            if r_rem == 0:
-                ri += 1
-                r_rem = receivers[ri]["amount"] if ri < len(receivers) else 0
-        sendToBot(session,
-                  f"BALANCING PLAN\nResource: {resource_name}\n\n"
-                  + "\n".join(plan_lines))
-
-    # Execute
-    si, ri = 0, 0
-    s_rem = senders[0]["amount"]
-    r_rem = receivers[0]["amount"]
-
-    while si < len(senders) and ri < len(receivers):
-        sender = senders[si]
-        receiver = receivers[ri]
-        amount = min(s_rem, r_rem)
-
-        if amount > 0:
-            toSend = [0] * len(materials_names)
-            toSend[resource_index] = amount
-
-            dest_isl_id = receiver["to"]["islandId"]
-            html = session.get(island_url + str(dest_isl_id))
-            dest_island = getIsland(html)
-
-            route = (sender["from"], receiver["to"],
-                     dest_island["id"], *toSend)
-            coords = f"[{dest_island['x']}:{dest_island['y']}]"
-
-            result = send_shipment(
-                session, route, useFreighters, notif_config, log_path,
-                "Even Distribution", coords
-            )
-
-            s_rem -= amount
-            r_rem -= amount
-
-        if s_rem == 0:
-            si += 1
-            if si < len(senders):
-                s_rem = senders[si]["amount"]
-        if r_rem == 0:
-            ri += 1
-            if ri < len(receivers):
-                r_rem = receivers[ri]["amount"]
-
-    if should_notify(notif_config, "complete"):
-        sendToBot(session,
-                  f"BALANCING COMPLETE\nResource: {resource_name}")
 
 
 # ============================================================================
@@ -2821,50 +2584,6 @@ def render_auto_send_review(destination_city, destination_island, routes,
     if choice == "" or choice.upper() == "Y":
         return "Y"
     return choice.upper()
-
-
-# ============================================================================
-#  MODE 4 EXECUTION: do_it_auto_send
-# ============================================================================
-
-def do_it_auto_send(session, routes, useFreighters, notif_config, log_path):
-    total_routes = len(routes)
-    completed = 0
-
-    print(f"\n--- Auto Send: {total_routes} shipments ---\n")
-
-    for idx, route in enumerate(routes):
-        origin_city = route[0]
-        dest_city = route[1]
-        amounts = route[3:]
-        res_desc = ", ".join(
-            f"{addThousandSeparator(amounts[i])} {materials_names[i]}"
-            for i in range(len(materials_names))
-            if i < len(amounts) and amounts[i] > 0
-        )
-
-        print(f"  [{idx+1}/{total_routes}] {origin_city['name']} -> "
-              f"{dest_city['name']}")
-        print(f"    Resources: {res_desc}")
-
-        result = send_shipment(
-            session, route, useFreighters, notif_config, log_path,
-            "Auto Send"
-        )
-
-        if result["success"]:
-            completed += 1
-            print(f"    SUCCESS ({completed}/{total_routes})")
-        else:
-            print(f"    FAILED: {result['error']}")
-            if not result["success"] and result["error"] and "lock" in result["error"].lower():
-                break  # Stop on lock failures
-
-    print(f"\n--- Auto Send complete: {completed}/{total_routes} ---\n")
-    if should_notify(notif_config, "complete"):
-        sendToBot(session,
-                  f"AUTO SEND COMPLETE\nAccount: {session.username}\n"
-                  f"Shipments: {completed}/{total_routes}")
 
 
 # ============================================================================
@@ -3328,8 +3047,8 @@ def _parse_row_selection(raw, total):
     return sorted(indices)
 
 
-def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
-                         telegram_enabled, log_path):
+def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
+                               telegram_enabled, log_path):
     try:
         print_module_banner("Bulk Distribution — CSV File")
         print(f"  {C.DIM}Send resources to many cities using a spreadsheet (CSV file).{C.RESET}")
@@ -3375,11 +3094,7 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
                 enter()
                 event.set()
                 return
-            # Re-enter to load the newly created file
-            bulkDistributionMode(session, event, stdin_fd,
-                                 predetermined_input, telegram_enabled,
-                                 log_path)
-            return
+            return "restart"
 
         try:
             rows = []
@@ -3469,11 +3184,7 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
                 return
             if rta.lower() == "e":
                 _bulk_editor_menu(session, csv_path, event)
-                # Reload CSV after editing
-                bulkDistributionMode(session, event, stdin_fd,
-                                     predetermined_input,
-                                     telegram_enabled, log_path)
-                return
+                return "restart"
             if rta.lower() == "d":
                 preview = _scan_csv_for_preview(session, rows, run_column)
                 if preview:
@@ -3502,6 +3213,17 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
+
+
+def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
+                         telegram_enabled, log_path):
+    while True:
+        result = _bulkDistributionModeInner(
+            session, event, stdin_fd, predetermined_input,
+            telegram_enabled, log_path,
+        )
+        if result != "restart":
+            return
 
 
 def _scan_csv_for_preview(session, rows, run_column):
@@ -3540,366 +3262,6 @@ def _scan_csv_for_preview(session, rows, run_column):
     return preview
 
 
-# ============================================================================
-#  MODE 5 EXECUTION: do_it_bulk_distribution
-# ============================================================================
-
-def do_it_bulk_distribution(session, csv_path, interval_hours,
-                            notif_config, run_column, log_path):
-    csv_resource_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
-
-    while True:
-        # Read CSV
-        try:
-            rows = []
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                fieldnames = list(reader.fieldnames or [])
-                for row in reader:
-                    rows.append(row)
-        except Exception as e:
-            if should_notify(notif_config, "error"):
-                sendToBot(session,
-                          f"BULK DIST ERROR\nCould not read CSV: {e}")
-            time.sleep(3600)
-            continue
-
-        # Ensure run column exists
-        if run_column not in (fieldnames or []):
-            fieldnames, run_columns = ensure_run_columns(fieldnames, rows)
-            if run_column not in run_columns:
-                run_column = run_columns[0]
-            try:
-                write_csv_atomic(csv_path, fieldnames, rows)
-            except Exception:
-                time.sleep(3600)
-                continue
-
-        # Ensure Transport, From and Issues columns exist; clear Issues for this cycle
-        fieldnames = ensure_transport_column(fieldnames, rows)
-        fieldnames = ensure_from_column(fieldnames, rows)
-        fieldnames = ensure_issues_column(fieldnames, rows)
-        for row in rows:
-            row["Issues"] = ""
-
-        city_cache = {}
-        mismatches = []
-        validated_cities = {}
-
-        session.setStatus(
-            f"[PRE-SCAN] Bulk Distribution | "
-            f"Validating {len(rows)} rows..."
-        )
-
-        # ---- PHASE 1: Pre-scan validation ----
-        for row_num, row in enumerate(rows, start=1):
-            try:
-                run_val = normalize_text(row.get(run_column, ""))
-                if run_val == "x":
-                    continue
-
-                x = row["X"].strip()
-                y = row["Y"].strip()
-                expected_player = row["Player"].strip()
-                expected_city = row["City"].strip()
-                expected_location = str(row.get("City_Location", "")).strip()
-
-                parsed_resources = [parse_resource_value(row.get(col, "0")) for col in csv_resource_cols]
-                has_resources = any(amt > 0 or mode == "except" for mode, amt in parsed_resources)
-                if not has_resources:
-                    continue
-
-                from_val = parse_from_column(row.get("From", ""))
-                if from_val is None:
-                    issue = "From column is empty (required: a, or city indices like 1,3,5)"
-                    row["Issues"] = issue
-                    mismatches.append(f"Row {row_num}: {issue}")
-                    continue
-                if isinstance(from_val, list):
-                    if "ids" not in city_cache:
-                        ids_tmp, map_tmp = getIdsOfCities(session)
-                        city_cache["ids"] = ids_tmp
-                        city_cache["map"] = map_tmp
-                    max_idx = len(city_cache["ids"])
-                    bad = [str(i) for i in from_val if i > max_idx]
-                    if bad:
-                        issue = f"From: city index {','.join(bad)} out of range (max {max_idx})"
-                        row["Issues"] = issue
-                        mismatches.append(f"Row {row_num}: {issue}")
-                        continue
-
-                html = session.get(
-                    f"view=island&xcoord={x}&ycoord={y}"
-                )
-                island = getIsland(html)
-                cities_on_island = [
-                    c for c in island["cities"]
-                    if c.get("type") == "city"
-                ]
-
-                # Match city (case-insensitive)
-                matched_city = None
-                candidates = []
-                exp_city_n = normalize_text(expected_city)
-                exp_player_n = normalize_text(expected_player)
-
-                for c in cities_on_island:
-                    cn = normalize_text(c.get("name", ""))
-                    pn = normalize_text(c.get("Name", ""))
-                    if cn == exp_city_n and pn == exp_player_n:
-                        candidates.append(c)
-
-                if candidates:
-                    exp_loc = normalize_text(expected_location)
-                    if exp_loc:
-                        for c in candidates:
-                            loc = get_city_location_token(c)
-                            if normalize_text(loc) == exp_loc:
-                                matched_city = c
-                                break
-                    if matched_city is None and len(candidates) == 1:
-                        matched_city = candidates[0]
-
-                if matched_city is None:
-                    issue = (f"City not found: {expected_player}/"
-                             f"{expected_city} at [{x}:{y}]")
-                    row["Issues"] = issue
-                    mismatches.append(f"Row {row_num}: {issue}")
-                    continue
-
-                # Auto-fill City_Location if empty
-                if not expected_location:
-                    loc_token = get_city_location_token(matched_city)
-                    if loc_token:
-                        row["City_Location"] = loc_token
-
-                validated_cities[row_num] = (matched_city, island)
-
-            except Exception as e:
-                issue = f"Error: {e}"
-                row["Issues"] = issue
-                mismatches.append(f"Row {row_num}: {issue}")
-
-        # Save CSV after pre-scan (persists Issues + City_Location auto-fills)
-        try:
-            write_csv_atomic(csv_path, fieldnames, rows)
-        except Exception as we:
-            print(f"    WARNING: pre-scan CSV write failed: {we}")
-
-        if mismatches and should_notify(notif_config, "error"):
-            sendToBot(session,
-                      f"BULK DIST ISSUES\n"
-                      + "\n".join(mismatches))
-
-        # ---- PHASE 2: Build routes from validated rows ----
-        routes = []
-        session.setStatus(
-            f"[PROCESSING] Bulk Distribution | "
-            f"Building routes for {len(validated_cities)} row(s)..."
-        )
-
-        # Refresh city cache for "except" resolution
-        city_cache.pop("objects", None)
-
-        for row_num, row in enumerate(rows, start=1):
-            run_val = normalize_text(row.get(run_column, ""))
-            if run_val == "x":
-                continue
-            if row_num not in validated_cities:
-                continue
-
-            matched_city, island = validated_cities[row_num]
-            x = row["X"].strip()
-            y = row["Y"].strip()
-            expected_player = row["Player"].strip()
-            parsed_resources = [parse_resource_value(row.get(col, "0")) for col in csv_resource_cols]
-
-            from_val = parse_from_column(row.get("From", ""))
-            row_use_freighters = parse_transport_value(row.get("Transport", "m"))
-            try:
-                src_cities = get_source_cities_for_row(
-                    session, from_val, city_cache
-                )
-            except Exception as e:
-                row["Issues"] = f"Error resolving source cities: {e}"
-                continue
-
-            done_indices = set()
-            if run_val and run_val != "x":
-                for p in run_val.split(","):
-                    p = p.strip()
-                    if p.isdigit():
-                        done_indices.add(int(p))
-
-            try:
-                dest_html = session.get(city_url + str(matched_city["id"]))
-                dest_city = getCity(dest_html)
-            except Exception as e:
-                row["Issues"] = f"Error fetching city details: {e}"
-                try:
-                    write_csv_atomic(csv_path, fieldnames, rows)
-                except Exception:
-                    pass
-                continue
-
-            dest_space = dest_city.get("freeSpaceForResources",
-                                       [0] * len(materials_names))
-            for src_idx, src_city in src_cities:
-                if src_idx in done_indices:
-                    continue
-                resources = resolve_resources(
-                    parsed_resources, src_city.get("availableResources", []),
-                    row, csv_resource_cols
-                )
-                for i in range(len(resources)):
-                    if i < len(dest_space):
-                        resources[i] = min(resources[i], dest_space[i])
-                if sum(resources) == 0:
-                    continue
-                route = (src_city, dest_city, island["id"], *resources)
-                routes.append((
-                    row_num, route, resources, dest_city["name"],
-                    expected_player, x, y, src_city["name"], src_idx,
-                    row_use_freighters, parsed_resources
-                ))
-
-        # Interleave routes by source city to spread action point usage
-        if len(routes) > 1:
-            from collections import defaultdict
-            groups = defaultdict(list)
-            for route_info in routes:
-                src_id = str(route_info[1][0]["id"])
-                groups[src_id].append(route_info)
-            interleaved = []
-            while any(groups.values()):
-                for src_id in list(groups.keys()):
-                    if groups[src_id]:
-                        interleaved.append(groups[src_id].pop(0))
-                    else:
-                        del groups[src_id]
-            routes = interleaved
-
-        if not routes:
-            if should_notify(notif_config, "error"):
-                sendToBot(session, "BULK DIST: No valid routes found")
-        else:
-            if should_notify(notif_config, "start"):
-                sendToBot(session,
-                          f"BULK DIST SCHEDULED\n"
-                          f"{len(routes)} shipment(s)")
-
-            completed = 0
-            skipped = 0
-            total = len(routes)
-
-            for idx, (row_num, route, resources, dest_name,
-                      player, rx, ry, src_name, src_idx,
-                      row_freighters, parsed_res) in enumerate(routes):
-
-                # For "except" mode, re-resolve with fresh source data
-                has_except = any(m == "except" for m, _ in parsed_res)
-                if has_except:
-                    src_city_id = str(route[0]["id"])
-                    src_fresh = getCity(session.get(city_url + src_city_id))
-                    resources = resolve_resources(
-                        parsed_res, src_fresh.get("availableResources", []),
-                        None, csv_resource_cols
-                    )
-                    dest_city_id = str(route[1]["id"])
-                    dest_fresh = getCity(session.get(city_url + dest_city_id))
-                    dest_space = dest_fresh.get("freeSpaceForResources",
-                                                [0] * len(materials_names))
-                    for i in range(len(resources)):
-                        if i < len(dest_space):
-                            resources[i] = min(resources[i], dest_space[i])
-                    if sum(resources) == 0:
-                        print(f"\n  [{idx+1}/{total}] {src_name} -> "
-                              f"{dest_name}: SKIPPED (insufficient stock or space)")
-                        skipped += 1
-                        continue
-                    route = (src_fresh, dest_fresh, route[2], *resources)
-
-                ship_label = "F" if row_freighters else "M"
-                res_desc = ", ".join(
-                    f"{addThousandSeparator(resources[i])} "
-                    f"{materials_names[i]}"
-                    for i in range(len(materials_names))
-                    if resources[i] > 0
-                )
-                print(f"\n  [{idx+1}/{total}] [{ship_label}] {src_name} -> "
-                      f"{dest_name} ({player}) [{rx}:{ry}]")
-                print(f"    {res_desc}")
-
-                session.setStatus(
-                    f"[SENDING] Bulk Dist [{idx+1}/{total}] "
-                    f"{src_name} -> {dest_name}"
-                )
-
-                coords = f"[{rx}:{ry}]"
-                result = send_shipment(
-                    session, route, row_freighters, notif_config,
-                    log_path, "Bulk Distribution", coords, player
-                )
-
-                if result["success"]:
-                    completed += 1
-                    print(f"    SUCCESS ({completed}/{total})")
-                    from_val = parse_from_column(rows[row_num - 1].get("From", ""))
-                    cur = rows[row_num - 1].get(run_column, "").strip()
-                    done = set()
-                    if cur and cur.upper() != "X":
-                        for p in cur.split(","):
-                            p = p.strip()
-                            if p.isdigit():
-                                done.add(int(p))
-                    done.add(src_idx)
-                    try:
-                        expected = get_source_cities_for_row(
-                            session, from_val, city_cache
-                        )
-                        expected_indices = {i for i, _ in expected}
-                    except Exception:
-                        expected_indices = done
-                    if done >= expected_indices:
-                        rows[row_num - 1][run_column] = "X"
-                    else:
-                        rows[row_num - 1][run_column] = ",".join(
-                            str(d) for d in sorted(done)
-                        )
-                    try:
-                        write_csv_atomic(csv_path, fieldnames, rows)
-                    except Exception as we:
-                        print(f"    WARNING: checkpoint write failed: {we}")
-                else:
-                    print(f"    FAILED: {result['error']}")
-
-            summary = f"{completed}/{total} sent"
-            if skipped:
-                summary += f", {skipped} skipped"
-            print(f"\n--- Bulk Distribution complete: {summary} ---")
-            if should_notify(notif_config, "complete"):
-                run_done = sum(
-                    1 for r in rows
-                    if normalize_text(r.get(run_column, "")) == "x"
-                )
-                sendToBot(session,
-                          f"BULK DIST COMPLETE\n"
-                          f"Slot: {run_column[4:]}\n"
-                          f"Cycle: {summary}\n"
-                          f"Progress: {run_done}/{len(rows)}")
-
-        # Schedule next cycle
-        next_run = datetime.datetime.now() + datetime.timedelta(
-            hours=interval_hours
-        )
-        session.setStatus(
-            f"[WAITING] Bulk Dist | Next: "
-            f"{getDateTime(next_run.timestamp())}"
-        )
-        sleep_secs = max(
-            0, (next_run - datetime.datetime.now()).total_seconds()
-        )
-        time.sleep(sleep_secs)
 
 
 # ============================================================================
@@ -4233,105 +3595,6 @@ def _top_up_dry_run(session, destinations, dest_configs,
     return preview_routes
 
 
-# ============================================================================
-#  MODE 6 EXECUTION: do_it_top_up
-# ============================================================================
-
-def do_it_top_up(session, destinations, dest_configs, source_city_ids,
-                 source_reserves, useFreighters, interval_hours,
-                 notif_config, log_path):
-
-    total_shipments = 0
-    first_run = True
-    next_run_time = datetime.datetime.now()
-
-    while True:
-        now = datetime.datetime.now()
-        if not first_run and now < next_run_time:
-            sleep_secs = max(0, (next_run_time - now).total_seconds())
-            time.sleep(min(sleep_secs, 60))
-            continue
-
-        if should_notify(notif_config, "start"):
-            dest_names = ", ".join(d["name"] for d in destinations)
-            sendToBot(session,
-                      f"TOP-UP CYCLE STARTING\n"
-                      f"Account: {session.username}\n"
-                      f"Destinations: {dest_names}")
-
-        cycle_sent = 0
-        consecutive_failures = 0
-
-        for dest in destinations:
-            html = session.get(city_url + str(dest["id"]))
-            dest_fresh = getCity(html)
-            targets = dest_configs[str(dest["id"])]
-
-            dest_isl_id = dest_fresh["islandId"]
-            html_isl = session.get(island_url + str(dest_isl_id))
-            dest_island = getIsland(html_isl)
-            coords = f"[{dest_island['x']}:{dest_island['y']}]"
-
-            for cid in source_city_ids:
-                needed = [0] * len(materials_names)
-                for i in range(len(materials_names)):
-                    if targets[i] is None:
-                        continue
-                    gap = targets[i] - dest_fresh["availableResources"][i]
-                    needed[i] = max(0, min(gap, dest_fresh["freeSpaceForResources"][i]))
-
-                if all(n <= 0 for n in needed):
-                    break
-
-                html = session.get(city_url + cid)
-                src_fresh = getCity(html)
-                reserves = source_reserves.get(cid, [0] * len(materials_names))
-                to_send = [0] * len(materials_names)
-                for i in range(len(materials_names)):
-                    if needed[i] <= 0:
-                        continue
-                    avail = src_fresh["availableResources"][i]
-                    reserve = reserves[i] if i < len(reserves) else 0
-                    sendable = max(0, avail - reserve)
-                    to_send[i] = min(needed[i], sendable)
-
-                if sum(to_send) > 0:
-                    route = (src_fresh, dest_fresh, dest_island["id"], *to_send)
-                    result = send_shipment(
-                        session, route, useFreighters, notif_config, log_path,
-                        "TopUp", coords
-                    )
-                    if result["success"]:
-                        total_shipments += 1
-                        cycle_sent += 1
-                        consecutive_failures = 0
-                        html = session.get(city_url + str(dest["id"]))
-                        dest_fresh = getCity(html)
-                    else:
-                        consecutive_failures += 1
-                        if consecutive_failures >= 3 and should_notify(notif_config, "error"):
-                            sendToBot(session,
-                                      f"WARNING: {consecutive_failures} consecutive failures")
-
-        if should_notify(notif_config, "complete"):
-            sendToBot(session,
-                      f"TOP-UP CYCLE COMPLETE\n"
-                      f"Account: {session.username}\n"
-                      f"Shipments this cycle: {cycle_sent}\n"
-                      f"Total shipments: {total_shipments}")
-
-        next_run_time = datetime.datetime.now() + datetime.timedelta(
-            hours=interval_hours
-        )
-        dest_names = ", ".join(d["name"] for d in destinations)
-        session.setStatus(
-            f"TopUp: {dest_names} | "
-            f"Sent: {total_shipments} | "
-            f"Next: {getDateTime(next_run_time.timestamp())}"
-        )
-        first_run = False
-        sleep_secs = max(0, (next_run_time - datetime.datetime.now()).total_seconds())
-        time.sleep(sleep_secs)
 
 
 # ============================================================================
@@ -4606,6 +3869,9 @@ def run_topup_cycle(session, sched, notif_config, log_path):
     if not dest_city_ids or not source_city_ids:
         return 0
 
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
+
     cycle_sent = 0
     for dcid in dest_city_ids:
         dcid_str = str(dcid)
@@ -4622,9 +3888,6 @@ def run_topup_cycle(session, sched, notif_config, log_path):
         html_isl = session.get(island_url + str(dest_isl_id))
         dest_island = getIsland(html_isl)
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
-
-        excluded = _rrs_excluded_set(session)
-        summary = _rrs_load_summary(session)
 
         for cid in source_city_ids:
             cid_str = str(cid)
@@ -4753,9 +4016,10 @@ def run_even_cycle(session, sched, notif_config, log_path):
                 )
                 if result["success"]:
                     cycle_sent += 1
-
-                s_rem -= amount
-                r_rem -= amount
+                    s_rem -= amount
+                    r_rem -= amount
+                else:
+                    break
 
             if s_rem == 0:
                 si += 1
@@ -4969,8 +4233,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     try:
         write_csv_atomic(csv_path, fieldnames, rows)
-    except Exception:
-        pass
+    except Exception as _csv_err:
+        session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
 
     if mismatches and should_notify(notif_config, "error"):
         sendToBot(session,
@@ -5024,8 +4288,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             row["Issues"] = f"Error fetching city details: {e}"
             try:
                 write_csv_atomic(csv_path, fieldnames, rows)
-            except Exception:
-                pass
+            except Exception as _csv_err:
+                session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
             continue
 
         dest_space = dest_city.get(
@@ -5087,6 +4351,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     completed = 0
     skipped = 0
     total = len(routes)
+    summary = _rrs_load_summary(session)
 
     for idx, (row_num, route, resources, dest_name,
               player, rx, ry, src_name, src_idx,
@@ -5159,8 +4424,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 )
             try:
                 write_csv_atomic(csv_path, fieldnames, rows)
-            except Exception:
-                pass
+            except Exception as _csv_err:
+                session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
 
     if should_notify(notif_config, "complete"):
         summary = f"{completed}/{total} sent"
@@ -5249,6 +4514,8 @@ def transport_scheduler_loop(session, stop_event):
         if os.path.exists(transport_stop_flag_path(session)):
             stop_event.set()
             break
+
+        _lock_refresh(transport_worker_lock_path(session))
 
         now = int(time.time())
         schedules = transport_csv_load(session)

@@ -153,15 +153,15 @@ def _reservation_lock(session, timeout=30):
     lock_file = _lock_path(session)
     start = time.time()
     acquired = False
+    my_payload = json.dumps(
+        {"pid": os.getpid(), "timestamp": time.time()}
+    ).encode()
 
     while time.time() - start < timeout:
         try:
             fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
-                os.write(
-                    fd,
-                    json.dumps({"pid": os.getpid(), "timestamp": time.time()}).encode(),
-                )
+                os.write(fd, my_payload)
             finally:
                 os.close(fd)
             acquired = True
@@ -171,14 +171,26 @@ def _reservation_lock(session, timeout=30):
                 with open(lock_file, "r") as f:
                     data = json.load(f)
                 if time.time() - data.get("timestamp", 0) > LOCK_STALE_SECONDS:
-                    os.remove(lock_file)
-                    continue
+                    tmp = lock_file + f".{os.getpid()}.tmp"
+                    try:
+                        fd2 = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        try:
+                            os.write(fd2, my_payload)
+                        finally:
+                            os.close(fd2)
+                        os.replace(tmp, lock_file)
+                        with open(lock_file, "r") as f2:
+                            check = json.load(f2)
+                        if check.get("pid") == os.getpid():
+                            acquired = True
+                            break
+                    except Exception:
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
             except (json.JSONDecodeError, KeyError, IOError):
-                try:
-                    os.remove(lock_file)
-                except Exception:
-                    pass
-                continue
+                pass
         except Exception:
             pass
         time.sleep(0.2)
@@ -197,10 +209,7 @@ def _reservation_lock(session, timeout=30):
             if data.get("pid") == os.getpid():
                 os.remove(lock_file)
         except Exception:
-            try:
-                os.remove(lock_file)
-            except Exception:
-                pass
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +250,8 @@ def _read_csv(session):
             return [_coerce_in(r) for r in csv.DictReader(f)]
     except FileNotFoundError:
         return []
+    except Exception:
+        return []
 
 
 def _write_csv(session, rows):
@@ -251,7 +262,9 @@ def _write_csv(session, rows):
         w.writeheader()
         for r in rows:
             w.writerow(_coerce_out(r))
-    os.replace(tmp, path)  # atomic rename — crash-safe
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def _clean_rows(rows):
@@ -263,7 +276,7 @@ def _clean_rows(rows):
     changed = False
     cleaned = []
     for row in rows:
-        if row["status"] == "active" and row["hard_expires_at"] and row["hard_expires_at"] < now:
+        if row["status"] == "active" and row["hard_expires_at"] is not None and row["hard_expires_at"] < now:
             row["status"] = "expired"
             changed = True
         if row["status"] != "active":
@@ -276,7 +289,9 @@ def _clean_rows(rows):
 
 
 def _next_id(rows):
-    return max((r["reservation_id"] for r in rows), default=0) + 1
+    max_existing = max((r["reservation_id"] for r in rows), default=0)
+    ts_based = int(time.time() * 1000) % 2_000_000_000
+    return max(max_existing, ts_based) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +348,8 @@ def _write_config(session, cfg):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
