@@ -25,6 +25,27 @@ from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.naval import getAvailableShips, getAvailableFreighters
 from ikabot.helpers.varios import addThousandSeparator, getDateTime
 
+# ---------------------------------------------------------------------------
+#  Resource Reservation System — optional dependency
+# ---------------------------------------------------------------------------
+try:
+    from resourceReservationSystem import (
+        reserve as rrs_reserve,
+        release as rrs_release,
+        release_all_for_module as rrs_release_all_for_module,
+        update_reservation as rrs_update_reservation,
+        get_summary as rrs_get_summary,
+        get_reservation_snapshot as rrs_get_reservation_snapshot,
+        is_city_excluded as rrs_is_city_excluded,
+        get_excluded_cities as rrs_get_excluded_cities,
+        get_config as rrs_get_config,
+    )
+    RRS_AVAILABLE = True
+except ImportError:
+    RRS_AVAILABLE = False
+
+MODULE_NAME = "resourceTransportManager"
+
 
 # ============================================================================
 #  ANSI COLOUR  (with Windows cmd.exe fallback)
@@ -63,6 +84,107 @@ class C:
     WARN   = "\033[1;33m" if _USE_COLOUR else ""   # bold yellow
     ERR    = "\033[1;31m" if _USE_COLOUR else ""    # bold red
     HINT   = "\033[2;37m" if _USE_COLOUR else ""    # dim white
+
+
+# ============================================================================
+#  RRS HELPERS  (no-op when RRS is not installed)
+# ============================================================================
+
+def _rrs_usable_amount(session, city, resource_index, amount_needed):
+    """How much of resource_index can we take from city, respecting reservations?
+    Falls back to raw availableResources when RRS is not installed."""
+    actual = city["availableResources"][resource_index]
+    if not RRS_AVAILABLE:
+        return min(actual, amount_needed)
+    if rrs_is_city_excluded(session, int(city["id"])):
+        return 0
+    available, _ = rrs_get_reservation_snapshot(
+        session, int(city["id"]), resource_index, actual
+    )
+    min_take = rrs_get_config(session)["min_ship_capacity"]
+    if available < min_take:
+        return 0
+    return min(available, amount_needed)
+
+
+def _rrs_free_amount(session, city, resource_index):
+    """How much of resource_index is free (unreserved) in city?
+    Falls back to raw availableResources when RRS is not installed."""
+    actual = city["availableResources"][resource_index]
+    if not RRS_AVAILABLE:
+        return actual
+    if rrs_is_city_excluded(session, int(city["id"])):
+        return 0
+    available, _ = rrs_get_reservation_snapshot(
+        session, int(city["id"]), resource_index, actual
+    )
+    return available
+
+
+def _rrs_load_summary(session):
+    """Load {city_id: {res_idx: reserved}} once for multi-city scans.
+    Returns empty dict when RRS is not installed."""
+    if not RRS_AVAILABLE:
+        return {}
+    return rrs_get_summary(session)
+
+
+def _rrs_free_from_summary(summary, city_id, resource_index, actual):
+    """Compute free amount using a pre-loaded summary dict."""
+    reserved = summary.get(int(city_id), {}).get(resource_index, 0)
+    return max(0, actual - reserved)
+
+
+def _rrs_is_excluded(session, city_id):
+    """Check if a city is excluded. Returns False when RRS not installed."""
+    if not RRS_AVAILABLE:
+        return False
+    return rrs_is_city_excluded(session, int(city_id))
+
+
+def _rrs_excluded_set(session):
+    """Return set of excluded city IDs. Empty set when RRS not installed."""
+    if not RRS_AVAILABLE:
+        return set()
+    return {e["city_id"] for e in rrs_get_excluded_cities(session)}
+
+
+def _rrs_reserve(session, city_id, city_name, resource_index, amount,
+                 reason, duration_seconds):
+    """Create a reservation. No-op when RRS not installed. Returns rid or None."""
+    if not RRS_AVAILABLE or amount <= 0:
+        return None
+    return rrs_reserve(
+        session,
+        city_id=int(city_id),
+        city_name=str(city_name),
+        resource_index=resource_index,
+        amount=amount,
+        module_name=MODULE_NAME,
+        reason=reason,
+        release_at=time.time() + duration_seconds,
+    )
+
+
+def _rrs_release(session, reservation_id):
+    """Release a single reservation. No-op when RRS not installed."""
+    if not RRS_AVAILABLE or reservation_id is None:
+        return
+    rrs_release(session, reservation_id, MODULE_NAME)
+
+
+def _rrs_release_all(session):
+    """Release all reservations owned by this module. No-op when RRS not installed."""
+    if not RRS_AVAILABLE:
+        return 0
+    return rrs_release_all_for_module(session, MODULE_NAME)
+
+
+def _rrs_min_ship_capacity(session):
+    """Get minimum usable amount from RRS config. Defaults to 0 without RRS."""
+    if not RRS_AVAILABLE:
+        return 0
+    return rrs_get_config(session).get("min_ship_capacity", 500)
 
 
 # ============================================================================
@@ -2615,7 +2737,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
 
 
 def allocate_from_suppliers(requested, suppliers, destination_city,
-                            destination_island):
+                            destination_island, rrs_summary=None):
     remaining = list(requested)
     routes = []
     for supplier in suppliers:
@@ -2624,7 +2746,11 @@ def allocate_from_suppliers(requested, suppliers, destination_city,
         for i in range(len(materials_names)):
             if remaining[i] <= 0:
                 continue
-            can_give = supplier["availableResources"][i]
+            actual = supplier["availableResources"][i]
+            if rrs_summary is not None and RRS_AVAILABLE:
+                can_give = _rrs_free_from_summary(rrs_summary, supplier["id"], i, actual)
+            else:
+                can_give = actual
             give = min(remaining[i], can_give)
             to_send[i] = give
             remaining[i] -= give
@@ -4351,8 +4477,13 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
     island = getIsland(html_isl)
     coords = f"[{island['x']}:{island['y']}]"
 
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
+
     cycle_sent = 0
     for cid in source_city_ids:
+        if int(cid) in excluded:
+            continue
         html = session.get(city_url + str(cid))
         try:
             oc_fresh = getCity(html)
@@ -4365,12 +4496,13 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
             if i >= len(resource_config) or resource_config[i] is None:
                 continue
             avail = oc_fresh["availableResources"][i]
+            free = _rrs_free_from_summary(summary, cid, i, avail) if RRS_AVAILABLE else avail
             if send_mode == 1:
-                s = (avail if resource_config[i] == 0
-                     else max(0, avail - resource_config[i]))
+                s = (free if resource_config[i] == 0
+                     else max(0, free - resource_config[i]))
             else:
                 s = (0 if resource_config[i] == 0
-                     else min(resource_config[i], avail))
+                     else min(resource_config[i], free))
             try:
                 s = min(s, destination_city["freeSpaceForResources"][i])
             except (KeyError, IndexError):
@@ -4409,6 +4541,9 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
         return 0
 
     src_city_id = str(source_city_ids[0])
+    if _rrs_is_excluded(session, src_city_id):
+        return 0
+
     cycle_sent = 0
 
     for dcid in dest_city_ids:
@@ -4433,7 +4568,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
         for i in range(len(materials_names)):
             if i >= len(resource_config) or resource_config[i] is None:
                 continue
-            avail = origin_city["availableResources"][i]
+            avail = _rrs_free_amount(session, origin_city, i)
             s = (0 if resource_config[i] == 0
                  else min(resource_config[i], avail))
             try:
@@ -4488,8 +4623,13 @@ def run_topup_cycle(session, sched, notif_config, log_path):
         dest_island = getIsland(html_isl)
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
 
+        excluded = _rrs_excluded_set(session)
+        summary = _rrs_load_summary(session)
+
         for cid in source_city_ids:
             cid_str = str(cid)
+            if int(cid) in excluded:
+                continue
             needed = [0] * len(materials_names)
             for i in range(len(materials_names)):
                 if i >= len(targets) or targets[i] is None:
@@ -4513,8 +4653,9 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                 if needed[i] <= 0:
                     continue
                 avail = src_fresh["availableResources"][i]
+                free = _rrs_free_from_summary(summary, cid, i, avail) if RRS_AVAILABLE else avail
                 reserve = reserves[i] if i < len(reserves) else 0
-                sendable = max(0, avail - reserve)
+                sendable = max(0, free - reserve)
                 to_send[i] = min(needed[i], sendable)
 
             if sum(to_send) > 0:
@@ -4543,8 +4684,13 @@ def run_even_cycle(session, sched, notif_config, log_path):
     if not city_ids or not resource_indices:
         return 0
 
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
+
     all_cities = []
     for cid in city_ids:
+        if int(cid) in excluded:
+            continue
         html = session.get(city_url + str(cid))
         try:
             all_cities.append(getCity(html))
@@ -4561,13 +4707,18 @@ def run_even_cycle(session, sched, notif_config, log_path):
             continue
         res_name = materials_names[res_idx]
 
-        total = sum(c["availableResources"][res_idx] for c in all_cities)
+        total = sum(
+            _rrs_free_from_summary(summary, c["id"], res_idx, c["availableResources"][res_idx])
+            if RRS_AVAILABLE else c["availableResources"][res_idx]
+            for c in all_cities
+        )
         target = total // len(all_cities)
 
         senders = []
         receivers = []
         for city in all_cities:
-            current = city["availableResources"][res_idx]
+            actual = city["availableResources"][res_idx]
+            current = _rrs_free_from_summary(summary, city["id"], res_idx, actual) if RRS_AVAILABLE else actual
             diff = current - target
             if diff > 0:
                 senders.append({"from": city, "amount": diff})
@@ -4636,11 +4787,16 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
     html = session.get(island_url + destination_city["islandId"])
     destination_island = getIsland(html)
 
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
+
     html = session.get()
     city_ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
     suppliers = []
     for cid in city_ids:
         if str(cid) == dest_city_id:
+            continue
+        if int(cid) in excluded:
             continue
         html_c = session.get(city_url + str(cid))
         try:
@@ -4653,6 +4809,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
 
     routes = allocate_from_suppliers(
         list(requested), suppliers, destination_city, destination_island,
+        rrs_summary=summary,
     )
     if routes is None:
         if should_notify(notif_config, "error"):
@@ -4713,6 +4870,9 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     city_cache = {}
     mismatches = []
     validated_cities = {}
+
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
 
     session.setStatus(
         f"[PRE-SCAN] Bulk Distribution | Validating {len(rows)} rows..."
@@ -4874,8 +5034,19 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         for src_idx, src_city in src_cities:
             if src_idx in done_indices:
                 continue
+            if int(src_city.get("id", 0)) in excluded:
+                continue
+            raw_avail = src_city.get("availableResources", [])
+            if RRS_AVAILABLE:
+                adjusted_avail = [
+                    _rrs_free_from_summary(summary, src_city["id"], i, raw_avail[i])
+                    if i < len(raw_avail) else 0
+                    for i in range(len(materials_names))
+                ]
+            else:
+                adjusted_avail = raw_avail
             resources = resolve_resources(
-                parsed_resources, src_city.get("availableResources", []),
+                parsed_resources, adjusted_avail,
                 row, csv_resource_cols,
             )
             for i in range(len(resources)):
@@ -4925,8 +5096,17 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         if has_except:
             src_city_id = str(route[0]["id"])
             src_fresh = getCity(session.get(city_url + src_city_id))
+            raw_a = src_fresh.get("availableResources", [])
+            if RRS_AVAILABLE:
+                adj_a = [
+                    _rrs_free_from_summary(summary, src_city_id, i, raw_a[i])
+                    if i < len(raw_a) else 0
+                    for i in range(len(materials_names))
+                ]
+            else:
+                adj_a = raw_a
             resources = resolve_resources(
-                parsed_res, src_fresh.get("availableResources", []),
+                parsed_res, adj_a,
                 None, csv_resource_cols,
             )
             dest_city_id = str(route[1]["id"])
@@ -5034,6 +5214,7 @@ def execute_schedule(session, sched, notif_config, log_path):
     try:
         cycle_sent = handler(session, sched, notif_config, log_path)
     except Exception:
+        _rrs_release_all(session)
         if should_notify(notif_config, "error"):
             sendToBot(
                 session,
@@ -5131,6 +5312,7 @@ def transport_scheduler_loop(session, stop_event):
         stop_event.wait(sleep_for)
 
     # Cleanup
+    _rrs_release_all(session)
     try:
         os.remove(transport_stop_flag_path(session))
     except OSError:
