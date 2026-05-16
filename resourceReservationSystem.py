@@ -9,29 +9,45 @@ Fulfillment logic, retry scheduling, and shipping all live in calling modules.
 Public API
 ----------
 reserve(session, city_id, city_name, resource_index, amount,
-        module_name, reason, release_at)  -> int (reservation_id)
-release(session, reservation_id, module_name)              -> bool
-release_all_for_module(session, module_name)               -> int (count)
-get_available(session, city_id, resource_index, actual_amount) -> int
-get_total_reserved(session, city_id, resource_index)       -> int
-get_reservations(session, city_id=None, module_name=None,
-                 active_only=True)                         -> list[dict]
+        module_name, reason, release_at)        -> int (reservation_id)
+update_reservation(session, reservation_id,
+        module_name, release_at)                -> True | False | None
+release(session, reservation_id, module_name)   -> True | False | None
+release_all_for_module(session, module_name)    -> int (count)
+release_all_for_city(session, city_id,
+        module_name="__admin__")                -> int (count)
+get_available(session, city_id, resource_index,
+        actual_amount)                          -> int
+get_total_reserved(session, city_id,
+        resource_index)                         -> int
+get_reservation_snapshot(session, city_id,
+        resource_index, actual_amount)          -> (available, reserved)
+get_summary(session)                            -> dict
+get_reservations(session, city_id=None,
+        module_name=None, active_only=True)     -> list[dict]
 
 exclude_city(session, city_id, city_name="")
 include_city(session, city_id)
-get_excluded_cities(session)                               -> list[dict]
-is_city_excluded(session, city_id)                         -> bool
+get_excluded_cities(session)                    -> list[dict]
+is_city_excluded(session, city_id)              -> bool
 
-get_config(session)                                        -> dict
+get_config(session)                             -> dict
 update_config(session, **kwargs)
 
-Files (all per server+username, stored in ~/)
----------------------------------------------
+Return-value convention for release/update
+------------------------------------------
+  True  — reservation found, owned, and acted upon
+  False — reservation not found (or already inactive)
+  None  — reservation found but caller does not own it (permission denied)
+
+Files (all per server+username, never shared across accounts)
+-------------------------------------------------------------
 ~/.ikabot_reservations_<server>_<username>.csv
 ~/.ikabot_reservations_<server>_<username>.lock
 ~/.ikabot_reservations_config_<server>_<username>.json
 """
 
+import copy
 import csv
 import json
 import os
@@ -75,6 +91,7 @@ INT_COLS = {
 }
 
 VALID_STATUSES = ("active", "released", "expired")
+VALID_RESOURCE_INDICES = range(5)   # 0=Wood 1=Wine 2=Marble 3=Crystal 4=Sulphur
 
 # hard_expires_at = release_at + this buffer (crash-protection safety net)
 HARD_EXPIRY_BUFFER_SECONDS = 24 * 3600
@@ -88,6 +105,9 @@ LOCK_STALE_SECONDS = 60
 # config defaults
 DEFAULT_MIN_SHIP_CAPACITY = 500
 DEFAULT_RETRY_HOURS = 6
+
+# History display cap in the view (shown with a note if truncated)
+HISTORY_DISPLAY_CAP = 15
 
 # ---------------------------------------------------------------------------
 # File-path helpers — every persistent file is keyed by (server, username)
@@ -196,8 +216,9 @@ def _coerce_in(raw):
             row[col] = int(v) if str(v).strip() != "" else 0
         except (TypeError, ValueError):
             row[col] = 0
+    # Default unknown statuses to "expired" — never silently reactivate a row
     if row.get("status", "") not in VALID_STATUSES:
-        row["status"] = "active"
+        row["status"] = "expired"
     return row
 
 
@@ -263,7 +284,7 @@ def _next_id(rows):
 # ---------------------------------------------------------------------------
 
 def _load_rows(session):
-    """Load CSV, run lazy cleanup, persist if changed, return rows."""
+    """Load CSV, run lazy cleanup, persist only if something changed, return rows."""
     with _reservation_lock(session):
         rows, changed = _clean_rows(_read_csv(session))
         if changed:
@@ -272,11 +293,16 @@ def _load_rows(session):
 
 
 def _modify_rows(session, fn):
-    """Load, clean, apply fn(rows) in-place, save — all under one lock hold."""
+    """Load, clean, apply fn(rows) in-place, save only if changed.
+
+    fn must return True if it modified rows, False (or None) otherwise.
+    The write is also triggered if lazy cleanup marked any rows as expired.
+    """
     with _reservation_lock(session):
-        rows, _ = _clean_rows(_read_csv(session))
-        fn(rows)
-        _write_csv(session, rows)
+        rows, cleaning_changed = _clean_rows(_read_csv(session))
+        fn_changed = fn(rows)
+        if cleaning_changed or fn_changed:
+            _write_csv(session, rows)
 
 
 # ---------------------------------------------------------------------------
@@ -295,11 +321,11 @@ def _read_config(session):
     try:
         with open(_config_path(session), "r", encoding="utf-8") as f:
             data = json.load(f)
-        cfg = dict(_CONFIG_DEFAULTS)
+        cfg = copy.deepcopy(_CONFIG_DEFAULTS)  # deep copy — excluded_cities is a list
         cfg.update(data)
         return cfg
     except (FileNotFoundError, json.JSONDecodeError, IOError):
-        return dict(_CONFIG_DEFAULTS)
+        return copy.deepcopy(_CONFIG_DEFAULTS)
 
 
 def _write_config(session, cfg):
@@ -333,7 +359,7 @@ def reserve(session, city_id, city_name, resource_index, amount, module_name, re
     resource_index : int
         0=Wood 1=Wine 2=Marble 3=Crystal 4=Sulphur.
     amount : int
-        Units being reserved.
+        Units being reserved.  Must be > 0.
     module_name : str
         Identifier of the calling module (used for ownership checks on release).
     reason : str
@@ -341,7 +367,20 @@ def reserve(session, city_id, city_name, resource_index, amount, module_name, re
     release_at : int|float
         Unix timestamp when the module expects to be done with these resources.
         hard_expires_at is automatically set to release_at + 24 h.
+        A warning is printed if release_at is already in the past.
     """
+    if int(amount) <= 0:
+        raise ValueError(f"reserved amount must be positive, got {amount}")
+    if int(resource_index) not in VALID_RESOURCE_INDICES:
+        raise ValueError(
+            f"resource_index must be 0–4 (Wood/Wine/Marble/Crystal/Sulphur), got {resource_index}"
+        )
+    if int(release_at) < time.time():
+        print(
+            f"{bcolors.WARNING}Warning: release_at ({_fmt_ts(release_at)}) is in the past. "
+            f"The reservation will hard-expire ~24 h from now.{bcolors.ENDC}"
+        )
+
     rid = [None]
 
     def _add(rows):
@@ -360,9 +399,54 @@ def reserve(session, city_id, city_name, resource_index, amount, module_name, re
             "status": "active",
             "schema_version": SCHEMA_VERSION,
         })
+        return True  # always modifies rows
 
     _modify_rows(session, _add)
     return rid[0]
+
+
+def update_reservation(session, reservation_id, module_name, release_at):
+    """Extend or modify the release_at of an existing active reservation.
+
+    Use this when an operation is taking longer than originally estimated —
+    extend the reservation rather than release-and-recreate (which opens a
+    gap where another module could claim the resources).
+
+    Only the owning module may update a reservation (or ``"__admin__"``).
+
+    Parameters
+    ----------
+    release_at : int|float
+        New unix timestamp for when the module expects to be done.
+
+    Returns
+    -------
+    True   reservation found, owned, and updated
+    False  reservation not found (or already inactive)
+    None   reservation found but caller does not own it
+    """
+    rid = int(reservation_id)
+    result = [False]
+
+    if int(release_at) < time.time():
+        print(
+            f"{bcolors.WARNING}Warning: release_at ({_fmt_ts(release_at)}) is in the past.{bcolors.ENDC}"
+        )
+
+    def _update(rows):
+        for row in rows:
+            if row["reservation_id"] == rid and row["status"] == "active":
+                if row["module_name"] == str(module_name) or str(module_name) == "__admin__":
+                    row["release_at"] = int(release_at)
+                    row["hard_expires_at"] = int(release_at) + HARD_EXPIRY_BUFFER_SECONDS
+                    result[0] = True
+                    return True   # rows changed
+                result[0] = None  # found but not authorised — no write needed
+                return False
+        return False  # not found — no write needed
+
+    _modify_rows(session, _update)
+    return result[0]
 
 
 def release(session, reservation_id, module_name):
@@ -371,21 +455,28 @@ def release(session, reservation_id, module_name):
     Only the module that created the reservation may release it, or the
     special sentinel ``"__admin__"`` (used by the interactive menu).
 
-    Returns True if the reservation was found and released, False otherwise.
+    Returns
+    -------
+    True   reservation found, owned, and released
+    False  reservation not found (or already inactive)
+    None   reservation found but caller does not own it
     """
     rid = int(reservation_id)
-    success = [False]
+    result = [False]
 
     def _release(rows):
         for row in rows:
             if row["reservation_id"] == rid and row["status"] == "active":
                 if row["module_name"] == str(module_name) or str(module_name) == "__admin__":
                     row["status"] = "released"
-                    success[0] = True
-                return
+                    result[0] = True
+                    return True   # rows changed
+                result[0] = None  # found but not authorised — no write needed
+                return False
+        return False  # not found — no write needed
 
     _modify_rows(session, _release)
-    return success[0]
+    return result[0]
 
 
 def release_all_for_module(session, module_name):
@@ -400,8 +491,34 @@ def release_all_for_module(session, module_name):
             if row["module_name"] == str(module_name) and row["status"] == "active":
                 row["status"] = "released"
                 count[0] += 1
+        return count[0] > 0  # True if anything changed
 
     _modify_rows(session, _release_all)
+    return count[0]
+
+
+def release_all_for_city(session, city_id, module_name="__admin__"):
+    """Atomically release all active reservations for a city.
+
+    When called with ``"__admin__"`` (the default) every reservation in the
+    city is released regardless of owning module — useful for city abandonment
+    or server migration.  When called with a specific module_name only that
+    module's reservations in the city are released.
+
+    Returns the number of reservations released.
+    """
+    cid = int(city_id)
+    count = [0]
+
+    def _release_city(rows):
+        for row in rows:
+            if row["city_id"] == cid and row["status"] == "active":
+                if row["module_name"] == str(module_name) or str(module_name) == "__admin__":
+                    row["status"] = "released"
+                    count[0] += 1
+        return count[0] > 0
+
+    _modify_rows(session, _release_city)
     return count[0]
 
 
@@ -415,16 +532,7 @@ def get_available(session, city_id, resource_index, actual_amount):
 
     Returns the larger of 0 and (actual_amount − total active reservations).
     """
-    rows = _load_rows(session)
-    cid = int(city_id)
-    ridx = int(resource_index)
-    reserved = sum(
-        r["reserved_amount"]
-        for r in rows
-        if r["city_id"] == cid
-        and r["resource_index"] == ridx
-        and r["status"] == "active"
-    )
+    _, reserved = get_reservation_snapshot(session, city_id, resource_index, actual_amount)
     return max(0, int(actual_amount) - reserved)
 
 
@@ -440,6 +548,68 @@ def get_total_reserved(session, city_id, resource_index):
         and r["resource_index"] == ridx
         and r["status"] == "active"
     )
+
+
+def get_reservation_snapshot(session, city_id, resource_index, actual_amount):
+    """Return (available, reserved) for a city+resource in a single lock acquisition.
+
+    Prefer this over separate get_available() + get_total_reserved() calls when
+    you need both values, as it halves the number of lock acquisitions.
+
+    Parameters
+    ----------
+    actual_amount : int
+        Live resource count from the game API.
+
+    Returns
+    -------
+    (available, reserved) : tuple[int, int]
+    """
+    rows = _load_rows(session)
+    cid = int(city_id)
+    ridx = int(resource_index)
+    reserved = sum(
+        r["reserved_amount"]
+        for r in rows
+        if r["city_id"] == cid
+        and r["resource_index"] == ridx
+        and r["status"] == "active"
+    )
+    available = max(0, int(actual_amount) - reserved)
+    return available, reserved
+
+
+def get_summary(session):
+    """Return a nested dict of all active reservations in a single lock acquisition.
+
+    Returns
+    -------
+    dict : ``{city_id: {resource_index: total_reserved_amount}}``
+
+    Calling modules that need to scan across many cities should use this
+    instead of calling get_available() per city, to avoid repeated lock
+    acquisitions and CSV reads.
+
+    Example
+    -------
+    ::
+
+        summary = get_summary(session)
+        for city in my_cities:
+            sulphur_reserved = summary.get(city["id"], {}).get(4, 0)
+            free = city["availableResources"][4] - sulphur_reserved
+    """
+    rows = _load_rows(session)
+    summary = {}
+    for r in rows:
+        if r["status"] != "active":
+            continue
+        cid = r["city_id"]
+        ridx = r["resource_index"]
+        if cid not in summary:
+            summary[cid] = {}
+        summary[cid][ridx] = summary[cid].get(ridx, 0) + r["reserved_amount"]
+    return summary
 
 
 def get_reservations(session, city_id=None, module_name=None, active_only=True):
@@ -510,7 +680,12 @@ def get_config(session):
 def update_config(session, **kwargs):
     """Update one or more config keys.
 
-    Accepted keys: ``min_ship_capacity`` (int), ``retry_hours`` (int|float).
+    Accepted keys
+    -------------
+    min_ship_capacity : int
+        Minimum free resources before a city is worth shipping from.
+    retry_hours : int | float
+        Advisory retry interval exposed to calling modules via get_config().
     """
     allowed = {"min_ship_capacity", "retry_hours"}
 
@@ -574,14 +749,19 @@ def _view_reservations(session):
         print("No active reservations.")
 
     if other:
+        capped = sorted(other, key=lambda x: x["hard_expires_at"], reverse=True)
+        truncated = len(capped) > HISTORY_DISPLAY_CAP
+        capped = capped[:HISTORY_DISPLAY_CAP]
+        note = f" (showing {HISTORY_DISPLAY_CAP} most recent)" if truncated else ""
         print(
             f"\n{bcolors.BLACK}"
             f"{'ID':>4}  {'City':<20} {'Resource':<10} "
             f"{'Reserved':>12}  {'Module':<22}  {'Status':<10}  Hard expires"
+            f"{note}"
             + bcolors.ENDC
         )
         print(bcolors.BLACK + "-" * 105 + bcolors.ENDC)
-        for r in sorted(other, key=lambda x: x["hard_expires_at"], reverse=True)[:15]:
+        for r in capped:
             print(
                 bcolors.BLACK
                 + f"{r['reservation_id']:>4}  "
@@ -623,9 +803,11 @@ def _release_reservation_menu(session):
     rid = read(msg="Reservation ID to release (0 to cancel): ", digit=True)
     if not rid or int(rid) == 0:
         return
-    ok = release(session, int(rid), "__admin__")
-    if ok:
+    result = release(session, int(rid), "__admin__")
+    if result is True:
         print(f"{bcolors.GREEN}Reservation {rid} released.{bcolors.ENDC}")
+    elif result is None:
+        print(f"{bcolors.RED}Permission denied.{bcolors.ENDC}")
     else:
         print(f"{bcolors.RED}Reservation {rid} not found or already inactive.{bcolors.ENDC}")
     enter()
@@ -654,6 +836,38 @@ def _release_module_menu(session):
     module = modules[idx]
     n = release_all_for_module(session, module)
     print(f"{bcolors.GREEN}Released {n} reservation(s) for '{module}'.{bcolors.ENDC}")
+    enter()
+
+
+def _release_city_menu(session):
+    banner()
+    rows = get_reservations(session, active_only=True)
+    if not rows:
+        print("No active reservations.")
+        enter()
+        return
+
+    cities = {}
+    for r in rows:
+        cid = r["city_id"]
+        if cid not in cities:
+            cities[cid] = {"name": r["city_name"], "count": 0}
+        cities[cid]["count"] += 1
+
+    city_list = sorted(cities.items(), key=lambda x: x[1]["name"])
+    print("Release all reservations for which city?\n")
+    for i, (cid, info) in enumerate(city_list, 1):
+        print(f"  {i}) {info['name']}  (ID: {cid}, {info['count']} reservation{'s' if info['count'] != 1 else ''})")
+    print()
+    choice = read(msg="Choice (0 to cancel): ", digit=True)
+    if not choice or int(choice) == 0:
+        return
+    idx = int(choice) - 1
+    if idx < 0 or idx >= len(city_list):
+        return
+    cid, info = city_list[idx]
+    n = release_all_for_city(session, cid, module_name="__admin__")
+    print(f"{bcolors.GREEN}Released {n} reservation(s) for {info['name']}.{bcolors.ENDC}")
     enter()
 
 
@@ -729,11 +943,14 @@ def _settings_menu(session):
                 update_config(session, min_ship_capacity=int(val))
         elif int(choice) == 2:
             val = read(
-                msg=f"New retry wait hours [{cfg['retry_hours']}]: ",
-                digit=True,
+                msg=f"New retry wait hours [{cfg['retry_hours']}] (decimals allowed, e.g. 0.5): ",
             )
             if val:
-                update_config(session, retry_hours=int(val))
+                try:
+                    update_config(session, retry_hours=float(val))
+                except ValueError:
+                    print(f"{bcolors.RED}Invalid number.{bcolors.ENDC}")
+                    enter()
 
 
 def resourceReservationSystem(session, event, stdin_fd, predetermined_input):
@@ -755,8 +972,9 @@ def resourceReservationSystem(session, event, stdin_fd, predetermined_input):
             print("  1) View reservations")
             print("  2) Manually release a reservation")
             print("  3) Release all reservations for a module")
-            print("  4) Excluded cities")
-            print("  5) Settings")
+            print("  4) Release all reservations for a city")
+            print("  5) Excluded cities")
+            print("  6) Settings")
             print("  0) Back")
             print()
             choice = read(msg="Choice: ", digit=True)
@@ -770,8 +988,10 @@ def resourceReservationSystem(session, event, stdin_fd, predetermined_input):
             elif c == 3:
                 _release_module_menu(session)
             elif c == 4:
-                _excluded_cities_menu(session)
+                _release_city_menu(session)
             elif c == 5:
+                _excluded_cities_menu(session)
+            elif c == 6:
                 _settings_menu(session)
     finally:
         event.set()
