@@ -424,7 +424,7 @@ def _prompt_vault_login():
     for attempt in range(1, MAX_ATTEMPTS + 1):
         master_pw = getpass.getpass(
             f"Vault master password (attempt {attempt}/{MAX_ATTEMPTS}): "
-        )
+        ).rstrip("\r\n")
         try:
             vault_session = open_vault(master_pw)
             break
@@ -461,9 +461,14 @@ def _prompt_vault_login():
     try:
         creds = vault_session.get_credentials(acct_idx)
     except VaultWrongPasswordError:
-        print("Credential decryption failed — vault may be corrupt.")
-        enter()
-        return None, None, None
+        # Re-read the vault from disk in case in-memory state is stale, then retry.
+        try:
+            vault_session = open_vault(master_pw)
+            creds = vault_session.get_credentials(acct_idx)
+        except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError):
+            print("Credential decryption failed — vault may be corrupt.")
+            enter()
+            return None, None, None
 
     return creds, vault_session, acct_idx
 
@@ -481,8 +486,8 @@ def _offer_save_to_vault(session):
     if not vault_exists():
         print("\nCreating a new vault. Choose a master password.")
         print("This password protects all stored accounts — do not forget it.\n")
-        master_pw = getpass.getpass("New master password: ")
-        confirm_pw = getpass.getpass("Confirm master password: ")
+        master_pw = getpass.getpass("New master password: ").rstrip("\r\n")
+        confirm_pw = getpass.getpass("Confirm master password: ").rstrip("\r\n")
         if master_pw != confirm_pw:
             print("Passwords do not match. Vault not created.")
             enter()
@@ -494,7 +499,7 @@ def _offer_save_to_vault(session):
             enter()
             return
     else:
-        master_pw = getpass.getpass("Vault master password: ")
+        master_pw = getpass.getpass("Vault master password: ").rstrip("\r\n")
         try:
             vault_session = open_vault(master_pw)
         except VaultWrongPasswordError:
@@ -554,7 +559,7 @@ def _vault_list_accounts():
         print("No vault found.")
         enter()
         return
-    master_pw = getpass.getpass("Master password: ")
+    master_pw = getpass.getpass("Master password: ").rstrip("\r\n")
     try:
         vs = open_vault(master_pw)
     except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
@@ -576,7 +581,7 @@ def _vault_remove_account():
         print("No vault found.")
         enter()
         return
-    master_pw = getpass.getpass("Master password: ")
+    master_pw = getpass.getpass("Master password: ").rstrip("\r\n")
     try:
         vs = open_vault(master_pw)
     except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
@@ -605,7 +610,7 @@ def _vault_rename_account():
         print("No vault found.")
         enter()
         return
-    master_pw = getpass.getpass("Master password: ")
+    master_pw = getpass.getpass("Master password: ").rstrip("\r\n")
     try:
         vs = open_vault(master_pw)
     except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
@@ -640,7 +645,7 @@ def _vault_change_master_password():
         print("No vault found.")
         enter()
         return
-    old_pw = getpass.getpass("Current master password: ")
+    old_pw = getpass.getpass("Current master password: ").rstrip("\r\n")
     try:
         vs = open_vault(old_pw)
     except VaultWrongPasswordError:
@@ -651,8 +656,8 @@ def _vault_change_master_password():
         print(f"Vault error: {exc}")
         enter()
         return
-    new_pw = getpass.getpass("New master password: ")
-    confirm_pw = getpass.getpass("Confirm new master password: ")
+    new_pw = getpass.getpass("New master password: ").rstrip("\r\n")
+    confirm_pw = getpass.getpass("Confirm new master password: ").rstrip("\r\n")
     if new_pw != confirm_pw:
         print("Passwords do not match. Password not changed.")
         enter()
