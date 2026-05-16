@@ -105,14 +105,52 @@ class AESCipher:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _pid_alive(pid):
+        """Return True if a process with the given PID is currently running."""
+        if pid == os.getpid():
+            return True
+        try:
+            if os.name == "nt":
+                import ctypes
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                handle = ctypes.windll.kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if not handle:
+                    return False
+                try:
+                    exit_code = ctypes.c_ulong(259)  # 259 = STILL_ACTIVE
+                    ctypes.windll.kernel32.GetExitCodeProcess(
+                        handle, ctypes.byref(exit_code))
+                    return exit_code.value == 259
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            else:
+                os.kill(pid, 0)
+                return True
+        except (OSError, PermissionError):
+            return False
+
+    @staticmethod
     def _acquire_lock(lock_path, timeout=10):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+                try:
+                    os.write(fd, str(os.getpid()).encode())
+                finally:
+                    os.close(fd)
                 return
             except FileExistsError:
+                # Check whether the lock belongs to a dead process (crash remnant).
+                try:
+                    with open(lock_path, "r") as f:
+                        pid_str = f.read().strip()
+                    if pid_str and not AESCipher._pid_alive(int(pid_str)):
+                        os.unlink(lock_path)
+                        continue  # retry immediately
+                except (OSError, ValueError):
+                    pass
                 time.sleep(0.05)
         raise TimeoutError(f"Could not acquire session lock: {lock_path}")
 
