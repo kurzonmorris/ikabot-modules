@@ -2,11 +2,25 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
+import re
 import traceback
 from ikabot.helpers.pedirInfo import read, enter
 from ikabot.helpers.gui import *
 from ikabot.config import *
 from importlib.machinery import SourceFileLoader
+
+
+def _module_function_name(filename):
+    """Derive the entry-point function name from a module filename.
+
+    A file may carry a version suffix like _v2, _v2.0, or _v2.0.0 so
+    older copies can sit alongside newer ones on disk. The suffix is
+    stripped here so the function inside the file can keep a stable
+    name (e.g. tavernManager_v2.0.0.py defines `def tavernManager`).
+    """
+    stem = os.path.basename(filename).replace('.py', '')
+    return re.sub(r'_v\d+(?:\.\d+)*$', '', stem)
+
 
 def loadCustomModule(session, event, stdin_fd, predetermined_input):
     """
@@ -96,7 +110,12 @@ def loadCustomModule(session, event, stdin_fd, predetermined_input):
             else:
                 # Execution logic
                 path = modules[choice - 3]
-                name = os.path.basename(path).replace('.py', '')
+                file_stem = os.path.basename(path).replace('.py', '')
+                # Strip a trailing _vN(.N)* from the file stem to get the
+                # function name. Lets us keep tavernManager.py and
+                # tavernManager_v2.0.0.py on disk side-by-side; both
+                # invoke `def tavernManager(...)`.
+                func_name = _module_function_name(path)
 
                 # Rewrite our entry in processList so ikabot's running-task
                 # display (main menu, killTasks, web server) shows the actual
@@ -110,7 +129,7 @@ def loadCustomModule(session, event, stdin_fd, predetermined_input):
                     my_pid = os.getpid()
                     for p in plist:
                         if p.get('pid') == my_pid:
-                            p['action'] = name
+                            p['action'] = func_name
                             break
                     sd['processList'] = plist
                     session.setSessionData(sd)
@@ -118,13 +137,29 @@ def loadCustomModule(session, event, stdin_fd, predetermined_input):
                     pass
 
                 banner()
-                print(f'Running module: {name}...\n')
+                if file_stem != func_name:
+                    print(f'Running module: {func_name} (from {file_stem}.py)...\n')
+                else:
+                    print(f'Running module: {func_name}...\n')
 
-                # Dynamic module loading
-                module = SourceFileLoader(name, path).load_module()
+                # Dynamic module loading. Loader uses file_stem as the
+                # module identifier (must be a legal Python identifier
+                # for sys.modules) but the entry-point is func_name.
+                module = SourceFileLoader(file_stem.replace('.', '_'), path).load_module()
 
-                # Execute the function (must match filename)
-                getattr(module, name)(session, event, stdin_fd, predetermined_input)
+                try:
+                    entrypoint = getattr(module, func_name)
+                except AttributeError:
+                    print(
+                        f"Error: {os.path.basename(path)} must define "
+                        f"`def {func_name}(session, event, stdin_fd, "
+                        f"predetermined_input)`."
+                    )
+                    enter()
+                    event.set()
+                    return
+
+                entrypoint(session, event, stdin_fd, predetermined_input)
 
                 event.set()
                 return
