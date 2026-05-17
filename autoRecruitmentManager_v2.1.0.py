@@ -541,8 +541,10 @@ def _request_resource_import(session, dest_city_id, needed_res, all_city_ids, ci
                 for i in range(5) if to_req[i] > 0
             )
             requests.append(f"{sup['city_name']} → {res_desc}")
-        except Exception:
-            pass
+        except AttributeError as e:
+            print(f"  RTM interface mismatch (function not found): {e}")
+        except Exception as e:
+            print(f"  RTM schedule append failed for {sup.get('city_name', '?')}: {e}")
 
     return requests
 
@@ -1339,6 +1341,10 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
     consecutive_errors = 0
     MAX_ERRORS = 10
 
+    last_order_time = time.time()
+    stall_warned    = False
+    STALL_WARN_SECS = 24 * 3600  # warn after 24 h with no successful order
+
     while True:
         # --- Check stop flag ---
         if os.path.exists(_stop_flag_path(session)):
@@ -1640,8 +1646,10 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                 if RRS_AVAILABLE:
                     for rid in reservation_ids:
                         result = rrs_release(session, rid, MODULE_NAME)
-                        # True = released OK, None = wrong owner (shouldn't happen),
-                        # False = already expired (fine, POST took <5 min)
+                        # True = released OK, False = already expired (fine)
+                        if result is None:
+                            print(f"  RRS warning: reservation {rid} not owned by "
+                                  f"{MODULE_NAME} — possible state inconsistency")
 
                 # Update in-memory remaining
                 for uid, qty in to_recruit.items():
@@ -1666,6 +1674,8 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                     r['status'] = new_status
                     r['last_updated'] = now_ts
                 csv_save_orders(session, is_units, updated_rows)
+                last_order_time = time.time()
+                stall_warned    = False
 
             except Exception as e:
                 print(f"  {b['city_name']}: POST failed — {e}")
@@ -1677,6 +1687,16 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
         # Brief pause, then check progress reports
         wait(30)
         cfg = _maybe_send_report(session, is_units, cfg)
+
+        # Stall guard: if no order has been placed in STALL_WARN_SECS, warn once
+        if not stall_warned and (time.time() - last_order_time) >= STALL_WARN_SECS:
+            stall_warned = True
+            sendToBot(
+                session,
+                f"Auto Recruitment Manager: no units ordered in the last 24 h.\n"
+                f"Check that buildings are reachable and resources are available.\n"
+                f"Use the queue manager to cancel orders if needed.",
+            )
 
 
 # =============================================================================
