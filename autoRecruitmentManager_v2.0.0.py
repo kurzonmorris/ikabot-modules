@@ -531,7 +531,7 @@ def _request_resource_import(session, dest_city_id, needed_res, all_city_ids, ci
                 resource_config=to_req,
                 send_mode="na",
                 interval_hours=0,
-                notes="autoRecruitmentManager resource import",
+                notes=f"{MODULE_NAME} resource import",
             )
             rtm.transport_csv_append(session, row)
             for i in range(5):
@@ -1460,7 +1460,10 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                 if slot.get('position') == pos:
                     b['is_busy'] = bool(slot.get('isBusy', False))
                     eta = slot.get('completed')
-                    b['queue_remaining_time'] = max(0, int(eta) - int(time.time())) if eta else 0
+                    try:
+                        b['queue_remaining_time'] = max(0, int(eta) - int(time.time())) if eta else 0
+                    except (TypeError, ValueError):
+                        b['queue_remaining_time'] = 0
                     break
 
         # --- Sort buildings by priority ---
@@ -1614,7 +1617,8 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                             reason=f"Recruit {unit_label} x{qty}",
                             release_at=time.time() + 300,
                         )
-                        reservation_ids.append(rid)
+                        if rid:
+                            reservation_ids.append(rid)
 
             params = {
                 'action':        'BuildUnits',
@@ -2101,6 +2105,12 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
             except Exception:
                 sendToBot(session, f"Error in:\n{info}\n{traceback.format_exc()}")
             finally:
+                try:
+                    flag = _stop_flag_path(session)
+                    if os.path.exists(flag):
+                        os.remove(flag)
+                except OSError:
+                    pass
                 if RRS_AVAILABLE:
                     try:
                         release_all_for_module(session, MODULE_NAME)
