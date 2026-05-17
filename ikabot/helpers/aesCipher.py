@@ -11,7 +11,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from ikabot.config import IKABOT_SESSIONS_DIR, DEFAULT_LOG_LEVEL
 from ikabot.helpers.botComm import *
+from ikabot.helpers.logging import getLogger
 from ikabot.helpers.pedirInfo import read
+
+logger = getLogger(__name__)
 
 
 def _safe(s):
@@ -102,14 +105,52 @@ class AESCipher:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _pid_alive(pid):
+        """Return True if a process with the given PID is currently running."""
+        if pid == os.getpid():
+            return True
+        try:
+            if os.name == "nt":
+                import ctypes
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                handle = ctypes.windll.kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if not handle:
+                    return False
+                try:
+                    exit_code = ctypes.c_ulong(259)  # 259 = STILL_ACTIVE
+                    ctypes.windll.kernel32.GetExitCodeProcess(
+                        handle, ctypes.byref(exit_code))
+                    return exit_code.value == 259
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            else:
+                os.kill(pid, 0)
+                return True
+        except (OSError, PermissionError):
+            return False
+
+    @staticmethod
     def _acquire_lock(lock_path, timeout=10):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+                try:
+                    os.write(fd, str(os.getpid()).encode())
+                finally:
+                    os.close(fd)
                 return
             except FileExistsError:
+                # Check whether the lock belongs to a dead process (crash remnant).
+                try:
+                    with open(lock_path, "r") as f:
+                        pid_str = f.read().strip()
+                    if pid_str and not AESCipher._pid_alive(int(pid_str)):
+                        os.unlink(lock_path)
+                        continue  # retry immediately
+                except (OSError, ValueError):
+                    pass
                 time.sleep(0.05)
         raise TimeoutError(f"Could not acquire session lock: {lock_path}")
 
@@ -169,17 +210,45 @@ class AESCipher:
         try:
             plaintext = self.decrypt(ciphertext)
         except Exception:
-            msg = "Error while decrypting session data.\nYou may have entered a wrong password."
-            if session.padre:
-                print(msg)
-            else:
-                sendToBot(session, msg)
-            print("\nWould you like to delete the ikabot session data associated with this email address? [y/N]")
-            rta = read(values=["n", "N", "y", "Y"])
-            if rta.lower() == "n":
-                os._exit(0)
-            self.deleteSessionData(session)
-            os._exit(0)
+            # Main file is corrupt — try the last-known-good backup silently.
+            bak_path = file_path + ".bak"
+            if os.path.exists(bak_path):
+                try:
+                    with open(bak_path, "r") as f:
+                        bak_ciphertext = f.read().strip()
+                    plaintext = self.decrypt(bak_ciphertext)
+                    # Restore the backup as the main file so future reads work.
+                    import shutil
+                    shutil.copy2(bak_path, file_path)
+                    logger.warning(
+                        "Session file was corrupt; restored from backup: %s", bak_path
+                    )
+                except Exception:
+                    pass
+                else:
+                    # Successfully recovered — fall through with plaintext.
+                    data_dict = json.loads(plaintext, strict=False)
+                    if all:
+                        return data_dict
+                    try:
+                        session_data = data_dict[session.username][session.mundo][session.servidor]
+                    except (KeyError, AttributeError):
+                        session_data = {}
+                    try:
+                        session_data["shared"] = data_dict["shared"]
+                    except KeyError:
+                        pass
+                    return session_data
+
+            # No usable backup either — start fresh without interrupting the user.
+            logger.error(
+                "Session file corrupt and no backup available; starting with empty session."
+            )
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
+            return {}
 
         data_dict = json.loads(plaintext, strict=False)
 
@@ -199,6 +268,8 @@ class AESCipher:
     def setSessionData(self, session, data, shared=False):
         file_path = self._get_file_path(session)
         lock_path = file_path + ".lock"
+        tmp_path  = file_path + ".tmp"
+        bak_path  = file_path + ".bak"
 
         self._acquire_lock(lock_path)
         try:
@@ -222,8 +293,19 @@ class AESCipher:
             plaintext  = json.dumps(session_data)
             ciphertext = self.encrypt(plaintext)
 
-            with open(file_path, "w") as f:
+            # Back up the current good file before overwriting it.
+            if os.path.exists(file_path):
+                try:
+                    import shutil
+                    shutil.copy2(file_path, bak_path)
+                except OSError:
+                    pass
+
+            # Write atomically: temp file → fsync → rename.
+            with open(tmp_path, "w") as f:
                 f.write(ciphertext)
                 f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, file_path)
         finally:
             self._release_lock(lock_path)

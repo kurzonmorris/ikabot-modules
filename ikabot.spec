@@ -3,6 +3,9 @@
 # Build command (run from the ikabot-modules directory):
 #   Windows:  python -m PyInstaller ikabot.spec
 #   Linux:    pyinstaller ikabot.spec
+#
+# Output: dist/ikabot/ikabot.exe  +  dist/ikabot/_internal/
+# To distribute: copy the entire dist/ikabot/ folder.
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
@@ -24,6 +27,8 @@ a = Analysis(
         # cryptography for the credential vault
         'cryptography',
         'cryptography.hazmat.primitives.ciphers.aead',
+        # dotenv used at startup in command_line.py
+        'dotenv',
     ],
     hookspath=[],
     hooksconfig={},
@@ -37,8 +42,6 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
     name='ikabot',
     debug=False,
@@ -53,4 +56,14 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='ikabot',
 )
