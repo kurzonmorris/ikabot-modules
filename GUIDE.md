@@ -7,6 +7,11 @@
 Work through this list top to bottom on each account before doing anything else.
 
 ```
+PREREQUISITES (one time only)
+─────────────────────────────────────────────────────────────
+[ ] 0. Install AutoHotkey (installer included in zip)
+        Required for the open all and close all scripts.
+
 SETUP
 ─────────────────────────────────────────────────────────────
 [ ] 1. Create one folder per account, e.g.:
@@ -337,3 +342,88 @@ Go to **21 → 2 (Notification Setup)** to connect one or more alert backends:
 
 Once configured, ikabot will message you when tasks complete, attacks are
 detected, or wine runs critically low — even if your PC is locked.
+
+---
+
+## 11. Utility Scripts — Managing Multiple Instances
+
+The zip includes four utility files that make running and updating many ikabot
+instances much faster.  Two are AutoHotkey scripts (`.ahk`) and two handle the
+update process automatically.
+
+---
+
+### Prerequisites — AutoHotkey
+
+The two `.ahk` scripts require **AutoHotkey** to be installed.  An installer is
+included in the zip.  Run it once and AutoHotkey will associate itself with
+`.ahk` files — after that, double-clicking any `.ahk` script runs it directly.
+
+Download / install AutoHotkey from the included installer before using either
+script below.
+
+---
+
+### close all ikabot.ahk — Mass Shutdown
+
+Double-clicking this script closes **every open ikabot console window** in one
+go.  Use this before applying an update or fixing a bug so you don't have to
+close each window manually.
+
+**When to use:**
+- Before running `replace_ikabot_profiles.bat` to update all instances
+- Any time you need a clean shutdown of all bots at once
+
+---
+
+### open all.ahk — Open All Shortcuts at Once
+
+This script asks you to choose the folder where you stored all your ikabot
+desktop shortcuts, then opens them **all in alphabetical/numerical order**,
+one after the other.
+
+**When to use:**
+- After an update, to restart all bots in one action
+- Every time you start up and want all accounts running
+
+**Recommended workflow:**
+```
+1. Run  close all ikabot.ahk   ← shuts everything down
+2. (Apply update if needed)
+3. Run  open all.ahk           ← starts everything back up
+4. Enter vault password for each window as it opens
+```
+
+---
+
+### replace_ikabot_profiles.py + run_replace_ikabot_profiles.bat — Auto Update
+
+These two files work together to replace the `ikabot` folder inside each of
+your account directories automatically — no manual copying needed.
+
+**Requirements:**
+- Your account folders must have **ikariam** in the name
+  (e.g. `Ikariam 1`, `Ikariam 2`, `Ikariam 3` etc.)
+- Each account folder must contain an `ikabot` subfolder (the old version)
+
+**How it works:**
+1. Double-click `run_replace_ikabot_profiles.bat`
+2. It asks you to choose:
+   - The folder containing all your `Ikariam X` account directories
+   - The new `ikabot` folder (the freshly built `dist\ikabot\`)
+3. It deletes the old `ikabot` subfolder from each account directory
+4. It copies the new version in its place
+5. All instances are now updated and ready to run
+
+**Full update workflow (recommended order):**
+```
+1. Build new ikabot.exe  →  python -m PyInstaller ikabot.spec --clean
+2. Run  close all ikabot.ahk          ← close all running bots
+3. Run  run_replace_ikabot_profiles.bat  ← replace all old versions
+4. Run  open all.ahk                  ← reopen all bots
+5. Enter vault password for each window
+```
+
+This entire process takes about a minute regardless of how many accounts you
+run.
+
