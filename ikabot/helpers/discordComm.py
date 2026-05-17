@@ -66,7 +66,13 @@ def setupDiscord(session, event=None, stdin_fd=None, predetermined_input=[]):
         return False
     webhook_url = webhook_url.strip()
 
-    if not webhook_url.startswith("https://discord.com/api/webhooks/"):
+    _valid_prefixes = (
+        "https://discord.com/api/webhooks/",
+        "https://discordapp.com/api/webhooks/",
+        "https://ptb.discord.com/api/webhooks/",
+        "https://canary.discord.com/api/webhooks/",
+    )
+    if not any(webhook_url.startswith(p) for p in _valid_prefixes):
         print(f"\n{bcolors.RED}That doesn't look like a valid Discord webhook URL.{bcolors.ENDC}")
         print("Expected format: https://discord.com/api/webhooks/...")
         enter()
