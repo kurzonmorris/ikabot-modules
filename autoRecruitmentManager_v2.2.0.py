@@ -18,7 +18,7 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.1.0
+Version: 2.2.0
 """
 
 import csv
