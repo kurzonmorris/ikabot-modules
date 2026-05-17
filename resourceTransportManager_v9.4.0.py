@@ -25,19 +25,186 @@ from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.naval import getAvailableShips, getAvailableFreighters
 from ikabot.helpers.varios import addThousandSeparator, getDateTime
 
+# ---------------------------------------------------------------------------
+#  Resource Reservation System — optional dependency
+# ---------------------------------------------------------------------------
+try:
+    from resourceReservationSystem import (
+        reserve as rrs_reserve,
+        release as rrs_release,
+        release_all_for_module as rrs_release_all_for_module,
+        update_reservation as rrs_update_reservation,
+        get_summary as rrs_get_summary,
+        get_reservation_snapshot as rrs_get_reservation_snapshot,
+        is_city_excluded as rrs_is_city_excluded,
+        get_excluded_cities as rrs_get_excluded_cities,
+        get_config as rrs_get_config,
+    )
+    RRS_AVAILABLE = True
+except ImportError:
+    RRS_AVAILABLE = False
+
+MODULE_NAME = "resourceTransportManager"
+
+
+# ============================================================================
+#  ANSI COLOUR  (with Windows cmd.exe fallback)
+# ============================================================================
+
+def _ansi_supported():
+    if os.name == "nt":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            handle = k32.GetStdHandle(-11)
+            mode = ctypes.c_ulong()
+            if k32.GetConsoleMode(handle, ctypes.byref(mode)):
+                k32.SetConsoleMode(handle, mode.value | 0x0004)
+                return True
+        except Exception:
+            pass
+        return os.environ.get("WT_SESSION") is not None
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+_USE_COLOUR = _ansi_supported()
+
+class C:
+    """Colour codes. All resolve to empty string when ANSI is off."""
+    RESET  = "\033[0m"  if _USE_COLOUR else ""
+    BOLD   = "\033[1m"  if _USE_COLOUR else ""
+    DIM    = "\033[2m"  if _USE_COLOUR else ""
+    CYAN   = "\033[36m" if _USE_COLOUR else ""
+    GREEN  = "\033[32m" if _USE_COLOUR else ""
+    YELLOW = "\033[33m" if _USE_COLOUR else ""
+    RED    = "\033[31m" if _USE_COLOUR else ""
+    WHITE  = "\033[97m" if _USE_COLOUR else ""
+    BLUE   = "\033[34m" if _USE_COLOUR else ""
+    HEADER = "\033[1;36m" if _USE_COLOUR else ""  # bold cyan
+    OK     = "\033[1;32m" if _USE_COLOUR else ""   # bold green
+    WARN   = "\033[1;33m" if _USE_COLOUR else ""   # bold yellow
+    ERR    = "\033[1;31m" if _USE_COLOUR else ""    # bold red
+    HINT   = "\033[2;37m" if _USE_COLOUR else ""    # dim white
+
+
+# ============================================================================
+#  RRS HELPERS  (no-op when RRS is not installed)
+# ============================================================================
+
+def _rrs_usable_amount(session, city, resource_index, amount_needed):
+    """How much of resource_index can we take from city, respecting reservations?
+    Falls back to raw availableResources when RRS is not installed."""
+    actual = city["availableResources"][resource_index]
+    if not RRS_AVAILABLE:
+        return min(actual, amount_needed)
+    if rrs_is_city_excluded(session, int(city["id"])):
+        return 0
+    available, _ = rrs_get_reservation_snapshot(
+        session, int(city["id"]), resource_index, actual
+    )
+    min_take = rrs_get_config(session)["min_ship_capacity"]
+    if available < min_take:
+        return 0
+    return min(available, amount_needed)
+
+
+def _rrs_free_amount(session, city, resource_index):
+    """How much of resource_index is free (unreserved) in city?
+    Falls back to raw availableResources when RRS is not installed."""
+    actual = city["availableResources"][resource_index]
+    if not RRS_AVAILABLE:
+        return actual
+    if rrs_is_city_excluded(session, int(city["id"])):
+        return 0
+    available, _ = rrs_get_reservation_snapshot(
+        session, int(city["id"]), resource_index, actual
+    )
+    return available
+
+
+def _rrs_load_summary(session):
+    """Load {city_id: {res_idx: reserved}} once for multi-city scans.
+    Returns empty dict when RRS is not installed."""
+    if not RRS_AVAILABLE:
+        return {}
+    return rrs_get_summary(session)
+
+
+def _rrs_free_from_summary(summary, city_id, resource_index, actual):
+    """Compute free amount using a pre-loaded summary dict."""
+    try:
+        cid = int(city_id)
+    except (TypeError, ValueError):
+        return actual
+    reserved = summary.get(cid, {}).get(resource_index, 0)
+    return max(0, actual - reserved)
+
+
+def _rrs_is_excluded(session, city_id):
+    """Check if a city is excluded. Returns False when RRS not installed."""
+    if not RRS_AVAILABLE:
+        return False
+    return rrs_is_city_excluded(session, int(city_id))
+
+
+def _rrs_excluded_set(session):
+    """Return set of excluded city IDs. Empty set when RRS not installed."""
+    if not RRS_AVAILABLE:
+        return set()
+    return {e["city_id"] for e in rrs_get_excluded_cities(session)}
+
+
+def _rrs_reserve(session, city_id, city_name, resource_index, amount,
+                 reason, duration_seconds):
+    """Create a reservation. No-op when RRS not installed. Returns rid or None."""
+    if not RRS_AVAILABLE or amount <= 0:
+        return None
+    return rrs_reserve(
+        session,
+        city_id=int(city_id),
+        city_name=str(city_name),
+        resource_index=resource_index,
+        amount=amount,
+        module_name=MODULE_NAME,
+        reason=reason,
+        release_at=time.time() + duration_seconds,
+    )
+
+
+def _rrs_release(session, reservation_id):
+    """Release a single reservation. No-op when RRS not installed."""
+    if not RRS_AVAILABLE or reservation_id is None:
+        return
+    rrs_release(session, reservation_id, MODULE_NAME)
+
+
+def _rrs_release_all(session):
+    """Release all reservations owned by this module. No-op when RRS not installed."""
+    if not RRS_AVAILABLE:
+        return 0
+    return rrs_release_all_for_module(session, MODULE_NAME)
+
+
+def _rrs_min_ship_capacity(session):
+    """Get minimum usable amount from RRS config. Defaults to 0 without RRS."""
+    if not RRS_AVAILABLE:
+        return 0
+    return rrs_get_config(session).get("min_ship_capacity", 500)
+
 
 # ============================================================================
 #  BANNER
 # ============================================================================
 
 def print_module_banner(page_title=None):
+    bar = "\u2550" * 58
+    rule = "\u2500" * 58
     print("\n")
-    print("\u2554" + "\u2550" * 58 + "\u2557")
-    print("\u2551          RESOURCE TRANSPORT MANAGER v8.1.1                  \u2551")
-    print("\u255a" + "\u2550" * 58 + "\u255d")
+    print(f"{C.HEADER}\u2554{bar}\u2557")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v9.4.0                  \u2551")
+    print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
-        print(f"\n{page_title}")
-        print("\u2500" * 58)
+        print(f"\n{C.BOLD}{page_title}{C.RESET}")
+        print(f"{C.DIM}{rule}{C.RESET}")
     print("")
 
 
@@ -48,20 +215,20 @@ def print_module_banner(page_title=None):
 def get_notification_config(telegram_enabled, event):
     if telegram_enabled is False:
         print_module_banner()
-        print("Telegram notifications are not configured.")
-        print("Do you want to continue without notifications? [Y/n]")
+        print(f"  {C.WARN}Telegram is not set up.{C.RESET}")
+        print(f"  Continue without notifications? {C.BOLD}[Y/n]{C.RESET}")
         rta = read(values=["y", "Y", "n", "N", ""])
         if rta.lower() == "n":
             event.set()
             return None
         return {"level": "none", "telegram": False}
 
-    print_module_banner("Notification Preferences")
-    print("When do you want to receive Telegram notifications?")
-    print("(1) Partial - Summary when each batch starts + errors")
-    print("(2) All - Every individual shipment")
-    print("(3) Errors only - Only notify on failures")
-    print("(') Back to main menu")
+    print_module_banner("Telegram Notifications")
+    print(f"  How much do you want to be notified?\n")
+    print(f"  {C.BOLD}(1){C.RESET} Partial — summary at start of each cycle + errors")
+    print(f"  {C.BOLD}(2){C.RESET} All — a message for every shipment sent")
+    print(f"  {C.BOLD}(3){C.RESET} Errors only — silent unless something fails")
+    print(f"  {C.BOLD}('){C.RESET} Back")
     choice = read(min=1, max=3, digit=True, additionalValues=["'"])
     if choice == "'":
         event.set()
@@ -128,12 +295,13 @@ def get_log_path(session):
 
     if saved:
         # Already have a saved path — use it silently
-        print(f"  Shipment log: {default_path}")
+        print(f"  {C.DIM}Shipment log:{C.RESET} {default_path}")
         return default_path
     # First time — ask the user
-    print(f"Shipment log file (Enter for default):")
-    print(f"  Default: {default_path}")
-    print(f"  (All accounts share one file — each row has an Account column)")
+    print(f"  {C.DIM}Shipment log records every shipment to a CSV file.{C.RESET}")
+    print(f"  {C.DIM}Press Enter to use the default path:{C.RESET}")
+    print(f"  {C.CYAN}{default_path}{C.RESET}")
+    print(f"  {C.HINT}All accounts share one file — each row has an Account column.{C.RESET}")
     user_path = read(msg="Log path: ", empty=True)
     chosen = user_path.strip() if user_path.strip() else default_path
     prefs["log_path"] = chosen
@@ -268,6 +436,7 @@ SCHEDULE_COLUMNS = [
     "dest_minimums",
     "bulk_csv_path",
     "bulk_run_column",
+    "ap_max_wait_minutes",
     "interval_hours",
     "notif_level",
     "status",
@@ -281,7 +450,7 @@ SCHEDULE_COLUMNS = [
 
 SCHEDULE_INT_COLS = {
     "schedule_id", "interval_hours", "total_shipments",
-    "created_at", "schema_version",
+    "created_at", "schema_version", "ap_max_wait_minutes",
 }
 SCHEDULE_INT_OR_BLANK_COLS = {"last_run", "next_run"}
 SCHEDULE_JSON_COLS = {
@@ -347,14 +516,15 @@ def transport_stop_flag_path(session):
 
 def _lock_acquire(lock_path, timeout=30, stale_after=60):
     start = time.time()
+    my_payload = json.dumps({
+        "pid": os.getpid(),
+        "timestamp": time.time(),
+    }).encode()
     while time.time() - start < timeout:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
-                os.write(fd, json.dumps({
-                    "pid": os.getpid(),
-                    "timestamp": time.time(),
-                }).encode())
+                os.write(fd, my_payload)
             finally:
                 os.close(fd)
             return True
@@ -362,19 +532,39 @@ def _lock_acquire(lock_path, timeout=30, stale_after=60):
             try:
                 with open(lock_path, "r") as f:
                     data = json.load(f)
-                    if time.time() - data.get("timestamp", 0) > stale_after:
-                        os.remove(lock_path)
-                        continue
-            except Exception:
-                try:
-                    os.remove(lock_path)
-                except Exception:
-                    pass
-                continue
+                if time.time() - data.get("timestamp", 0) > stale_after:
+                    tmp = lock_path + f".{os.getpid()}.tmp"
+                    try:
+                        fd2 = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        try:
+                            os.write(fd2, my_payload)
+                        finally:
+                            os.close(fd2)
+                        os.replace(tmp, lock_path)
+                        with open(lock_path, "r") as f2:
+                            check = json.load(f2)
+                        if check.get("pid") == os.getpid():
+                            return True
+                    except Exception:
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
+            except (json.JSONDecodeError, IOError, OSError):
+                pass
         except Exception:
             pass
         time.sleep(1)
     return False
+
+
+def _lock_refresh(lock_path):
+    """Rewrite the lock file with a fresh timestamp to prevent stale detection."""
+    try:
+        with open(lock_path, "w") as f:
+            json.dump({"pid": os.getpid(), "timestamp": time.time()}, f)
+    except Exception:
+        pass
 
 
 def _lock_release(lock_path):
@@ -382,15 +572,10 @@ def _lock_release(lock_path):
         if os.path.exists(lock_path):
             with open(lock_path, "r") as f:
                 data = json.load(f)
-                if data.get("pid") == os.getpid():
-                    os.remove(lock_path)
-                    return
-            os.remove(lock_path)
+            if data.get("pid") == os.getpid():
+                os.remove(lock_path)
     except Exception:
-        try:
-            os.remove(lock_path)
-        except Exception:
-            pass
+        pass
 
 
 class _transport_csv_lock:
@@ -507,6 +692,8 @@ def transport_csv_save_all(session, rows):
             w.writeheader()
             for r in rows:
                 w.writerow(_coerce_schedule_out(r))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
 
 
@@ -525,6 +712,8 @@ def _transport_csv_modify(session, fn):
             w.writeheader()
             for r in rows:
                 w.writerow(_coerce_schedule_out(r))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
 
 
@@ -575,7 +764,8 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
                        resource_config=None, send_mode="na",
                        dest_targets=None, source_reserves=None,
                        dest_minimums=None, bulk_csv_path="",
-                       bulk_run_column="", interval_hours=0,
+                       bulk_run_column="", ap_max_wait_minutes=120,
+                       interval_hours=0,
                        notif_level="none", status="pending",
                        notes=""):
     now_ts = int(time.time())
@@ -592,6 +782,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "dest_minimums":   dest_minimums or [0, 0, 0, 0, 0],
         "bulk_csv_path":   bulk_csv_path,
         "bulk_run_column": bulk_run_column,
+        "ap_max_wait_minutes": ap_max_wait_minutes,
         "interval_hours":  interval_hours,
         "notif_level":     notif_level,
         "status":          status,
@@ -660,6 +851,11 @@ def getActionPoints(html):
     return None
 
 
+def _extract_action_request(html):
+    m = re.search(r'"actionRequest"\s*:\s*"([^"]+)"', html)
+    return m.group(1) if m else ""
+
+
 def wait_for_action_points(session, origin_city_id, status_prefix="",
                            max_wait=1800):
     """Navigate to source city and wait until action points are available.
@@ -669,10 +865,11 @@ def wait_for_action_points(session, origin_city_id, status_prefix="",
         html = session.get()
         current = getCity(html)
         if str(current["id"]) != str(origin_city_id):
+            ar = _extract_action_request(html)
             session.post(params={
                 "action": "header",
                 "function": "changeCurrentCity",
-                "actionRequest": actionRequest,
+                "actionRequest": ar,
                 "oldView": "city",
                 "cityId": origin_city_id,
                 "backgroundView": "city",
@@ -711,7 +908,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
     ship_type_name = "freighters" if useFreighters else "merchant ships"
     prefix = f"{origin_city['name']} -> {dest_city['name']} | "
 
-    result = {"success": False, "error": None, "ships_used": 0}
+    result = {"success": False, "error": None, "ships_used": 0, "no_ap": False}
 
     # 1. Wait for ships (with timeout)
     available = wait_for_ships(session, useFreighters, prefix)
@@ -727,20 +924,14 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      next_shipment_str)
         return result
 
-    # 1b. Wait for action points on source city
-    ap = wait_for_action_points(session, origin_city["id"], prefix)
+    # 1b. Check action points on source city (quick check, no long wait)
+    ap = wait_for_action_points(session, origin_city["id"], prefix,
+                                max_wait=30)
     if ap == 0:
+        result["no_ap"] = True
         result["error"] = (
-            f"No action points available for {origin_city['name']} (timed out)"
+            f"No action points for {origin_city['name']}"
         )
-        if should_notify(notif_config, "error"):
-            sendToBot(session,
-                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
-        log_shipment(log_path, session, mode_name,
-                     origin_city["name"], "", dest_city["name"],
-                     dest_island_coords, dest_player, resources,
-                     0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str)
         return result
 
     # 2. Acquire lock with retries
@@ -879,6 +1070,8 @@ def write_csv_atomic(csv_path, fieldnames, rows):
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
         os.replace(tmp_path, csv_path)
     except Exception:
         try:
@@ -1037,12 +1230,13 @@ def resolve_resources(parsed, source_available, row, csv_resource_cols):
 
 
 def choose_run_slot(session, event, rows, run_columns):
-    print_module_banner("Bulk Distribution - Progress Tracking")
-    print("Each run tracks which cities have been sent to.")
-    print("Choose how to start:")
-    print("(1) Start fresh (clears progress from the oldest run)")
-    print("(2) Resume a previous run (continue where you left off)")
-    print("(') Back to main menu")
+    print_module_banner("Bulk Distribution — Run Slot")
+    print(f"  {C.DIM}Each run tracks progress (which cities have been sent to).{C.RESET}\n")
+    print(f"  {C.BOLD}(1){C.RESET} Start fresh — begin a new run")
+    print(f"  {C.DIM}    Replaces the oldest run slot with a clean starting point.{C.RESET}")
+    print(f"  {C.BOLD}(2){C.RESET} Resume — continue a previous run")
+    print(f"  {C.DIM}    Pick up where you left off (unsent cities still pending).{C.RESET}")
+    print(f"  {C.BOLD}('){C.RESET} Back")
     mode = read(min=1, max=2, digit=True, additionalValues=["'"])
     if mode == "'":
         event.set()
@@ -1091,11 +1285,11 @@ def choose_run_slot(session, event, rows, run_columns):
 
     # Resume mode
     print("")
-    print("Select run slot to resume:")
+    print(f"  {C.DIM}Select which run to continue:{C.RESET}")
     for i, col in enumerate(run_columns):
         done = completion.get(col, 0)
-        print(f"({i + 1}) {col[4:]}  [{done}/{total_rows} sent]")
-    print("(') Back to main menu")
+        print(f"  {C.BOLD}({i + 1}){C.RESET} {col[4:]}  [{done}/{total_rows} sent]")
+    print(f"  {C.BOLD}('){C.RESET} Back")
     choice = read(
         min=1, max=len(run_columns), digit=True, additionalValues=["'"]
     )
@@ -1131,7 +1325,7 @@ def readResourceAmount(resource_name):
                 return None
             print(f"  -> Set to: {addThousandSeparator(amount)}")
             return amount
-        print("  Enter a number, e = send all, blank = skip, ' = exit, = = restart")
+        print(f"  {C.HINT}Enter a number, e = send all, blank = skip, ' = exit, = = restart{C.RESET}")
 
 
 def get_resource_config(send_mode=2):
@@ -1157,18 +1351,17 @@ def get_resource_config(send_mode=2):
 
 def get_dest_minimums():
     print("")
-    print("Skip sending if the destination already has enough?")
-    print("  If set, resources are only sent when the destination")
-    print("  has LESS than the target amount.")
-    print("(1) Yes - set a target amount per resource")
-    print("(2) No - always send")
+    print(f"  {C.DIM}Skip sending if the destination already has enough?{C.RESET}")
+    print(f"  {C.DIM}If set, resources only ship when the destination is below the target.{C.RESET}\n")
+    print(f"  {C.BOLD}(1){C.RESET} Yes — set a target threshold per resource")
+    print(f"  {C.BOLD}(2){C.RESET} No — always send regardless")
     choice = read(min=1, max=2, digit=True)
     if choice == 2:
         return None
     print("")
-    print("Enter target amount for each resource.")
-    print("(Only sends when destination has less than this)")
-    print("(blank = no limit, always send this resource)\n")
+    print(f"  {C.DIM}Enter the target per resource. Shipments only happen when{C.RESET}")
+    print(f"  {C.DIM}the destination has less than this amount.{C.RESET}")
+    print(f"  {C.HINT}blank = no limit (always send this resource){C.RESET}\n")
     minimums = []
     for resource in materials_names:
         amount = readResourceAmount(f"Target {resource}")
@@ -1361,6 +1554,49 @@ def run_dry_preview(routes_info, mode_name):
 #  MAIN ENTRY POINT
 # ============================================================================
 
+def _scheduler_status_line(session):
+    """Return a coloured one-line scheduler status string."""
+    worker_running = _is_transport_worker_running(session)
+    counts = transport_csv_count_by_status(session)
+    active_ct = counts.get("active", 0)
+    pending_ct = counts.get("pending", 0)
+    total = sum(counts.values())
+
+    if worker_running:
+        status = f"{C.OK}RUNNING{C.RESET}"
+    else:
+        status = f"{C.WARN}STOPPED{C.RESET}"
+
+    parts = f"Scheduler: {status}"
+    if total > 0:
+        parts += f"  |  {active_ct} active"
+        if pending_ct:
+            parts += f", {pending_ct} pending"
+        parts += f" of {total} schedule(s)"
+    else:
+        parts += f"  |  No schedules"
+    return parts
+
+
+def _clear_all_schedules(session):
+    """Delete every schedule from the CSV after confirmation."""
+    rows = transport_csv_load(session)
+    if not rows:
+        print(f"  {C.DIM}No schedules to clear.{C.RESET}")
+        enter()
+        return
+    print(f"\n  {C.WARN}This will delete ALL {len(rows)} schedule(s).{C.RESET}")
+    print(f"  Type {C.BOLD}yes{C.RESET} to confirm:")
+    confirm = read(msg="  > ", additionalValues=["'", "yes", "Yes", "YES"])
+    if confirm.lower() != "yes":
+        print("  Cancelled.")
+        enter()
+        return
+    transport_csv_save_all(session, [])
+    print(f"  {C.OK}All schedules cleared.{C.RESET}")
+    enter()
+
+
 def resourceTransportManager(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
@@ -1371,20 +1607,59 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
         print_module_banner("Shipment Log Setup")
         log_path = get_log_path(session)
 
-        print_module_banner("Shipping Mode Selection")
-        print("Select shipping mode:")
-        print("(1) Consolidate: Collect from multiple cities into one")
-        print("(2) Distribute: Send from one city to multiple cities")
-        print("(3) Even Distribution: Balance resources across your cities")
-        print("(4) Auto Send: Specify what you need, auto-collect from others")
-        print("(5) Bulk Distribution: Send to many cities using a CSV file")
-        print("(6) Keep Topped Up: Maintain target resource levels in cities")
-        print("(7) Manage Schedules: View, edit, start, or stop schedules")
-        print("(') Back to main menu")
-        shipping_mode = read(min=1, max=7, digit=True, additionalValues=["'"])
+        print_module_banner()
+        print(f"  {_scheduler_status_line(session)}")
+        worker_running = _is_transport_worker_running(session)
+        if not worker_running:
+            counts = transport_csv_count_by_status(session)
+            if counts.get("active", 0) + counts.get("pending", 0) > 0:
+                print(f"  {C.WARN}Schedules exist but the scheduler is stopped."
+                      f" Press (s) to start it.{C.RESET}")
+        print(f"\n  {C.BOLD}(s){C.RESET} Start scheduler   "
+              f"{C.BOLD}(o){C.RESET} Stop scheduler   "
+              f"{C.BOLD}(x){C.RESET} Clear all schedules")
+        print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
+              f" to run it.{C.RESET}")
+
+        print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Consolidate")
+        print(f"  {C.DIM}    Collect resources from multiple cities into one destination.{C.RESET}")
+        print(f"  {C.BOLD}(2){C.RESET} Distribute")
+        print(f"  {C.DIM}    Send resources from one city out to several destinations.{C.RESET}")
+        print(f"  {C.BOLD}(3){C.RESET} Even Distribution")
+        print(f"  {C.DIM}    Spread a resource evenly across selected cities so each has the same.{C.RESET}")
+        print(f"  {C.BOLD}(4){C.RESET} Auto Send")
+        print(f"  {C.DIM}    Request a total amount — the system gathers it from all your cities.{C.RESET}")
+        print(f"  {C.BOLD}(5){C.RESET} Bulk Distribution")
+        print(f"  {C.DIM}    Send to many cities at once using a CSV spreadsheet file.{C.RESET}")
+        print(f"  {C.BOLD}(6){C.RESET} Keep Topped Up")
+        print(f"  {C.DIM}    Automatically refill cities when resources drop below a target.{C.RESET}")
+
+        print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
+        print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
+        print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
+        print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
+
+        shipping_mode = read(min=1, max=7, digit=True,
+                             additionalValues=["'", "s", "S", "o", "O",
+                                                "x", "X"])
         if shipping_mode == "'":
             event.set()
             return
+
+        if isinstance(shipping_mode, str):
+            letter = shipping_mode.lower()
+            if letter == "s":
+                _activate_transport_worker(session, event)
+                return
+            elif letter == "o":
+                _stop_transport_worker(session)
+                event.set()
+                return
+            elif letter == "x":
+                _clear_all_schedules(session)
+                event.set()
+                return
 
         if shipping_mode == 1:
             consolidateMode(session, event, stdin_fd, predetermined_input,
@@ -1423,22 +1698,22 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
 def consolidateMode(session, event, stdin_fd, predetermined_input,
                     telegram_enabled, log_path):
     try:
-        print_module_banner("Ship Type Selection")
-        print("What type of ships do you want to use?")
-        print("(1) Merchant ships")
-        print("(2) Freighters")
-        print("(') Back to main menu")
+        print_module_banner("Consolidate — Ship Type")
+        print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+        print(f"  {C.BOLD}(2){C.RESET} Freighters")
+        print(f"  {C.BOLD}('){C.RESET} Back")
         shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
         useFreighters = (shiptype == 2)
 
-        print_module_banner("Source City Selection")
-        print("Select source city option:")
-        print("(1) Single city")
-        print("(2) Multiple cities")
-        print("(') Back to main menu")
+        print_module_banner("Consolidate — Source Cities")
+        print(f"  {C.DIM}Where do the resources come from?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Single city")
+        print(f"  {C.BOLD}(2){C.RESET} Multiple cities")
+        print(f"  {C.BOLD}('){C.RESET} Back")
         source_option = read(min=1, max=2, digit=True, additionalValues=["'"])
         if source_option == "'":
             event.set()
@@ -1446,16 +1721,17 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
 
         origin_cities = []
         if source_option == 1:
-            print_module_banner("Single Source City")
-            print("Select source city:")
+            print_module_banner("Consolidate — Pick Source City")
+            print(f"  {C.DIM}Choose the city to send resources from:{C.RESET}")
             origin_city = rtm_chooseCity(session)
             origin_cities.append(origin_city)
         else:
-            print_module_banner("Multiple Source Cities")
-            source_msg = "Select source cities (cities to send resources from):"
+            print_module_banner("Consolidate — Pick Source Cities")
+            source_msg = (f"{C.DIM}Click cities to add them as sources "
+                          f"(the ones sending resources):{C.RESET}")
             source_city_ids, _ = rtm_ignoreCities(session, msg=source_msg)
             if not source_city_ids:
-                print("No cities selected!")
+                print(f"  {C.WARN}No cities selected!{C.RESET}")
                 enter()
                 event.set()
                 return
@@ -1464,41 +1740,38 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 city = getCity(html)
                 origin_cities.append(city)
 
-        print_module_banner("Sending Mode Selection")
+        print_module_banner("Consolidate — Sending Mode")
         source_summary = ", ".join(c["name"] for c in origin_cities)
-        print(f"Source cities: {source_summary}")
-        print("")
-        print("Choose sending mode:")
-        print("(1) Send ALL EXCEPT a reserve amount (keep X, send rest)")
-        print("(2) Send SPECIFIC amounts (send exactly X)")
-        print("(') Back to main menu")
+        print(f"  Source: {C.CYAN}{source_summary}{C.RESET}\n")
+        print(f"  {C.DIM}How should resource amounts be calculated?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Keep reserves — send everything except a reserve amount")
+        print(f"  {C.DIM}    You set how much to keep; the rest gets shipped.{C.RESET}")
+        print(f"  {C.BOLD}(2){C.RESET} Send specific — send an exact amount per resource")
+        print(f"  {C.DIM}    You set exactly how much to send.{C.RESET}")
+        print(f"  {C.BOLD}('){C.RESET} Back")
         send_mode = read(min=1, max=2, digit=True, additionalValues=["'"])
         if send_mode == "'":
             event.set()
             return
 
-        print_module_banner("Resource Configuration")
-        print(f"Source cities: {source_summary}\n")
+        print_module_banner("Consolidate — Resources")
+        print(f"  Source: {C.CYAN}{source_summary}{C.RESET}\n")
         if send_mode == 1:
-            print("Configure resource reserves (KEEP mode):")
-            print("  Number = keep that amount in reserve, send the rest")
-            print("  e = send ALL of this resource (keep nothing)")
-            print("  blank = skip (don't touch this resource)")
-            print("  Commas OK: 6000 or 6,000")
-            print("  = restart | ' exit\n")
+            print(f"  {C.DIM}Enter how much of each resource to KEEP in reserve.{C.RESET}")
+            print(f"  {C.DIM}Everything above that amount will be sent.{C.RESET}\n")
+            print(f"  {C.HINT}  number = keep that amount, send the rest{C.RESET}")
+            print(f"  {C.HINT}  e = send ALL (keep nothing)  |  blank = skip{C.RESET}")
+            print(f"  {C.HINT}  = restart  |  ' exit{C.RESET}\n")
         else:
-            print("Configure resource amounts to send:")
-            print("  Number = send exactly that amount")
-            print("  e = send ALL of this resource")
-            print("  blank = skip (don't send this resource)")
-            print("  Commas OK: 6000 or 6,000")
-            print("  = restart | ' exit\n")
+            print(f"  {C.DIM}Enter how much of each resource to SEND.{C.RESET}\n")
+            print(f"  {C.HINT}  number = send that amount  |  e = send ALL{C.RESET}")
+            print(f"  {C.HINT}  blank = skip  |  = restart  |  ' exit{C.RESET}\n")
             if len(origin_cities) == 1:
                 html = session.get(city_url + str(origin_cities[0]["id"]))
                 cdata = getCity(html)
                 for i, res in enumerate(materials_names):
                     avail = cdata["availableResources"][i]
-                    print(f"  {res}: {addThousandSeparator(avail)} available")
+                    print(f"  {C.CYAN}{res}:{C.RESET} {addThousandSeparator(avail)} available")
                 print("")
 
         resource_config = get_resource_config(send_mode)
@@ -1507,12 +1780,12 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             return
 
         # --- Destination ---
-        print_module_banner("Destination Selection")
-        print(f"Source cities: {source_summary}\n")
-        print("Select destination type:")
-        print("(1) Internal city (your cities)")
-        print("(2) External city (island coordinates)")
-        print("(') Back to main menu")
+        print_module_banner("Consolidate — Destination")
+        print(f"  Source: {C.CYAN}{source_summary}{C.RESET}\n")
+        print(f"  {C.DIM}Where should the resources be delivered?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Your own city")
+        print(f"  {C.BOLD}(2){C.RESET} Another player's city (enter island coordinates)")
+        print(f"  {C.BOLD}('){C.RESET} Back")
         dest_type = read(min=1, max=2, digit=True, additionalValues=["'"])
         if dest_type == "'":
             event.set()
@@ -1522,9 +1795,9 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             # External city
             coords_done = False
             while not coords_done:
-                print_module_banner("Island Coordinates")
-                print("Enter destination island coordinates:")
-                print("(' exit | = restart)\n")
+                print_module_banner("Consolidate — Island Coordinates")
+                print(f"  {C.DIM}Enter the island location of the target city.{C.RESET}")
+                print(f"  {C.HINT}' exit  |  = restart{C.RESET}\n")
                 x_coord = read(msg="X coordinate: ", digit=True,
                                additionalValues=["'", "="])
                 if x_coord == "'":
@@ -1589,8 +1862,8 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 coords_done = True
         else:
             # Internal city
-            print_module_banner("Internal City Selection")
-            print("Select destination city:\n")
+            print_module_banner("Consolidate — Pick Destination")
+            print(f"  {C.DIM}Choose which of your cities will receive the resources:{C.RESET}\n")
             destination_city = rtm_chooseCity(session)
             html = session.get(city_url + str(destination_city["id"]))
             destination_city = getCity(html)
@@ -1624,22 +1897,23 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             return
 
         # Schedule
-        print_module_banner("Schedule Configuration")
+        print_module_banner("Consolidate — Repeat Interval")
+        print(f"  {C.DIM}How often should this shipment run?{C.RESET}\n")
         interval_confirmed = False
         while not interval_confirmed:
-            print("How often to send (in hours)?")
-            print("(0 = one-time | 1+ = recurring)")
-            print("(') Back to main menu")
+            print(f"  {C.HINT}0 = one-time (send once and done){C.RESET}")
+            print(f"  {C.HINT}1+ = repeat every N hours{C.RESET}")
+            print(f"  {C.BOLD}('){C.RESET} Back")
             interval_hours = read(min=0, digit=True, additionalValues=["'"])
             if interval_hours == "'":
                 event.set()
                 return
             print("")
             if interval_hours == 0:
-                print("Mode: One-time shipment")
+                print(f"  {C.CYAN}One-time shipment{C.RESET}")
             else:
-                print(f"Interval: Every {interval_hours} hour(s)")
-            print("(1) Confirm  (2) Re-enter")
+                print(f"  {C.CYAN}Repeats every {interval_hours} hour(s){C.RESET}")
+            print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter")
             if read(min=1, max=2, digit=True) == 1:
                 interval_confirmed = True
 
@@ -1663,10 +1937,10 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                     free = destination_city["freeSpaceForResources"][i]
                     if s > free:
                         space_warnings.append(
-                            f"    {materials_names[i]}: reduced "
+                            f"    {C.WARN}{materials_names[i]}: reduced "
                             f"{addThousandSeparator(s)} -> "
                             f"{addThousandSeparator(free)} "
-                            f"(destination full)")
+                            f"(destination full){C.RESET}")
                     s = min(s, free)
                 if dest_minimums:
                     s = apply_dest_minimums(
@@ -1684,23 +1958,26 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
 
         # Final confirmation with dry-run option
         while True:
-            print_module_banner("Configuration Summary")
+            print_module_banner("Consolidate — Summary")
             ship_label = "Freighters" if useFreighters else "Merchant ships"
-            print(f"  Ship type: {ship_label}")
+            print(f"  {C.BOLD}Ship type:{C.RESET}   {ship_label}")
             mode_label = "Keep reserves" if send_mode == 1 else "Send specific"
-            print(f"  Mode: {mode_label}")
-            print(f"  Sources ({len(origin_cities)}): {source_summary}")
-            print(f"  Destination: {destination_city['name']}")
+            print(f"  {C.BOLD}Mode:{C.RESET}        {mode_label}")
+            print(f"  {C.BOLD}Sources:{C.RESET}     {source_summary} ({len(origin_cities)})")
+            print(f"  {C.BOLD}Destination:{C.RESET} {destination_city['name']}")
             if dest_minimums:
-                print(f"  Send only if below: {_format_resource_list(dest_minimums)}")
-            print(f"  Interval: {'One-time' if interval_hours == 0 else f'{interval_hours}h'}")
-            print(f"  Total: {addThousandSeparator(sum(total_send))} resources")
+                print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
+            int_label = "One-time" if interval_hours == 0 else f"Every {interval_hours}h"
+            print(f"  {C.BOLD}Interval:{C.RESET}    {int_label}")
+            print(f"  {C.BOLD}Total:{C.RESET}       {C.OK}{addThousandSeparator(sum(total_send))}{C.RESET} resources")
             if space_warnings:
-                print(f"\n  NOTE: Some amounts reduced due to warehouse space:")
+                print(f"\n  {C.WARN}Some amounts reduced (warehouse space):{C.RESET}")
                 for w in space_warnings:
                     print(w)
             print("")
-            print("(Y) Proceed  (D) Dry run preview  (N) Cancel")
+            print(f"  {C.OK}(Y){C.RESET} Proceed  "
+                  f"{C.CYAN}(D){C.RESET} Dry run preview  "
+                  f"{C.WARN}(N){C.RESET} Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", ""])
             if rta.lower() == "n":
                 event.set()
@@ -1736,98 +2013,6 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                              log_path)
 
 
-# ============================================================================
-#  MODE 1 EXECUTION: do_it (Consolidate)
-# ============================================================================
-
-def do_it(session, origin_cities, destination_city, island,
-          interval_hours, resource_config, useFreighters, send_mode,
-          notif_config, dest_minimums, log_path):
-
-    total_shipments = 0
-    consecutive_failures = 0
-    first_run = True
-    next_run_time = datetime.datetime.now()
-
-    while True:
-        now = datetime.datetime.now()
-        if not first_run and now < next_run_time:
-            sleep_secs = max(0, (next_run_time - now).total_seconds())
-            time.sleep(min(sleep_secs, 60))
-            continue
-
-        # Refresh destination
-        html = session.get(city_url + str(destination_city["id"]))
-        destination_city = getCity(html)
-
-        # Start notification
-        if should_notify(notif_config, "start"):
-            src_names = ", ".join(c["name"] for c in origin_cities)
-            sendToBot(session,
-                      f"SHIPMENT CYCLE STARTING\n"
-                      f"Account: {session.username}\n"
-                      f"From: {src_names}\n"
-                      f"To: [{island['x']}:{island['y']}] "
-                      f"{destination_city['name']}")
-
-        for oc in origin_cities:
-            html = session.get(city_url + str(oc["id"]))
-            oc_fresh = getCity(html)
-
-            toSend = [0] * len(materials_names)
-            total = 0
-            for i in range(len(materials_names)):
-                if resource_config[i] is None:
-                    continue
-                avail = oc_fresh["availableResources"][i]
-                if send_mode == 1:
-                    s = avail if resource_config[i] == 0 else max(0, avail - resource_config[i])
-                else:
-                    s = 0 if resource_config[i] == 0 else min(resource_config[i], avail)
-                if destination_city.get("isOwnCity", False):
-                    s = min(s, destination_city["freeSpaceForResources"][i])
-                if dest_minimums:
-                    s = apply_dest_minimums(
-                        s, destination_city["availableResources"][i],
-                        dest_minimums[i]
-                    )
-                toSend[i] = s
-                total += s
-
-            if total > 0:
-                route = (oc_fresh, destination_city, island["id"], *toSend)
-                coords = f"[{island['x']}:{island['y']}]"
-                result = send_shipment(
-                    session, route, useFreighters, notif_config, log_path,
-                    "Consolidate", coords
-                )
-                if result["success"]:
-                    total_shipments += 1
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3 and should_notify(notif_config, "error"):
-                        sendToBot(session,
-                                  f"WARNING: {consecutive_failures} consecutive failures")
-
-        if interval_hours == 0:
-            src_names = ", ".join(c["name"] for c in origin_cities)
-            session.setStatus(
-                f"One-time shipment done: {src_names} -> "
-                f"{destination_city['name']}"
-            )
-            return
-
-        next_run_time = datetime.datetime.now() + datetime.timedelta(
-            hours=interval_hours
-        )
-        session.setStatus(
-            f"Shipments: {total_shipments} | "
-            f"Next: {getDateTime(next_run_time.timestamp())}"
-        )
-        first_run = False
-        sleep_secs = max(0, (next_run_time - datetime.datetime.now()).total_seconds())
-        time.sleep(sleep_secs)
 
 
 # ============================================================================
@@ -1837,34 +2022,35 @@ def do_it(session, origin_cities, destination_city, island,
 def distributeMode(session, event, stdin_fd, predetermined_input,
                    telegram_enabled, log_path):
     try:
-        print_module_banner("Ship Type Selection")
-        print("What type of ships do you want to use?")
-        print("(1) Merchant ships")
-        print("(2) Freighters")
-        print("(') Back to main menu")
+        print_module_banner("Distribute — Ship Type")
+        print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+        print(f"  {C.BOLD}(2){C.RESET} Freighters")
+        print(f"  {C.BOLD}('){C.RESET} Back")
         shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
         useFreighters = (shiptype == 2)
 
-        print_module_banner("Source City Selection")
-        print("Select source city:\n")
+        print_module_banner("Distribute — Source City")
+        print(f"  {C.DIM}Choose the city that will send resources:{C.RESET}\n")
         origin_city = rtm_chooseCity(session)
 
-        print_module_banner("Distribution Setup")
-        print(f"Source city: {origin_city['name']}")
-        print("Note: Source city auto-excluded from destinations\n")
-        dest_msg = "Select destination cities (cities to receive resources):"
+        print_module_banner("Distribute — Destinations")
+        print(f"  Source: {C.CYAN}{origin_city['name']}{C.RESET}")
+        print(f"  {C.DIM}The source city is automatically excluded from this list.{C.RESET}\n")
+        dest_msg = (f"{C.DIM}Click cities to add them as destinations "
+                    f"(the ones receiving resources):{C.RESET}")
         dest_ids, _ = rtm_ignoreCities(session, msg=dest_msg)
 
         src_id = str(origin_city["id"])
         if src_id in dest_ids:
             dest_ids.remove(src_id)
-            print(f"Removed {origin_city['name']} from destinations (source)")
+            print(f"  {C.DIM}Removed {origin_city['name']} from destinations (it's the source){C.RESET}")
 
         if not dest_ids:
-            print("No valid destination cities!")
+            print(f"  {C.WARN}No destination cities selected!{C.RESET}")
             enter()
             event.set()
             return
@@ -1874,13 +2060,13 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
             html = session.get(city_url + cid)
             destination_cities.append(getCity(html))
 
-        print_module_banner("Distribution Setup")
+        print_module_banner("Distribute — Resources")
         dest_summary = ", ".join(c["name"] for c in destination_cities)
-        print(f"Source: {origin_city['name']}")
-        print(f"Destinations: {dest_summary}\n")
-        print("Resources to send to EACH destination:")
-        print("(Number = amount, 0 or blank = skip)")
-        print("(= restart | ' exit)\n")
+        print(f"  Source: {C.CYAN}{origin_city['name']}{C.RESET}")
+        print(f"  Destinations: {C.CYAN}{dest_summary}{C.RESET}\n")
+        print(f"  {C.DIM}Enter how much of each resource to send to EACH destination.{C.RESET}\n")
+        print(f"  {C.HINT}  number = send that amount  |  e = send ALL{C.RESET}")
+        print(f"  {C.HINT}  blank = skip  |  = restart  |  ' exit{C.RESET}\n")
 
         resource_config = get_resource_config(send_mode=2)
         if resource_config is None:
@@ -1896,22 +2082,22 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
             return
 
         # Schedule
-        print_module_banner("Schedule Configuration")
+        print_module_banner("Distribute — Repeat Interval")
+        print(f"  {C.DIM}How often should this distribution run?{C.RESET}\n")
         interval_confirmed = False
         while not interval_confirmed:
-            print("How often to send (in hours)?")
-            print("(0 = one-time | 1+ = recurring)")
-            print("(') Back to main menu")
+            print(f"  {C.HINT}0 = one-time  |  1+ = repeat every N hours{C.RESET}")
+            print(f"  {C.BOLD}('){C.RESET} Back")
             interval_hours = read(min=0, digit=True, additionalValues=["'"])
             if interval_hours == "'":
                 event.set()
                 return
             print("")
             if interval_hours == 0:
-                print("Mode: One-time shipment")
+                print(f"  {C.CYAN}One-time distribution{C.RESET}")
             else:
-                print(f"Interval: Every {interval_hours} hour(s)")
-            print("(1) Confirm  (2) Re-enter")
+                print(f"  {C.CYAN}Repeats every {interval_hours} hour(s){C.RESET}")
+            print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter")
             if read(min=1, max=2, digit=True) == 1:
                 interval_confirmed = True
 
@@ -1927,17 +2113,19 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
             })
 
         while True:
-            print_module_banner("Configuration Summary")
+            print_module_banner("Distribute — Summary")
             ship_label = "Freighters" if useFreighters else "Merchant ships"
-            print(f"  Ship type: {ship_label}")
-            print(f"  Source: {origin_city['name']}")
-            print(f"  Destinations ({len(destination_cities)}): {dest_summary}")
+            print(f"  {C.BOLD}Ship type:{C.RESET}     {ship_label}")
+            print(f"  {C.BOLD}Source:{C.RESET}        {origin_city['name']}")
+            print(f"  {C.BOLD}Destinations:{C.RESET}  {dest_summary} ({len(destination_cities)})")
             if dest_minimums:
-                print(f"  Send only if below: {_format_resource_list(dest_minimums)}")
-            print(f"  Total resources: {addThousandSeparator(grand)}")
-            int_label = "One-time" if interval_hours == 0 else f"{interval_hours}h"
-            print(f"  Interval: {int_label}\n")
-            print("(Y) Proceed  (D) Dry run preview  (N) Cancel")
+                print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
+            int_label = "One-time" if interval_hours == 0 else f"Every {interval_hours}h"
+            print(f"  {C.BOLD}Interval:{C.RESET}      {int_label}")
+            print(f"  {C.BOLD}Total:{C.RESET}         {C.OK}{addThousandSeparator(grand)}{C.RESET} resources\n")
+            print(f"  {C.OK}(Y){C.RESET} Proceed  "
+                  f"{C.CYAN}(D){C.RESET} Dry run preview  "
+                  f"{C.WARN}(N){C.RESET} Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", ""])
             if rta.lower() == "n":
                 event.set()
@@ -1973,101 +2161,6 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
 
 
 # ============================================================================
-#  MODE 2 EXECUTION: do_it_distribute
-# ============================================================================
-
-def do_it_distribute(session, origin_city, destination_cities,
-                     interval_hours, resource_config, useFreighters,
-                     notif_config, dest_minimums, log_path):
-
-    total_shipments = 0
-    consecutive_failures = 0
-    first_run = True
-    next_run_time = datetime.datetime.now()
-
-    while True:
-        now = datetime.datetime.now()
-        if not first_run and now < next_run_time:
-            sleep_secs = max(0, (next_run_time - now).total_seconds())
-            time.sleep(min(sleep_secs, 60))
-            continue
-
-        # Refresh origin
-        html = session.get(city_url + str(origin_city["id"]))
-        origin_fresh = getCity(html)
-        origin_island_id = origin_fresh["islandId"]
-        html_isl = session.get(island_url + str(origin_island_id))
-        origin_island = getIsland(html_isl)
-
-        if should_notify(notif_config, "start"):
-            dest_names = ", ".join(c["name"] for c in destination_cities)
-            sendToBot(session,
-                      f"DISTRIBUTION CYCLE STARTING\n"
-                      f"Account: {session.username}\n"
-                      f"From: {origin_fresh['name']}\n"
-                      f"To: {len(destination_cities)} cities ({dest_names})")
-
-        for dc in destination_cities:
-            html = session.get(city_url + str(dc["id"]))
-            dc_fresh = getCity(html)
-            dest_isl_id = dc_fresh["islandId"]
-            html_di = session.get(island_url + str(dest_isl_id))
-            dest_island = getIsland(html_di)
-
-            toSend = [0] * len(materials_names)
-            total = 0
-            for i in range(len(materials_names)):
-                if resource_config[i] == 0:
-                    continue
-                avail = origin_fresh["availableResources"][i]
-                s = min(resource_config[i], avail)
-                dest_space = dc_fresh.get("freeSpaceForResources", [0] * len(materials_names))
-                if i < len(dest_space):
-                    s = min(s, dest_space[i])
-                if dest_minimums:
-                    s = apply_dest_minimums(
-                        s, dc_fresh["availableResources"][i],
-                        dest_minimums[i]
-                    )
-                toSend[i] = s
-                total += s
-
-            if total > 0:
-                route = (origin_fresh, dc_fresh, dest_island["id"], *toSend)
-                coords = f"[{dest_island['x']}:{dest_island['y']}]"
-                result = send_shipment(
-                    session, route, useFreighters, notif_config, log_path,
-                    "Distribute", coords
-                )
-                if result["success"]:
-                    total_shipments += 1
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3 and should_notify(notif_config, "error"):
-                        sendToBot(session,
-                                  f"WARNING: {consecutive_failures} consecutive failures")
-
-        if interval_hours == 0:
-            session.setStatus(
-                f"One-time distribution done: {origin_fresh['name']}"
-            )
-            return
-
-        next_run_time = datetime.datetime.now() + datetime.timedelta(
-            hours=interval_hours
-        )
-        session.setStatus(
-            f"{origin_fresh['name']} -> {len(destination_cities)} cities | "
-            f"Shipments: {total_shipments} | "
-            f"Next: {getDateTime(next_run_time.timestamp())}"
-        )
-        first_run = False
-        sleep_secs = max(0, (next_run_time - datetime.datetime.now()).total_seconds())
-        time.sleep(sleep_secs)
-
-
-# ============================================================================
 #  MODE 3: EVEN DISTRIBUTION  (balance resources across cities)
 #  Now supports MULTI-RESOURCE balancing
 # ============================================================================
@@ -2076,13 +2169,12 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
                          telegram_enabled, log_path):
     try:
         # Select resources (multi-select)
-        print_module_banner("Resource Selection")
-        print("Select which resource(s) to balance across cities:")
+        print_module_banner("Even Distribution — Pick Resources")
+        print(f"  {C.DIM}Choose which resource(s) to split evenly across cities.{C.RESET}\n")
         for i, res in enumerate(materials_names):
-            print(f"({i+1}) {res}")
-        print("")
-        print("Enter one or more numbers (comma-separated, e.g. 1,3,5):")
-        print("(') Back to main menu")
+            print(f"  {C.BOLD}({i+1}){C.RESET} {res}")
+        print(f"\n  {C.HINT}Enter one or more numbers, comma-separated (e.g. 1,3,5){C.RESET}")
+        print(f"  {C.BOLD}('){C.RESET} Back")
         raw = read(msg="Resources: ", additionalValues=["'"])
         if raw == "'":
             event.set()
@@ -2106,12 +2198,12 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         print(f"\nBalancing: {selected_names}")
 
         # Ship type
-        print_module_banner("Ship Type Selection")
-        print(f"Balancing: {selected_names}\n")
-        print("What type of ships do you want to use?")
-        print("(1) Merchant ships")
-        print("(2) Freighters")
-        print("(') Back to main menu")
+        print_module_banner("Even Distribution — Ship Type")
+        print(f"  Balancing: {C.CYAN}{selected_names}{C.RESET}\n")
+        print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+        print(f"  {C.BOLD}(2){C.RESET} Freighters")
+        print(f"  {C.BOLD}('){C.RESET} Back")
         shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
@@ -2119,9 +2211,9 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         useFreighters = (shiptype == 2)
 
         # Select cities
-        print_module_banner("City Selection")
-        print(f"Balancing: {selected_names}\n")
-        balance_msg = "Select cities to include in balancing:"
+        print_module_banner("Even Distribution — Cities")
+        print(f"  Balancing: {C.CYAN}{selected_names}{C.RESET}\n")
+        balance_msg = (f"{C.DIM}Click cities to include them in the balancing pool:{C.RESET}")
         included_ids, _ = rtm_ignoreCities(session, msg=balance_msg)
 
         all_cities = []
@@ -2193,17 +2285,17 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
                         r_rem = receivers[ri]["amount"]
 
         if not preview_routes:
-            print("\nAll cities are already balanced! Nothing to do.")
+            print(f"\n  {C.OK}All cities are already balanced! Nothing to do.{C.RESET}")
             enter()
             event.set()
             return
 
         # Confirmation with dry run
         while True:
-            print(f"\n{len(preview_routes)} shipment(s) planned.")
-            print("(Y) Confirm - Start balancing")
-            print("(D) Dry run - preview shipments")
-            print("(N) Cancel")
+            print(f"\n  {C.BOLD}{len(preview_routes)} shipment(s) planned.{C.RESET}")
+            print(f"  {C.OK}(Y){C.RESET} Confirm — start balancing")
+            print(f"  {C.CYAN}(D){C.RESET} Dry run — preview shipments")
+            print(f"  {C.WARN}(N){C.RESET} Cancel")
             choice = read(values=["y", "Y", "n", "N", "d", "D", ""])
             if choice.lower() == "n":
                 event.set()
@@ -2241,88 +2333,6 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
                              log_path)
 
 
-# ============================================================================
-#  MODE 3 EXECUTION: do_even_distribution
-# ============================================================================
-
-def do_even_distribution(session, shipments, resource_index, resource_name,
-                         useFreighters, notif_config, log_path):
-    senders = [s for s in shipments if s["type"] == "sender"]
-    receivers = [s for s in shipments if s["type"] == "receiver"]
-
-    # FIX: check for empty lists
-    if not senders or not receivers:
-        msg = f"{resource_name}: Already balanced (no shipments needed)"
-        if should_notify(notif_config, "complete"):
-            sendToBot(session, msg)
-        return
-
-    if should_notify(notif_config, "start"):
-        plan_lines = []
-        si, ri = 0, 0
-        s_rem, r_rem = senders[0]["amount"], receivers[0]["amount"]
-        while si < len(senders) and ri < len(receivers):
-            amt = min(s_rem, r_rem)
-            if amt > 0:
-                plan_lines.append(
-                    f"{senders[si]['from']['name']} -> "
-                    f"{receivers[ri]['to']['name']}: "
-                    f"{addThousandSeparator(amt)} {resource_name}"
-                )
-            s_rem -= amt
-            r_rem -= amt
-            if s_rem == 0:
-                si += 1
-                s_rem = senders[si]["amount"] if si < len(senders) else 0
-            if r_rem == 0:
-                ri += 1
-                r_rem = receivers[ri]["amount"] if ri < len(receivers) else 0
-        sendToBot(session,
-                  f"BALANCING PLAN\nResource: {resource_name}\n\n"
-                  + "\n".join(plan_lines))
-
-    # Execute
-    si, ri = 0, 0
-    s_rem = senders[0]["amount"]
-    r_rem = receivers[0]["amount"]
-
-    while si < len(senders) and ri < len(receivers):
-        sender = senders[si]
-        receiver = receivers[ri]
-        amount = min(s_rem, r_rem)
-
-        if amount > 0:
-            toSend = [0] * len(materials_names)
-            toSend[resource_index] = amount
-
-            dest_isl_id = receiver["to"]["islandId"]
-            html = session.get(island_url + str(dest_isl_id))
-            dest_island = getIsland(html)
-
-            route = (sender["from"], receiver["to"],
-                     dest_island["id"], *toSend)
-            coords = f"[{dest_island['x']}:{dest_island['y']}]"
-
-            result = send_shipment(
-                session, route, useFreighters, notif_config, log_path,
-                "Even Distribution", coords
-            )
-
-            s_rem -= amount
-            r_rem -= amount
-
-        if s_rem == 0:
-            si += 1
-            if si < len(senders):
-                s_rem = senders[si]["amount"]
-        if r_rem == 0:
-            ri += 1
-            if ri < len(receivers):
-                r_rem = receivers[ri]["amount"]
-
-    if should_notify(notif_config, "complete"):
-        sendToBot(session,
-                  f"BALANCING COMPLETE\nResource: {resource_name}")
 
 
 # ============================================================================
@@ -2332,11 +2342,11 @@ def do_even_distribution(session, shipments, resource_index, resource_name,
 def autoSendMode(session, event, stdin_fd, predetermined_input,
                  telegram_enabled, log_path):
     try:
-        print_module_banner("Auto Send")
-        print("What type of ships do you want to use?")
-        print("(1) Merchant ships")
-        print("(2) Freighters")
-        print("(') Back to main menu")
+        print_module_banner("Auto Send — Ship Type")
+        print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+        print(f"  {C.BOLD}(2){C.RESET} Freighters")
+        print(f"  {C.BOLD}('){C.RESET} Back")
         shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
@@ -2344,15 +2354,15 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
         useFreighters = (shiptype == 2)
 
         while True:
-            print_module_banner("Auto Send")
-            print("Select the destination city:\n")
+            print_module_banner("Auto Send — Destination")
+            print(f"  {C.DIM}Choose the city that needs resources:{C.RESET}\n")
             destination_city = rtm_chooseCity(session)
 
             html = session.get(island_url + destination_city["islandId"])
             destination_island = getIsland(html)
 
             print_module_banner("Auto Send")
-            print("Scanning cities...")
+            print(f"  {C.DIM}Scanning your cities for available resources...{C.RESET}")
             html = session.get()
             city_ids = re.findall(
                 r'<option value="(\d+)" class="cityowntown"', html
@@ -2375,17 +2385,17 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                 event.set()
                 return
 
-            print_module_banner("Auto Send")
-            print(f"  Destination: {destination_city['name']} "
+            print_module_banner("Auto Send — Request Resources")
+            print(f"  Destination: {C.CYAN}{destination_city['name']}{C.RESET} "
                   f"[{destination_island['x']}:{destination_island['y']}]\n")
-            print("  Available resources (excluding destination):")
+            print(f"  {C.DIM}Available across all your other cities:{C.RESET}")
             for i, res in enumerate(materials_names):
-                print(f"    {res:<12} {addThousandSeparator(totals[i]):>12}")
+                print(f"    {C.CYAN}{res:<12}{C.RESET} {addThousandSeparator(totals[i]):>12}")
             print("")
 
             while True:
-                print("  Enter how much of each resource to collect:")
-                print("  (blank = skip, e = collect all, ' = exit, '=' = restart)\n")
+                print(f"  {C.DIM}Enter how much of each resource to collect and send here:{C.RESET}")
+                print(f"  {C.HINT}blank = skip  |  e = collect all  |  ' = exit  |  = restart{C.RESET}\n")
 
                 requested = [0] * len(materials_names)
                 restart = False
@@ -2487,7 +2497,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
 
 
 def allocate_from_suppliers(requested, suppliers, destination_city,
-                            destination_island):
+                            destination_island, rrs_summary=None):
     remaining = list(requested)
     routes = []
     for supplier in suppliers:
@@ -2496,7 +2506,11 @@ def allocate_from_suppliers(requested, suppliers, destination_city,
         for i in range(len(materials_names)):
             if remaining[i] <= 0:
                 continue
-            can_give = supplier["availableResources"][i]
+            actual = supplier["availableResources"][i]
+            if rrs_summary is not None and RRS_AVAILABLE:
+                can_give = _rrs_free_from_summary(rrs_summary, supplier["id"], i, actual)
+            else:
+                can_give = actual
             give = min(remaining[i], can_give)
             to_send[i] = give
             remaining[i] -= give
@@ -2559,58 +2573,14 @@ def render_auto_send_review(destination_city, destination_island, routes,
         print(f" {addThousandSeparator(grand[i]):>9}", end="")
     print(f" {total_ships:>7}\n")
 
-    print("  (Y) Proceed")
-    print("  (D) Dry run preview")
-    print("  (E) Edit - re-select")
-    print("  (C) Cancel")
+    print(f"  {C.OK}(Y){C.RESET} Proceed")
+    print(f"  {C.CYAN}(D){C.RESET} Dry run preview")
+    print(f"  {C.YELLOW}(E){C.RESET} Edit — re-enter amounts")
+    print(f"  {C.WARN}(C){C.RESET} Cancel")
     choice = read(values=["y", "Y", "e", "E", "c", "C", "d", "D", ""])
     if choice == "" or choice.upper() == "Y":
         return "Y"
     return choice.upper()
-
-
-# ============================================================================
-#  MODE 4 EXECUTION: do_it_auto_send
-# ============================================================================
-
-def do_it_auto_send(session, routes, useFreighters, notif_config, log_path):
-    total_routes = len(routes)
-    completed = 0
-
-    print(f"\n--- Auto Send: {total_routes} shipments ---\n")
-
-    for idx, route in enumerate(routes):
-        origin_city = route[0]
-        dest_city = route[1]
-        amounts = route[3:]
-        res_desc = ", ".join(
-            f"{addThousandSeparator(amounts[i])} {materials_names[i]}"
-            for i in range(len(materials_names))
-            if i < len(amounts) and amounts[i] > 0
-        )
-
-        print(f"  [{idx+1}/{total_routes}] {origin_city['name']} -> "
-              f"{dest_city['name']}")
-        print(f"    Resources: {res_desc}")
-
-        result = send_shipment(
-            session, route, useFreighters, notif_config, log_path,
-            "Auto Send"
-        )
-
-        if result["success"]:
-            completed += 1
-            print(f"    SUCCESS ({completed}/{total_routes})")
-        else:
-            print(f"    FAILED: {result['error']}")
-            if not result["success"] and result["error"] and "lock" in result["error"].lower():
-                break  # Stop on lock failures
-
-    print(f"\n--- Auto Send complete: {completed}/{total_routes} ---\n")
-    if should_notify(notif_config, "complete"):
-        sendToBot(session,
-                  f"AUTO SEND COMPLETE\nAccount: {session.username}\n"
-                  f"Shipments: {completed}/{total_routes}")
 
 
 # ============================================================================
@@ -2643,18 +2613,21 @@ def _bulk_editor_menu(session, csv_path, event):
         return
 
     while True:
-        print_module_banner("Bulk Distribution CSV Editor")
-        print(f"  CSV: {csv_path}")
-        print(f"  Rows: {len(rows)}\n")
+        print_module_banner("Bulk CSV Editor")
+        print(f"  {C.DIM}CSV:{C.RESET} {csv_path}")
+        print(f"  {C.DIM}Rows:{C.RESET} {len(rows)}\n")
 
-        print("(1) Add cities")
-        print("(2) View all rows")
-        print("(3) Edit row(s)")
-        print("(4) Delete row(s)")
-        print("(5) Set resources for rows")
-        print("(6) Set transport/from for rows")
-        print("(7) Save and back")
-        print("(') Cancel without saving")
+        print(f"  {C.BOLD}(1){C.RESET} Add cities")
+        print(f"  {C.DIM}    Browse islands and pick cities to add as rows.{C.RESET}")
+        print(f"  {C.BOLD}(2){C.RESET} View all rows")
+        print(f"  {C.BOLD}(3){C.RESET} Edit row(s)")
+        print(f"  {C.BOLD}(4){C.RESET} Delete row(s)")
+        print(f"  {C.BOLD}(5){C.RESET} Set resources")
+        print(f"  {C.DIM}    Set resource amounts for all rows or specific rows.{C.RESET}")
+        print(f"  {C.BOLD}(6){C.RESET} Set transport & source")
+        print(f"  {C.DIM}    Choose ship type and which cities send resources.{C.RESET}")
+        print(f"  {C.OK}(7){C.RESET} Save and back")
+        print(f"  {C.WARN}('){C.RESET} Cancel without saving")
 
         choice = read(min=1, max=7, digit=True, additionalValues=["'"])
         if choice == "'":
@@ -2811,9 +2784,9 @@ def _bulk_editor_set_resources(rows):
 
     print_module_banner("Set Resources")
     print(f"  {len(rows)} row(s) in CSV.\n")
-    print("  (1) Same resources for all rows")
-    print("  (2) Set per-row")
-    print("  (') Cancel")
+    print(f"  {C.BOLD}(1){C.RESET} Same resources for all rows")
+    print(f"  {C.BOLD}(2){C.RESET} Set per-row")
+    print(f"  {C.BOLD}('){C.RESET} Cancel")
 
     choice = read(min=1, max=2, digit=True, additionalValues=["'"])
     if choice == "'":
@@ -2880,10 +2853,10 @@ def _bulk_editor_set_transport_from(rows):
     print(f"  {len(rows)} row(s) in CSV.\n")
 
     print("  Ship type for all rows:")
-    print("  (1) Merchant ships (m)")
-    print("  (2) Freighters (f)")
-    print("  (3) Keep current / set per-row later")
-    print("  (') Cancel")
+    print(f"  {C.BOLD}(1){C.RESET} Merchant ships (m)")
+    print(f"  {C.BOLD}(2){C.RESET} Freighters (f)")
+    print(f"  {C.BOLD}(3){C.RESET} Keep current / set per-row later")
+    print(f"  {C.BOLD}('){C.RESET} Cancel")
     st = read(min=1, max=3, digit=True, additionalValues=["'"])
     if st == "'":
         return
@@ -2897,9 +2870,9 @@ def _bulk_editor_set_transport_from(rows):
         print("  All rows set to freighters.")
 
     print("\n  From (source cities) for all rows:")
-    print("  (1) All cities (a)")
-    print("  (2) Specific indices (enter value)")
-    print("  (3) Keep current / set per-row later")
+    print(f"  {C.BOLD}(1){C.RESET} All cities (a)")
+    print(f"  {C.BOLD}(2){C.RESET} Specific indices (enter value)")
+    print(f"  {C.BOLD}(3){C.RESET} Keep current / set per-row later")
     fc = read(min=1, max=3, digit=True, additionalValues=["'"])
     if fc == "'":
         return
@@ -3071,23 +3044,25 @@ def _parse_row_selection(raw, total):
     return sorted(indices)
 
 
-def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
-                         telegram_enabled, log_path):
+def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
+                               telegram_enabled, log_path):
     try:
-        print_module_banner("Bulk Distribution")
+        print_module_banner("Bulk Distribution — CSV File")
+        print(f"  {C.DIM}Send resources to many cities using a spreadsheet (CSV file).{C.RESET}")
+        print(f"  {C.DIM}You can edit the file in a spreadsheet app or in the built-in editor.{C.RESET}\n")
         prefs = load_prefs()
         saved_csv = prefs.get("csv_path", "")
         if saved_csv:
-            print(f"CSV file (Enter to reuse last: {saved_csv}):")
+            print(f"  {C.CYAN}Last used:{C.RESET} {saved_csv}")
+            print(f"  {C.DIM}Press Enter to reuse, or type a new path:{C.RESET}")
         else:
-            print("Enter the full path to your CSV file:")
-        print("CSV columns: Transport, X, Y, Player, City, City_Location,")
-        print("  Wood, Wine, Marble, Crystal, Sulphur, From, Hours, Issues")
-        print("  Transport: m = merchant ships, f = freighters")
-        print("  Resources: 500 = send 500, e0 = send all,")
-        print("             e10000 = send all except 10,000")
-        print("  From: a = all your cities, or city numbers like 1,3,5")
-        print("(') Back to main menu\n")
+            print(f"  Enter the full path to your CSV file:")
+        print(f"\n  {C.HINT}CSV columns: Transport, X, Y, Player, City, City_Location,{C.RESET}")
+        print(f"  {C.HINT}  Wood, Wine, Marble, Crystal, Sulphur, From, Hours, Issues{C.RESET}")
+        print(f"  {C.HINT}  Transport: m = merchant, f = freighter{C.RESET}")
+        print(f"  {C.HINT}  Resources: 500 = send 500, e0 = send all, e10000 = all except 10k{C.RESET}")
+        print(f"  {C.HINT}  From: a = all cities, or city numbers like 1,3,5{C.RESET}")
+        print(f"  {C.BOLD}('){C.RESET} Back\n")
         csv_input = read(msg="CSV path: ", empty=True, additionalValues=["'"])
         if csv_input == "'":
             event.set()
@@ -3103,9 +3078,9 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
         save_prefs(prefs)
 
         if not os.path.isfile(csv_path):
-            print(f"File not found: {csv_path}")
-            print("\n(1) Create new CSV with in-app editor")
-            print("(') Back\n")
+            print(f"  {C.WARN}File not found:{C.RESET} {csv_path}")
+            print(f"\n  {C.BOLD}(1){C.RESET} Create new CSV with the built-in editor")
+            print(f"  {C.BOLD}('){C.RESET} Back\n")
             choice = read(values=["1", "'"], additionalValues=["'"])
             if choice == "'":
                 event.set()
@@ -3116,11 +3091,7 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
                 enter()
                 event.set()
                 return
-            # Re-enter to load the newly created file
-            bulkDistributionMode(session, event, stdin_fd,
-                                 predetermined_input, telegram_enabled,
-                                 log_path)
-            return
+            return "restart"
 
         try:
             rows = []
@@ -3192,26 +3163,39 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
         if notif_config is None:
             return
 
+        ap_max_wait = 120  # default 2 hours
+
         # Final confirmation with dry run
         while True:
-            print_module_banner("Bulk Distribution - Summary")
-            print(f"  CSV rows: {len(rows)}")
-            print(f"  Interval: every {interval_hours}h")
-            print(f"  Run slot: {run_column[4:]}\n")
-            print("(Y) Proceed  (D) Dry run preview  (E) Edit CSV  (N) Cancel")
+            print_module_banner("Bulk Distribution — Summary")
+            print(f"  {C.BOLD}CSV rows:{C.RESET}  {len(rows)}")
+            print(f"  {C.BOLD}Interval:{C.RESET}  every {interval_hours}h")
+            print(f"  {C.BOLD}AP wait:{C.RESET}   {ap_max_wait} min")
+            print(f"  {C.BOLD}Run slot:{C.RESET}  {run_column[4:]}\n")
+            print(f"  {C.OK}(Y){C.RESET} Proceed  "
+                  f"{C.CYAN}(D){C.RESET} Dry run preview  "
+                  f"{C.YELLOW}(E){C.RESET} Edit CSV  "
+                  f"{C.CYAN}(A){C.RESET} AP wait timer  "
+                  f"{C.WARN}(N){C.RESET} Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", "e", "E",
-                               "", "'"],
+                               "a", "A", "", "'"],
                        additionalValues=["'"])
             if rta == "'" or rta.lower() == "n":
                 event.set()
                 return
             if rta.lower() == "e":
                 _bulk_editor_menu(session, csv_path, event)
-                # Reload CSV after editing
-                bulkDistributionMode(session, event, stdin_fd,
-                                     predetermined_input,
-                                     telegram_enabled, log_path)
-                return
+                return "restart"
+            if rta.lower() == "a":
+                print(f"\n  Current AP wait: {ap_max_wait} minutes")
+                print("  How long to retry AP-blocked cities (minutes, 0=no retry):")
+                ap_input = read(min=0, digit=True, additionalValues=["'"])
+                if ap_input == "'":
+                    continue
+                ap_max_wait = int(ap_input)
+                print(f"  {C.OK}AP wait set to {ap_max_wait} min{C.RESET}")
+                enter()
+                continue
             if rta.lower() == "d":
                 preview = _scan_csv_for_preview(session, rows, run_column)
                 if preview:
@@ -3234,12 +3218,24 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
         mode="bulk",
         bulk_csv_path=csv_path,
         bulk_run_column=run_column,
+        ap_max_wait_minutes=ap_max_wait,
         interval_hours=interval_hours,
         notif_level=notif_config.get("level", "none"),
         notes=f"CSV: {os.path.basename(csv_path)}",
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
+
+
+def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
+                         telegram_enabled, log_path):
+    while True:
+        result = _bulkDistributionModeInner(
+            session, event, stdin_fd, predetermined_input,
+            telegram_enabled, log_path,
+        )
+        if result != "restart":
+            return
 
 
 def _scan_csv_for_preview(session, rows, run_column):
@@ -3278,366 +3274,6 @@ def _scan_csv_for_preview(session, rows, run_column):
     return preview
 
 
-# ============================================================================
-#  MODE 5 EXECUTION: do_it_bulk_distribution
-# ============================================================================
-
-def do_it_bulk_distribution(session, csv_path, interval_hours,
-                            notif_config, run_column, log_path):
-    csv_resource_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
-
-    while True:
-        # Read CSV
-        try:
-            rows = []
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                fieldnames = list(reader.fieldnames or [])
-                for row in reader:
-                    rows.append(row)
-        except Exception as e:
-            if should_notify(notif_config, "error"):
-                sendToBot(session,
-                          f"BULK DIST ERROR\nCould not read CSV: {e}")
-            time.sleep(3600)
-            continue
-
-        # Ensure run column exists
-        if run_column not in (fieldnames or []):
-            fieldnames, run_columns = ensure_run_columns(fieldnames, rows)
-            if run_column not in run_columns:
-                run_column = run_columns[0]
-            try:
-                write_csv_atomic(csv_path, fieldnames, rows)
-            except Exception:
-                time.sleep(3600)
-                continue
-
-        # Ensure Transport, From and Issues columns exist; clear Issues for this cycle
-        fieldnames = ensure_transport_column(fieldnames, rows)
-        fieldnames = ensure_from_column(fieldnames, rows)
-        fieldnames = ensure_issues_column(fieldnames, rows)
-        for row in rows:
-            row["Issues"] = ""
-
-        city_cache = {}
-        mismatches = []
-        validated_cities = {}
-
-        session.setStatus(
-            f"[PRE-SCAN] Bulk Distribution | "
-            f"Validating {len(rows)} rows..."
-        )
-
-        # ---- PHASE 1: Pre-scan validation ----
-        for row_num, row in enumerate(rows, start=1):
-            try:
-                run_val = normalize_text(row.get(run_column, ""))
-                if run_val == "x":
-                    continue
-
-                x = row["X"].strip()
-                y = row["Y"].strip()
-                expected_player = row["Player"].strip()
-                expected_city = row["City"].strip()
-                expected_location = str(row.get("City_Location", "")).strip()
-
-                parsed_resources = [parse_resource_value(row.get(col, "0")) for col in csv_resource_cols]
-                has_resources = any(amt > 0 or mode == "except" for mode, amt in parsed_resources)
-                if not has_resources:
-                    continue
-
-                from_val = parse_from_column(row.get("From", ""))
-                if from_val is None:
-                    issue = "From column is empty (required: a, or city indices like 1,3,5)"
-                    row["Issues"] = issue
-                    mismatches.append(f"Row {row_num}: {issue}")
-                    continue
-                if isinstance(from_val, list):
-                    if "ids" not in city_cache:
-                        ids_tmp, map_tmp = getIdsOfCities(session)
-                        city_cache["ids"] = ids_tmp
-                        city_cache["map"] = map_tmp
-                    max_idx = len(city_cache["ids"])
-                    bad = [str(i) for i in from_val if i > max_idx]
-                    if bad:
-                        issue = f"From: city index {','.join(bad)} out of range (max {max_idx})"
-                        row["Issues"] = issue
-                        mismatches.append(f"Row {row_num}: {issue}")
-                        continue
-
-                html = session.get(
-                    f"view=island&xcoord={x}&ycoord={y}"
-                )
-                island = getIsland(html)
-                cities_on_island = [
-                    c for c in island["cities"]
-                    if c.get("type") == "city"
-                ]
-
-                # Match city (case-insensitive)
-                matched_city = None
-                candidates = []
-                exp_city_n = normalize_text(expected_city)
-                exp_player_n = normalize_text(expected_player)
-
-                for c in cities_on_island:
-                    cn = normalize_text(c.get("name", ""))
-                    pn = normalize_text(c.get("Name", ""))
-                    if cn == exp_city_n and pn == exp_player_n:
-                        candidates.append(c)
-
-                if candidates:
-                    exp_loc = normalize_text(expected_location)
-                    if exp_loc:
-                        for c in candidates:
-                            loc = get_city_location_token(c)
-                            if normalize_text(loc) == exp_loc:
-                                matched_city = c
-                                break
-                    if matched_city is None and len(candidates) == 1:
-                        matched_city = candidates[0]
-
-                if matched_city is None:
-                    issue = (f"City not found: {expected_player}/"
-                             f"{expected_city} at [{x}:{y}]")
-                    row["Issues"] = issue
-                    mismatches.append(f"Row {row_num}: {issue}")
-                    continue
-
-                # Auto-fill City_Location if empty
-                if not expected_location:
-                    loc_token = get_city_location_token(matched_city)
-                    if loc_token:
-                        row["City_Location"] = loc_token
-
-                validated_cities[row_num] = (matched_city, island)
-
-            except Exception as e:
-                issue = f"Error: {e}"
-                row["Issues"] = issue
-                mismatches.append(f"Row {row_num}: {issue}")
-
-        # Save CSV after pre-scan (persists Issues + City_Location auto-fills)
-        try:
-            write_csv_atomic(csv_path, fieldnames, rows)
-        except Exception as we:
-            print(f"    WARNING: pre-scan CSV write failed: {we}")
-
-        if mismatches and should_notify(notif_config, "error"):
-            sendToBot(session,
-                      f"BULK DIST ISSUES\n"
-                      + "\n".join(mismatches))
-
-        # ---- PHASE 2: Build routes from validated rows ----
-        routes = []
-        session.setStatus(
-            f"[PROCESSING] Bulk Distribution | "
-            f"Building routes for {len(validated_cities)} row(s)..."
-        )
-
-        # Refresh city cache for "except" resolution
-        city_cache.pop("objects", None)
-
-        for row_num, row in enumerate(rows, start=1):
-            run_val = normalize_text(row.get(run_column, ""))
-            if run_val == "x":
-                continue
-            if row_num not in validated_cities:
-                continue
-
-            matched_city, island = validated_cities[row_num]
-            x = row["X"].strip()
-            y = row["Y"].strip()
-            expected_player = row["Player"].strip()
-            parsed_resources = [parse_resource_value(row.get(col, "0")) for col in csv_resource_cols]
-
-            from_val = parse_from_column(row.get("From", ""))
-            row_use_freighters = parse_transport_value(row.get("Transport", "m"))
-            try:
-                src_cities = get_source_cities_for_row(
-                    session, from_val, city_cache
-                )
-            except Exception as e:
-                row["Issues"] = f"Error resolving source cities: {e}"
-                continue
-
-            done_indices = set()
-            if run_val and run_val != "x":
-                for p in run_val.split(","):
-                    p = p.strip()
-                    if p.isdigit():
-                        done_indices.add(int(p))
-
-            try:
-                dest_html = session.get(city_url + str(matched_city["id"]))
-                dest_city = getCity(dest_html)
-            except Exception as e:
-                row["Issues"] = f"Error fetching city details: {e}"
-                try:
-                    write_csv_atomic(csv_path, fieldnames, rows)
-                except Exception:
-                    pass
-                continue
-
-            dest_space = dest_city.get("freeSpaceForResources",
-                                       [0] * len(materials_names))
-            for src_idx, src_city in src_cities:
-                if src_idx in done_indices:
-                    continue
-                resources = resolve_resources(
-                    parsed_resources, src_city.get("availableResources", []),
-                    row, csv_resource_cols
-                )
-                for i in range(len(resources)):
-                    if i < len(dest_space):
-                        resources[i] = min(resources[i], dest_space[i])
-                if sum(resources) == 0:
-                    continue
-                route = (src_city, dest_city, island["id"], *resources)
-                routes.append((
-                    row_num, route, resources, dest_city["name"],
-                    expected_player, x, y, src_city["name"], src_idx,
-                    row_use_freighters, parsed_resources
-                ))
-
-        # Interleave routes by source city to spread action point usage
-        if len(routes) > 1:
-            from collections import defaultdict
-            groups = defaultdict(list)
-            for route_info in routes:
-                src_id = str(route_info[1][0]["id"])
-                groups[src_id].append(route_info)
-            interleaved = []
-            while any(groups.values()):
-                for src_id in list(groups.keys()):
-                    if groups[src_id]:
-                        interleaved.append(groups[src_id].pop(0))
-                    else:
-                        del groups[src_id]
-            routes = interleaved
-
-        if not routes:
-            if should_notify(notif_config, "error"):
-                sendToBot(session, "BULK DIST: No valid routes found")
-        else:
-            if should_notify(notif_config, "start"):
-                sendToBot(session,
-                          f"BULK DIST SCHEDULED\n"
-                          f"{len(routes)} shipment(s)")
-
-            completed = 0
-            skipped = 0
-            total = len(routes)
-
-            for idx, (row_num, route, resources, dest_name,
-                      player, rx, ry, src_name, src_idx,
-                      row_freighters, parsed_res) in enumerate(routes):
-
-                # For "except" mode, re-resolve with fresh source data
-                has_except = any(m == "except" for m, _ in parsed_res)
-                if has_except:
-                    src_city_id = str(route[0]["id"])
-                    src_fresh = getCity(session.get(city_url + src_city_id))
-                    resources = resolve_resources(
-                        parsed_res, src_fresh.get("availableResources", []),
-                        None, csv_resource_cols
-                    )
-                    dest_city_id = str(route[1]["id"])
-                    dest_fresh = getCity(session.get(city_url + dest_city_id))
-                    dest_space = dest_fresh.get("freeSpaceForResources",
-                                                [0] * len(materials_names))
-                    for i in range(len(resources)):
-                        if i < len(dest_space):
-                            resources[i] = min(resources[i], dest_space[i])
-                    if sum(resources) == 0:
-                        print(f"\n  [{idx+1}/{total}] {src_name} -> "
-                              f"{dest_name}: SKIPPED (insufficient stock or space)")
-                        skipped += 1
-                        continue
-                    route = (src_fresh, dest_fresh, route[2], *resources)
-
-                ship_label = "F" if row_freighters else "M"
-                res_desc = ", ".join(
-                    f"{addThousandSeparator(resources[i])} "
-                    f"{materials_names[i]}"
-                    for i in range(len(materials_names))
-                    if resources[i] > 0
-                )
-                print(f"\n  [{idx+1}/{total}] [{ship_label}] {src_name} -> "
-                      f"{dest_name} ({player}) [{rx}:{ry}]")
-                print(f"    {res_desc}")
-
-                session.setStatus(
-                    f"[SENDING] Bulk Dist [{idx+1}/{total}] "
-                    f"{src_name} -> {dest_name}"
-                )
-
-                coords = f"[{rx}:{ry}]"
-                result = send_shipment(
-                    session, route, row_freighters, notif_config,
-                    log_path, "Bulk Distribution", coords, player
-                )
-
-                if result["success"]:
-                    completed += 1
-                    print(f"    SUCCESS ({completed}/{total})")
-                    from_val = parse_from_column(rows[row_num - 1].get("From", ""))
-                    cur = rows[row_num - 1].get(run_column, "").strip()
-                    done = set()
-                    if cur and cur.upper() != "X":
-                        for p in cur.split(","):
-                            p = p.strip()
-                            if p.isdigit():
-                                done.add(int(p))
-                    done.add(src_idx)
-                    try:
-                        expected = get_source_cities_for_row(
-                            session, from_val, city_cache
-                        )
-                        expected_indices = {i for i, _ in expected}
-                    except Exception:
-                        expected_indices = done
-                    if done >= expected_indices:
-                        rows[row_num - 1][run_column] = "X"
-                    else:
-                        rows[row_num - 1][run_column] = ",".join(
-                            str(d) for d in sorted(done)
-                        )
-                    try:
-                        write_csv_atomic(csv_path, fieldnames, rows)
-                    except Exception as we:
-                        print(f"    WARNING: checkpoint write failed: {we}")
-                else:
-                    print(f"    FAILED: {result['error']}")
-
-            summary = f"{completed}/{total} sent"
-            if skipped:
-                summary += f", {skipped} skipped"
-            print(f"\n--- Bulk Distribution complete: {summary} ---")
-            if should_notify(notif_config, "complete"):
-                run_done = sum(
-                    1 for r in rows
-                    if normalize_text(r.get(run_column, "")) == "x"
-                )
-                sendToBot(session,
-                          f"BULK DIST COMPLETE\n"
-                          f"Slot: {run_column[4:]}\n"
-                          f"Cycle: {summary}\n"
-                          f"Progress: {run_done}/{len(rows)}")
-
-        # Schedule next cycle
-        next_run = datetime.datetime.now() + datetime.timedelta(
-            hours=interval_hours
-        )
-        session.setStatus(
-            f"[WAITING] Bulk Dist | Next: "
-            f"{getDateTime(next_run.timestamp())}"
-        )
-        sleep_secs = max(
-            0, (next_run - datetime.datetime.now()).total_seconds()
-        )
-        time.sleep(sleep_secs)
 
 
 # ============================================================================
@@ -3650,11 +3286,11 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         # --- Step 1: Ship type ---
         ship_confirmed = False
         while not ship_confirmed:
-            print_module_banner("Ship Type Selection")
-            print("What type of ships do you want to use?")
-            print("(1) Merchant ships")
-            print("(2) Freighters")
-            print("(') Back to main menu")
+            print_module_banner("Keep Topped Up — Ship Type")
+            print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+            print(f"  {C.BOLD}(2){C.RESET} Freighters")
+            print(f"  {C.BOLD}('){C.RESET} Back")
             shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
             if shiptype == "'":
                 event.set()
@@ -3662,7 +3298,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
             useFreighters = (shiptype == 2)
             ship_label = "Freighters" if useFreighters else "Merchant ships"
             print(f"\nShip type: {ship_label}")
-            print("(1) Confirm  (2) Re-enter  (') Back to main menu")
+            print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
             c = read(min=1, max=2, digit=True, additionalValues=["'"])
             if c == "'":
                 event.set()
@@ -3676,18 +3312,18 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         while adding_dests:
             dest_confirmed = False
             while not dest_confirmed:
-                print_module_banner("Destination Selection")
+                print_module_banner("Keep Topped Up — Destinations")
+                print(f"  {C.DIM}Choose cities that should be kept stocked up.{C.RESET}\n")
                 if destinations:
-                    print("Current destinations: " +
-                          ", ".join(d["name"] for d in destinations))
+                    print(f"  Current: {C.CYAN}{', '.join(d['name'] for d in destinations)}{C.RESET}")
                     print("")
-                print("Select destination city:")
+                print(f"  {C.DIM}Select destination city:{C.RESET}")
                 dest = rtm_chooseCity(session)
                 if dest is None:
                     event.set()
                     return
                 print(f"\nSelected: {dest['name']}")
-                print("(1) Confirm  (2) Re-enter destination  (') Back to main menu")
+                print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
                 c = read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
@@ -3697,7 +3333,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
             destinations.append(dest)
 
             print(f"\nDestinations so far: {', '.join(d['name'] for d in destinations)}")
-            print("(1) Add another destination  (2) Done adding destinations")
+            print(f"  {C.BOLD}(1){C.RESET} Add another destination  {C.BOLD}(2){C.RESET} Done adding")
             c = read(min=1, max=2, digit=True)
             if c == 2:
                 adding_dests = False
@@ -3707,14 +3343,14 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         for dest in destinations:
             targets_confirmed = False
             while not targets_confirmed:
-                print_module_banner(f"Resource Targets — {dest['name']}")
+                print_module_banner(f"Keep Topped Up — Targets for {dest['name']}")
                 cap = dest.get("storageCapacity", 0)
                 fill_95 = math.floor(cap * 0.95)
-                print(f"Storage capacity: {addThousandSeparator(cap)}")
-                print(f"  f = fill to 95% ({addThousandSeparator(fill_95)})")
-                print(f"  0 or blank = skip this resource")
-                print(f"  or enter a specific amount")
-                print(f"(= restart | ' exit)\n")
+                print(f"  {C.DIM}Set the target amount for each resource in this city.{C.RESET}")
+                print(f"  {C.DIM}Whenever it drops below the target, resources will be shipped.{C.RESET}\n")
+                print(f"  Storage: {C.CYAN}{addThousandSeparator(cap)}{C.RESET}")
+                print(f"  {C.HINT}  f = fill to 95% ({addThousandSeparator(fill_95)}){C.RESET}")
+                print(f"  {C.HINT}  0 or blank = skip  |  = restart  |  ' exit{C.RESET}\n")
 
                 targets = []
                 restart = False
@@ -3746,7 +3382,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                         print(f"  {res}: skip")
                     else:
                         print(f"  {res}: {addThousandSeparator(targets[i])}")
-                print("(1) Confirm  (2) Re-enter  (') Back to main menu")
+                print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
                 c = read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
@@ -3758,9 +3394,8 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         # --- Step 4: Source cities ---
         src_confirmed = False
         while not src_confirmed:
-            src_msg = ("Select source cities to send from.\n"
-                       "  Click a city to add or remove it.\n"
-                       "  After confirming, you can set reserve protection per city.")
+            src_msg = (f"{C.DIM}Click cities to add them as sources (they'll supply the resources).\n"
+                       f"  You can set reserve protection per city after confirming.{C.RESET}")
             source_city_ids, source_cities = rtm_ignoreCities(session, msg=src_msg)
             if not source_city_ids:
                 print("No source cities selected!")
@@ -3781,12 +3416,11 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
 
         # --- Step 5: Reserve protection (optional, per source city) ---
         source_reserves = {}
-        print_module_banner("Reserve Protection")
-        print("Reserve protection: Prevent source cities from being")
-        print("emptied below a threshold per resource.")
-        print("")
-        print("(1) Set up reserve protection")
-        print("(2) No reserve protection (default)")
+        print_module_banner("Keep Topped Up — Reserve Protection")
+        print(f"  {C.DIM}Optionally prevent source cities from being emptied.{C.RESET}")
+        print(f"  {C.DIM}Set a minimum amount to keep in each source city.{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Set up reserve protection")
+        print(f"  {C.BOLD}(2){C.RESET} No protection (send everything available)")
         reserve_choice = read(min=1, max=2, digit=True)
         if reserve_choice == 1:
             reserves_confirmed = False
@@ -3832,7 +3466,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                             else:
                                 parts.append(f"{res} none")
                         print(f"  {cname}: {' | '.join(parts)}")
-                print("\n(1) Confirm  (2) Re-enter reserves  (') Back to main menu")
+                print(f"\n  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
                 c = read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
@@ -3843,16 +3477,16 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         # --- Step 6: Check interval ---
         interval_confirmed = False
         while not interval_confirmed:
-            print_module_banner("Check Interval")
-            print("How often to check and top up (in hours)?")
-            print("(Recommended: 1-4 hours)")
-            print("(') Back to main menu")
+            print_module_banner("Keep Topped Up — Check Interval")
+            print(f"  {C.DIM}How often should the system check and top up?{C.RESET}")
+            print(f"  {C.HINT}Recommended: 1-4 hours{C.RESET}")
+            print(f"  {C.BOLD}('){C.RESET} Back")
             interval_hours = read(min=1, digit=True, additionalValues=["'"])
             if interval_hours == "'":
                 event.set()
                 return
             print(f"\nInterval: Every {interval_hours} hour(s)")
-            print("(1) Confirm  (2) Re-enter  (') Back to main menu")
+            print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
             c = read(min=1, max=2, digit=True, additionalValues=["'"])
             if c == "'":
                 event.set()
@@ -3868,8 +3502,8 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         # --- Step 8: Final summary + dry run ---
         while True:
             print_module_banner("Keep Topped Up — Summary")
-            print(f"  Ship type: {ship_label}")
-            print(f"  Destinations ({len(destinations)}):")
+            print(f"  {C.BOLD}Ship type:{C.RESET}  {ship_label}")
+            print(f"  {C.BOLD}Destinations ({len(destinations)}):{C.RESET}")
             for dest in destinations:
                 parts = []
                 tgts = dest_configs[str(dest["id"])]
@@ -3877,11 +3511,11 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                     if tgts[i] is None:
                         continue
                     parts.append(f"{res}: {addThousandSeparator(tgts[i])}")
-                print(f"    {dest['name']} — {' | '.join(parts) if parts else 'none'}")
+                print(f"    {C.CYAN}{dest['name']}{C.RESET} — {' | '.join(parts) if parts else 'none'}")
             src_names = ", ".join(source_cities[cid]["name"] for cid in source_city_ids)
-            print(f"  Sources ({len(source_city_ids)}): {src_names}")
+            print(f"  {C.BOLD}Sources ({len(source_city_ids)}):{C.RESET} {src_names}")
             if source_reserves:
-                print(f"  Reserve protection: enabled")
+                print(f"  {C.BOLD}Reserve protection:{C.RESET} {C.OK}enabled{C.RESET}")
                 for cid in source_city_ids:
                     res_list = source_reserves.get(cid, [0] * len(materials_names))
                     if any(r > 0 for r in res_list):
@@ -3889,10 +3523,12 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                                  for i in range(len(materials_names)) if res_list[i] > 0]
                         print(f"    {source_cities[cid]['name']}: {' | '.join(parts)}")
             else:
-                print(f"  Reserve protection: none")
-            print(f"  Check interval: every {interval_hours}h")
+                print(f"  {C.BOLD}Reserve protection:{C.RESET} none")
+            print(f"  {C.BOLD}Check interval:{C.RESET} every {interval_hours}h")
             print("")
-            print("(Y) Proceed  (D) Dry run preview  (N) Cancel")
+            print(f"  {C.OK}(Y){C.RESET} Proceed  "
+                  f"{C.CYAN}(D){C.RESET} Dry run preview  "
+                  f"{C.WARN}(N){C.RESET} Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", ""])
             if rta.lower() == "n":
                 event.set()
@@ -3971,105 +3607,6 @@ def _top_up_dry_run(session, destinations, dest_configs,
     return preview_routes
 
 
-# ============================================================================
-#  MODE 6 EXECUTION: do_it_top_up
-# ============================================================================
-
-def do_it_top_up(session, destinations, dest_configs, source_city_ids,
-                 source_reserves, useFreighters, interval_hours,
-                 notif_config, log_path):
-
-    total_shipments = 0
-    first_run = True
-    next_run_time = datetime.datetime.now()
-
-    while True:
-        now = datetime.datetime.now()
-        if not first_run and now < next_run_time:
-            sleep_secs = max(0, (next_run_time - now).total_seconds())
-            time.sleep(min(sleep_secs, 60))
-            continue
-
-        if should_notify(notif_config, "start"):
-            dest_names = ", ".join(d["name"] for d in destinations)
-            sendToBot(session,
-                      f"TOP-UP CYCLE STARTING\n"
-                      f"Account: {session.username}\n"
-                      f"Destinations: {dest_names}")
-
-        cycle_sent = 0
-        consecutive_failures = 0
-
-        for dest in destinations:
-            html = session.get(city_url + str(dest["id"]))
-            dest_fresh = getCity(html)
-            targets = dest_configs[str(dest["id"])]
-
-            dest_isl_id = dest_fresh["islandId"]
-            html_isl = session.get(island_url + str(dest_isl_id))
-            dest_island = getIsland(html_isl)
-            coords = f"[{dest_island['x']}:{dest_island['y']}]"
-
-            for cid in source_city_ids:
-                needed = [0] * len(materials_names)
-                for i in range(len(materials_names)):
-                    if targets[i] is None:
-                        continue
-                    gap = targets[i] - dest_fresh["availableResources"][i]
-                    needed[i] = max(0, min(gap, dest_fresh["freeSpaceForResources"][i]))
-
-                if all(n <= 0 for n in needed):
-                    break
-
-                html = session.get(city_url + cid)
-                src_fresh = getCity(html)
-                reserves = source_reserves.get(cid, [0] * len(materials_names))
-                to_send = [0] * len(materials_names)
-                for i in range(len(materials_names)):
-                    if needed[i] <= 0:
-                        continue
-                    avail = src_fresh["availableResources"][i]
-                    reserve = reserves[i] if i < len(reserves) else 0
-                    sendable = max(0, avail - reserve)
-                    to_send[i] = min(needed[i], sendable)
-
-                if sum(to_send) > 0:
-                    route = (src_fresh, dest_fresh, dest_island["id"], *to_send)
-                    result = send_shipment(
-                        session, route, useFreighters, notif_config, log_path,
-                        "TopUp", coords
-                    )
-                    if result["success"]:
-                        total_shipments += 1
-                        cycle_sent += 1
-                        consecutive_failures = 0
-                        html = session.get(city_url + str(dest["id"]))
-                        dest_fresh = getCity(html)
-                    else:
-                        consecutive_failures += 1
-                        if consecutive_failures >= 3 and should_notify(notif_config, "error"):
-                            sendToBot(session,
-                                      f"WARNING: {consecutive_failures} consecutive failures")
-
-        if should_notify(notif_config, "complete"):
-            sendToBot(session,
-                      f"TOP-UP CYCLE COMPLETE\n"
-                      f"Account: {session.username}\n"
-                      f"Shipments this cycle: {cycle_sent}\n"
-                      f"Total shipments: {total_shipments}")
-
-        next_run_time = datetime.datetime.now() + datetime.timedelta(
-            hours=interval_hours
-        )
-        dest_names = ", ".join(d["name"] for d in destinations)
-        session.setStatus(
-            f"TopUp: {dest_names} | "
-            f"Sent: {total_shipments} | "
-            f"Next: {getDateTime(next_run_time.timestamp())}"
-        )
-        first_run = False
-        sleep_secs = max(0, (next_run_time - datetime.datetime.now()).total_seconds())
-        time.sleep(sleep_secs)
 
 
 # ============================================================================
@@ -4092,21 +3629,23 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
     if worker_running:
         transport_csv_update(session, sid, status="active")
-        print(f"\n  Schedule #{sid} ({mode_label}) saved and activated.")
-        print(f"  Background scheduler is running — it will start this "
-              f"within {TICK_BUDGET_SECONDS}s.")
+        print(f"\n  {C.OK}Schedule #{sid} ({mode_label}) saved and activated.{C.RESET}")
+        print(f"  {C.DIM}The scheduler is running — it will pick this up within "
+              f"{TICK_BUDGET_SECONDS}s.{C.RESET}")
         enter()
         event.set()
         return
 
-    print(f"\n  Schedule #{sid} ({mode_label}) saved.")
-    print(f"  (1) Start now (launches background scheduler)")
-    print(f"  (2) Return to menu (start later from Manage Schedules)")
+    print(f"\n  {C.OK}Schedule #{sid} ({mode_label}) saved.{C.RESET}")
+    print(f"  {C.WARN}The scheduler is not running.{C.RESET}\n")
+    print(f"  {C.BOLD}(1){C.RESET} Start scheduler now")
+    print(f"  {C.DIM}    Launches a background process to run all schedules.{C.RESET}")
+    print(f"  {C.BOLD}(2){C.RESET} Return to menu")
+    print(f"  {C.DIM}    Start the scheduler later with (s) on the main page.{C.RESET}")
     choice = read(min=1, max=2, digit=True)
 
     if choice == 2:
-        print(f"  Schedule #{sid} saved as pending. "
-              f"Activate from option 7 'Manage Schedules'.")
+        print(f"  {C.DIM}Schedule #{sid} saved as pending. Press (s) on the main page to start.{C.RESET}")
         enter()
         event.set()
         return
@@ -4213,8 +3752,13 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
     island = getIsland(html_isl)
     coords = f"[{island['x']}:{island['y']}]"
 
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
+
     cycle_sent = 0
     for cid in source_city_ids:
+        if int(cid) in excluded:
+            continue
         html = session.get(city_url + str(cid))
         try:
             oc_fresh = getCity(html)
@@ -4227,12 +3771,13 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
             if i >= len(resource_config) or resource_config[i] is None:
                 continue
             avail = oc_fresh["availableResources"][i]
+            free = _rrs_free_from_summary(summary, cid, i, avail) if RRS_AVAILABLE else avail
             if send_mode == 1:
-                s = (avail if resource_config[i] == 0
-                     else max(0, avail - resource_config[i]))
+                s = (free if resource_config[i] == 0
+                     else max(0, free - resource_config[i]))
             else:
                 s = (0 if resource_config[i] == 0
-                     else min(resource_config[i], avail))
+                     else min(resource_config[i], free))
             try:
                 s = min(s, destination_city["freeSpaceForResources"][i])
             except (KeyError, IndexError):
@@ -4271,6 +3816,9 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
         return 0
 
     src_city_id = str(source_city_ids[0])
+    if _rrs_is_excluded(session, src_city_id):
+        return 0
+
     cycle_sent = 0
 
     for dcid in dest_city_ids:
@@ -4295,7 +3843,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
         for i in range(len(materials_names)):
             if i >= len(resource_config) or resource_config[i] is None:
                 continue
-            avail = origin_city["availableResources"][i]
+            avail = _rrs_free_amount(session, origin_city, i)
             s = (0 if resource_config[i] == 0
                  else min(resource_config[i], avail))
             try:
@@ -4333,6 +3881,9 @@ def run_topup_cycle(session, sched, notif_config, log_path):
     if not dest_city_ids or not source_city_ids:
         return 0
 
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
+
     cycle_sent = 0
     for dcid in dest_city_ids:
         dcid_str = str(dcid)
@@ -4352,6 +3903,8 @@ def run_topup_cycle(session, sched, notif_config, log_path):
 
         for cid in source_city_ids:
             cid_str = str(cid)
+            if int(cid) in excluded:
+                continue
             needed = [0] * len(materials_names)
             for i in range(len(materials_names)):
                 if i >= len(targets) or targets[i] is None:
@@ -4375,8 +3928,9 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                 if needed[i] <= 0:
                     continue
                 avail = src_fresh["availableResources"][i]
+                free = _rrs_free_from_summary(summary, cid, i, avail) if RRS_AVAILABLE else avail
                 reserve = reserves[i] if i < len(reserves) else 0
-                sendable = max(0, avail - reserve)
+                sendable = max(0, free - reserve)
                 to_send[i] = min(needed[i], sendable)
 
             if sum(to_send) > 0:
@@ -4405,8 +3959,13 @@ def run_even_cycle(session, sched, notif_config, log_path):
     if not city_ids or not resource_indices:
         return 0
 
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
+
     all_cities = []
     for cid in city_ids:
+        if int(cid) in excluded:
+            continue
         html = session.get(city_url + str(cid))
         try:
             all_cities.append(getCity(html))
@@ -4423,13 +3982,18 @@ def run_even_cycle(session, sched, notif_config, log_path):
             continue
         res_name = materials_names[res_idx]
 
-        total = sum(c["availableResources"][res_idx] for c in all_cities)
+        total = sum(
+            _rrs_free_from_summary(summary, c["id"], res_idx, c["availableResources"][res_idx])
+            if RRS_AVAILABLE else c["availableResources"][res_idx]
+            for c in all_cities
+        )
         target = total // len(all_cities)
 
         senders = []
         receivers = []
         for city in all_cities:
-            current = city["availableResources"][res_idx]
+            actual = city["availableResources"][res_idx]
+            current = _rrs_free_from_summary(summary, city["id"], res_idx, actual) if RRS_AVAILABLE else actual
             diff = current - target
             if diff > 0:
                 senders.append({"from": city, "amount": diff})
@@ -4464,9 +4028,10 @@ def run_even_cycle(session, sched, notif_config, log_path):
                 )
                 if result["success"]:
                     cycle_sent += 1
-
-                s_rem -= amount
-                r_rem -= amount
+                    s_rem -= amount
+                    r_rem -= amount
+                else:
+                    break
 
             if s_rem == 0:
                 si += 1
@@ -4498,11 +4063,16 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
     html = session.get(island_url + destination_city["islandId"])
     destination_island = getIsland(html)
 
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
+
     html = session.get()
     city_ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
     suppliers = []
     for cid in city_ids:
         if str(cid) == dest_city_id:
+            continue
+        if int(cid) in excluded:
             continue
         html_c = session.get(city_url + str(cid))
         try:
@@ -4515,6 +4085,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
 
     routes = allocate_from_suppliers(
         list(requested), suppliers, destination_city, destination_island,
+        rrs_summary=summary,
     )
     if routes is None:
         if should_notify(notif_config, "error"):
@@ -4575,6 +4146,9 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     city_cache = {}
     mismatches = []
     validated_cities = {}
+
+    excluded = _rrs_excluded_set(session)
+    summary = _rrs_load_summary(session)
 
     session.setStatus(
         f"[PRE-SCAN] Bulk Distribution | Validating {len(rows)} rows..."
@@ -4671,8 +4245,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     try:
         write_csv_atomic(csv_path, fieldnames, rows)
-    except Exception:
-        pass
+    except Exception as _csv_err:
+        session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
 
     if mismatches and should_notify(notif_config, "error"):
         sendToBot(session,
@@ -4726,8 +4300,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             row["Issues"] = f"Error fetching city details: {e}"
             try:
                 write_csv_atomic(csv_path, fieldnames, rows)
-            except Exception:
-                pass
+            except Exception as _csv_err:
+                session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
             continue
 
         dest_space = dest_city.get(
@@ -4736,8 +4310,19 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         for src_idx, src_city in src_cities:
             if src_idx in done_indices:
                 continue
+            if int(src_city.get("id", 0)) in excluded:
+                continue
+            raw_avail = src_city.get("availableResources", [])
+            if RRS_AVAILABLE:
+                adjusted_avail = [
+                    _rrs_free_from_summary(summary, src_city["id"], i, raw_avail[i])
+                    if i < len(raw_avail) else 0
+                    for i in range(len(materials_names))
+                ]
+            else:
+                adjusted_avail = raw_avail
             resources = resolve_resources(
-                parsed_resources, src_city.get("availableResources", []),
+                parsed_resources, adjusted_avail,
                 row, csv_resource_cols,
             )
             for i in range(len(resources)):
@@ -4778,17 +4363,39 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     completed = 0
     skipped = 0
     total = len(routes)
+    summary = _rrs_load_summary(session)
 
-    for idx, (row_num, route, resources, dest_name,
-              player, rx, ry, src_name, src_idx,
-              row_freighters, parsed_res) in enumerate(routes):
+    AP_CHECK_INTERVAL = 300  # 5 minutes between AP re-checks
+    ap_blocked_cities = {}   # {src_city_id: last_check_timestamp}
+    deferred_routes = []     # routes deferred due to no AP
+    ap_wait_mins = int(sched.get("ap_max_wait_minutes", 120) or 120)
+    max_ap_retries = max(0, ap_wait_mins // 5)  # e.g. 120min / 5 = 24 retries
+
+    def _try_send_route(route_info):
+        """Attempt to send one route. Returns (success, deferred)."""
+        (row_num, route, resources, dest_name,
+         player, rx, ry, src_name, src_idx,
+         row_freighters, parsed_res) = route_info
+
+        src_city_id = str(route[0]["id"])
+
+        if src_city_id in ap_blocked_cities:
+            return False, True
 
         has_except = any(m == "except" for m, _ in parsed_res)
         if has_except:
-            src_city_id = str(route[0]["id"])
             src_fresh = getCity(session.get(city_url + src_city_id))
+            raw_a = src_fresh.get("availableResources", [])
+            if RRS_AVAILABLE:
+                adj_a = [
+                    _rrs_free_from_summary(summary, src_city_id, i, raw_a[i])
+                    if i < len(raw_a) else 0
+                    for i in range(len(materials_names))
+                ]
+            else:
+                adj_a = raw_a
             resources = resolve_resources(
-                parsed_res, src_fresh.get("availableResources", []),
+                parsed_res, adj_a,
                 None, csv_resource_cols,
             )
             dest_city_id = str(route[1]["id"])
@@ -4800,14 +4407,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 if i < len(dest_space):
                     resources[i] = min(resources[i], dest_space[i])
             if sum(resources) == 0:
-                skipped += 1
-                continue
+                return False, False
             route = (src_fresh, dest_fresh, route[2], *resources)
-
-        session.setStatus(
-            f"[SENDING] Bulk Dist [{idx+1}/{total}] "
-            f"{src_name} -> {dest_name}"
-        )
 
         coords = f"[{rx}:{ry}]"
         result = send_shipment(
@@ -4815,8 +4416,14 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             log_path, "Bulk Distribution", coords, player,
         )
 
+        if result.get("no_ap"):
+            ap_blocked_cities[src_city_id] = time.time()
+            session.setStatus(
+                f"[AP BLOCKED] {src_name} — deferring, will retry in 5min"
+            )
+            return False, True
+
         if result["success"]:
-            completed += 1
             from_val = parse_from_column(rows[row_num - 1].get("From", ""))
             cur = rows[row_num - 1].get(run_column, "").strip()
             done = set()
@@ -4841,13 +4448,91 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 )
             try:
                 write_csv_atomic(csv_path, fieldnames, rows)
-            except Exception:
-                pass
+            except Exception as _csv_err:
+                session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
+            return True, False
+
+        return False, False
+
+    # --- First pass: send all routes, deferring AP-blocked ones ---
+    for idx, route_info in enumerate(routes):
+        src_name = route_info[7]
+        dest_name = route_info[3]
+        session.setStatus(
+            f"[SENDING] Bulk Dist [{idx+1}/{total}] "
+            f"{src_name} -> {dest_name}"
+        )
+        success, deferred = _try_send_route(route_info)
+        if success:
+            completed += 1
+        elif deferred:
+            deferred_routes.append(route_info)
+        else:
+            skipped += 1
+
+    # --- Retry loop: re-check AP-blocked cities every 5 min ---
+    retry_round = 0
+    while deferred_routes and retry_round < max_ap_retries:
+        retry_round += 1
+        session.setStatus(
+            f"[AP WAIT] {len(deferred_routes)} shipment(s) deferred, "
+            f"waiting 5min (retry {retry_round}/{max_ap_retries})..."
+        )
+        time.sleep(AP_CHECK_INTERVAL)
+
+        # Re-check AP for blocked cities
+        unblocked = set()
+        for cid in list(ap_blocked_cities.keys()):
+            html = session.get(city_url + cid)
+            ap = getActionPoints(html)
+            if ap is not None and ap > 0:
+                unblocked.add(cid)
+                del ap_blocked_cities[cid]
+
+        if not unblocked:
+            continue
+
+        session.setStatus(
+            f"[AP RESTORED] {len(unblocked)} city(ies) unblocked, "
+            f"retrying {len(deferred_routes)} shipment(s)..."
+        )
+
+        still_deferred = []
+        for route_info in deferred_routes:
+            src_city_id = str(route_info[1][0]["id"])
+            if src_city_id in ap_blocked_cities:
+                still_deferred.append(route_info)
+                continue
+            src_name = route_info[7]
+            dest_name = route_info[3]
+            session.setStatus(
+                f"[RETRY] Bulk Dist {src_name} -> {dest_name}"
+            )
+            success, deferred = _try_send_route(route_info)
+            if success:
+                completed += 1
+            elif deferred:
+                still_deferred.append(route_info)
+            else:
+                skipped += 1
+        deferred_routes = still_deferred
+
+    if deferred_routes:
+        skipped += len(deferred_routes)
+        if should_notify(notif_config, "error"):
+            blocked_names = set()
+            for ri in deferred_routes:
+                blocked_names.add(ri[7])
+            sendToBot(session,
+                      f"BULK DIST: {len(deferred_routes)} shipment(s) "
+                      f"permanently skipped (no AP after "
+                      f"{ap_wait_mins}min)\n"
+                      f"Cities: {', '.join(sorted(blocked_names))}")
 
     if should_notify(notif_config, "complete"):
-        summary = f"{completed}/{total} sent"
+        summ_str = f"{completed}/{total} sent"
         if skipped:
-            summary += f", {skipped} skipped"
+            summ_str += f", {skipped} skipped"
         run_done = sum(
             1 for r in rows
             if normalize_text(r.get(run_column, "")) == "x"
@@ -4855,7 +4540,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         sendToBot(session,
                   f"BULK DIST COMPLETE\n"
                   f"Slot: {run_column[4:]}\n"
-                  f"Cycle: {summary}\n"
+                  f"Cycle: {summ_str}\n"
                   f"Progress: {run_done}/{len(rows)}")
 
     return completed
@@ -4896,6 +4581,7 @@ def execute_schedule(session, sched, notif_config, log_path):
     try:
         cycle_sent = handler(session, sched, notif_config, log_path)
     except Exception:
+        _rrs_release_all(session)
         if should_notify(notif_config, "error"):
             sendToBot(
                 session,
@@ -4930,6 +4616,8 @@ def transport_scheduler_loop(session, stop_event):
         if os.path.exists(transport_stop_flag_path(session)):
             stop_event.set()
             break
+
+        _lock_refresh(transport_worker_lock_path(session))
 
         now = int(time.time())
         schedules = transport_csv_load(session)
@@ -4993,6 +4681,7 @@ def transport_scheduler_loop(session, stop_event):
         stop_event.wait(sleep_for)
 
     # Cleanup
+    _rrs_release_all(session)
     try:
         os.remove(transport_stop_flag_path(session))
     except OSError:
@@ -5018,16 +4707,18 @@ def _activate_transport_worker(session, event):
 
     wlock = transport_worker_lock_path(session)
     if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
-        print("  A background scheduler is already running for this account.")
-        print("  Use option 6 'Stop background scheduler' first.")
-        print("  If you're sure nothing is running, delete this file:")
+        print(f"  {C.WARN}A scheduler is already running for this account.{C.RESET}")
+        print(f"  {C.DIM}Press (o) on the main page to stop it first.{C.RESET}")
+        print(f"  {C.DIM}If you're sure nothing is running, delete:{C.RESET}")
         print(f"    {wlock}")
         enter()
+        event.set()
         return
 
     if not enforce_transport_schema_or_abort(session):
         _lock_release(wlock)
         enter()
+        event.set()
         return
 
     schedules = transport_csv_load(session)
@@ -5037,13 +4728,14 @@ def _activate_transport_worker(session, event):
     ]
 
     if not activatable:
-        print("  No active or pending schedules found.")
-        print("  Create schedules first using modes 1-6.")
+        print(f"  {C.WARN}No schedules to run.{C.RESET}")
+        print(f"  {C.DIM}Create a schedule first using options 1-6.{C.RESET}")
         _lock_release(wlock)
         enter()
+        event.set()
         return
 
-    print(f"\n  {len(activatable)} schedule(s) to activate:\n")
+    print(f"\n  {C.BOLD}{len(activatable)} schedule(s) to activate:{C.RESET}\n")
     for s in activatable:
         sid = s.get("schedule_id", "?")
         mode = s.get("mode", "?").capitalize()
@@ -5051,23 +4743,24 @@ def _activate_transport_worker(session, event):
         notes = s.get("notes", "")
         status = s.get("status", "?")
         interval_str = f"every {interval}h" if interval > 0 else "one-shot"
-        line = f"  #{sid} {mode} ({interval_str})"
+        line = f"  {C.CYAN}#{sid}{C.RESET} {mode} ({interval_str})"
         if notes:
-            line += f" - {notes}"
+            line += f" — {notes}"
         if status == "pending":
-            line += " [NEW]"
+            line += f" {C.YELLOW}[NEW]{C.RESET}"
         print(line)
 
-    print(f"\n  Resume mode:")
-    print(f"  (1) Continue as scheduled")
-    print(f"      Missed runs execute immediately.")
-    print(f"  (2) Start from now")
-    print(f"      Reset all schedules to run from current time.")
-    print(f"  (') Cancel")
+    print(f"\n  {C.BOLD}Resume mode:{C.RESET}")
+    print(f"  {C.BOLD}(1){C.RESET} Continue as scheduled")
+    print(f"  {C.DIM}    Missed runs execute immediately, then resume normal timing.{C.RESET}")
+    print(f"  {C.BOLD}(2){C.RESET} Start from now")
+    print(f"  {C.DIM}    Reset all timers — first run happens after the interval.{C.RESET}")
+    print(f"  {C.BOLD}('){C.RESET} Cancel")
 
     choice = read(min=1, max=2, digit=True, additionalValues=["'"])
     if choice == "'":
         _lock_release(wlock)
+        event.set()
         return
 
     resume_mode = "continue" if choice == 1 else "from_now"
@@ -5130,13 +4823,14 @@ def _stop_transport_worker(session):
     flag = transport_stop_flag_path(session)
     wlock = transport_worker_lock_path(session)
     if not os.path.exists(wlock):
-        print("  No transport worker appears to be running.")
+        print(f"  {C.DIM}No scheduler appears to be running.{C.RESET}")
         enter()
         return
     pathlib.Path(flag).touch()
     print(
-        f"  Stop flag written. The worker will exit within "
-        f"{TICK_BUDGET_SECONDS}s after finishing any active shipments."
+        f"  {C.OK}Stop signal sent.{C.RESET} "
+        f"{C.DIM}The scheduler will exit within "
+        f"{TICK_BUDGET_SECONDS}s after finishing any active shipment.{C.RESET}"
     )
     enter()
 
@@ -5154,26 +4848,20 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
 
         counts = transport_csv_count_by_status(session)
         total = sum(counts.values())
-        active_ct = counts.get("active", 0)
-        pending_ct = counts.get("pending", 0)
-        paused_ct = counts.get("paused", 0)
-        worker_running = _is_transport_worker_running(session)
 
-        print_module_banner("Schedule Manager")
-        print(f"  Schedules: {total} total "
-              f"({active_ct} active, {pending_ct} waiting, {paused_ct} paused)")
-        status_label = "RUNNING" if worker_running else "NOT RUNNING"
-        print(f"  Background scheduler: {status_label}\n")
+        print_module_banner("Manage Schedules")
+        print(f"  {_scheduler_status_line(session)}\n")
+        print(f"  {C.DIM}Use (s)/(o) on the main page to start/stop the scheduler.{C.RESET}\n")
 
-        print("(1) View schedules")
-        print("(2) Modify schedule")
-        print("(3) Pause/resume schedule")
-        print("(4) Delete schedule(s)")
-        print("(5) Start background scheduler")
-        print("(6) Stop background scheduler")
-        print("(') Back")
+        print(f"  {C.BOLD}(1){C.RESET} View schedules")
+        print(f"  {C.DIM}    See all saved schedules and their current status.{C.RESET}")
+        print(f"  {C.BOLD}(2){C.RESET} Modify schedule")
+        print(f"  {C.DIM}    Change interval, resources, ship type, notes, etc.{C.RESET}")
+        print(f"  {C.BOLD}(3){C.RESET} Pause / resume a schedule")
+        print(f"  {C.BOLD}(4){C.RESET} Delete schedule(s)")
+        print(f"  {C.BOLD}('){C.RESET} Back")
 
-        choice = read(min=1, max=6, digit=True, additionalValues=["'"])
+        choice = read(min=1, max=4, digit=True, additionalValues=["'"])
         if choice == "'":
             event.set()
             return
@@ -5186,32 +4874,32 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
             _toggle_schedule_pause(session)
         elif choice == 4:
             _delete_schedules(session)
-        elif choice == 5:
-            _activate_transport_worker(session, event)
-            return
-        elif choice == 6:
-            _stop_transport_worker(session)
 
 
 def _view_schedules(session):
     rows = transport_csv_load(session)
     if not rows:
-        print("\n  No schedules found.\n")
+        print(f"\n  {C.DIM}No schedules found.{C.RESET}\n")
         enter()
         return
 
-    print(f"\n  {'ID':>4} {'Mode':<13} {'Status':<10} {'Repeat':<10} "
-          f"{'Ships':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}")
+    print(f"\n  {C.BOLD}{'ID':>4} {'Mode':<13} {'Status':<10} {'Repeat':<10} "
+          f"{'Ships':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}{C.RESET}")
     print(f"  {'---':>4} {'---':<13} {'---':<10} {'---':<10} "
           f"{'---':<5} {'---':>6} {'---':<12} {'---'}")
 
+    _status_colours = {"pending": C.YELLOW, "active": C.GREEN,
+                       "paused": C.DIM, "completed": C.CYAN,
+                       "error": C.RED}
     _status_display = {"pending": "waiting", "active": "active",
                         "paused": "paused", "completed": "done",
                         "error": "error"}
     for r in rows:
         sid = r.get("schedule_id", "?")
         mode = r.get("mode", "?").capitalize()
-        status = _status_display.get(r.get("status", "?"), r.get("status", "?"))
+        raw_status = r.get("status", "?")
+        status = _status_display.get(raw_status, raw_status)
+        sc = _status_colours.get(raw_status, "")
         interval = r.get("interval_hours", 0)
         ship = "F" if r.get("ship_type", "m") == "f" else "M"
         total_sent = r.get("total_shipments", 0)
@@ -5227,10 +4915,10 @@ def _view_schedules(session):
         else:
             last_str = "never"
 
-        print(f"  {sid:>4} {mode:<13} {status:<10} {interval_str:<10} "
+        print(f"  {sid:>4} {mode:<13} {sc}{status:<10}{C.RESET} {interval_str:<10} "
               f"{ship:<5} {total_sent:>6} {last_str:<12} {notes}")
 
-    print(f"\n  Total: {len(rows)} schedule(s)\n")
+    print(f"\n  {C.DIM}Total: {len(rows)} schedule(s){C.RESET}\n")
     enter()
 
 
@@ -5357,17 +5045,17 @@ def _modify_schedule(session):
     while True:
         _view_schedule_detail(target)
 
-        print("\n  What to modify?")
-        print("  (1) Interval (hours)")
-        print("  (2) Ship type")
-        print("  (3) Notes")
-        print("  (4) Notification level")
-        print("  (5) Resources")
+        print(f"\n  {C.BOLD}What to modify?{C.RESET}")
+        print(f"  {C.BOLD}(1){C.RESET} Interval (hours)")
+        print(f"  {C.BOLD}(2){C.RESET} Ship type")
+        print(f"  {C.BOLD}(3){C.RESET} Notes")
+        print(f"  {C.BOLD}(4){C.RESET} Notification level")
+        print(f"  {C.BOLD}(5){C.RESET} Resources")
         is_consolidate = target.get("mode") == "consolidate"
         if is_consolidate:
-            print("  (6) Send mode")
-        print("  (7) Send-only-if-below targets")
-        print("  (') Back")
+            print(f"  {C.BOLD}(6){C.RESET} Send mode")
+        print(f"  {C.BOLD}(7){C.RESET} Send-only-if-below thresholds")
+        print(f"  {C.BOLD}('){C.RESET} Back")
 
         choice = read(min=1, max=7, digit=True, additionalValues=["'"])
         if choice == "'":
@@ -5390,7 +5078,7 @@ def _modify_schedule(session):
         elif choice == 2:
             current = "Freighters" if target.get("ship_type") == "f" else "Merchant"
             print(f"\n  Current: {current}")
-            print("  (1) Merchant ships  (2) Freighters")
+            print(f"  {C.BOLD}(1){C.RESET} Merchant ships  {C.BOLD}(2){C.RESET} Freighters")
             st = read(min=1, max=2, digit=True, additionalValues=["'"])
             if st == "'":
                 continue
@@ -5398,7 +5086,7 @@ def _modify_schedule(session):
             transport_csv_update(session, sid, ship_type=new_type)
             target["ship_type"] = new_type
             label = "Freighters" if new_type == "f" else "Merchant ships"
-            print(f"  Ship type updated to {label}.")
+            print(f"  {C.OK}Ship type updated to {label}.{C.RESET}")
 
         elif choice == 3:
             current = target.get("notes", "") or "(none)"
@@ -5414,7 +5102,7 @@ def _modify_schedule(session):
         elif choice == 4:
             current = target.get("notif_level", "none")
             print(f"\n  Current: {current}")
-            print("  (1) Partial  (2) All  (3) Errors only")
+            print(f"  {C.BOLD}(1){C.RESET} Partial  {C.BOLD}(2){C.RESET} All  {C.BOLD}(3){C.RESET} Errors only")
             nl = read(min=1, max=3, digit=True, additionalValues=["'"])
             if nl == "'":
                 continue
@@ -5474,8 +5162,8 @@ def _modify_schedule(session):
                 continue
             current = target.get("send_mode", "send")
             print(f"\n  Current: {current}")
-            print("  (1) Keep reserves (send all except X)")
-            print("  (2) Send specific amounts")
+            print(f"  {C.BOLD}(1){C.RESET} Keep reserves (send all except X)")
+            print(f"  {C.BOLD}(2){C.RESET} Send specific amounts")
             sm = read(min=1, max=2, digit=True, additionalValues=["'"])
             if sm == "'":
                 continue
