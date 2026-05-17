@@ -15,7 +15,7 @@ PREREQUISITES (one time only)
 SETUP
 ─────────────────────────────────────────────────────────────
 [ ] 1. Create one folder per account, e.g.:
-        C:\ikabot\account-alice\   (copy the full dist\ikabot\ folder here)
+        C:\ikabot\account-alice\   (copy the ikabot folder from the zip here)
         C:\ikabot\account-bob\
         C:\ikabot\account-charlie\
 
@@ -78,7 +78,7 @@ A clean layout looks like this:
 ```
 C:\ikabot\
 │
-├── account-alice\        ← copy of the dist\ikabot\ folder
+├── account-alice\        ← copy of the ikabot folder from the zip
 │   └── ikabot.exe
 │   └── _internal\
 │
@@ -93,7 +93,7 @@ C:\ikabot\
 
 > **Why separate folders?**  The `_internal\` folder next to the exe contains
 > all supporting Python files.  Sharing it between instances causes file-lock
-> conflicts.  Copy the whole `dist\ikabot\` output folder once per account.
+> conflicts.  Copy the whole ikabot folder from the zip once per account.
 
 ---
 
@@ -410,18 +410,17 @@ your account directories automatically — no manual copying needed.
 1. Double-click `run_replace_ikabot_profiles.bat`
 2. It asks you to choose:
    - The folder containing all your `Ikariam X` account directories
-   - The new `ikabot` folder (the freshly built `dist\ikabot\`)
+   - The new `ikabot` folder (from the updated zip)
 3. It deletes the old `ikabot` subfolder from each account directory
 4. It copies the new version in its place
 5. All instances are now updated and ready to run
 
 **Full update workflow (recommended order):**
 ```
-1. Build new ikabot.exe  →  python -m PyInstaller ikabot.spec --clean
-2. Run  close all ikabot.ahk          ← close all running bots
-3. Run  run_replace_ikabot_profiles.bat  ← replace all old versions
-4. Run  open all.ahk                  ← reopen all bots
-5. Enter vault password for each window
+1. Run  close all ikabot.ahk             ← close all running bots
+2. Run  run_replace_ikabot_profiles.bat  ← replace all old versions
+3. Run  open all.ahk                     ← reopen all bots
+4. Enter vault password for each window
 ```
 
 This entire process takes about a minute regardless of how many accounts you
