@@ -427,6 +427,8 @@ def _prompt_vault_login():
         ).rstrip("\r\n")
         try:
             vault_session = open_vault(master_pw)
+            if not vault_session.verify_password():
+                raise VaultWrongPasswordError("Wrong master password.")
             break
         except VaultWrongPasswordError:
             print("Wrong master password.")

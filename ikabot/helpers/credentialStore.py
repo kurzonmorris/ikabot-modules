@@ -185,6 +185,20 @@ class VaultSession:
     # Public read API
     # ------------------------------------------------------------------ #
 
+    def verify_password(self) -> bool:
+        """Confirm the derived key is correct by decrypting the first account.
+
+        Returns True if the password is correct or the vault is empty.
+        Returns False if decryption fails (wrong master password).
+        """
+        if not self._data["accounts"]:
+            return True
+        try:
+            _decrypt(self._key, self._data["accounts"][0]["encrypted"])
+            return True
+        except VaultWrongPasswordError:
+            return False
+
     def list_accounts(self) -> list:
         """Return [(index, label), ...] sorted in natural order (1, 2, 10 not 1, 10, 2)."""
         def _natural_key(item):
