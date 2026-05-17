@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import time
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -85,8 +86,77 @@ def _decrypt(key: bytes, encrypted_b64: str) -> dict:
     return json.loads(plaintext.decode("utf-8"))
 
 
+def _pid_alive(pid: int) -> bool:
+    """Return True if a process with the given PID is currently running."""
+    if pid == os.getpid():
+        return True
+    try:
+        if os.name == "nt":
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong(259)  # 259 = STILL_ACTIVE
+                ctypes.windll.kernel32.GetExitCodeProcess(
+                    handle, ctypes.byref(exit_code))
+                return exit_code.value == 259
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, PermissionError):
+        return False
+
+
+def _vault_lock_path() -> str:
+    return _vault_path() + ".lock"
+
+
+def _acquire_vault_lock(timeout: float = 15.0) -> None:
+    """Acquire an exclusive write-lock on the vault file.
+
+    Writes the current PID into the lock file so stale locks (left by
+    crashed processes) are detected and removed automatically.
+    """
+    lock_path = _vault_lock_path()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
+            return
+        except FileExistsError:
+            try:
+                with open(lock_path, "r") as f:
+                    pid_str = f.read().strip()
+                if pid_str and not _pid_alive(int(pid_str)):
+                    os.unlink(lock_path)
+                    continue
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.05)
+    raise TimeoutError(f"Could not acquire vault lock: {lock_path}")
+
+
+def _release_vault_lock() -> None:
+    try:
+        os.unlink(_vault_lock_path())
+    except FileNotFoundError:
+        pass
+
+
 def _atomic_write(path: str, data: dict) -> None:
-    """Write JSON to path atomically via a temp file, with 0o600 permissions."""
+    """Write JSON to path atomically via a temp file, with 0o600 permissions.
+
+    Must be called while holding the vault lock (_acquire_vault_lock).
+    """
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -215,7 +285,11 @@ class VaultSession:
     # ------------------------------------------------------------------ #
 
     def _save(self) -> None:
-        _atomic_write(self._path, self._data)
+        _acquire_vault_lock()
+        try:
+            _atomic_write(self._path, self._data)
+        finally:
+            _release_vault_lock()
 
 
 # ---------------------------------------------------------------------------
