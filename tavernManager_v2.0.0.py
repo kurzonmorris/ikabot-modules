@@ -59,14 +59,64 @@ def _setup_stdio():
     UnicodeEncodeError on POSIX/C locales or Windows cp1252 terminals.
 
     Falls back to replacement characters (e.g. 'K?ln' for 'Köln') rather
-    than crashing if the terminal really can't encode a character. Safe
-    on Python 3.7+ and silently a no-op if reconfigure isn't available.
+    than crashing if the terminal really can't encode a character. On
+    Python 3.7+ this is one reconfigure call; on older Pythons we wrap
+    the underlying buffer in a fresh TextIOWrapper with the same
+    semantics. Silent no-op only if both paths fail.
     """
-    for stream in (sys.stdout, sys.stderr):
+    import io
+    for stream_name in ('stdout', 'stderr'):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
         try:
             stream.reconfigure(encoding='utf-8', errors='replace')
+            continue
         except (AttributeError, OSError):
             pass
+        # Fallback: rebuild a TextIOWrapper around the same buffer.
+        try:
+            buf = getattr(stream, 'buffer', None)
+            if buf is not None:
+                line_buf = getattr(stream, 'line_buffering', True)
+                setattr(sys, stream_name, io.TextIOWrapper(
+                    buf, encoding='utf-8', errors='replace',
+                    line_buffering=line_buf,
+                ))
+        except Exception:
+            pass
+
+
+def _clean_name(name):
+    """Normalise a city name for display.
+
+    ikabot's getIdsOfCities strips backslashes before json.loads, which
+    leaves names like 'Ku00f6ln' (no backslash, literal escape text)
+    instead of the decoded 'Köln'. Some session paths leak the
+    backslash form '\\u00f6' instead. Decode whichever shape we get
+    so the results table, Telegram messages, and stdout don't show
+    raw escape codes — and don't crash with ASCII errors when they
+    finally do reach a terminal.
+    """
+    if not isinstance(name, str):
+        return name
+    # Backslash-prefixed form: Python's unicode-escape codec handles
+    # it cleanly. Try this first because it also covers \n / \t etc.
+    if '\\u' in name:
+        try:
+            return name.encode('utf-8', errors='replace').decode('unicode-escape')
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+    # No-backslash form (what getIdsOfCities produces). Same regex
+    # ikabot's own decodeUnicodeEscape uses, applied defensively.
+    try:
+        return re.sub(
+            r'u([0-9a-fA-F]{4})',
+            lambda m: chr(int(m.group(1), 16)),
+            name,
+        )
+    except Exception:
+        return name
 
 
 class TavernManager:
@@ -420,14 +470,19 @@ class TavernManager:
             # was lost when the exception unwound — rebuild a WARN row
             # with as much context as we have.
             return {
-                'name': city['name'], 'status': 'WARN',
+                'name': _clean_name(city.get('name', '')), 'status': 'WARN',
                 'pop': '', 'satisfaction': '',
                 'note': f"wine NOT changed — {rejected}",
             }
 
     def _process_one_city_inner(self, city_id, city):
+        # Decode any literal unicode-escape sequences left in the
+        # city name by ikabot's session-data parser, so the results
+        # table prints "Köln" rather than "Ku00f6ln" and stdout
+        # doesn't trip over non-ASCII characters mid-row.
+        display_name = _clean_name(city.get('name', ''))
         result = {
-            'name': city['name'],
+            'name': display_name,
             'status': None,
             'pop': '',
             'satisfaction': '',
@@ -526,6 +581,11 @@ class TavernManager:
 
         for city_id in cities_ids:
             city = cities[city_id]
+            # Sanitize the display name once per iteration so error
+            # rows, ERROR-result dicts and Telegram strings all use
+            # the human-readable form rather than the raw escape
+            # sequence from getIdsOfCities.
+            display_name = _clean_name(city.get('name', ''))
             try:
                 result = self._process_one_city(city_id, city)
             except _StaleCacheError as stale:
@@ -540,7 +600,7 @@ class TavernManager:
                     result['note'] = f"{note} (refreshed)".strip()
                 except _StaleCacheError as stale2:
                     result = {
-                        'name': city['name'], 'status': 'ERROR',
+                        'name': display_name, 'status': 'ERROR',
                         'pop': '', 'satisfaction': '',
                         'note': (
                             "city looked stale, still couldn't read it after a "
@@ -550,26 +610,26 @@ class TavernManager:
                     if self.notification_mode in (1, 2):
                         sendToBot(
                             self.session,
-                            f"❌ Wine auto-tune error\n{city['name']}: still stale after refresh ({stale2})"
+                            f"❌ Wine auto-tune error\n{display_name}: still stale after refresh ({stale2})"
                         )
                 except Exception as e:
                     self.clear_caches(city_id)
                     result = {
-                        'name': city['name'], 'status': 'ERROR',
+                        'name': display_name, 'status': 'ERROR',
                         'pop': '', 'satisfaction': '',
                         'note': str(e),
                     }
                     if self.notification_mode in (1, 2):
-                        sendToBot(self.session, f"❌ Wine auto-tune error\n{city['name']}: {str(e)}")
+                        sendToBot(self.session, f"❌ Wine auto-tune error\n{display_name}: {str(e)}")
             except Exception as e:
                 self.clear_caches(city_id)
                 result = {
-                    'name': city['name'], 'status': 'ERROR',
+                    'name': display_name, 'status': 'ERROR',
                     'pop': '', 'satisfaction': '',
                     'note': str(e),
                 }
                 if self.notification_mode in (1, 2):
-                    sendToBot(self.session, f"❌ Wine auto-tune error\n{city['name']}: {str(e)}")
+                    sendToBot(self.session, f"❌ Wine auto-tune error\n{display_name}: {str(e)}")
 
             results.append(result)
 
@@ -598,12 +658,13 @@ class TavernManager:
         """Set this city's wine consumption to `pct`% of the tavern's
         maximum available level, rounded to the nearest integer level
         the dropdown actually offers. pct is an int in [0, 100]."""
+        display_name = _clean_name(city.get('name', ''))
         try:
-            return self._set_tavern_pct_once(city, pct)
+            return self._set_tavern_pct_once(city, pct, display_name)
         except _ApplyRejectedError as rejected:
             # No retry: an "out of wine" rejection won't be fixed by
             # trying again, so report it and move on.
-            print(f"  {city['name']}: NOT CHANGED — {rejected}")
+            print(f"  {display_name}: NOT CHANGED — {rejected}")
             return False
         except _StaleCacheError as stale:
             # Force-refresh paths above already fetched fresh data, so a
@@ -611,44 +672,46 @@ class TavernManager:
             # (e.g. stale session token). Clear and retry once.
             self.clear_caches(city['id'])
             try:
-                ok = self._set_tavern_pct_once(city, pct)
+                ok = self._set_tavern_pct_once(city, pct, display_name)
                 if ok:
-                    print(f"  {city['name']}: (cached data was stale, refreshed and retried successfully)")
+                    print(f"  {display_name}: (cached data was stale, refreshed and retried successfully)")
                 return ok
             except _ApplyRejectedError as rejected:
-                print(f"  {city['name']}: NOT CHANGED — {rejected}")
+                print(f"  {display_name}: NOT CHANGED — {rejected}")
                 return False
             except _StaleCacheError as stale2:
                 print(
-                    f"  {city['name']}: failed — cached data was stale and the "
+                    f"  {display_name}: failed — cached data was stale and the "
                     f"refresh didn't help ({stale2})"
                 )
                 return False
 
-    def _set_tavern_pct_once(self, city, pct):
+    def _set_tavern_pct_once(self, city, pct, display_name=None):
         city_id = city['id']
+        if display_name is None:
+            display_name = _clean_name(city.get('name', ''))
 
         # Manual mode: always refresh so the user sees current state.
         positions = self._get_positions(city_id, force_refresh=True)
         if positions is None:
-            print(f"  {city['name']}: skipped — couldn't read city data from the server")
+            print(f"  {display_name}: skipped — couldn't read city data from the server")
             return False
 
         tavern = positions['tavern']
         if not tavern:
-            print(f"  {city['name']}: skipped — no tavern built in this city")
+            print(f"  {display_name}: skipped — no tavern built in this city")
             return False
 
         tavern_data = self._get_tavern_data(city_id, tavern['position'], force_refresh=True)
         if not tavern_data or not tavern_data['action_code']:
-            print(f"  {city['name']}: skipped — couldn't read tavern data from the server")
+            print(f"  {display_name}: skipped — couldn't read tavern data from the server")
             return False
 
         consumption_values = tavern_data['consumption_values']
         current_level = tavern_data['current_level']
 
         if not consumption_values:
-            print(f"  {city['name']}: skipped — tavern has no wine settings available")
+            print(f"  {display_name}: skipped — tavern has no wine settings available")
             return False
 
         max_level = max(l for l, w in consumption_values)
@@ -660,11 +723,11 @@ class TavernManager:
         current_wine = self._wine_at_level(consumption_values, current_level)
         new_wine = self._wine_at_level(consumption_values, target_level)
         if target_level == current_level:
-            print(f"  {city['name']}: already at level {current_level} ({current_wine} wine/hr) — no change needed")
+            print(f"  {display_name}: already at level {current_level} ({current_wine} wine/hr) — no change needed")
             return True
         self._apply_level(city_id, tavern['position'], target_level, tavern_data)
         print(
-            f"  {city['name']}: set to {pct}% — "
+            f"  {display_name}: set to {pct}% — "
             f"level {current_level} ({current_wine} wine/hr) -> "
             f"level {target_level} ({new_wine} wine/hr)"
         )
