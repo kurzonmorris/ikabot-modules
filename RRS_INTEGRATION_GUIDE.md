@@ -17,6 +17,9 @@ via a per-account CSV file with cross-process file locking.
 **Does not:** ship resources, retry operations, sleep, schedule anything. All of
 that stays in the calling module.
 
+Current file: `resourceReservationSystem_v1.0.0.py` (versioned; loader picks
+the highest version automatically — see detection block below).
+
 ---
 
 ## Non-negotiable integration constraint
@@ -29,26 +32,64 @@ import or make RRS a required dependency.
 
 ## Detection block — copy verbatim at module top, after stdlib imports
 
+The file is versioned (`resourceReservationSystem_v1.0.0.py`, `_v1.1.0.py`, …).
+The loader below mirrors the pattern used in `constructionManager.py` for
+`resourceTransportManager`: glob for all matching files, prefer an unversioned
+copy if present, otherwise pick the highest `(major, minor, patch)` version.
+
 ```python
-try:
-    from resourceReservationSystem import (
-        reserve,
-        update_reservation,
-        release,
-        release_all_for_module,
-        release_all_for_city,
-        get_available,
-        get_total_reserved,
-        get_reservation_snapshot,
-        get_summary,
-        get_reservations,
-        is_city_excluded,
-        get_excluded_cities,
-        get_config as rrs_get_config,
-    )
-    RRS_AVAILABLE = True
-except ImportError:
-    RRS_AVAILABLE = False
+import glob, importlib.util, os, re, threading
+
+_rrs_module = None
+_rrs_lock = threading.Lock()
+
+def _load_rrs():
+    global _rrs_module
+    if _rrs_module is not None:
+        return _rrs_module
+    with _rrs_lock:
+        if _rrs_module is not None:
+            return _rrs_module
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = glob.glob(os.path.join(here, "resourceReservationSystem*.py"))
+        if not candidates:
+            return None
+        unversioned = [c for c in candidates
+                       if os.path.basename(c) == "resourceReservationSystem.py"]
+        if unversioned:
+            target = unversioned[0]
+        else:
+            def _ver(path):
+                m = re.search(r"resourceReservationSystem_v(\d+)\.(\d+)\.(\d+)\.py$", path)
+                return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+            versioned = [(c, _ver(c)) for c in candidates]
+            versioned = [(c, v) for c, v in versioned if v is not None]
+            if not versioned:
+                return None
+            target = max(versioned, key=lambda cv: cv[1])[0]
+        spec = importlib.util.spec_from_file_location("_rrs", target)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _rrs_module = mod
+        return mod
+
+_rrs = _load_rrs()
+RRS_AVAILABLE = _rrs is not None
+
+if RRS_AVAILABLE:
+    reserve                 = _rrs.reserve
+    update_reservation      = _rrs.update_reservation
+    release                 = _rrs.release
+    release_all_for_module  = _rrs.release_all_for_module
+    release_all_for_city    = _rrs.release_all_for_city
+    get_available           = _rrs.get_available
+    get_total_reserved      = _rrs.get_total_reserved
+    get_reservation_snapshot = _rrs.get_reservation_snapshot
+    get_summary             = _rrs.get_summary
+    get_reservations        = _rrs.get_reservations
+    is_city_excluded        = _rrs.is_city_excluded
+    get_excluded_cities     = _rrs.get_excluded_cities
+    rrs_get_config          = _rrs.get_config
 
 MODULE_NAME = "yourModuleFilenameWithoutDotPy"  # e.g. "constructionManager"
 ```
