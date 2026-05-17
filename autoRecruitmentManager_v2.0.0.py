@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Auto Recruitment Module for Ikabot
-===================================
+Auto Recruitment Manager for Ikabot
+=====================================
 Automates recruitment of military units and ships across multiple barracks/shipyards.
 
 Features:
@@ -18,7 +18,7 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 3.0
+Version: 2.0.0
 """
 
 import csv
@@ -44,7 +44,7 @@ from ikabot.helpers.varios import *
 # RESOURCE RESERVATION SYSTEM (RRS) — optional integration
 # =============================================================================
 
-MODULE_NAME = "autoRecruitment"
+MODULE_NAME = "autoRecruitmentManager"
 
 try:
     from resourceReservationSystem import (
@@ -298,7 +298,7 @@ def _build_progress_report(all_rows):
     Returns a plain-text string suitable for Telegram.
     """
     now_str = time.strftime("%d %b %Y %H:%M", time.localtime())
-    lines = [f"AUTO RECRUITMENT — {now_str}", ""]
+    lines = [f"AUTO RECRUITMENT MANAGER — {now_str}", ""]
 
     # Separate units and ships
     unit_rows = [r for r in all_rows if r["is_units"]]
@@ -531,7 +531,7 @@ def _request_resource_import(session, dest_city_id, needed_res, all_city_ids, ci
                 resource_config=to_req,
                 send_mode="na",
                 interval_hours=0,
-                notes="autoRecruitment resource import",
+                notes="autoRecruitmentManager resource import",
             )
             rtm.transport_csv_append(session, row)
             for i in range(5):
@@ -1212,7 +1212,7 @@ def _manage_running_session(session, event, is_units):
     while True:
         banner()
         print("=" * 60)
-        print("  AUTO RECRUITMENT — RUNNING SESSION")
+        print("  AUTO RECRUITMENT MANAGER — RUNNING SESSION")
         print("=" * 60)
         print()
         _show_queue_status(session, is_units)
@@ -1346,7 +1346,7 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                 os.remove(_stop_flag_path(session))
             except OSError:
                 pass
-            session.setStatus("Auto Recruitment: stopped by user")
+            session.setStatus("Auto Recruitment Manager: stopped by user")
             break
 
         # --- Reload CSV each cycle to pick up live queue changes ---
@@ -1679,15 +1679,15 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
 # MAIN ENTRY POINT
 # =============================================================================
 
-def autoRecruitment(session, event, stdin_fd, predetermined_input):
-    """Auto Recruitment Module — Main entry point"""
+def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
+    """Auto Recruitment Manager — Main entry point"""
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
 
     try:
         banner()
         print("=" * 60)
-        print("           AUTO RECRUITMENT MODULE")
+        print("         AUTO RECRUITMENT MANAGER")
         print("=" * 60)
         print()
 
