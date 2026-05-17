@@ -905,7 +905,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
     ship_type_name = "freighters" if useFreighters else "merchant ships"
     prefix = f"{origin_city['name']} -> {dest_city['name']} | "
 
-    result = {"success": False, "error": None, "ships_used": 0}
+    result = {"success": False, "error": None, "ships_used": 0, "no_ap": False}
 
     # 1. Wait for ships (with timeout)
     available = wait_for_ships(session, useFreighters, prefix)
@@ -921,20 +921,14 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      next_shipment_str)
         return result
 
-    # 1b. Wait for action points on source city
-    ap = wait_for_action_points(session, origin_city["id"], prefix)
+    # 1b. Check action points on source city (quick check, no long wait)
+    ap = wait_for_action_points(session, origin_city["id"], prefix,
+                                max_wait=30)
     if ap == 0:
+        result["no_ap"] = True
         result["error"] = (
-            f"No action points available for {origin_city['name']} (timed out)"
+            f"No action points for {origin_city['name']}"
         )
-        if should_notify(notif_config, "error"):
-            sendToBot(session,
-                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
-        log_shipment(log_path, session, mode_name,
-                     origin_city["name"], "", dest_city["name"],
-                     dest_island_coords, dest_player, resources,
-                     0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str)
         return result
 
     # 2. Acquire lock with retries
@@ -4353,13 +4347,24 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     total = len(routes)
     summary = _rrs_load_summary(session)
 
-    for idx, (row_num, route, resources, dest_name,
-              player, rx, ry, src_name, src_idx,
-              row_freighters, parsed_res) in enumerate(routes):
+    AP_CHECK_INTERVAL = 300  # 5 minutes between AP re-checks
+    ap_blocked_cities = {}   # {src_city_id: last_check_timestamp}
+    deferred_routes = []     # routes deferred due to no AP
+    max_ap_retries = 6       # give up after 30 min total (6 x 5min)
+
+    def _try_send_route(route_info):
+        """Attempt to send one route. Returns (success, deferred)."""
+        (row_num, route, resources, dest_name,
+         player, rx, ry, src_name, src_idx,
+         row_freighters, parsed_res) = route_info
+
+        src_city_id = str(route[0]["id"])
+
+        if src_city_id in ap_blocked_cities:
+            return False, True
 
         has_except = any(m == "except" for m, _ in parsed_res)
         if has_except:
-            src_city_id = str(route[0]["id"])
             src_fresh = getCity(session.get(city_url + src_city_id))
             raw_a = src_fresh.get("availableResources", [])
             if RRS_AVAILABLE:
@@ -4383,14 +4388,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 if i < len(dest_space):
                     resources[i] = min(resources[i], dest_space[i])
             if sum(resources) == 0:
-                skipped += 1
-                continue
+                return False, False
             route = (src_fresh, dest_fresh, route[2], *resources)
-
-        session.setStatus(
-            f"[SENDING] Bulk Dist [{idx+1}/{total}] "
-            f"{src_name} -> {dest_name}"
-        )
 
         coords = f"[{rx}:{ry}]"
         result = send_shipment(
@@ -4398,8 +4397,14 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             log_path, "Bulk Distribution", coords, player,
         )
 
+        if result.get("no_ap"):
+            ap_blocked_cities[src_city_id] = time.time()
+            session.setStatus(
+                f"[AP BLOCKED] {src_name} — deferring, will retry in 5min"
+            )
+            return False, True
+
         if result["success"]:
-            completed += 1
             from_val = parse_from_column(rows[row_num - 1].get("From", ""))
             cur = rows[row_num - 1].get(run_column, "").strip()
             done = set()
@@ -4426,11 +4431,89 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 write_csv_atomic(csv_path, fieldnames, rows)
             except Exception as _csv_err:
                 session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
+            return True, False
+
+        return False, False
+
+    # --- First pass: send all routes, deferring AP-blocked ones ---
+    for idx, route_info in enumerate(routes):
+        src_name = route_info[7]
+        dest_name = route_info[3]
+        session.setStatus(
+            f"[SENDING] Bulk Dist [{idx+1}/{total}] "
+            f"{src_name} -> {dest_name}"
+        )
+        success, deferred = _try_send_route(route_info)
+        if success:
+            completed += 1
+        elif deferred:
+            deferred_routes.append(route_info)
+        else:
+            skipped += 1
+
+    # --- Retry loop: re-check AP-blocked cities every 5 min ---
+    retry_round = 0
+    while deferred_routes and retry_round < max_ap_retries:
+        retry_round += 1
+        session.setStatus(
+            f"[AP WAIT] {len(deferred_routes)} shipment(s) deferred, "
+            f"waiting 5min (retry {retry_round}/{max_ap_retries})..."
+        )
+        time.sleep(AP_CHECK_INTERVAL)
+
+        # Re-check AP for blocked cities
+        unblocked = set()
+        for cid in list(ap_blocked_cities.keys()):
+            html = session.get(city_url + cid)
+            ap = getActionPoints(html)
+            if ap is not None and ap > 0:
+                unblocked.add(cid)
+                del ap_blocked_cities[cid]
+
+        if not unblocked:
+            continue
+
+        session.setStatus(
+            f"[AP RESTORED] {len(unblocked)} city(ies) unblocked, "
+            f"retrying {len(deferred_routes)} shipment(s)..."
+        )
+
+        still_deferred = []
+        for route_info in deferred_routes:
+            src_city_id = str(route_info[1][0]["id"])
+            if src_city_id in ap_blocked_cities:
+                still_deferred.append(route_info)
+                continue
+            src_name = route_info[7]
+            dest_name = route_info[3]
+            session.setStatus(
+                f"[RETRY] Bulk Dist {src_name} -> {dest_name}"
+            )
+            success, deferred = _try_send_route(route_info)
+            if success:
+                completed += 1
+            elif deferred:
+                still_deferred.append(route_info)
+            else:
+                skipped += 1
+        deferred_routes = still_deferred
+
+    if deferred_routes:
+        skipped += len(deferred_routes)
+        if should_notify(notif_config, "error"):
+            blocked_names = set()
+            for ri in deferred_routes:
+                blocked_names.add(ri[7])
+            sendToBot(session,
+                      f"BULK DIST: {len(deferred_routes)} shipment(s) "
+                      f"permanently skipped (no AP after "
+                      f"{max_ap_retries * 5}min)\n"
+                      f"Cities: {', '.join(sorted(blocked_names))}")
 
     if should_notify(notif_config, "complete"):
-        summary = f"{completed}/{total} sent"
+        summ_str = f"{completed}/{total} sent"
         if skipped:
-            summary += f", {skipped} skipped"
+            summ_str += f", {skipped} skipped"
         run_done = sum(
             1 for r in rows
             if normalize_text(r.get(run_column, "")) == "x"
@@ -4438,7 +4521,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         sendToBot(session,
                   f"BULK DIST COMPLETE\n"
                   f"Slot: {run_column[4:]}\n"
-                  f"Cycle: {summary}\n"
+                  f"Cycle: {summ_str}\n"
                   f"Progress: {run_done}/{len(rows)}")
 
     return completed
