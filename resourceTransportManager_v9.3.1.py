@@ -436,6 +436,7 @@ SCHEDULE_COLUMNS = [
     "dest_minimums",
     "bulk_csv_path",
     "bulk_run_column",
+    "ap_max_wait_minutes",
     "interval_hours",
     "notif_level",
     "status",
@@ -449,7 +450,7 @@ SCHEDULE_COLUMNS = [
 
 SCHEDULE_INT_COLS = {
     "schedule_id", "interval_hours", "total_shipments",
-    "created_at", "schema_version",
+    "created_at", "schema_version", "ap_max_wait_minutes",
 }
 SCHEDULE_INT_OR_BLANK_COLS = {"last_run", "next_run"}
 SCHEDULE_JSON_COLS = {
@@ -763,7 +764,8 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
                        resource_config=None, send_mode="na",
                        dest_targets=None, source_reserves=None,
                        dest_minimums=None, bulk_csv_path="",
-                       bulk_run_column="", interval_hours=0,
+                       bulk_run_column="", ap_max_wait_minutes=120,
+                       interval_hours=0,
                        notif_level="none", status="pending",
                        notes=""):
     now_ts = int(time.time())
@@ -780,6 +782,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "dest_minimums":   dest_minimums or [0, 0, 0, 0, 0],
         "bulk_csv_path":   bulk_csv_path,
         "bulk_run_column": bulk_run_column,
+        "ap_max_wait_minutes": ap_max_wait_minutes,
         "interval_hours":  interval_hours,
         "notif_level":     notif_level,
         "status":          status,
@@ -3160,18 +3163,22 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         if notif_config is None:
             return
 
+        ap_max_wait = 120  # default 2 hours
+
         # Final confirmation with dry run
         while True:
             print_module_banner("Bulk Distribution — Summary")
             print(f"  {C.BOLD}CSV rows:{C.RESET}  {len(rows)}")
             print(f"  {C.BOLD}Interval:{C.RESET}  every {interval_hours}h")
+            print(f"  {C.BOLD}AP wait:{C.RESET}   {ap_max_wait} min")
             print(f"  {C.BOLD}Run slot:{C.RESET}  {run_column[4:]}\n")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
                   f"{C.CYAN}(D){C.RESET} Dry run preview  "
                   f"{C.YELLOW}(E){C.RESET} Edit CSV  "
+                  f"{C.CYAN}(A){C.RESET} AP wait timer  "
                   f"{C.WARN}(N){C.RESET} Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", "e", "E",
-                               "", "'"],
+                               "a", "A", "", "'"],
                        additionalValues=["'"])
             if rta == "'" or rta.lower() == "n":
                 event.set()
@@ -3179,6 +3186,16 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             if rta.lower() == "e":
                 _bulk_editor_menu(session, csv_path, event)
                 return "restart"
+            if rta.lower() == "a":
+                print(f"\n  Current AP wait: {ap_max_wait} minutes")
+                print("  How long to retry AP-blocked cities (minutes, 0=no retry):")
+                ap_input = read(min=0, digit=True, additionalValues=["'"])
+                if ap_input == "'":
+                    continue
+                ap_max_wait = int(ap_input)
+                print(f"  {C.OK}AP wait set to {ap_max_wait} min{C.RESET}")
+                enter()
+                continue
             if rta.lower() == "d":
                 preview = _scan_csv_for_preview(session, rows, run_column)
                 if preview:
@@ -3201,6 +3218,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         mode="bulk",
         bulk_csv_path=csv_path,
         bulk_run_column=run_column,
+        ap_max_wait_minutes=ap_max_wait,
         interval_hours=interval_hours,
         notif_level=notif_config.get("level", "none"),
         notes=f"CSV: {os.path.basename(csv_path)}",
@@ -4350,7 +4368,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     AP_CHECK_INTERVAL = 300  # 5 minutes between AP re-checks
     ap_blocked_cities = {}   # {src_city_id: last_check_timestamp}
     deferred_routes = []     # routes deferred due to no AP
-    max_ap_retries = 6       # give up after 30 min total (6 x 5min)
+    ap_wait_mins = int(sched.get("ap_max_wait_minutes", 120) or 120)
+    max_ap_retries = max(0, ap_wait_mins // 5)  # e.g. 120min / 5 = 24 retries
 
     def _try_send_route(route_info):
         """Attempt to send one route. Returns (success, deferred)."""
@@ -4507,7 +4526,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             sendToBot(session,
                       f"BULK DIST: {len(deferred_routes)} shipment(s) "
                       f"permanently skipped (no AP after "
-                      f"{max_ap_retries * 5}min)\n"
+                      f"{ap_wait_mins}min)\n"
                       f"Cities: {', '.join(sorted(blocked_names))}")
 
     if should_notify(notif_config, "complete"):
