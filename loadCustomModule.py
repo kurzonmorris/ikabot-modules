@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
-import re
 import traceback
 from ikabot.helpers.pedirInfo import read, enter
 from ikabot.helpers.gui import *
@@ -124,12 +123,8 @@ def loadCustomModule(session, event, stdin_fd, predetermined_input):
                 # Dynamic module loading
                 module = SourceFileLoader(name, path).load_module()
 
-                # Resolve entry function: strip _vX.Y.Z suffix so versioned
-                # filenames like autoRecruitmentManager_v2.0.0.py still find
-                # their entry point (def autoRecruitmentManager).
-                func_name = re.sub(r'_v[\d]+(?:\.[\d]+)*$', '', name)
-                entry_fn = getattr(module, func_name, None) or getattr(module, name)
-                entry_fn(session, event, stdin_fd, predetermined_input)
+                # Execute the function (must match filename)
+                getattr(module, name)(session, event, stdin_fd, predetermined_input)
 
                 event.set()
                 return
