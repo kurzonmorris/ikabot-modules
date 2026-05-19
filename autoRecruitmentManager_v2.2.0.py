@@ -540,7 +540,7 @@ def _request_resource_import(session, dest_city_id, needed_res, all_city_ids, ci
                 f"{RESOURCE_NAMES[i]} {to_req[i]:,}"
                 for i in range(5) if to_req[i] > 0
             )
-            requests.append(f"{sup['city_name']} → {res_desc}")
+            requests.append(f"{sup['city_name']} -> {res_desc}")
         except AttributeError as e:
             print(f"  RTM interface mismatch (function not found): {e}")
         except Exception as e:
@@ -1536,6 +1536,7 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
         # --- Handle resource import if enabled and nothing can be recruited ---
         if not buildings_to_recruit and cfg.get("resource_import_enabled"):
             now_ts = int(time.time())
+            all_import_lines = []
             for b in active_buildings:
                 if b.get('is_busy'):
                     continue
@@ -1556,8 +1557,10 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                     )
                     if requests:
                         import_requested_at[cid] = now_ts
-                        msg = f"Resource import requested for {b['city_name']}:\n" + "\n".join(f"  {r}" for r in requests)
-                        sendToBot(session, msg)
+                        all_import_lines.append(f"{b['city_name']}:")
+                        all_import_lines.extend(f"  {r}" for r in requests)
+            if all_import_lines:
+                sendToBot(session, "Resource imports requested:\n" + "\n".join(all_import_lines))
 
         # --- Wait if nothing to recruit ---
         if not buildings_to_recruit:
