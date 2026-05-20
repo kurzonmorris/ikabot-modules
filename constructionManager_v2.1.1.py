@@ -6,6 +6,8 @@
 See `construction/construction module plan.txt` for the design.
 """
 
+__version__ = "2.1.1"
+
 import csv
 import glob
 import importlib.util
@@ -1714,7 +1716,7 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
             pending = csv_count_pending(session)
             n_cities = csv_count_cities_with_work(session)
             print(
-                f"Construction Manager\n"
+                f"Construction Manager v{__version__}\n"
                 f"  CSV: {csv_path(session)}\n"
                 f"  {_worker_status_line(session)}\n"
                 f"  {pending} pending row(s) across {n_cities} city/cities\n"
