@@ -1309,6 +1309,9 @@ class Session:
                         params=params_original,
                         ignoreExpire=ignoreExpire,
                         noIndex=noIndex,
+                        fullResponse=fullResponse,
+                        noQuery=noQuery,
+                        **kwargs,
                     )
                 # --- update developer runtime info ---
                 try:
