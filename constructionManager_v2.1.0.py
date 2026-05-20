@@ -764,6 +764,10 @@ def _format_slot_line(i, slot, queued):
     name = slot.get("name", "empty")
     if name == "empty":
         slot_type = slot.get("type", "")
+        if i == 14:
+            slot_type = "wall only"
+        elif i == 17:
+            slot_type = "pirate fortress"
         build_q = next((q for q in queued if q["action"] == "build"), None)
         if build_q is not None:
             effective_lv = max(q["target_level"] for q in queued)
@@ -1007,17 +1011,42 @@ def _add_to_queue(session):
             building_slug = chosen["building"]
             building_name = chosen["name"]
             building_id   = chosen["buildingId"]
-            target_level  = 1
-            rows_to_add = [(target_level, "build")]
+            target_level = read(
+                min=1,
+                max=HARD_LEVEL_CAP,
+                msg=f"  Build {building_name} to level (1 = just construct): ",
+                additionalValues=["'", "="],
+            )
+            if target_level == "'":
+                exit_to_menu = True
+                break
+            if target_level == "=":
+                continue
+            rows_to_add = [(1, "build")] + [
+                (lv, "upgrade") for lv in range(2, target_level + 1)
+            ]
 
-            # fetch costs for level 1
             if building_slug not in cost_cache:
                 print("  Fetching cost data…")
                 cost_cache[building_slug] = fetch_costs_for_building(
                     session, city, building_slug
                 )
             costs_dict = cost_cache[building_slug]
-            row_costs = [costs_dict.get(1, [0] * 5)]
+            row_costs = []
+            missing_levels = []
+            for lv, _ in rows_to_add:
+                c = costs_dict.get(lv)
+                if c is None:
+                    row_costs.append([0] * 5)
+                    missing_levels.append(lv)
+                else:
+                    row_costs.append(c)
+            if missing_levels:
+                print(
+                    f"  {bcolors.YELLOW}Cost data missing for levels "
+                    f"{missing_levels}; stored as 0 and will be recomputed "
+                    f"before execution.{bcolors.ENDC}"
+                )
 
         elif is_empty and build_q is not None:
             # ---- empty slot, build already queued: extend with more upgrades ----
@@ -1614,7 +1643,31 @@ def _edit_queue(session):
 
 
 # ---------------------------------------------------------------------------
-# Stop worker (menu option 5)
+# Worker status helpers
+# ---------------------------------------------------------------------------
+
+def _is_worker_running(session):
+    """True if a fresh (non-stale) worker lock exists for this account."""
+    wlock = worker_lock_path(session)
+    try:
+        with open(wlock, "r") as f:
+            data = json.load(f)
+    except (IOError, json.JSONDecodeError):
+        return False
+    return time.time() - data.get("timestamp", 0) <= WORKER_LOCK_STALE_SECONDS
+
+
+def _worker_status_line(session):
+    """Return a coloured one-line worker status string."""
+    if _is_worker_running(session):
+        status = f"{bcolors.GREEN}RUNNING{bcolors.ENDC}"
+    else:
+        status = f"{bcolors.WARNING}STOPPED{bcolors.ENDC}"
+    return f"Worker: {status}"
+
+
+# ---------------------------------------------------------------------------
+# Stop worker
 # ---------------------------------------------------------------------------
 
 def _stop_worker(session):
@@ -1663,15 +1716,30 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
             print(
                 f"Construction Manager\n"
                 f"  CSV: {csv_path(session)}\n"
+                f"  {_worker_status_line(session)}\n"
                 f"  {pending} pending row(s) across {n_cities} city/cities\n"
             )
+            print(f"  {bcolors.BOLD}(s){bcolors.ENDC} Start worker   "
+                  f"{bcolors.BOLD}(o){bcolors.ENDC} Stop worker\n")
             print("(1) Add construction(s) to queue        [interactive only]")
             print("(2) View queue")
             print("(3) Edit queue (modify / delete / reorder) [interactive only]")
-            print("(4) Activate construction worker (background, all cities)")
-            print("(5) Stop construction worker")
-            print("(6) Back")
-            choice = read(min=1, max=6)
+            print("(') Back")
+            choice = read(min=1, max=3,
+                          additionalValues=["'", "s", "S", "o", "O"])
+
+            if isinstance(choice, str):
+                letter = choice.lower()
+                if letter == "'":
+                    break
+                if letter == "s":
+                    # _activate_worker is defined in chunk 5.
+                    # Parent returns after fork; finally block sets event.
+                    _activate_worker(session, event)
+                    return
+                if letter == "o":
+                    _stop_worker(session)
+                continue
 
             if choice in (1, 3) and not interactive:
                 print(
@@ -1687,15 +1755,6 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
                 _view_queue(session)
             elif choice == 3:
                 _edit_queue(session)
-            elif choice == 4:
-                # _activate_worker is defined in chunk 5.
-                # Parent returns after fork; finally block sets event.
-                _activate_worker(session, event)
-                return
-            elif choice == 5:
-                _stop_worker(session)
-            else:
-                break
     except KeyboardInterrupt:
         pass
     finally:
@@ -2454,7 +2513,7 @@ def _activate_worker(session, event):
             f"for this account.{bcolors.ENDC}"
         )
         print(f"  Lock file: {wlock}")
-        print("  Use main-menu option 5 to stop it, or remove the lock file "
+        print("  Press (o) in the menu to stop it, or remove the lock file "
               "if you're sure no worker is running.")
         enter()
         event.set()
@@ -2476,7 +2535,7 @@ def _activate_worker(session, event):
     info = (
         f"\nConstruction Manager worker\n"
         f"  CSV: {csv_path(session)}\n"
-        f"  Stop via main-menu option 5 (touches {stop_flag_path(session)})\n"
+        f"  Stop via menu option (o) (touches {stop_flag_path(session)})\n"
     )
     setInfoSignal(session, info)
 
