@@ -3,7 +3,7 @@ Credential vault for ikabot.
 
 Stores game account credentials (email, password, blackbox token, lobby
 cookie) encrypted under a master-password-derived PBKDF2 key. The vault
-file lives at ~/.ikabot_vault and is never shared with .ikabot.
+file lives inside the .ikabot data directory alongside sessions and logs.
 
 Master password is NEVER written to disk. Wrong password is detected
 automatically by AES-GCM authentication-tag failure on first decrypt.
@@ -19,7 +19,7 @@ import time
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from ikabot.config import isWindows
+from ikabot.config import isWindows, IKABOT_DATA_DIR
 
 _VAULT_VERSION = 1
 _PBKDF2_ITERATIONS = 200_000
@@ -46,11 +46,39 @@ class VaultVersionError(Exception):
 # ---------------------------------------------------------------------------
 
 def _vault_path() -> str:
+    """Return the vault file path inside the ikabot data directory."""
+    os.makedirs(IKABOT_DATA_DIR, exist_ok=True)
+    return os.path.join(IKABOT_DATA_DIR, "vault")
+
+
+def _legacy_vault_path() -> str:
+    """Return the old vault location at the home directory root."""
     if isWindows:
         base = os.environ.get("USERPROFILE", os.path.expanduser("~"))
     else:
         base = os.path.expanduser("~")
     return os.path.join(base, ".ikabot_vault")
+
+
+def _migrate_vault_if_needed() -> None:
+    """Move the vault from the old home-directory location to the new data dir.
+
+    Called once on every startup via vault_exists(). Safe to call repeatedly.
+    """
+    old = _legacy_vault_path()
+    new = _vault_path()
+    if os.path.isfile(old) and not os.path.isfile(new):
+        try:
+            os.makedirs(IKABOT_DATA_DIR, exist_ok=True)
+            os.rename(old, new)
+        except OSError:
+            pass
+    # Clean up any stale legacy lock/tmp files left at the old location.
+    for suffix in (".lock", ".tmp"):
+        try:
+            os.unlink(old + suffix)
+        except FileNotFoundError:
+            pass
 
 
 def _derive_key(master_pw: str, salt_bytes: bytes) -> bytes:
@@ -312,6 +340,7 @@ class VaultSession:
 
 def vault_exists() -> bool:
     """Return True if an ikabot vault file is present."""
+    _migrate_vault_if_needed()
     return os.path.isfile(_vault_path())
 
 

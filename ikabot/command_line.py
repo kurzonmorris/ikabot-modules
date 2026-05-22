@@ -53,6 +53,9 @@ from ikabot.function.vacationMode import vacationMode
 from ikabot.function.webServer import webServer
 from ikabot.function.loadCustomModule import loadCustomModule
 from ikabot.function.activateShrine import activateShrine
+from ikabot.function.alertMessages import alertMessages
+from ikabot.function.inactivePlayersRadiusMonitor import inactivePlayersRadiusMonitor
+from ikabot.function.sendCulturalTreatyRequests import sendCulturalTreatyRequests
 from ikabot.helpers.botComm import telegramDataIsValid, notificationDataIsValid
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import read
@@ -84,6 +87,7 @@ def menu(session, checkUpdate=True):
         6: loginDaily,
         701: alertAttacks,
         702: alertLowWine,
+        703: alertMessages,
         801: buyResources,
         802: sellResources,
         901: donate,
@@ -103,6 +107,7 @@ def menu(session, checkUpdate=True):
         1902: autoBarbarians,
         2001: searchForIslandSpaces,
         2002: dumpWorld,
+        2003: inactivePlayersRadiusMonitor,
         2101: proxyConf,
         2102: notificationSetup,
         2103: killTasks,
@@ -113,6 +118,7 @@ def menu(session, checkUpdate=True):
         2108: developer,
         22: consolidateResources,
         23: modifyProduction,
+        25: sendCulturalTreatyRequests,
     }
 
     while True:
@@ -190,6 +196,7 @@ def menu(session, checkUpdate=True):
         print("(21) Options / Settings")
         print("(22) Consolidate resources")
         print("(23) Set Production of Saw mill / Luxury good")
+        print("(25) Send cultural treaty requests")
 
         plugins = discover_plugins()
         if plugins:
@@ -208,7 +215,8 @@ def menu(session, checkUpdate=True):
             print("(0) Back")
             print("(1) Alert attacks")
             print("(2) Alert wine running out")
-            selected = read(min=0, max=2, digit=True)
+            print("(3) Alert in-game messages")
+            selected = read(min=0, max=3, digit=True)
             if selected == 0:
                 continue
             selected += 700
@@ -259,7 +267,8 @@ def menu(session, checkUpdate=True):
             print("(0) Back")
             print("(1) Monitor islands")
             print("(2) Dump & Search world")
-            selected = read(min=0, max=2, digit=True)
+            print("(3) Monitor inactive players in radius")
+            selected = read(min=0, max=3, digit=True)
             if selected == 0:
                 continue
             selected += 2000
