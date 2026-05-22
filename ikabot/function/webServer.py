@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import traceback
+import signal
 from datetime import datetime, timedelta
 from io import BytesIO
 from urllib.parse import unquote_plus, parse_qs
@@ -352,11 +353,18 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
             "\nPress [ENTER] if you want to run the web server now, or CTRL+C to go back to the main menu"
         )
         enter()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         session.setStatus(
             f"""running on http://127.0.0.1:{port} {'and '+'http://' + str(local_network_ip) + ':' + port if local_network_ip else ''}"""
         )
         event.set()
-        app.run(host="0.0.0.0", port=int(port), threaded=True)
+
+        try:
+            app.run(host="0.0.0.0", port=int(port), threaded=True, use_reloader=False)
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        finally:
+            event.set()
 
     except Exception:
         event.set()
