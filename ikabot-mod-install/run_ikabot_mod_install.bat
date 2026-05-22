@@ -1,14 +1,14 @@
 @echo off
 setlocal
 
-REM Runs setup_ikabot_instances.py from the same folder as this BAT file.
-REM Put both files together, then double-click this BAT.
+REM Launcher for ikabot-mod-install.py
+REM Place this BAT next to ikabot-mod-install.py and double-click to run.
 
 set "SCRIPT_DIR=%~dp0"
-set "PY_SCRIPT=%SCRIPT_DIR%setup_ikabot_instances.py"
+set "PY_SCRIPT=%SCRIPT_DIR%ikabot-mod-install.py"
 
 if not exist "%PY_SCRIPT%" (
-    echo ERROR: Could not find setup_ikabot_instances.py next to this BAT file.
+    echo ERROR: ikabot-mod-install.py not found next to this BAT file.
     echo Expected: "%PY_SCRIPT%"
     pause
     exit /b 1
@@ -26,7 +26,7 @@ if %errorlevel%==0 (
     goto done
 )
 
-echo ERROR: Python was not found in PATH.
+echo ERROR: Python not found in PATH.
 echo Install Python from https://www.python.org/downloads/
 pause
 exit /b 1
