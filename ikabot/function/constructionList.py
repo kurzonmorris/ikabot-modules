@@ -122,7 +122,7 @@ def expandBuilding(session, cityId, building, waitForResources):
             sendToBot(session, msg)
             return
 
-        url = "action=CityScreen&function=upgradeBuilding&actionRequest={}&cityId={}&position={:d}&level={}&activeTab=tabSendTransporter&backgroundView=city&currentCityId={}&templateView={}&ajax=1".format(
+        url = "action=UpgradeExistingBuilding&actionRequest={}&cityId={}&position={:d}&level={}&activeTab=tabSendTransporter&backgroundView=city&currentCityId={}&templateView={}&ajax=1".format(
             actionRequest,
             cityId,
             position,
@@ -130,10 +130,21 @@ def expandBuilding(session, cityId, building, waitForResources):
             cityId,
             building["building"],
         )
-        resp = session.post(url)
-        html = session.get(city_url + cityId)
-        city = getCity(html)
-        building = city["position"][position]
+        max_retries = 3
+        for attempt in range(max_retries):
+            resp = session.post(url)
+            html = session.get(city_url + cityId)
+            city = getCity(html)
+            building = city["position"][position]
+            if building["isBusy"] is True:
+                break
+            if attempt < max_retries - 1:
+                retry_wait = random.randint(10, 20)
+                msg = "{}: The building {} was not extended (attempt {}/{}), retrying in {}s".format(
+                    city["cityName"], building["name"], attempt + 1, max_retries, retry_wait
+                )
+                sendToBot(session, msg)
+                time.sleep(retry_wait)
         if building["isBusy"] is False:
             msg = "{}: The building {} was not extended".format(
                 city["cityName"], building["name"]

@@ -306,6 +306,16 @@ class AESCipher:
                 f.write(ciphertext)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, file_path)
+            # On Windows a concurrent reader can briefly hold the target file
+            # open, causing os.replace to fail with PermissionError (WinError 32).
+            # Retry a few times — readers release almost immediately.
+            for _attempt in range(20):
+                try:
+                    os.replace(tmp_path, file_path)
+                    break
+                except PermissionError:
+                    if _attempt == 19:
+                        raise
+                    time.sleep(0.05)
         finally:
             self._release_lock(lock_path)
