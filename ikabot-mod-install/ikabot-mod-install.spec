@@ -13,7 +13,7 @@ a = Analysis(
     datas=[
         # Bundle the version files so the exe can read its own version
         ('version.json', '.'),
-        ('version_1.0',  '.'),
+        ('version_1.1.0',  '.'),
     ],
     hiddenimports=[
         'tkinter',
