@@ -39,9 +39,13 @@ INSTALLER_VERSION = "1.1.0"
 
 GITHUB_API = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 
-ASSET_INSTALLER = "ikabot-mod-install.zip"
-ASSET_IKABOT    = "ikabot.zip"
-ASSET_TOOLS     = "open close update.zip"
+# Regex patterns for release asset filenames — version numbers are captured in group 1.
+# ikabot:    ikabot-v7.3.3-mod-v0.9.4.zip   (mod version used for comparison)
+# installer: ikabot-mod-install_v1.1.0.zip
+# tools:     open close update.zip  (exact, no version in name yet)
+ASSET_IKABOT_RE    = re.compile(r'^ikabot-v[\d.]+-mod-v([\d.]+)\.zip$',   re.IGNORECASE)
+ASSET_INSTALLER_RE = re.compile(r'^ikabot-mod-install_v([\d.]+)\.zip$',   re.IGNORECASE)
+ASSET_TOOLS_RE     = re.compile(r'^open.close.update.*\.zip$',             re.IGNORECASE)
 
 DEFAULT_INSTALL   = Path("C:/Program Files/ikabot")
 DEFAULT_SHORTCUTS = Path.home() / "Desktop" / "ikabot shortcuts"
@@ -152,13 +156,18 @@ def fetch_releases() -> list[dict]:
         return json.loads(resp.read())
 
 
-def find_asset(releases: list[dict], asset_name: str) -> tuple[str, str] | None:
-    """Return (download_url, tag_name) for the first release containing asset_name."""
-    name_lower = asset_name.lower()
+def find_asset(releases: list[dict], pattern: re.Pattern) -> tuple[str, str, str] | None:
+    """Return (download_url, tag_name, version) for the newest release with a matching asset.
+
+    GitHub returns releases newest-first, so the first match is always the latest.
+    Version is extracted from the filename capture group; falls back to the release tag.
+    """
     for release in releases:
         for asset in release.get("assets", []):
-            if asset["name"].lower() == name_lower:
-                return asset["browser_download_url"], release["tag_name"]
+            m = pattern.match(asset["name"])
+            if m:
+                ver = m.group(1) if m.lastindex else release["tag_name"].lstrip("vV")
+                return asset["browser_download_url"], release["tag_name"], ver
     return None
 
 
@@ -325,15 +334,15 @@ def main() -> None:
         return
 
     # ── 4. Installer self-update ──────────────────────────────────────────────
-    installer_asset = find_asset(releases, ASSET_INSTALLER)
+    installer_asset = find_asset(releases, ASSET_INSTALLER_RE)
     if installer_asset:
-        url, tag = installer_asset
+        url, tag, remote_ver = installer_asset
         local_ver = read_version(update_dir) or INSTALLER_VERSION
-        if is_newer(tag, local_ver):
-            print(f"Downloading installer update {tag} ...")
+        if is_newer(remote_ver, local_ver):
+            print(f"Downloading installer update v{remote_ver} ...")
             try:
-                download_zip(url, update_dir, ASSET_INSTALLER)
-                write_version(update_dir, tag)
+                download_zip(url, update_dir, f"ikabot-mod-install v{remote_ver}")
+                write_version(update_dir, remote_ver)
             except Exception as exc:
                 show_error(f"Failed to download the installer update:\n\n{exc}")
                 return
@@ -360,22 +369,22 @@ def main() -> None:
                     subprocess.Popen([str(launcher)])
                 sys.exit(0)
     else:
-        print(f"Note: {ASSET_INSTALLER} not yet on GitHub releases — skipping self-update check.")
+        print("Note: no ikabot-mod-install release asset found on GitHub — skipping self-update check.")
 
     # ── 5. Download ikabot ────────────────────────────────────────────────────
-    ikabot_asset = find_asset(releases, ASSET_IKABOT)
+    ikabot_asset = find_asset(releases, ASSET_IKABOT_RE)
     if not ikabot_asset:
         show_error(
             "The ikabot program files could not be found on GitHub.\n\n"
-            f"Expected release asset: {ASSET_IKABOT}\n\n"
+            "Expected an asset matching:  ikabot-v{x.x.x}-mod-v{x.x.x}.zip\n\n"
             "Please check that the release has been published and try again."
         )
         return
 
-    url, tag = ikabot_asset
+    url, tag, remote_ver = ikabot_asset
     local_ikabot_ver = read_version(template_dir)
-    if local_ikabot_ver is None or is_newer(tag, local_ikabot_ver):
-        print(f"Downloading ikabot {tag} ...")
+    if local_ikabot_ver is None or is_newer(remote_ver, local_ikabot_ver):
+        print(f"Downloading ikabot mod v{remote_ver} ...")
         for item in template_dir.iterdir():
             if item.name.startswith("version"):
                 continue
@@ -384,16 +393,16 @@ def main() -> None:
             else:
                 item.unlink()
         try:
-            download_zip(url, template_dir, ASSET_IKABOT)
-            write_version(template_dir, tag)
-            print(f"ikabot {tag} downloaded.")
+            download_zip(url, template_dir, f"ikabot mod v{remote_ver}")
+            write_version(template_dir, remote_ver)
+            print(f"ikabot mod v{remote_ver} downloaded.")
         except Exception as exc:
             show_error(f"Failed to download ikabot:\n\n{exc}")
             return
     else:
-        print(f"ikabot already up to date (v{local_ikabot_ver}).")
+        print(f"ikabot already up to date (mod v{local_ikabot_ver}).")
 
-    ikabot_ver = read_version(template_dir) or tag.lstrip("vV")
+    ikabot_ver = read_version(template_dir) or remote_ver
 
     # ── 5b. Install ikabot manager ────────────────────────────────────────────
     # The manager is bundled with the installer. Copy it to its own folder
@@ -526,17 +535,17 @@ def main() -> None:
         print(f"Shortcuts saved to {user_sc_dir}")
 
     # ── 10. Open/close/update tools ───────────────────────────────────────────
-    tools_asset = find_asset(releases, ASSET_TOOLS)
+    tools_asset = find_asset(releases, ASSET_TOOLS_RE)
     if tools_asset:
-        url, tag = tools_asset
+        url, tag, remote_ver = tools_asset
         tools_dir = update_dir / "tools"
         local_tools_ver = read_version(tools_dir)
-        if local_tools_ver is None or is_newer(tag, local_tools_ver):
+        if local_tools_ver is None or is_newer(remote_ver, local_tools_ver):
             tools_dir.mkdir(exist_ok=True)
-            print(f"Downloading tools {tag} ...")
+            print(f"Downloading tools v{remote_ver} ...")
             try:
-                download_zip(url, tools_dir, ASSET_TOOLS)
-                write_version(tools_dir, tag)
+                download_zip(url, tools_dir, f"tools v{remote_ver}")
+                write_version(tools_dir, remote_ver)
                 for sc_dest in (shortcuts_dir, user_sc_dir):
                     for ahk in tools_dir.glob("*.ahk"):
                         create_shortcut(ahk, sc_dest / (ahk.stem + ".lnk"))
@@ -548,7 +557,7 @@ def main() -> None:
         else:
             print(f"Tools already up to date (v{local_tools_ver}).")
     else:
-        print(f"Note: {ASSET_TOOLS} not yet on GitHub releases — skipping.")
+        print("Note: no open/close/update tools release found on GitHub — skipping.")
 
     # ── Done ──────────────────────────────────────────────────────────────────
     show_info(

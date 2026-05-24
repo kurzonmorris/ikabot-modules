@@ -198,19 +198,23 @@ try {
     $releases = Invoke-RestMethod -Uri 'https://api.github.com/repos/kurzonmorris/ikabot-modules/releases' -Headers $headers
 
     $asset = $null
-    $tag   = $null
+    $ver   = $null
     foreach ($r in $releases) {
         foreach ($a in $r.assets) {
-            if ($a.name -eq 'ikabot.zip') { $asset = $a; $tag = $r.tag_name; break }
+            if ($a.name -match '^ikabot-v[\d.]+-mod-v([\d.]+)\.zip$') {
+                $asset = $a
+                $ver   = $matches[1]
+                break
+            }
         }
         if ($asset) { break }
     }
 
     if (-not $asset) {
-        throw 'ikabot.zip was not found in any GitHub release. Please check that the release has been published and try again.'
+        throw 'No ikabot release asset found on GitHub (expected ikabot-v{x.x.x}-mod-v{x.x.x}.zip). Please check that the release has been published and try again.'
     }
 
-    Log ('Latest version available: ' + $tag)
+    Log ('Latest version available: mod v' + $ver)
     Log 'Downloading ikabot...'
     $tmp = [IO.Path]::GetTempFileName() + '.zip'
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp -UseBasicParsing
@@ -227,7 +231,6 @@ try {
     Expand-Archive -Path $tmp -DestinationPath $template -Force
     Remove-Item $tmp
 
-    $ver = $tag.TrimStart('v')
     Set-Content -Path ($template + '\version.json')       -Value ('{"version": "' + $ver + '"}')
     Set-Content -Path ($template + '\version_' + $ver)    -Value ''
 
@@ -250,7 +253,7 @@ try {
     }
 
     Log ''
-    Log ('Update complete. Installed ' + $tag + '. ' + $count + ' instance folder(s) refreshed.')
+    Log ('Update complete. Installed mod v' + $ver + '. ' + $count + ' instance folder(s) refreshed.')
 
 } catch {
     Log ('ERROR: ' + $_.ToString())
