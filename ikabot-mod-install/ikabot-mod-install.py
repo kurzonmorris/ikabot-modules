@@ -43,9 +43,10 @@ GITHUB_API = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 # ikabot:    ikabot-v7.3.3-mod-v0.9.4.zip   (mod version used for comparison)
 # installer: ikabot-mod-install_v1.1.0.zip
 # tools:     open close update.zip  (exact, no version in name yet)
-ASSET_IKABOT_RE    = re.compile(r'^ikabot-v[\d.]+-mod-v([\d.]+)\.zip$',   re.IGNORECASE)
-ASSET_INSTALLER_RE = re.compile(r'^ikabot-mod-install_v([\d.]+)\.zip$',   re.IGNORECASE)
-ASSET_TOOLS_RE     = re.compile(r'^open.close.update.*\.zip$',             re.IGNORECASE)
+ASSET_IKABOT_RE    = re.compile(r'^ikabot-v[\d.]+-mod-v([\d.]+)\.zip$',       re.IGNORECASE)
+ASSET_INSTALLER_RE = re.compile(r'^ikabot-mod-install_v([\d.]+)\.zip$',       re.IGNORECASE)
+ASSET_MODULES_RE   = re.compile(r'^ikabot-modules-[\d]+-[\d]+-[\d]+_.*\.zip$', re.IGNORECASE)
+ASSET_TOOLS_RE     = re.compile(r'^open.close.update.*\.zip$',                 re.IGNORECASE)
 
 DEFAULT_INSTALL   = Path("C:/Program Files/ikabot")
 DEFAULT_SHORTCUTS = Path.home() / "Desktop" / "ikabot shortcuts"
@@ -277,9 +278,10 @@ def main() -> None:
         "What this installer does:\n"
         "  1. Downloads the latest version of ikabot\n"
         "  2. Downloads the ikabot Manager tool\n"
-        "  3. Creates a separate folder for each instance\n"
-        "  4. Creates shortcuts so you can launch them easily\n\n"
-        "You will be asked 4 questions. Click OK to begin.",
+        "  3. Optionally downloads extra automation modules\n"
+        "  4. Creates a separate folder for each instance\n"
+        "  5. Creates shortcuts so you can launch them easily\n\n"
+        "You will be asked a few questions. Click OK to begin.",
         "ikabot Installer",
     )
 
@@ -423,6 +425,40 @@ def main() -> None:
             print(f"Warning: could not copy ikabot manager: {exc}")
     else:
         print("Note: ikabot_manager.ahk not found in installer bundle — skipping.")
+
+    # ── 5c. Download ikabot modules (optional) ────────────────────────────────
+    modules_asset = find_asset(releases, ASSET_MODULES_RE)
+    if modules_asset:
+        url, tag, _ = modules_asset
+        if ask_yes_no(
+            "Step 4 of 4 — ikabot Modules\n\n"
+            "Additional automation modules are available for ikabot.\n"
+            "These extend what ikabot can do (recruitment, construction,\n"
+            "resource transport, and more).\n\n"
+            "Would you like to download and install them now?\n"
+            "(They will be placed in the modules folder.)"
+        ):
+            try:
+                download_zip(url, modules_dir, "ikabot modules")
+                # Rename files: strip _vXXX suffix from stem, leave CSV untouched
+                for f in list(modules_dir.iterdir()):
+                    if not f.is_file() or f.suffix.lower() == ".csv":
+                        continue
+                    new_stem = re.sub(r"_v.+$", "", f.stem)
+                    new_name = new_stem + f.suffix
+                    if new_name != f.name:
+                        target = f.parent / new_name
+                        if target.exists():
+                            target.unlink()
+                        f.rename(target)
+                        print(f"  {f.name} -> {new_name}")
+                print("Modules installed.")
+            except Exception as exc:
+                show_error(f"Could not download modules:\n\n{exc}")
+        else:
+            print("Modules skipped.")
+    else:
+        print("Note: no modules release found on GitHub — skipping.")
 
     # ── 6. Instance count ─────────────────────────────────────────────────────
     existing = sum(
