@@ -10,7 +10,9 @@ a = Analysis(
     ['ikabot-mod-install.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('ikabot_manager.ahk', '.'),
+    ],
     hiddenimports=[
         'tkinter',
         'tkinter.filedialog',

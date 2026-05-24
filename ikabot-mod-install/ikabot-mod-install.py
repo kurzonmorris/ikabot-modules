@@ -41,7 +41,6 @@ GITHUB_API = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 
 ASSET_INSTALLER = "ikabot-mod-install.zip"
 ASSET_IKABOT    = "ikabot.zip"
-ASSET_MANAGER   = "ikabot-manager.zip"
 ASSET_TOOLS     = "open close update.zip"
 
 DEFAULT_INSTALL   = Path("C:/Program Files/ikabot")
@@ -396,25 +395,25 @@ def main() -> None:
 
     ikabot_ver = read_version(template_dir) or tag.lstrip("vV")
 
-    # ── 5b. Download ikabot manager ───────────────────────────────────────────
+    # ── 5b. Install ikabot manager ────────────────────────────────────────────
+    # The manager is bundled with the installer. Copy it to its own folder
+    # inside the install directory so it lives alongside the other tools.
     manager_dir = install_dir / "ikabot manager"
     manager_dir.mkdir(exist_ok=True)
-    manager_asset = find_asset(releases, ASSET_MANAGER)
-    if manager_asset:
-        url, tag = manager_asset
-        local_mgr_ver = read_version(manager_dir)
-        if local_mgr_ver is None or is_newer(tag, local_mgr_ver):
-            print(f"Downloading ikabot manager {tag} ...")
-            try:
-                download_zip(url, manager_dir, ASSET_MANAGER)
-                write_version(manager_dir, tag)
-                print("ikabot manager installed.")
-            except Exception as exc:
-                print(f"Warning: could not download ikabot manager: {exc}")
-        else:
-            print(f"ikabot manager already up to date (v{local_mgr_ver}).")
+
+    # When frozen by PyInstaller, bundled files land in sys._MEIPASS.
+    # When running as a plain script, they sit next to this file.
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    bundled_manager = bundle_root / "ikabot_manager.ahk"
+
+    if bundled_manager.exists():
+        try:
+            shutil.copy2(bundled_manager, manager_dir / "ikabot_manager.ahk")
+            print("ikabot manager installed.")
+        except Exception as exc:
+            print(f"Warning: could not copy ikabot manager: {exc}")
     else:
-        print(f"Note: {ASSET_MANAGER} not yet on GitHub releases — skipping.")
+        print("Note: ikabot_manager.ahk not found in installer bundle — skipping.")
 
     # ── 6. Instance count ─────────────────────────────────────────────────────
     existing = sum(
