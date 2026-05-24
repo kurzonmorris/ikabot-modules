@@ -10,11 +10,7 @@ a = Analysis(
     ['ikabot-mod-install.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        # Bundle the version files so the exe can read its own version
-        ('version.json', '.'),
-        ('version_1.1.0',  '.'),
-    ],
+    datas=[],
     hiddenimports=[
         'tkinter',
         'tkinter.filedialog',
