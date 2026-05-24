@@ -41,6 +41,7 @@ GITHUB_API = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 
 ASSET_INSTALLER = "ikabot-mod-install.zip"
 ASSET_IKABOT    = "ikabot.zip"
+ASSET_MANAGER   = "ikabot-manager.zip"
 ASSET_TOOLS     = "open close update.zip"
 
 DEFAULT_INSTALL   = Path("C:/Program Files/ikabot")
@@ -267,8 +268,9 @@ def main() -> None:
         "different Ikariam account and run at the same time.\n\n"
         "What this installer does:\n"
         "  1. Downloads the latest version of ikabot\n"
-        "  2. Creates a separate folder for each instance\n"
-        "  3. Creates shortcuts so you can launch them easily\n\n"
+        "  2. Downloads the ikabot Manager tool\n"
+        "  3. Creates a separate folder for each instance\n"
+        "  4. Creates shortcuts so you can launch them easily\n\n"
         "You will be asked 4 questions. Click OK to begin.",
         "ikabot Installer",
     )
@@ -394,6 +396,26 @@ def main() -> None:
 
     ikabot_ver = read_version(template_dir) or tag.lstrip("vV")
 
+    # ── 5b. Download ikabot manager ───────────────────────────────────────────
+    manager_dir = install_dir / "ikabot manager"
+    manager_dir.mkdir(exist_ok=True)
+    manager_asset = find_asset(releases, ASSET_MANAGER)
+    if manager_asset:
+        url, tag = manager_asset
+        local_mgr_ver = read_version(manager_dir)
+        if local_mgr_ver is None or is_newer(tag, local_mgr_ver):
+            print(f"Downloading ikabot manager {tag} ...")
+            try:
+                download_zip(url, manager_dir, ASSET_MANAGER)
+                write_version(manager_dir, tag)
+                print("ikabot manager installed.")
+            except Exception as exc:
+                print(f"Warning: could not download ikabot manager: {exc}")
+        else:
+            print(f"ikabot manager already up to date (v{local_mgr_ver}).")
+    else:
+        print(f"Note: {ASSET_MANAGER} not yet on GitHub releases — skipping.")
+
     # ── 6. Instance count ─────────────────────────────────────────────────────
     existing = sum(
         1 for f in ikabot_dir.iterdir()
@@ -457,6 +479,20 @@ def main() -> None:
             + "\n\nThe instance folders are still set up correctly.\n"
             "You can create the shortcuts manually later."
         )
+
+    # ikabot manager shortcut — goes into shortcuts_dir so step 9 copies it automatically
+    for ahk in manager_dir.glob("*.ahk"):
+        try:
+            create_shortcut(ahk, shortcuts_dir / (ahk.stem + ".lnk"))
+            print(f"  {ahk.stem}.lnk")
+        except Exception as exc:
+            print(f"  Warning: could not create manager shortcut: {exc}")
+    for exe_file in manager_dir.glob("*.exe"):
+        try:
+            create_shortcut(exe_file, shortcuts_dir / (exe_file.stem + ".lnk"))
+            print(f"  {exe_file.stem}.lnk")
+        except Exception as exc:
+            print(f"  Warning: could not create manager shortcut: {exc}")
 
     # ── 9. User shortcut destination ──────────────────────────────────────────
     show_info(
@@ -525,8 +561,9 @@ def main() -> None:
         f"  Shortcuts saved  : {user_sc_dir}\n\n"
         "What to do next:\n"
         f"  1. Open '{user_sc_dir.name}' on your Desktop\n"
-        "  2. Double-click a numbered shortcut to launch that instance\n"
-        "  3. Log into your Ikariam account in the browser that opens\n\n"
+        "  2. Use 'ikabot Manager' to open, close or update all instances\n"
+        "  3. Or double-click a numbered shortcut to launch one instance\n"
+        "  4. Log into your Ikariam account in the browser that opens\n\n"
         "To add more instances later, simply re-run this installer\n"
         "and enter a higher number — existing instances are not affected.",
         "Installation Complete",
