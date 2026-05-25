@@ -8,6 +8,7 @@
 #           ikabot-mod-install.exe   <- the installer
 #           _internal/               <- dependencies + bundled files
 #               ikabot_manager.ahk
+#               ikabot_update.ps1
 #               RELEASE_NOTES.txt
 #               ... (Python runtime, dlls, etc.)
 #
@@ -19,6 +20,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('ikabot_manager.ahk', '.'),
+        ('ikabot_update.ps1',  '.'),
         ('RELEASE_NOTES.txt',  '.'),
     ],
     hiddenimports=[

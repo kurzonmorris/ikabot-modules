@@ -653,10 +653,13 @@ def main() -> None:
     # When running as a plain script, they sit next to this file.
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
     bundled_manager = bundle_root / "ikabot_manager.ahk"
+    bundled_ps      = bundle_root / "ikabot_update.ps1"
 
     if bundled_manager.exists():
         try:
             shutil.copy2(bundled_manager, manager_dir / "ikabot_manager.ahk")
+            if bundled_ps.exists():
+                shutil.copy2(bundled_ps, manager_dir / "ikabot_update.ps1")
             print("ikabot manager installed.")
         except Exception as exc:
             print(f"Warning: could not copy ikabot manager: {exc}")
