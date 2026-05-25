@@ -148,6 +148,58 @@ def ask_choice(title: str, message: str, options: list[str]) -> str | None:
     win.mainloop()
     return result[0]
 
+
+def ask_count_or_skip(title: str, message: str, initial: str = "") -> str | None:
+    """Show a dialog with a text entry plus OK, Skip, and Cancel buttons.
+
+    Returns the entered text (may be empty), "SKIP" if Skip was clicked,
+    or None if Cancel/close was clicked.
+    """
+    result: list[str | None] = [None]
+
+    win = tk.Tk()
+    win.withdraw()
+
+    dlg = tk.Toplevel(win)
+    dlg.title(title)
+    dlg.resizable(False, False)
+    dlg.attributes("-topmost", True)
+
+    tk.Label(dlg, text=message, justify="left", padx=24, pady=12,
+             wraplength=380).pack(fill="x")
+
+    entry_var = tk.StringVar(value=initial)
+    entry = tk.Entry(dlg, textvariable=entry_var, width=12, font=("", 11), justify="center")
+    entry.pack(pady=(0, 8))
+    entry.focus_set()
+    entry.select_range(0, "end")
+
+    frm = tk.Frame(dlg, padx=24, pady=8)
+    frm.pack()
+
+    def on_ok():
+        result[0] = entry_var.get()
+        win.destroy()
+
+    def on_skip():
+        result[0] = "SKIP"
+        win.destroy()
+
+    def on_cancel():
+        win.destroy()
+
+    tk.Button(frm, text="OK",     width=12, command=on_ok).grid(row=0, column=0, padx=4, pady=3)
+    tk.Button(frm, text="Skip",   width=12, command=on_skip).grid(row=0, column=1, padx=4, pady=3)
+    tk.Button(frm, text="Cancel", width=12, command=on_cancel).grid(row=0, column=2, padx=4, pady=3)
+
+    dlg.bind("<Return>", lambda _: on_ok())
+    dlg.bind("<Escape>", lambda _: on_cancel())
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.lift()
+    dlg.focus_force()
+    win.mainloop()
+    return result[0]
+
 # ── Version helpers ───────────────────────────────────────────────────────────
 
 def ver_tuple(v: str) -> tuple[int, ...]:
@@ -708,61 +760,79 @@ def main() -> None:
 
     existing_note = (
         f"\n\nYou already have {existing} instance folder(s) set up.\n"
-        "Enter the total number you want — new folders will be added\n"
-        "and all folders will be refreshed with the latest ikabot files."
+        "Enter a higher number to add more, or the same number to refresh.\n"
+        "Click Skip to leave your instances untouched."
         if existing > 0 else ""
     )
 
+    count = existing  # default: keep existing count if user skips
     while True:
-        count = ask_integer(
+        raw = ask_count_or_skip(
+            "Step 2 of 4 — Instance Count",
             "Step 2 of 4 — How many instances?\n\n"
             "Each instance is a separate copy of ikabot that can log into\n"
             "a different Ikariam account and run at the same time.\n\n"
-            "Enter the total number of instances you want.\n"
-            "Max 100 per run — re-run the installer to add more later\n"
-            "without losing your existing setup."
+            "Enter the total number of instances you want (max 100).\n"
+            "Click Skip to keep your existing setup unchanged.\n"
+            "Re-run the installer any time to add more without losing your setup."
             + existing_note,
-            title="Step 2 of 4 — Instance Count",
+            initial=str(existing) if existing > 0 else "",
         )
-        if count is None:
+        if raw is None:
             print("Cancelled.")
             return
+        if raw == "SKIP" or raw.strip() == "" or raw.strip() == "0":
+            print(f"Instance count skipped — keeping {existing} existing folder(s).")
+            count = existing
+            break
+        if not raw.strip().isdigit():
+            show_error("Please enter a whole number, or click Skip.")
+            continue
+        count = int(raw.strip())
+        if count < 1 or count > 100:
+            show_error("Please enter a number between 1 and 100, or click Skip.")
+            continue
         if count > 20:
             if not ask_yes_no(
                 f"You requested {count} instances.\n\n"
                 "Running this many at once will use significant memory and CPU.\n\n"
-                "Are you sure you want to set up all {count}?"
+                f"Are you sure you want to set up all {count}?"
             ):
                 continue
         break
 
+    if count == 0:
+        print("No instances to set up — skipping folder sync and shortcuts.")
+
     # ── 7. Sync ikariam folders ───────────────────────────────────────────────
-    print(f"Setting up {count} ikabot instance(s) ...")
-    sync_ikariam_folders(ikabot_dir, count, template_dir)
+    if count > 0:
+        print(f"Setting up {count} ikabot instance(s) ...")
+        sync_ikariam_folders(ikabot_dir, count, template_dir)
+    else:
+        print("Skipping instance folder sync.")
 
     # ── 8. Create internal shortcuts ──────────────────────────────────────────
-    print("Creating shortcuts ...")
     sc_errors: list[str] = []
-    created_shortcuts = 0
-    for i in range(1, count + 1):
-        exe = ikabot_dir / f"ikariam {i}" / "ikabot.exe"
-        if exe.exists():
-            lnk_name = shortcut_name(f"ikariam {i}")
-            try:
-                create_shortcut(exe, shortcuts_dir / lnk_name)
-                print(f"  {lnk_name}")
-                created_shortcuts += 1
-            except Exception as exc:
-                sc_errors.append(lnk_name)
-                print(f"  ERROR creating {lnk_name}: {exc}")
+    if count > 0:
+        print("Creating shortcuts ...")
+        for i in range(1, count + 1):
+            exe = ikabot_dir / f"ikariam {i}" / "ikabot.exe"
+            if exe.exists():
+                lnk_name = shortcut_name(f"ikariam {i}")
+                try:
+                    create_shortcut(exe, shortcuts_dir / lnk_name)
+                    print(f"  {lnk_name}")
+                except Exception as exc:
+                    sc_errors.append(lnk_name)
+                    print(f"  ERROR creating {lnk_name}: {exc}")
 
-    if sc_errors:
-        show_error(
-            "Some shortcuts could not be created:\n\n"
-            + "\n".join(sc_errors)
-            + "\n\nThe instance folders are still set up correctly.\n"
-            "You can create the shortcuts manually later."
-        )
+        if sc_errors:
+            show_error(
+                "Some shortcuts could not be created:\n\n"
+                + "\n".join(sc_errors)
+                + "\n\nThe instance folders are still set up correctly.\n"
+                "You can create the shortcuts manually later."
+            )
 
     # ikabot manager shortcut — goes into shortcuts_dir so step 9 copies it automatically
     for ahk in manager_dir.glob("*.ahk"):
