@@ -148,6 +148,58 @@ def ask_choice(title: str, message: str, options: list[str]) -> str | None:
     win.mainloop()
     return result[0]
 
+
+def ask_count_or_skip(title: str, message: str, initial: str = "") -> str | None:
+    """Show a dialog with a text entry plus OK, Skip, and Cancel buttons.
+
+    Returns the entered text (may be empty), "SKIP" if Skip was clicked,
+    or None if Cancel/close was clicked.
+    """
+    result: list[str | None] = [None]
+
+    win = tk.Tk()
+    win.withdraw()
+
+    dlg = tk.Toplevel(win)
+    dlg.title(title)
+    dlg.resizable(False, False)
+    dlg.attributes("-topmost", True)
+
+    tk.Label(dlg, text=message, justify="left", padx=24, pady=12,
+             wraplength=380).pack(fill="x")
+
+    entry_var = tk.StringVar(value=initial)
+    entry = tk.Entry(dlg, textvariable=entry_var, width=12, font=("", 11), justify="center")
+    entry.pack(pady=(0, 8))
+    entry.focus_set()
+    entry.select_range(0, "end")
+
+    frm = tk.Frame(dlg, padx=24, pady=8)
+    frm.pack()
+
+    def on_ok():
+        result[0] = entry_var.get()
+        win.destroy()
+
+    def on_skip():
+        result[0] = "SKIP"
+        win.destroy()
+
+    def on_cancel():
+        win.destroy()
+
+    tk.Button(frm, text="OK",     width=12, command=on_ok).grid(row=0, column=0, padx=4, pady=3)
+    tk.Button(frm, text="Skip",   width=12, command=on_skip).grid(row=0, column=1, padx=4, pady=3)
+    tk.Button(frm, text="Cancel", width=12, command=on_cancel).grid(row=0, column=2, padx=4, pady=3)
+
+    dlg.bind("<Return>", lambda _: on_ok())
+    dlg.bind("<Escape>", lambda _: on_cancel())
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.lift()
+    dlg.focus_force()
+    win.mainloop()
+    return result[0]
+
 # ── Version helpers ───────────────────────────────────────────────────────────
 
 def ver_tuple(v: str) -> tuple[int, ...]:
@@ -708,38 +760,37 @@ def main() -> None:
 
     existing_note = (
         f"\n\nYou already have {existing} instance folder(s) set up.\n"
-        "Enter a higher number to add more, the same number to refresh,\n"
-        "or enter 0 (or leave blank) to skip this step and keep what you have."
+        "Enter a higher number to add more, or the same number to refresh.\n"
+        "Click Skip to leave your instances untouched."
         if existing > 0 else ""
     )
 
     count = existing  # default: keep existing count if user skips
     while True:
-        raw = ask_string(
+        raw = ask_count_or_skip(
+            "Step 2 of 4 — Instance Count",
             "Step 2 of 4 — How many instances?\n\n"
             "Each instance is a separate copy of ikabot that can log into\n"
             "a different Ikariam account and run at the same time.\n\n"
             "Enter the total number of instances you want (max 100).\n"
-            "Enter 0 or leave blank to skip and keep your existing setup.\n"
+            "Click Skip to keep your existing setup unchanged.\n"
             "Re-run the installer any time to add more without losing your setup."
             + existing_note,
-            title="Step 2 of 4 — Instance Count",
             initial=str(existing) if existing > 0 else "",
         )
         if raw is None:
             print("Cancelled.")
             return
-        raw = raw.strip()
-        if raw == "" or raw == "0":
+        if raw == "SKIP" or raw.strip() == "" or raw.strip() == "0":
             print(f"Instance count skipped — keeping {existing} existing folder(s).")
             count = existing
             break
-        if not raw.isdigit():
-            show_error("Please enter a whole number, or 0 to skip.")
+        if not raw.strip().isdigit():
+            show_error("Please enter a whole number, or click Skip.")
             continue
-        count = int(raw)
+        count = int(raw.strip())
         if count < 1 or count > 100:
-            show_error("Please enter a number between 1 and 100, or 0 to skip.")
+            show_error("Please enter a number between 1 and 100, or click Skip.")
             continue
         if count > 20:
             if not ask_yes_no(
