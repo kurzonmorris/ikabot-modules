@@ -778,15 +778,17 @@ def main() -> None:
     # ── 9. User shortcut destination ──────────────────────────────────────────
     show_info(
         "Step 3 of 4 — Shortcut Location\n\n"
-        "Next you will choose where to save your ikabot shortcuts.\n\n"
-        "A folder browser will open. Navigate to where you want\n"
-        "the shortcuts saved and click OK.\n\n"
-        "An 'ikabot shortcuts' subfolder will be created there.\n"
-        "Cancel to use the default (Desktop).",
+        "Choose where to put your ikabot shortcuts.\n\n"
+        "A folder browser will open — simply select Desktop\n"
+        "(or any folder you prefer) and click OK.\n\n"
+        "The installer will automatically create an\n"
+        "'ikabot shortcuts' folder there for you.\n"
+        "You do not need to create the folder yourself.\n\n"
+        "Click Cancel to place the shortcuts on the Desktop by default.",
         "Step 3 of 4 — Shortcut Location",
     )
     sc_parent = pick_folder(
-        "Choose where to create the 'ikabot shortcuts' folder",
+        "Select where to create the 'ikabot shortcuts' folder  (e.g. your Desktop)",
         initial=str(Path.home() / "Desktop"),
     )
     user_sc_dir = (sc_parent / "ikabot shortcuts") if sc_parent else DEFAULT_SHORTCUTS
