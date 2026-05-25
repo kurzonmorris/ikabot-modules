@@ -1178,8 +1178,7 @@ class Session:
                 
                 # modifica processi 404
                 if response.status_code == 404:
-                    self.logger.error(f"404 Not Found received for URL: {url}")
-                    self.logger.error(f"HTML received: {response.text[:200]}")
+                    self.logger.warning(f"404 Not Found received for URL: {url}")
                     raise AssertionError("404 Not Found - Session likely expired")
 
                 if self.__test_server_maintenace(html):

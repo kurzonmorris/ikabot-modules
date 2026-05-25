@@ -925,6 +925,7 @@ def _fetch_message_payloads(session):
     payloads = []
 
     base_html = ""
+    base_html = ""
     try:
         base_html = session.get()
         if base_html:
@@ -1601,7 +1602,10 @@ def _notify_movement_report(session):
 
 
 def _fetch_military_movements(session):
-    html_home = session.get()
+    try:
+        html_home = session.get()
+    except Exception:
+        html_home = ""
     city_id_match = re.search(r"currentCityId:\s*(\d+),", html_home)
     if city_id_match is None:
         return None, int(time.time())
