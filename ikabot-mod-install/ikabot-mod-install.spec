@@ -4,13 +4,23 @@
 # Build command (run from the ikabot-mod-install/ folder):
 #   pyinstaller ikabot-mod-install.spec
 #
-# Output: dist/ikabot-mod-install.exe  (single-file, no console window)
+# Output: dist/ikabot-mod-install/
+#           ikabot-mod-install.exe   <- the installer
+#           _internal/               <- dependencies + bundled files
+#               ikabot_manager.ahk
+#               RELEASE_NOTES.txt
+#               ... (Python runtime, dlls, etc.)
+#
+# Distribute the entire dist/ikabot-mod-install/ folder, not just the exe.
 
 a = Analysis(
     ['ikabot-mod-install.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('ikabot_manager.ahk', '.'),
+        ('RELEASE_NOTES.txt',  '.'),
+    ],
     hiddenimports=[
         'tkinter',
         'tkinter.filedialog',
@@ -29,8 +39,6 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
     name='ikabot-mod-install',
     debug=False,
@@ -38,12 +46,21 @@ exe = EXE(
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,           # keeps a progress window open so the user can see download/install steps
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     icon=None,              # replace None with 'icon.ico' if you add an icon file
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='ikabot-mod-install',
 )
