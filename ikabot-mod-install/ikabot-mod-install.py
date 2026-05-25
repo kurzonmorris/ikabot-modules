@@ -571,9 +571,24 @@ def main() -> None:
 
         update_ver = read_version(update_dir)
         if update_ver and is_newer(update_ver, INSTALLER_VERSION):
-            new_exe = update_dir / "ikabot-mod-install.exe"
-            new_py  = update_dir / "ikabot-mod-install.py"
-            launcher = new_exe if new_exe.exists() else (new_py if new_py.exists() else None)
+            # The release zip may be a onedir bundle (ikabot-mod-install/ikabot-mod-install.exe)
+            # or a flat archive (ikabot-mod-install.exe). Check both.
+            subdir = update_dir / "ikabot-mod-install"
+            new_exe = next(
+                (p for p in (
+                    subdir / "ikabot-mod-install.exe",
+                    update_dir / "ikabot-mod-install.exe",
+                ) if p.exists()),
+                None,
+            )
+            new_py = next(
+                (p for p in (
+                    subdir / "ikabot-mod-install.py",
+                    update_dir / "ikabot-mod-install.py",
+                ) if p.exists()),
+                None,
+            )
+            launcher = new_exe or new_py
 
             if launcher:
                 show_info(
@@ -586,9 +601,11 @@ def main() -> None:
                 )
                 save_state(install_dir)
                 if launcher.suffix == ".py":
-                    subprocess.Popen([sys.executable, str(launcher)])
+                    subprocess.Popen([sys.executable, str(launcher)],
+                                     cwd=str(launcher.parent))
                 else:
-                    subprocess.Popen([str(launcher)])
+                    subprocess.Popen([str(launcher)],
+                                     cwd=str(launcher.parent))
                 sys.exit(0)
     else:
         print("Note: no ikabot-mod-install release asset found on GitHub — skipping self-update check.")
