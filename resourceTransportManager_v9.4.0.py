@@ -4650,11 +4650,16 @@ def transport_scheduler_loop(session, stop_event):
                     total_shipments=total, status="active",
                 )
             else:
-                transport_csv_update(
-                    session, sid,
-                    last_run=now, status="completed",
-                    total_shipments=total,
-                )
+                transport_csv_delete(session, sid)
+
+        # Auto-cleanup: delete one-time schedules older than 24h
+        schedules = transport_csv_load(session)
+        for s in schedules:
+            if s.get("interval_hours", 0) == 0:
+                created = s.get("created_at", 0)
+                if isinstance(created, int) and created > 0:
+                    if now - created > 86400:
+                        transport_csv_delete(session, s.get("schedule_id"))
 
         schedules = transport_csv_load(session)
         active = [s for s in schedules if s.get("status") == "active"]
@@ -5246,6 +5251,26 @@ def _toggle_schedule_pause(session):
     enter()
 
 
+def _parse_id_ranges(text):
+    """Parse comma-separated IDs and ranges (e.g. '1-20, 25-90, 3')."""
+    ids = set()
+    for part in text.split(","):
+        part = part.strip()
+        if "-" in part:
+            bounds = part.split("-", 1)
+            try:
+                lo, hi = int(bounds[0].strip()), int(bounds[1].strip())
+                ids.update(range(lo, hi + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                ids.add(int(part))
+            except ValueError:
+                continue
+    return sorted(ids)
+
+
 def _delete_schedules(session):
     rows = transport_csv_load(session)
     if not rows:
@@ -5254,14 +5279,13 @@ def _delete_schedules(session):
         return
 
     _view_schedules_compact(rows)
-    print("  Enter schedule ID(s) to delete (comma-separated, or ' to cancel):")
+    print("  Enter ID(s) to delete (comma-sep, ranges with -, e.g. 1-20, 25-90):")
     sid_input = read(additionalValues=["'"])
     if sid_input == "'":
         return
 
-    try:
-        sids = [int(x.strip()) for x in sid_input.split(",")]
-    except ValueError:
+    sids = _parse_id_ranges(sid_input)
+    if not sids:
         print("  Invalid input.")
         enter()
         return
@@ -5277,7 +5301,7 @@ def _delete_schedules(session):
         enter()
         return
 
-    print(f"  Delete schedule(s) {to_delete}? [y/N]")
+    print(f"  Delete {len(to_delete)} schedule(s)? [y/N]")
     confirm = read(values=["y", "Y", "n", "N", ""])
     if confirm.lower() != "y":
         return
