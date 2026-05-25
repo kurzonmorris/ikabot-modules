@@ -502,7 +502,8 @@ def sync_ikariam_folders(ikabot_dir: Path, count: int, template_dir: Path) -> No
         show_error(
             "Some instance folders could not be set up:\n\n"
             + "\n".join(errors)
-            + "\n\nClose any running ikabot instances and re-run the installer."
+            + "\n\nThis is usually because ikabot is still running.\n"
+            "Please close all ikabot instances and try again."
         )
 
 # ── Main ──────────────────────────────────────────────────────────────────────
