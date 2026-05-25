@@ -1,30 +1,38 @@
 #!/usr/bin/env python3
-"""ikabot-mod-install — Interactive installer for ikabot multi-instance setup.
+"""ikabot-mod-install — Interactive installer and manager for ikabot multi-instance setup.
 
-Flow:
-  1. Welcome screen
-  2. Ask install location  (default C:/Program Files/ikabot/)
-  3. Build folder structure
-  4. Download latest ikabot-mod-install_v*.zip → update/  (if newer on GitHub)
-  5. Self-update check: if update/ version > this version, launch new exe and exit
-  6. Download latest ikabot.zip             → ikabot template/  (if newer)
-  7. Ask instance count with context (warn >20, hard cap 100)
-  8. Sync ikariam folders, populate from template
-  9. Create numbered shortcuts internally
- 10. Ask where user wants shortcuts (folder picker), copy there
- 11. Download latest open close update.zip  → update/tools/  (if newer)
-     Create shortcuts to tools in both shortcut locations
- 12. Summary screen with what was installed and what to do next
+First screen: Install or Maintenance mode.
+
+Install flow:
+  1. Install location prompt
+  2. Build folder structure
+  3. Installer self-update check (downloads newer version if available)
+  4. Download latest ikabot release into template folder
+  5. Install bundled ikabot Manager tool
+  5c. Optional modules download
+  6. Instance count prompt
+  7. Sync ikariam folders from template
+  8. Create numbered shortcuts
+  9. Shortcut destination prompt (folder picker)
+ 10. Download open/close/update tools if available
+ 11. Summary screen
+
+Maintenance mode (loops until Exit):
+  - Open all instances  (opens .lnk shortcuts from install dir)
+  - Close all instances (taskkill ikabot.exe)
+  - Update ikabot       (download latest, wipe and repopulate all instance folders)
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 import urllib.request
@@ -51,7 +59,8 @@ ASSET_TOOLS_RE     = re.compile(r'^open.close.update.*\.zip$',                 r
 DEFAULT_INSTALL   = Path("C:/Program Files/ikabot")
 DEFAULT_SHORTCUTS = Path.home() / "Desktop" / "ikabot shortcuts"
 
-STATE_FILE = Path(tempfile.gettempdir()) / "ikabot_install_state.json"
+STATE_FILE  = Path(tempfile.gettempdir()) / "ikabot_install_state.json"
+CONFIG_FILE = Path.home() / "AppData" / "Local" / "ikabot" / "installer_config.json"
 
 # ── Tkinter helpers ───────────────────────────────────────────────────────────
 
@@ -108,6 +117,36 @@ def ask_ok_cancel(msg: str, title: str = "ikabot Installer") -> bool:
     result = messagebox.askokcancel(title, msg, parent=r)
     r.destroy()
     return result
+
+
+def ask_choice(title: str, message: str, options: list[str]) -> str | None:
+    """Show a dialog with one button per option. Returns the chosen label or None if closed."""
+    result: list[str | None] = [None]
+
+    win = tk.Tk()
+    win.withdraw()
+
+    dlg = tk.Toplevel(win)
+    dlg.title(title)
+    dlg.resizable(False, False)
+    dlg.attributes("-topmost", True)
+
+    tk.Label(dlg, text=message, justify="left", padx=24, pady=12,
+             wraplength=360).pack(fill="x")
+
+    frm = tk.Frame(dlg, padx=24, pady=8)
+    frm.pack()
+    for opt in options:
+        def handler(o=opt):
+            result[0] = o
+            win.destroy()
+        tk.Button(frm, text=opt, width=30, pady=4, command=handler).pack(pady=3)
+
+    dlg.protocol("WM_DELETE_WINDOW", win.destroy)
+    dlg.lift()
+    dlg.focus_force()
+    win.mainloop()
+    return result[0]
 
 # ── Version helpers ───────────────────────────────────────────────────────────
 
@@ -224,6 +263,158 @@ def load_state() -> dict:
             pass
     return {}
 
+
+def save_config(data: dict) -> None:
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(data, indent=2))
+
+
+def load_config() -> dict:
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+# ── Maintenance helpers ───────────────────────────────────────────────────────
+
+def _leading_num(name: str) -> int:
+    m = re.search(r"\d+", name)
+    return int(m.group()) if m else 0
+
+
+def maint_open_all(install_dir: Path) -> None:
+    sc_dir = install_dir / "shortcuts"
+    lnks = sorted(sc_dir.glob("*.lnk"), key=lambda p: _leading_num(p.name)) if sc_dir.exists() else []
+
+    if not lnks:
+        show_info(
+            "Select the folder that contains your ikabot shortcut (.lnk) files.",
+            "Open All — Select Folder",
+        )
+        picked = pick_folder("Select your ikabot shortcuts folder", initial=str(install_dir))
+        if not picked:
+            return
+        lnks = sorted(picked.glob("*.lnk"), key=lambda p: _leading_num(p.name))
+
+    if not lnks:
+        show_error("No shortcut (.lnk) files were found in the selected folder.")
+        return
+
+    for lnk in lnks:
+        os.startfile(str(lnk))
+        time.sleep(0.15)
+
+    show_info(f"{len(lnks)} ikabot instance(s) launched.", "Open All — Done")
+
+
+def maint_close_all() -> None:
+    if not ask_yes_no("Close all running ikabot instances?", "Close All"):
+        return
+
+    res = subprocess.run(
+        ["taskkill", "/F", "/IM", "ikabot.exe"],
+        capture_output=True, text=True,
+    )
+    if res.returncode == 0:
+        show_info("All ikabot instances have been closed.", "Close All — Done")
+    elif res.returncode == 128:
+        show_info("No ikabot instances were running.", "Close All")
+    else:
+        show_error(
+            f"taskkill exited with code {res.returncode}.\n"
+            "Some instances may not have closed cleanly.\n\n"
+            + (res.stderr or res.stdout or "")
+        )
+
+
+def maint_update_ikabot(install_dir: Path) -> None:
+    template_dir = install_dir / "ikabot template"
+    ikabot_dir   = install_dir / "ikabot"
+
+    if not template_dir.exists() or not ikabot_dir.exists():
+        show_error(
+            f"Required folders not found inside:\n  {install_dir}\n\n"
+            "Expected:\n  - ikabot template\n  - ikabot\n\n"
+            "Make sure you selected the correct install folder."
+        )
+        return
+
+    local_ver    = read_version(template_dir) or "not installed"
+    folder_count = sum(1 for f in ikabot_dir.iterdir()
+                       if f.is_dir() and re.match(r"^ikariam \d+$", f.name))
+
+    if not ask_yes_no(
+        f"Current installed version:  {local_ver}\n"
+        f"ikabot instance folders:    {folder_count}\n\n"
+        "This will:\n"
+        "  - Download the latest ikabot release from GitHub\n"
+        "  - Replace the ikabot template folder\n"
+        f"  - Wipe and re-populate all {folder_count} instance folder(s)\n\n"
+        "Close all running instances before continuing.\n\n"
+        "Proceed?",
+        "Update ikabot",
+    ):
+        return
+
+    print("Contacting GitHub ...")
+    try:
+        releases = fetch_releases()
+    except Exception as exc:
+        show_error(f"Could not contact GitHub:\n\n{exc}")
+        return
+
+    ikabot_asset = find_asset(releases, ASSET_IKABOT_RE)
+    if not ikabot_asset:
+        show_error(
+            "No ikabot release asset found on GitHub.\n\n"
+            "Expected: ikabot-v{x.x.x}-mod-v{x.x.x}.zip"
+        )
+        return
+
+    url, _, remote_ver = ikabot_asset
+    print(f"Downloading ikabot mod v{remote_ver} ...")
+    for item in template_dir.iterdir():
+        if item.name.startswith("version"):
+            continue
+        shutil.rmtree(item) if item.is_dir() else item.unlink()
+
+    try:
+        download_zip(url, template_dir, f"ikabot mod v{remote_ver}")
+        write_version(template_dir, remote_ver)
+    except Exception as exc:
+        show_error(f"Failed to download ikabot:\n\n{exc}")
+        return
+
+    print(f"Updating {folder_count} instance folder(s) ...")
+    sync_ikariam_folders(ikabot_dir, folder_count, template_dir)
+
+    show_info(
+        f"Update complete!\n\n"
+        f"  ikabot mod version : {remote_ver}\n"
+        f"  Instances updated  : {folder_count}\n\n"
+        "All instances are now running the latest version.",
+        "Update Complete",
+    )
+
+
+def maintenance_mode(install_dir: Path) -> None:
+    while True:
+        choice = ask_choice(
+            "ikabot Manager",
+            "ikabot Manager\n\nSelect an action:",
+            ["Open all instances", "Close all instances", "Update ikabot", "Exit"],
+        )
+        if choice is None or choice == "Exit":
+            return
+        elif choice == "Open all instances":
+            maint_open_all(install_dir)
+        elif choice == "Close all instances":
+            maint_close_all()
+        elif choice == "Update ikabot":
+            maint_update_ikabot(install_dir)
+
 # ── ikariam folder management ─────────────────────────────────────────────────
 
 def sync_ikariam_folders(ikabot_dir: Path, count: int, template_dir: Path) -> None:
@@ -267,7 +458,36 @@ def sync_ikariam_folders(ikabot_dir: Path, count: int, template_dir: Path) -> No
 def main() -> None:
     state = load_state()
     saved_install = Path(state["install_dir"]) if "install_dir" in state else None
+    config        = load_config()
+    last_install  = Path(config["install_dir"]) if "install_dir" in config else None
 
+    # ── Mode selection ────────────────────────────────────────────────────────
+    mode = ask_choice(
+        f"ikabot  v{INSTALLER_VERSION}",
+        f"ikabot Installer  v{INSTALLER_VERSION}\n\nWhat would you like to do?",
+        ["Install / Update ikabot", "Maintenance"],
+    )
+    if mode is None:
+        return
+
+    if mode == "Maintenance":
+        default_dir = saved_install or last_install or DEFAULT_INSTALL
+        show_info(
+            "Select your ikabot install folder.\n\n"
+            "This is the folder that contains the 'ikabot' and\n"
+            "'ikabot template' subfolders.",
+            "ikabot Manager — Select Install Folder",
+        )
+        picked = pick_folder(
+            "Select your ikabot install folder",
+            initial=str(default_dir),
+        )
+        if not picked:
+            return
+        maintenance_mode(picked)
+        return
+
+    # ── Install mode ──────────────────────────────────────────────────────────
     # ── Welcome ───────────────────────────────────────────────────────────────
     show_info(
         f"Welcome to the ikabot Installer  (v{INSTALLER_VERSION})\n\n"
@@ -596,6 +816,7 @@ def main() -> None:
         print("Note: no open/close/update tools release found on GitHub — skipping.")
 
     # ── Done ──────────────────────────────────────────────────────────────────
+    save_config({"install_dir": str(install_dir)})
     show_info(
         "Installation complete!\n\n"
         f"  ikabot version   : {ikabot_ver}\n"
