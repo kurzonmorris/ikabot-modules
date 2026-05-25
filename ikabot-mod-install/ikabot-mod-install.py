@@ -5,7 +5,7 @@ Flow:
   1. Welcome screen
   2. Ask install location  (default C:/Program Files/ikabot/)
   3. Build folder structure
-  4. Download latest ikabot-mod-install.zip → update/  (if newer on GitHub)
+  4. Download latest ikabot-mod-install_v*.zip → update/  (if newer on GitHub)
   5. Self-update check: if update/ version > this version, launch new exe and exit
   6. Download latest ikabot.zip             → ikabot template/  (if newer)
   7. Ask instance count with context (warn >20, hard cap 100)
