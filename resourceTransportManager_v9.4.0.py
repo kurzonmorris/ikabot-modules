@@ -437,6 +437,7 @@ SCHEDULE_COLUMNS = [
     "bulk_csv_path",
     "bulk_run_column",
     "ap_max_wait_minutes",
+    "min_shipment_threshold",
     "interval_hours",
     "notif_level",
     "status",
@@ -451,6 +452,7 @@ SCHEDULE_COLUMNS = [
 SCHEDULE_INT_COLS = {
     "schedule_id", "interval_hours", "total_shipments",
     "created_at", "schema_version", "ap_max_wait_minutes",
+    "min_shipment_threshold",
 }
 SCHEDULE_INT_OR_BLANK_COLS = {"last_run", "next_run"}
 SCHEDULE_JSON_COLS = {
@@ -765,7 +767,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
                        dest_targets=None, source_reserves=None,
                        dest_minimums=None, bulk_csv_path="",
                        bulk_run_column="", ap_max_wait_minutes=120,
-                       interval_hours=0,
+                       min_shipment_threshold=0, interval_hours=0,
                        notif_level="none", status="pending",
                        notes=""):
     now_ts = int(time.time())
@@ -783,6 +785,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "bulk_csv_path":   bulk_csv_path,
         "bulk_run_column": bulk_run_column,
         "ap_max_wait_minutes": ap_max_wait_minutes,
+        "min_shipment_threshold": min_shipment_threshold,
         "interval_hours":  interval_hours,
         "notif_level":     notif_level,
         "status":          status,
@@ -3164,6 +3167,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             return
 
         ap_max_wait = 120  # default 2 hours
+        min_threshold = 0  # 0 = disabled (no minimum)
 
         # Final confirmation with dry run
         while True:
@@ -3171,14 +3175,19 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             print(f"  {C.BOLD}CSV rows:{C.RESET}  {len(rows)}")
             print(f"  {C.BOLD}Interval:{C.RESET}  every {interval_hours}h")
             print(f"  {C.BOLD}AP wait:{C.RESET}   {ap_max_wait} min")
+            if min_threshold > 0:
+                print(f"  {C.BOLD}Min ship:{C.RESET}  {min_threshold:,} total resources")
+            else:
+                print(f"  {C.BOLD}Min ship:{C.RESET}  {C.DIM}off{C.RESET}")
             print(f"  {C.BOLD}Run slot:{C.RESET}  {run_column[4:]}\n")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
                   f"{C.CYAN}(D){C.RESET} Dry run preview  "
                   f"{C.YELLOW}(E){C.RESET} Edit CSV  "
                   f"{C.CYAN}(A){C.RESET} AP wait timer  "
+                  f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", "e", "E",
-                               "a", "A", "", "'"],
+                               "a", "A", "t", "T", "", "'"],
                        additionalValues=["'"])
             if rta == "'" or rta.lower() == "n":
                 event.set()
@@ -3194,6 +3203,21 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                     continue
                 ap_max_wait = int(ap_input)
                 print(f"  {C.OK}AP wait set to {ap_max_wait} min{C.RESET}")
+                enter()
+                continue
+            if rta.lower() == "t":
+                print(f"\n  Current minimum: "
+                      f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
+                print("  Minimum total resources per shipment (0=off):")
+                t_input = read(min=0, digit=True, additionalValues=["'"])
+                if t_input == "'":
+                    continue
+                min_threshold = int(t_input)
+                if min_threshold > 0:
+                    print(f"  {C.OK}Shipments below {min_threshold:,} "
+                          f"will be skipped{C.RESET}")
+                else:
+                    print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
                 enter()
                 continue
             if rta.lower() == "d":
@@ -3219,6 +3243,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         bulk_csv_path=csv_path,
         bulk_run_column=run_column,
         ap_max_wait_minutes=ap_max_wait,
+        min_shipment_threshold=min_threshold,
         interval_hours=interval_hours,
         notif_level=notif_config.get("level", "none"),
         notes=f"CSV: {os.path.basename(csv_path)}",
@@ -4370,9 +4395,11 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     deferred_routes = []     # routes deferred due to no AP
     ap_wait_mins = int(sched.get("ap_max_wait_minutes", 120) or 120)
     max_ap_retries = max(0, ap_wait_mins // 5)  # e.g. 120min / 5 = 24 retries
+    min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    small_shipments = []     # (src_name, dest_name, resources) below threshold
 
     def _try_send_route(route_info):
-        """Attempt to send one route. Returns (success, deferred)."""
+        """Attempt to send one route. Returns (success, deferred, small)."""
         (row_num, route, resources, dest_name,
          player, rx, ry, src_name, src_idx,
          row_freighters, parsed_res) = route_info
@@ -4380,7 +4407,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         src_city_id = str(route[0]["id"])
 
         if src_city_id in ap_blocked_cities:
-            return False, True
+            return False, True, False
 
         has_except = any(m == "except" for m, _ in parsed_res)
         if has_except:
@@ -4407,8 +4434,13 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 if i < len(dest_space):
                     resources[i] = min(resources[i], dest_space[i])
             if sum(resources) == 0:
-                return False, False
+                return False, False, False
             route = (src_fresh, dest_fresh, route[2], *resources)
+
+        ship_total = sum(route[3:])
+        if min_threshold > 0 and ship_total < min_threshold:
+            small_shipments.append((src_name, dest_name, list(route[3:])))
+            return False, False, True
 
         coords = f"[{rx}:{ry}]"
         result = send_shipment(
@@ -4421,7 +4453,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             session.setStatus(
                 f"[AP BLOCKED] {src_name} — deferring, will retry in 5min"
             )
-            return False, True
+            return False, True, False
 
         if result["success"]:
             from_val = parse_from_column(rows[row_num - 1].get("From", ""))
@@ -4450,9 +4482,40 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 write_csv_atomic(csv_path, fieldnames, rows)
             except Exception as _csv_err:
                 session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
-            return True, False
+            return True, False, False
 
-        return False, False
+        return False, False, False
+
+    def _mark_route_complete(route_info):
+        """Mark a route's run column entry as done (for small-shipment skips)."""
+        (row_num, route, _res, _dn, _pl, _rx, _ry, _sn, src_idx,
+         _fr, _pr) = route_info
+        from_val = parse_from_column(rows[row_num - 1].get("From", ""))
+        cur = rows[row_num - 1].get(run_column, "").strip()
+        done = set()
+        if cur and cur.upper() != "X":
+            for p in cur.split(","):
+                p = p.strip()
+                if p.isdigit():
+                    done.add(int(p))
+        done.add(src_idx)
+        try:
+            expected = get_source_cities_for_row(
+                session, from_val, city_cache
+            )
+            expected_indices = {i for i, _ in expected}
+        except Exception:
+            expected_indices = done
+        if done >= expected_indices:
+            rows[row_num - 1][run_column] = "X"
+        else:
+            rows[row_num - 1][run_column] = ",".join(
+                str(d) for d in sorted(done)
+            )
+        try:
+            write_csv_atomic(csv_path, fieldnames, rows)
+        except Exception:
+            pass
 
     # --- First pass: send all routes, deferring AP-blocked ones ---
     for idx, route_info in enumerate(routes):
@@ -4462,8 +4525,11 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             f"[SENDING] Bulk Dist [{idx+1}/{total}] "
             f"{src_name} -> {dest_name}"
         )
-        success, deferred = _try_send_route(route_info)
+        success, deferred, small = _try_send_route(route_info)
         if success:
+            completed += 1
+        elif small:
+            _mark_route_complete(route_info)
             completed += 1
         elif deferred:
             deferred_routes.append(route_info)
@@ -4508,8 +4574,11 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             session.setStatus(
                 f"[RETRY] Bulk Dist {src_name} -> {dest_name}"
             )
-            success, deferred = _try_send_route(route_info)
+            success, deferred, small = _try_send_route(route_info)
             if success:
+                completed += 1
+            elif small:
+                _mark_route_complete(route_info)
                 completed += 1
             elif deferred:
                 still_deferred.append(route_info)
@@ -4529,10 +4598,26 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                       f"{ap_wait_mins}min)\n"
                       f"Cities: {', '.join(sorted(blocked_names))}")
 
+    if small_shipments and should_notify(notif_config, "partial"):
+        res_names = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
+        lines = [f"SMALL SHIPMENTS SKIPPED (below {min_threshold:,})"]
+        total_unshipped = [0] * 5
+        for src, dst, res in small_shipments:
+            parts = [f"{res_names[i]}:{v:,}" for i, v in enumerate(res) if v > 0]
+            lines.append(f"  {src} -> {dst}: {', '.join(parts)}")
+            for i in range(min(5, len(res))):
+                total_unshipped[i] += res[i]
+        tot_parts = [f"{res_names[i]}:{v:,}"
+                     for i, v in enumerate(total_unshipped) if v > 0]
+        lines.append(f"Total unshipped: {', '.join(tot_parts)}")
+        sendToBot(session, "\n".join(lines))
+
     if should_notify(notif_config, "complete"):
         summ_str = f"{completed}/{total} sent"
         if skipped:
             summ_str += f", {skipped} skipped"
+        if small_shipments:
+            summ_str += f", {len(small_shipments)} below min"
         run_done = sum(
             1 for r in rows
             if normalize_text(r.get(run_column, "")) == "x"
