@@ -87,6 +87,21 @@ def _setup_stdio():
             pass
 
 
+def _safe_set_status(session, text):
+    """Update ikabot's cosmetic task-list status string, swallowing any
+    error. setStatus writes the shared, lock-protected session file;
+    that write can time out on the session lock when multiple ikabot
+    tasks write concurrently, when a stale .session.lock lingers, or
+    when antivirus / cloud-sync briefly holds the file on Windows.
+    None of that warrants crashing or alerting — the status string is
+    purely informational, so we just skip the update on failure.
+    """
+    try:
+        session.setStatus(text)
+    except Exception:
+        pass
+
+
 def _clean_name(name):
     """Normalise a city name for display.
 
@@ -1081,7 +1096,14 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     event.set()
 
     info = f"\nWine auto-tune: {len(cities_ids)} cities, every {run_hours}h\n"
-    setInfoSignal(session, info)
+    # setInfoSignal writes the shared session file; if the session lock
+    # is briefly contended (other ikabot tasks, a stale .lock, AV/cloud
+    # sync on Windows) it can raise. It's only used to show this text
+    # when you request a status — not worth aborting startup over.
+    try:
+        setInfoSignal(session, info)
+    except Exception:
+        traceback.print_exc()
 
     try:
         while True:
@@ -1092,7 +1114,6 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
             # the daemon. Print it, optionally telegram it, and continue.
             try:
                 run_check()
-                session.setStatus(f"Wine auto-tune ran at {getDateTime()}")
             except KeyboardInterrupt:
                 raise
             except Exception:
@@ -1107,6 +1128,12 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
                         sendToBot(session, cycle_err)
                     except Exception:
                         traceback.print_exc()
+            # Cosmetic status line for ikabot's task list. This writes the
+            # shared session file and can hit a session-lock timeout when
+            # several tasks write at once — that's not a real failure, so
+            # swallow it quietly rather than letting it trip the error
+            # firewall above (which would spam tracebacks / Telegram).
+            _safe_set_status(session, f"Wine auto-tune ran at {getDateTime()}")
     except KeyboardInterrupt:
         pass
     except Exception:
