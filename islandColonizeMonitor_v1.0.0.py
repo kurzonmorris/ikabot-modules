@@ -1518,7 +1518,6 @@ def islandColonizeMonitor(session, event, stdin_fd, predetermined_input):
                       additionalValues=["'", "s", "S", "o", "O", "x", "X"])
 
         if choice == "'":
-            event.set()
             return
 
         if isinstance(choice, str):
@@ -1528,21 +1527,25 @@ def islandColonizeMonitor(session, event, stdin_fd, predetermined_input):
                 return
             elif letter == "o":
                 _stop_monitor(session)
-                event.set()
                 return
             elif letter == "x":
                 _clear_all_islands(session)
-                event.set()
                 return
 
-        # Choices 1–3: interactive management — event.set() after work completes
+        # Choices 1–3: interactive management
         if choice == 1:
             _add_island(session)
         elif choice == 2:
             _manage_islands(session)
         elif choice == 3:
             _settings_screen(session)
-        event.set()
 
     except KeyboardInterrupt:
-        event.set()
+        pass
+    except Exception:
+        traceback.print_exc()
+    finally:
+        try:
+            event.set()
+        except Exception:
+            pass
