@@ -1619,84 +1619,86 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
         print_module_banner("Shipment Log Setup")
         log_path = get_log_path(session)
 
-        print_module_banner()
-        print(f"  {_scheduler_status_line(session)}")
-        worker_running = _is_transport_worker_running(session)
-        if not worker_running:
-            counts = transport_csv_count_by_status(session)
-            if counts.get("active", 0) + counts.get("pending", 0) > 0:
-                print(f"  {C.WARN}Schedules exist but the scheduler is stopped."
-                      f" Press (s) to start it.{C.RESET}")
-        print(f"\n  {C.BOLD}(s){C.RESET} Start scheduler   "
-              f"{C.BOLD}(o){C.RESET} Stop scheduler   "
-              f"{C.BOLD}(x){C.RESET} Clear all schedules")
-        print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
-              f" to run it.{C.RESET}")
+        while True:
+            print_module_banner()
+            print(f"  {_scheduler_status_line(session)}")
+            worker_running = _is_transport_worker_running(session)
+            if not worker_running:
+                counts = transport_csv_count_by_status(session)
+                if counts.get("active", 0) + counts.get("pending", 0) > 0:
+                    print(f"  {C.WARN}Schedules exist but the scheduler is stopped."
+                          f" Press (s) to start it.{C.RESET}")
+            print(f"\n  {C.BOLD}(s){C.RESET} Start scheduler   "
+                  f"{C.BOLD}(o){C.RESET} Stop scheduler   "
+                  f"{C.BOLD}(x){C.RESET} Clear all schedules")
+            print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
+                  f" to run it.{C.RESET}")
 
-        print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Consolidate")
-        print(f"  {C.DIM}    Collect resources from multiple cities into one destination.{C.RESET}")
-        print(f"  {C.BOLD}(2){C.RESET} Distribute")
-        print(f"  {C.DIM}    Send resources from one city out to several destinations.{C.RESET}")
-        print(f"  {C.BOLD}(3){C.RESET} Even Distribution")
-        print(f"  {C.DIM}    Spread a resource evenly across selected cities so each has the same.{C.RESET}")
-        print(f"  {C.BOLD}(4){C.RESET} Auto Send")
-        print(f"  {C.DIM}    Request a total amount — the system gathers it from all your cities.{C.RESET}")
-        print(f"  {C.BOLD}(5){C.RESET} Bulk Distribution")
-        print(f"  {C.DIM}    Send to many cities at once using a CSV spreadsheet file.{C.RESET}")
-        print(f"  {C.BOLD}(6){C.RESET} Keep Topped Up")
-        print(f"  {C.DIM}    Automatically refill cities when resources drop below a target.{C.RESET}")
+            print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Consolidate")
+            print(f"  {C.DIM}    Collect resources from multiple cities into one destination.{C.RESET}")
+            print(f"  {C.BOLD}(2){C.RESET} Distribute")
+            print(f"  {C.DIM}    Send resources from one city out to several destinations.{C.RESET}")
+            print(f"  {C.BOLD}(3){C.RESET} Even Distribution")
+            print(f"  {C.DIM}    Spread a resource evenly across selected cities so each has the same.{C.RESET}")
+            print(f"  {C.BOLD}(4){C.RESET} Auto Send")
+            print(f"  {C.DIM}    Request a total amount — the system gathers it from all your cities.{C.RESET}")
+            print(f"  {C.BOLD}(5){C.RESET} Bulk Distribution")
+            print(f"  {C.DIM}    Send to many cities at once using a CSV spreadsheet file.{C.RESET}")
+            print(f"  {C.BOLD}(6){C.RESET} Keep Topped Up")
+            print(f"  {C.DIM}    Automatically refill cities when resources drop below a target.{C.RESET}")
 
-        print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
-        print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
-        print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
-        print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
+            print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
+            print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
+            print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
+            print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
 
-        shipping_mode = read(min=1, max=7, digit=True,
-                             additionalValues=["'", "s", "S", "o", "O",
-                                                "x", "X"])
-        if shipping_mode == "'":
-            event.set()
+            shipping_mode = read(min=1, max=7, digit=True,
+                                 additionalValues=["'", "s", "S", "o", "O",
+                                                    "x", "X"])
+            if shipping_mode == "'":
+                event.set()
+                return
+
+            if isinstance(shipping_mode, str):
+                letter = shipping_mode.lower()
+                if letter == "s":
+                    _activate_transport_worker(session, event)
+                    return
+                elif letter == "o":
+                    _stop_transport_worker(session)
+                    continue
+                elif letter == "x":
+                    _clear_all_schedules(session)
+                    continue
+
+            if shipping_mode == 7:
+                manage_schedules_menu(session, event, telegram_enabled,
+                                      log_path)
+                continue
+
+            if shipping_mode == 1:
+                consolidateMode(session, event, stdin_fd, predetermined_input,
+                                telegram_enabled, log_path)
+            elif shipping_mode == 2:
+                distributeMode(session, event, stdin_fd, predetermined_input,
+                               telegram_enabled, log_path)
+            elif shipping_mode == 3:
+                evenDistributionMode(session, event, stdin_fd,
+                                     predetermined_input, telegram_enabled,
+                                     log_path)
+            elif shipping_mode == 4:
+                autoSendMode(session, event, stdin_fd, predetermined_input,
+                             telegram_enabled, log_path)
+            elif shipping_mode == 5:
+                bulkDistributionMode(session, event, stdin_fd,
+                                     predetermined_input, telegram_enabled,
+                                     log_path)
+            elif shipping_mode == 6:
+                topUpMode(session, event, stdin_fd,
+                          predetermined_input, telegram_enabled,
+                          log_path)
             return
-
-        if isinstance(shipping_mode, str):
-            letter = shipping_mode.lower()
-            if letter == "s":
-                _activate_transport_worker(session, event)
-                return
-            elif letter == "o":
-                _stop_transport_worker(session)
-                event.set()
-                return
-            elif letter == "x":
-                _clear_all_schedules(session)
-                event.set()
-                return
-
-        if shipping_mode == 1:
-            consolidateMode(session, event, stdin_fd, predetermined_input,
-                            telegram_enabled, log_path)
-        elif shipping_mode == 2:
-            distributeMode(session, event, stdin_fd, predetermined_input,
-                           telegram_enabled, log_path)
-        elif shipping_mode == 3:
-            evenDistributionMode(session, event, stdin_fd,
-                                 predetermined_input, telegram_enabled,
-                                 log_path)
-        elif shipping_mode == 4:
-            autoSendMode(session, event, stdin_fd, predetermined_input,
-                         telegram_enabled, log_path)
-        elif shipping_mode == 5:
-            bulkDistributionMode(session, event, stdin_fd,
-                                 predetermined_input, telegram_enabled,
-                                 log_path)
-        elif shipping_mode == 6:
-            topUpMode(session, event, stdin_fd,
-                      predetermined_input, telegram_enabled,
-                      log_path)
-        elif shipping_mode == 7:
-            manage_schedules_menu(session, event, telegram_enabled,
-                                  log_path)
 
     except KeyboardInterrupt:
         event.set()
@@ -5092,7 +5094,6 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
     while True:
         if not enforce_transport_schema_or_abort(session):
             enter()
-            event.set()
             return
 
         counts = transport_csv_count_by_status(session)
@@ -5112,7 +5113,6 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
 
         choice = read(min=1, max=4, digit=True, additionalValues=["'"])
         if choice == "'":
-            event.set()
             return
 
         if choice == 1:
