@@ -14,7 +14,7 @@ import time
 import traceback
 
 import ikabot.config as config
-from ikabot.config import IKABOT_DATA_DIR, city_url, materials_names
+from ikabot.config import IKABOT_DATA_DIR, city_url, island_url, materials_names
 from ikabot.helpers.botComm import sendToBot, notificationDataIsValid
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import banner, enter, bcolors
@@ -408,18 +408,20 @@ def _colonize_succeeded(text):
 
 # ─── Island slot detection ────────────────────────────────────────────────────
 
-def _find_empty_slots(bg, accept_premium):
-    """Returns (available_positions, premium_positions) as sorted int lists."""
+def _parse_slot_list(cities, accept_premium):
+    """Parse a cities/slots list into (free, premium) position lists."""
     free, premium = [], []
-    for i, c in enumerate((bg or {}).get("cities", []) or []):
+    for i, c in enumerate(cities or []):
         if not isinstance(c, dict) or c.get("type") != "buildplace":
             continue
         bp  = (c.get("buildplace_type") or "").strip().lower()
-        pos = c.get("position") or c.get("pos") or (i + 1)
+        pos = c.get("position") or c.get("pos")
+        if pos is None:
+            pos = i + 1
         try:
             pos = int(pos)
         except Exception:
-            pos = i + 1
+            continue
         if not 1 <= pos <= 17:
             continue
         if bp in ("", "normal"):
@@ -432,8 +434,21 @@ def _find_empty_slots(bg, accept_premium):
         return sorted(set(free + premium)), premium
     return free, []
 
+def _get_real_empty_slots(session, island_id, accept_premium):
+    """Detect genuinely empty slots using the regular island view.
+
+    The colonize view backgroundData lists ALL island positions as buildplaces
+    regardless of whether they are already occupied by other players' cities.
+    Using the island view instead returns actual occupancy, preventing false
+    positives on full islands.
+    """
+    html   = session.get(island_url + str(island_id))
+    island = getIsland(html)
+    return _parse_slot_list(island.get("cities") or [], accept_premium)
+
 def _load_colonize_view(session, island_id, position=1):
-    """Fetch colonize view. Returns (action_request, background_data)."""
+    """Fetch colonize view to retrieve the action request token for a POST.
+    Not used for slot detection — use _get_real_empty_slots() for that."""
     url = (
         "view=colonize&islandId={}&position={}"
         "&backgroundView=island&currentIslandId={}"
@@ -646,14 +661,18 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
     # Reserve resources via RRS so other modules don't consume them
     rids = _rrs_reserve_resources(session, row) if rrs_enabled else []
 
-    # Final slot check just before sending
+    # Final slot check just before sending (uses island view — reliable occupancy)
     session.setStatus(f"{label} — confirming slot {pos} still open...")
-    ar2, bg2 = _load_colonize_view(session, row["island_id"], position=pos)
-    valid2, _ = _find_empty_slots(bg2, bool(row["accept_premium"]))
+    valid2, _ = _get_real_empty_slots(
+        session, row["island_id"], bool(row["accept_premium"])
+    )
     if pos not in valid2:
         _rrs_release_list(session, rids)
         session.setStatus(f"{label} — slot {pos} no longer available")
         return False
+
+    # Get action request from colonize view for this specific position
+    ar2, _ = _load_colonize_view(session, row["island_id"], position=pos)
 
     session.setStatus(f"{label} — sending colonization to slot {pos}...")
     ok, reason = _do_colonize(
@@ -672,8 +691,9 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
     session.setStatus(f"{label} — colonize failed, retrying in 30 s...")
     wait(30)
 
-    ar3, bg3 = _load_colonize_view(session, row["island_id"], position=pos)
-    valid3, _ = _find_empty_slots(bg3, bool(row["accept_premium"]))
+    valid3, _ = _get_real_empty_slots(
+        session, row["island_id"], bool(row["accept_premium"])
+    )
     if pos not in valid3:
         if has_notif:
             sendToBot(
@@ -683,7 +703,8 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
             )
         return False
 
-    # Second attempt
+    # Second attempt — fresh action request
+    ar3, _ = _load_colonize_view(session, row["island_id"], position=pos)
     rids2 = _rrs_reserve_resources(session, row) if rrs_enabled else []
     ok2, _ = _do_colonize(
         session, row["island_id"], pos, row["origin_city_id"], ar3,
@@ -749,10 +770,10 @@ def _process_island(session, row, settings, has_notif, rrs_enabled):
     session.setStatus(f"[{row['x']}:{row['y']}] Scanning for open slots...")
 
     try:
-        _, bg = _load_colonize_view(session, row["island_id"])
+        available, premium = _get_real_empty_slots(
+            session, row["island_id"], bool(row["accept_premium"])
+        )
         csv_update(session, mid, last_checked=now)
-
-        available, premium = _find_empty_slots(bg, bool(row["accept_premium"]))
 
         if not available:
             session.setStatus(f"[{row['x']}:{row['y']}] No open slots found")
