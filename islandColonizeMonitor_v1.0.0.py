@@ -5,30 +5,32 @@ MODULE_NAME  = "Island Colonize Monitor"
 MODULE_ENTRY = "islandColonizeMonitor"
 
 import csv
+import datetime
 import json
 import math
+import multiprocessing
 import os
+import random
 import re
 import sys
 import time
 import traceback
 
 import ikabot.config as config
-from ikabot.config import IKABOT_DATA_DIR, city_url, island_url, materials_names
+from ikabot.config import IKABOT_DATA_DIR, city_url, island_url
 from ikabot.helpers.botComm import sendToBot, notificationDataIsValid
 from ikabot.helpers.getJson import getCity, getIsland
-from ikabot.helpers.gui import banner, enter, bcolors
+from ikabot.helpers.gui import banner, enter
 from ikabot.helpers.naval import getAvailableShips
 from ikabot.helpers.pedirInfo import read, getIdsOfCities
 from ikabot.helpers.process import set_child_mode, updateProcessList
 from ikabot.helpers.signals import setInfoSignal
-from ikabot.helpers.varios import wait, addThousandSeparator, getDateTime
+from ikabot.helpers.varios import wait, addThousandSeparator
 
 try:
     from resourceReservationSystem import (
         reserve as rrs_reserve,
         release as rrs_release,
-        release_all_for_module as rrs_release_all,
     )
     RRS_AVAILABLE = True
 except ImportError:
@@ -325,7 +327,10 @@ def _is_worker_running(session):
             d = json.load(f)
         if time.time() - d.get("ts", 0) > 600:
             return False
-        os.kill(d.get("pid", 0), 0)
+        pid = d.get("pid", 0)
+        if not pid:
+            return False
+        os.kill(pid, 0)
         return True
     except (ProcessLookupError, PermissionError):
         return False
@@ -353,7 +358,7 @@ def _banner(page=None):
     rule = "─" * 58
     print("\n")
     print(f"{C.H}╔{bar}╗")
-    print(f"║      ISLAND COLONIZE MONITOR v{_VERSION:<44}║")
+    print(f"║      ISLAND COLONIZE MONITOR v{_VERSION:<27}║")
     print(f"╚{bar}╝{C.R}")
     if page:
         print(f"\n{C.B}{page}{C.R}")
@@ -613,7 +618,6 @@ def _do_colonize(session, island_id, position, origin_city_id, action_request,
 # ─── Jitter ───────────────────────────────────────────────────────────────────
 
 def _jitter_secs(jitter_type):
-    import random
     if jitter_type == "small":
         return random.randint(60, 300)
     if jitter_type == "large":
@@ -623,7 +627,7 @@ def _jitter_secs(jitter_type):
 
 # ─── Worker — colonize attempt ────────────────────────────────────────────────
 
-def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
+def _attempt_colonize(session, row, pos, settings, notif_col, notif_err, rrs_enabled):
     """Try to colonize `pos`. Returns True if a ship was sent."""
     mid   = row["monitor_id"]
     label = f"[{row['x']}:{row['y']}] {row['island_name']}"
@@ -634,10 +638,11 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
     # Ship availability
     ships_avail = _get_ships(session, row["origin_city_id"])
     if ships_avail < ships:
-        session.setStatus(
+        setInfoSignal(
+            session,
             f"{label} — slot found but only {ships_avail}/{ships} ships available"
         )
-        if has_notif:
+        if notif_col:
             sendToBot(
                 session,
                 f"Island Monitor: Open slot found at {label} pos {pos} but "
@@ -648,13 +653,13 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
 
     # Resource check (warn only — gold cannot be pre-checked)
     ok_res, missing = _check_origin_resources(session, row)
-    if not ok_res and missing and has_notif:
+    if not ok_res and missing and notif_col:
         sendToBot(
             session,
             f"Island Monitor: Slot found at {label} but resources may be "
             f"insufficient in {row['origin_city_name']}:\n"
             + "\n".join(missing)
-            + "\nAttempting anyway — ensure {addThousandSeparator(_BASE_GOLD)} "
+            + f"\nAttempting anyway — ensure {addThousandSeparator(_BASE_GOLD)} "
               "gold is available in that city."
         )
 
@@ -662,19 +667,19 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
     rids = _rrs_reserve_resources(session, row) if rrs_enabled else []
 
     # Final slot check just before sending (uses island view — reliable occupancy)
-    session.setStatus(f"{label} — confirming slot {pos} still open...")
+    setInfoSignal(session, f"{label} — confirming slot {pos} still open...")
     valid2, _ = _get_real_empty_slots(
         session, row["island_id"], bool(row["accept_premium"])
     )
     if pos not in valid2:
         _rrs_release_list(session, rids)
-        session.setStatus(f"{label} — slot {pos} no longer available")
+        setInfoSignal(session, f"{label} — slot {pos} no longer available")
         return False
 
     # Get action request from colonize view for this specific position
     ar2, _ = _load_colonize_view(session, row["island_id"], position=pos)
 
-    session.setStatus(f"{label} — sending colonization to slot {pos}...")
+    setInfoSignal(session, f"{label} — sending colonization to slot {pos}...")
     ok, reason = _do_colonize(
         session, row["island_id"], pos, row["origin_city_id"], ar2,
         row["extra_wood"], row["extra_wine"], row["extra_marble"],
@@ -683,19 +688,19 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
     _rrs_release_list(session, rids)
 
     if ok:
-        _record_colonize_sent(session, row, pos, ships, settings, has_notif,
+        _record_colonize_sent(session, row, pos, ships, settings, notif_col,
                                label, suffix="")
         return True
 
     # ── First attempt failed: retry after 30 s ────────────────────────────────
-    session.setStatus(f"{label} — colonize failed, retrying in 30 s...")
+    setInfoSignal(session, f"{label} — colonize failed, retrying in 30 s...")
     wait(30)
 
     valid3, _ = _get_real_empty_slots(
         session, row["island_id"], bool(row["accept_premium"])
     )
     if pos not in valid3:
-        if has_notif:
+        if notif_col:
             sendToBot(
                 session,
                 f"Island Monitor: Slot at {label} pos {pos} was taken by "
@@ -714,11 +719,11 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
     _rrs_release_list(session, rids2)
 
     if ok2:
-        _record_colonize_sent(session, row, pos, ships, settings, has_notif,
+        _record_colonize_sent(session, row, pos, ships, settings, notif_col,
                                label, suffix=" (retry)")
         return True
 
-    if has_notif:
+    if notif_err:
         sendToBot(
             session,
             f"Island Monitor: Colonization failed at {label} pos {pos} after "
@@ -727,7 +732,7 @@ def _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled):
     return False
 
 
-def _record_colonize_sent(session, row, pos, ships, settings, has_notif,
+def _record_colonize_sent(session, row, pos, ships, settings, notif_col,
                            label, suffix):
     """Update CSV and notify after a successful colonization send."""
     now           = time.time()
@@ -740,7 +745,7 @@ def _record_colonize_sent(session, row, pos, ships, settings, has_notif,
         last_sent      = now,
         cooldown_until = now + cooldown_mins * 60,
     )
-    if has_notif:
+    if notif_col:
         sendToBot(
             session,
             f"Colonization sent{suffix}!\n"
@@ -754,7 +759,7 @@ def _record_colonize_sent(session, row, pos, ships, settings, has_notif,
 
 # ─── Worker — per-island processing ──────────────────────────────────────────
 
-def _process_island(session, row, settings, has_notif, rrs_enabled):
+def _process_island(session, row, settings, notif_col, notif_err, rrs_enabled):
     """Scan one island and send colonization ships if slots are available."""
     now = time.time()
     mid = row["monitor_id"]
@@ -762,12 +767,13 @@ def _process_island(session, row, settings, has_notif, rrs_enabled):
     # Skip if in post-colonize cooldown
     if row["cooldown_until"] and float(row["cooldown_until"]) > now:
         remaining_m = max(1, int((float(row["cooldown_until"]) - now) / 60))
-        session.setStatus(
+        setInfoSignal(
+            session,
             f"[{row['x']}:{row['y']}] In cooldown — {remaining_m}m remaining"
         )
         return
 
-    session.setStatus(f"[{row['x']}:{row['y']}] Scanning for open slots...")
+    setInfoSignal(session, f"[{row['x']}:{row['y']}] Scanning for open slots...")
 
     try:
         available, premium = _get_real_empty_slots(
@@ -776,7 +782,7 @@ def _process_island(session, row, settings, has_notif, rrs_enabled):
         csv_update(session, mid, last_checked=now)
 
         if not available:
-            session.setStatus(f"[{row['x']}:{row['y']}] No open slots found")
+            setInfoSignal(session, f"[{row['x']}:{row['y']}] No open slots found")
             return
 
         remaining = row["max_cities"] - row["cities_sent"]
@@ -789,7 +795,8 @@ def _process_island(session, row, settings, has_notif, rrs_enabled):
             f" ({len(premium)} premium)" if premium and bool(row["accept_premium"])
             else f" ({len(premium)} premium — skipped)" if premium else ""
         )
-        session.setStatus(
+        setInfoSignal(
+            session,
             f"{label} — {len(available)} slot(s) open{prem_note}, "
             f"need {remaining} more"
         )
@@ -802,14 +809,15 @@ def _process_island(session, row, settings, has_notif, rrs_enabled):
             row   = next((r for r in fresh if r["monitor_id"] == mid), row)
             if row["cities_sent"] >= row["max_cities"]:
                 break
-            _attempt_colonize(session, row, pos, settings, has_notif, rrs_enabled)
+            _attempt_colonize(session, row, pos, settings,
+                              notif_col, notif_err, rrs_enabled)
 
         # Check if all cities planted
         fresh = csv_load(session)
         row   = next((r for r in fresh if r["monitor_id"] == mid), row)
         if row["cities_sent"] >= row["max_cities"]:
             csv_update(session, mid, status=STATUS_COMPLETED)
-            if has_notif:
+            if notif_col:
                 sendToBot(
                     session,
                     f"Island Monitor complete!\n"
@@ -821,7 +829,7 @@ def _process_island(session, row, settings, has_notif, rrs_enabled):
     except Exception:
         err = traceback.format_exc()
         csv_update(session, mid, status=STATUS_ERROR, notes=err[:240])
-        if has_notif:
+        if notif_err:
             sendToBot(
                 session,
                 f"Island Monitor error on [{row['x']}:{row['y']}]:\n{err}"
@@ -832,14 +840,19 @@ def _process_island(session, row, settings, has_notif, rrs_enabled):
 
 def _worker(session, settings, rrs_enabled):
     set_child_mode(session)
+    updateProcessList(session)
     _worker_lock_write(session)
     _clear_stop_flag(session)
     setInfoSignal(session, "Island Colonize Monitor running")
 
-    has_notif         = notificationDataIsValid(session)
-    hb_secs           = settings.get("heartbeat_hours", 0) * 3600
-    last_heartbeat    = 0.0
-    first_run         = True
+    notif_enabled   = notificationDataIsValid(session)
+    notif_level     = settings.get("notif_level", "colonize")
+    notif_col       = notif_enabled and notif_level in ("all", "colonize")
+    notif_err       = notif_enabled
+    notif_heartbeat = notif_enabled and notif_level == "all"
+    hb_secs         = settings.get("heartbeat_hours", 0) * 3600
+    last_heartbeat  = 0.0
+    first_run       = True
 
     try:
         while not _stop_requested(session):
@@ -854,14 +867,15 @@ def _worker(session, settings, rrs_enabled):
             total_active = len(active_rows)
             total_sent   = sum(r["cities_sent"] for r in rows)
 
-            session.setStatus(
+            setInfoSignal(
+                session,
                 f"Island Monitor — watching {total_active} island(s), "
                 f"{total_sent} colonization(s) sent total"
             )
 
             # Heartbeat
             now = time.time()
-            if has_notif and hb_secs > 0 and now - last_heartbeat >= hb_secs:
+            if notif_heartbeat and hb_secs > 0 and now - last_heartbeat >= hb_secs:
                 detail = "\n".join(
                     f"  [{r['x']}:{r['y']}] {r['island_name']} — "
                     f"{r['cities_sent']}/{r['max_cities']} planted"
@@ -880,7 +894,8 @@ def _worker(session, settings, rrs_enabled):
             for row in active_rows:
                 if _stop_requested(session):
                     break
-                _process_island(session, row, settings, has_notif, rrs_enabled)
+                _process_island(session, row, settings, notif_col, notif_err,
+                                rrs_enabled)
 
             # No wait on first run — check immediately, then start the interval
             if not first_run:
@@ -889,7 +904,8 @@ def _worker(session, settings, rrs_enabled):
                 total_wait    = interval_secs + jitter_secs
                 wait_m        = total_wait // 60
 
-                session.setStatus(
+                setInfoSignal(
+                    session,
                     f"Island Monitor — next check in ~{wait_m} minute(s)"
                 )
                 wait(total_wait)
@@ -898,7 +914,7 @@ def _worker(session, settings, rrs_enabled):
 
     except Exception:
         err = traceback.format_exc()
-        if has_notif:
+        if notif_err:
             try:
                 sendToBot(session, f"Island Monitor crashed:\n{err}")
             except Exception:
@@ -911,8 +927,6 @@ def _worker(session, settings, rrs_enabled):
 # ─── Start / stop the worker ──────────────────────────────────────────────────
 
 def _activate_monitor(session, event):
-    import multiprocessing
-
     if _is_worker_running(session):
         print(f"\n  {C.WA}Monitor is already running.{C.R}")
         enter()
@@ -971,9 +985,14 @@ def _pick_city(session):
         print(f"  {C.WA}No cities found.{C.R}")
         return None, None
     print("")
+    print(f"  {'#':<4} {'City name':<22} {'Island':<9} {'Resource'}")
+    print(f"  {'-'*4} {'-'*22} {'-'*9} {'-'*10}")
     for i, cid in enumerate(ids, 1):
-        c = cities[cid]
-        print(f"  {C.B}({i}){C.R} {c['name']}")
+        c   = cities[cid]
+        x_c = c.get("islandX") or c.get("x", "?")
+        y_c = c.get("islandY") or c.get("y", "?")
+        tg  = _TRADEGOOD_LABEL.get(int(c.get("tradegood", 0) or 0), "")
+        print(f"  {C.B}({i}){C.R}  {c['name']:<22} [{x_c}:{y_c}]  {tg}")
     choice = read(min=1, max=len(ids), digit=True)
     cid = ids[choice - 1]
     return int(cities[cid]["id"]), cities[cid]["name"]
@@ -1052,6 +1071,9 @@ def _add_island(session):
     print(f"  {C.HI}Tip: choose the city closest to the target island for faster travel.{C.R}")
     origin_city_id, origin_city_name = _pick_city(session)
     if origin_city_id is None:
+        print(f"\n  {C.ER}No city available to send from. "
+              f"Wizard cancelled — nothing was added.{C.R}")
+        enter()
         return
 
     # ── Step 6: Extra resources ───────────────────────────────────────────────
@@ -1082,6 +1104,8 @@ def _add_island(session):
         while True:
             raw = read(msg=f"  {label}: ", empty=True, additionalValues=["'"])
             if raw == "'":
+                print(f"\n  {C.WA}Wizard cancelled — no island was added.{C.R}")
+                enter()
                 return
             if raw == "":
                 extras.append(0)
@@ -1246,12 +1270,10 @@ def _manage_single_island(session, row):
         print(f"  Post cooldown:    {row['post_cooldown_mins']} minutes")
 
         if row["last_checked"]:
-            import datetime
             lc = datetime.datetime.fromtimestamp(
                 float(row["last_checked"])).strftime("%H:%M:%S  %d/%m/%Y")
             print(f"  Last scanned:     {lc}")
         if row["last_sent"]:
-            import datetime
             ls = datetime.datetime.fromtimestamp(
                 float(row["last_sent"])).strftime("%H:%M:%S  %d/%m/%Y")
             print(f"  Last ship sent:   {ls}")
@@ -1332,6 +1354,22 @@ def _settings_screen(session):
     banner()
     _banner("Settings")
 
+    cur_int  = settings.get("interval_minutes", 30)
+    cur_jit  = settings.get("jitter_type", "small")
+    cur_cd   = settings.get("post_cooldown_mins", 20)
+    cur_nl   = settings.get("notif_level", "colonize")
+    cur_hb   = settings.get("heartbeat_hours", 0)
+    print(f"  {C.D}Current settings:{C.R}")
+    print(f"    Interval:       {cur_int} minute(s)")
+    print(f"    Jitter:         {cur_jit}")
+    print(f"    Cooldown:       {cur_cd} minute(s)")
+    print(f"    Notifications:  {cur_nl}")
+    print(f"    Heartbeat:      {cur_hb}h (0 = off)")
+    print(f"\n  {C.B}(1){C.R} Update settings")
+    print(f"  {C.B}(0){C.R} Back without changing\n")
+    if read(min=0, max=1, digit=True) == 0:
+        return
+
     # Check interval
     print(f"  {C.H}── Check Interval ──{C.R}\n")
     print(f"  {C.D}How often should the monitor scan all islands for open slots?{C.R}")
@@ -1392,6 +1430,9 @@ def _settings_screen(session):
 
     _save_settings(session, settings)
     print(f"\n  {C.OK}Settings saved.{C.R}")
+    if _is_worker_running(session):
+        print(f"  {C.HI}The monitor is currently running with the previous settings.{C.R}")
+        print(f"  {C.HI}Stop (o) and restart (s) from the main menu to apply changes.{C.R}")
     enter()
 
 
@@ -1421,10 +1462,16 @@ def _clear_all_islands(session):
         print(f"\n  {C.D}Watch list is already empty.{C.R}")
         enter()
         return
-    print(f"\n  {C.ER}This will permanently remove all {len(rows)} island(s) "
+    if _is_worker_running(session):
+        print(f"\n  {C.WA}Warning: the monitor is currently running.{C.R}")
+        print(f"  {C.WA}Stop it first with (o) before clearing, otherwise the{C.R}")
+        print(f"  {C.WA}worker process will keep running until its current scan ends.{C.R}")
+        print(f"  {C.WA}Continue anyway?{C.R}\n")
+    print(f"  {C.ER}This will permanently remove all {len(rows)} island(s) "
           f"from the watch list.{C.R}")
-    print(f"  Type {C.B}yes{C.R} to confirm:")
-    ans = read(msg="  > ", additionalValues=["yes", "Yes", "YES", "'"])
+    print(f"  Type {C.B}yes{C.R} to confirm, or press Enter to cancel:")
+    ans = read(msg="  > ", additionalValues=["yes", "Yes", "YES",
+                                             "no", "No", "NO", "n", "N", "y", "Y", ""])
     if str(ans).lower() != "yes":
         print("  Cancelled.")
         enter()
