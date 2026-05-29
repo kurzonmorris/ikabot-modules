@@ -38,7 +38,7 @@ except ImportError:
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-_VERSION       = "1.0.0"
+_VERSION       = "1.5.0"
 _MOD_TAG       = "IslandColonizeMonitor"
 
 _BASE_CITIZENS = 40
