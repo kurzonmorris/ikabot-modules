@@ -453,7 +453,7 @@ def _get_real_empty_slots(session, island_id, accept_premium):
 
 def _load_colonize_view(session, island_id, position=1):
     """Fetch colonize view to retrieve the action request token for a POST.
-    Not used for slot detection — use _get_real_empty_slots() for that."""
+    Not used for slot detection - use _get_real_empty_slots() for that."""
     url = (
         "view=colonize&islandId={}&position={}"
         "&backgroundView=island&currentIslandId={}"
@@ -493,7 +493,7 @@ def _get_ships(session, city_id):
         return 0
 
 def _check_origin_resources(session, row):
-    """Returns (ok, missing_lines). Checks resources only — gold not pre-checkable."""
+    """Returns (ok, missing_lines). Checks resources only - gold not pre-checkable."""
     try:
         html  = session.get(city_url + str(row["origin_city_id"]))
         city  = getCity(html)
@@ -625,7 +625,7 @@ def _jitter_secs(jitter_type):
     return 0
 
 
-# ─── Worker — colonize attempt ────────────────────────────────────────────────
+# ─── Worker - colonize attempt ────────────────────────────────────────────────
 
 def _attempt_colonize(session, row, pos, settings, notif_col, notif_err, rrs_enabled):
     """Try to colonize `pos`. Returns True if a ship was sent."""
@@ -640,7 +640,7 @@ def _attempt_colonize(session, row, pos, settings, notif_col, notif_err, rrs_ena
     if ships_avail < ships:
         setInfoSignal(
             session,
-            f"{label} — slot found but only {ships_avail}/{ships} ships available"
+            f"{label} - slot found but only {ships_avail}/{ships} ships available"
         )
         if notif_col:
             sendToBot(
@@ -651,7 +651,7 @@ def _attempt_colonize(session, row, pos, settings, notif_col, notif_err, rrs_ena
             )
         return False
 
-    # Resource check (warn only — gold cannot be pre-checked)
+    # Resource check (warn only - gold cannot be pre-checked)
     ok_res, missing = _check_origin_resources(session, row)
     if not ok_res and missing and notif_col:
         sendToBot(
@@ -659,27 +659,27 @@ def _attempt_colonize(session, row, pos, settings, notif_col, notif_err, rrs_ena
             f"Island Monitor: Slot found at {label} but resources may be "
             f"insufficient in {row['origin_city_name']}:\n"
             + "\n".join(missing)
-            + f"\nAttempting anyway — ensure {addThousandSeparator(_BASE_GOLD)} "
+            + f"\nAttempting anyway - ensure {addThousandSeparator(_BASE_GOLD)} "
               "gold is available in that city."
         )
 
     # Reserve resources via RRS so other modules don't consume them
     rids = _rrs_reserve_resources(session, row) if rrs_enabled else []
 
-    # Final slot check just before sending (uses island view — reliable occupancy)
-    setInfoSignal(session, f"{label} — confirming slot {pos} still open...")
+    # Final slot check just before sending (uses island view - reliable occupancy)
+    setInfoSignal(session, f"{label} - confirming slot {pos} still open...")
     valid2, _ = _get_real_empty_slots(
         session, row["island_id"], bool(row["accept_premium"])
     )
     if pos not in valid2:
         _rrs_release_list(session, rids)
-        setInfoSignal(session, f"{label} — slot {pos} no longer available")
+        setInfoSignal(session, f"{label} - slot {pos} no longer available")
         return False
 
     # Get action request from colonize view for this specific position
     ar2, _ = _load_colonize_view(session, row["island_id"], position=pos)
 
-    setInfoSignal(session, f"{label} — sending colonization to slot {pos}...")
+    setInfoSignal(session, f"{label} - sending colonization to slot {pos}...")
     ok, reason = _do_colonize(
         session, row["island_id"], pos, row["origin_city_id"], ar2,
         row["extra_wood"], row["extra_wine"], row["extra_marble"],
@@ -693,7 +693,7 @@ def _attempt_colonize(session, row, pos, settings, notif_col, notif_err, rrs_ena
         return True
 
     # ── First attempt failed: retry after 30 s ────────────────────────────────
-    setInfoSignal(session, f"{label} — colonize failed, retrying in 30 s...")
+    setInfoSignal(session, f"{label} - colonize failed, retrying in 30 s...")
     wait(30)
 
     valid3, _ = _get_real_empty_slots(
@@ -708,7 +708,7 @@ def _attempt_colonize(session, row, pos, settings, notif_col, notif_err, rrs_ena
             )
         return False
 
-    # Second attempt — fresh action request
+    # Second attempt - fresh action request
     ar3, _ = _load_colonize_view(session, row["island_id"], position=pos)
     rids2 = _rrs_reserve_resources(session, row) if rrs_enabled else []
     ok2, _ = _do_colonize(
@@ -757,7 +757,7 @@ def _record_colonize_sent(session, row, pos, ships, settings, notif_col,
         )
 
 
-# ─── Worker — per-island processing ──────────────────────────────────────────
+# ─── Worker - per-island processing ──────────────────────────────────────────
 
 def _process_island(session, row, settings, notif_col, notif_err, rrs_enabled):
     """Scan one island and send colonization ships if slots are available."""
@@ -769,7 +769,7 @@ def _process_island(session, row, settings, notif_col, notif_err, rrs_enabled):
         remaining_m = max(1, int((float(row["cooldown_until"]) - now) / 60))
         setInfoSignal(
             session,
-            f"[{row['x']}:{row['y']}] In cooldown — {remaining_m}m remaining"
+            f"[{row['x']}:{row['y']}] In cooldown - {remaining_m}m remaining"
         )
         return
 
@@ -793,11 +793,11 @@ def _process_island(session, row, settings, notif_col, notif_err, rrs_enabled):
         label = f"[{row['x']}:{row['y']}] {row['island_name']}"
         prem_note = (
             f" ({len(premium)} premium)" if premium and bool(row["accept_premium"])
-            else f" ({len(premium)} premium — skipped)" if premium else ""
+            else f" ({len(premium)} premium - skipped)" if premium else ""
         )
         setInfoSignal(
             session,
-            f"{label} — {len(available)} slot(s) open{prem_note}, "
+            f"{label} - {len(available)} slot(s) open{prem_note}, "
             f"need {remaining} more"
         )
 
@@ -858,7 +858,7 @@ def _worker(session, settings, rrs_enabled):
         while not _stop_requested(session):
             _worker_lock_refresh(session)
 
-            # Re-read CSV every cycle — picks up manual edits
+            # Re-read CSV every cycle - picks up manual edits
             rows        = csv_load(session)
             active_rows = sorted(
                 [r for r in rows if r["status"] == STATUS_ACTIVE],
@@ -869,7 +869,7 @@ def _worker(session, settings, rrs_enabled):
 
             setInfoSignal(
                 session,
-                f"Island Monitor — watching {total_active} island(s), "
+                f"Island Monitor - watching {total_active} island(s), "
                 f"{total_sent} colonization(s) sent total"
             )
 
@@ -877,7 +877,7 @@ def _worker(session, settings, rrs_enabled):
             now = time.time()
             if notif_heartbeat and hb_secs > 0 and now - last_heartbeat >= hb_secs:
                 detail = "\n".join(
-                    f"  [{r['x']}:{r['y']}] {r['island_name']} — "
+                    f"  [{r['x']}:{r['y']}] {r['island_name']} - "
                     f"{r['cities_sent']}/{r['max_cities']} planted"
                     for r in active_rows
                 ) or "  (none)"
@@ -897,7 +897,7 @@ def _worker(session, settings, rrs_enabled):
                 _process_island(session, row, settings, notif_col, notif_err,
                                 rrs_enabled)
 
-            # No wait on first run — check immediately, then start the interval
+            # No wait on first run - check immediately, then start the interval
             if not first_run:
                 interval_secs = settings.get("interval_minutes", 30) * 60
                 jitter_secs   = _jitter_secs(settings.get("jitter_type", "none"))
@@ -906,7 +906,7 @@ def _worker(session, settings, rrs_enabled):
 
                 setInfoSignal(
                     session,
-                    f"Island Monitor — next check in ~{wait_m} minute(s)"
+                    f"Island Monitor - next check in ~{wait_m} minute(s)"
                 )
                 wait(total_wait)
 
@@ -954,9 +954,9 @@ def _activate_monitor(session, event):
     proc.start()
 
     event.set()
-    print(f"\n  {C.OK}Monitor started — watching {len(active)} island(s).{C.R}")
+    print(f"\n  {C.OK}Monitor started - watching {len(active)} island(s).{C.R}")
     if rrs_enabled:
-        print(f"  {C.HI}RRS detected — resources will be reserved before each "
+        print(f"  {C.HI}RRS detected - resources will be reserved before each "
               f"colonization attempt.{C.R}")
     interval = settings.get("interval_minutes", 30)
     jitter   = settings.get("jitter_type", "none")
@@ -1004,7 +1004,7 @@ def _add_island(session):
 
     # ── Step 1: Coordinates ───────────────────────────────────────────────────
     banner()
-    _banner("Add Island  —  Step 1 of 7: Island Coordinates")
+    _banner("Add Island  -  Step 1 of 7: Island Coordinates")
     print(f"  {C.D}Enter the world map coordinates of the island you want to monitor.{C.R}\n")
     x = read(min=0, max=100, digit=True, msg="  X coordinate: ")
     y = read(min=0, max=100, digit=True, msg="  Y coordinate: ")
@@ -1020,7 +1020,7 @@ def _add_island(session):
     tg          = int(island.get("tradegood", 0))
     island_name = island.get("name", f"Island {island_id}")
     tg_label    = _TRADEGOOD_LABEL.get(tg, "Unknown")
-    print(f"\n  {C.OK}Found: {island_name} [{x}:{y}] — {tg_label} island (ID {island_id}){C.R}")
+    print(f"\n  {C.OK}Found: {island_name} [{x}:{y}] - {tg_label} island (ID {island_id}){C.R}")
 
     existing = csv_load(session)
     for r in existing:
@@ -1032,18 +1032,18 @@ def _add_island(session):
 
     # ── Step 2: Priority ──────────────────────────────────────────────────────
     banner()
-    _banner("Add Island  —  Step 2 of 7: Priority")
-    print(f"  Island: {C.CY}{island_name} [{x}:{y}] — {tg_label}{C.R}\n")
+    _banner("Add Island  -  Step 2 of 7: Priority")
+    print(f"  Island: {C.CY}{island_name} [{x}:{y}] - {tg_label}{C.R}\n")
     print(f"  {C.D}Higher-priority islands are checked first in each scan cycle.{C.R}",)
     print(f"  {C.D}Use High for islands you want to colonize as soon as possible.{C.R}\n")
-    print(f"  {C.B}(1){C.R} High   — checked first every cycle")
-    print(f"  {C.B}(2){C.R} Medium — checked after High islands")
-    print(f"  {C.B}(3){C.R} Low    — checked last")
+    print(f"  {C.B}(1){C.R} High   - checked first every cycle")
+    print(f"  {C.B}(2){C.R} Medium - checked after High islands")
+    print(f"  {C.B}(3){C.R} Low    - checked last")
     priority = read(min=1, max=3, digit=True)
 
     # ── Step 3: Cities to plant ───────────────────────────────────────────────
     banner()
-    _banner("Add Island  —  Step 3 of 7: How Many Cities to Plant")
+    _banner("Add Island  -  Step 3 of 7: How Many Cities to Plant")
     print(f"  Island: {C.CY}{island_name} [{x}:{y}]{C.R}\n")
     print(f"  {C.D}How many of this island's city slots do you want to colonize?{C.R}")
     print(f"  {C.D}The monitor keeps watching until this many ships have been sent,{C.R}")
@@ -1053,32 +1053,32 @@ def _add_island(session):
 
     # ── Step 4: Premium spots ─────────────────────────────────────────────────
     banner()
-    _banner("Add Island  —  Step 4 of 7: Premium Spots")
+    _banner("Add Island  -  Step 4 of 7: Premium Spots")
     print(f"  Island: {C.CY}{island_name} [{x}:{y}]{C.R}\n")
     print(f"  {C.D}Some island slots are marked as 'premium' positions.{C.R}")
     print(f"  {C.D}Colonizing a premium slot costs Ambrosia (real money) or a special item.{C.R}")
     print(f"  {C.D}Free slots have no extra cost.{C.R}\n")
-    print(f"  {C.B}(1){C.R} Free slots only — {C.OK}safe, no Ambrosia spent{C.R}")
-    print(f"  {C.B}(2){C.R} Accept premium slots — {C.WA}WARNING: costs Ambrosia or an item{C.R}")
+    print(f"  {C.B}(1){C.R} Free slots only - {C.OK}safe, no Ambrosia spent{C.R}")
+    print(f"  {C.B}(2){C.R} Accept premium slots - {C.WA}WARNING: costs Ambrosia or an item{C.R}")
     prem_choice    = read(min=1, max=2, digit=True)
     accept_premium = 1 if prem_choice == 2 else 0
 
     # ── Step 5: Origin city ───────────────────────────────────────────────────
     banner()
-    _banner("Add Island  —  Step 5 of 7: Origin City")
+    _banner("Add Island  -  Step 5 of 7: Origin City")
     print(f"  Island: {C.CY}{island_name} [{x}:{y}]{C.R}\n")
     print(f"  {C.D}Which of your cities will send the colonization ships to this island?{C.R}")
     print(f"  {C.HI}Tip: choose the city closest to the target island for faster travel.{C.R}")
     origin_city_id, origin_city_name = _pick_city(session)
     if origin_city_id is None:
         print(f"\n  {C.ER}No city available to send from. "
-              f"Wizard cancelled — nothing was added.{C.R}")
+              f"Wizard cancelled - nothing was added.{C.R}")
         enter()
         return
 
     # ── Step 6: Extra resources ───────────────────────────────────────────────
     banner()
-    _banner("Add Island  —  Step 6 of 7: Extra Resources")
+    _banner("Add Island  -  Step 6 of 7: Extra Resources")
     print(f"  Island: {C.CY}{island_name} [{x}:{y}]{C.R}\n")
     print(f"  {C.D}Every colonization ship always carries these mandatory items:{C.R}")
     print(f"    {C.B}Wood:{C.R}     {addThousandSeparator(_BASE_WOOD)}  (base requirement)")
@@ -1104,7 +1104,7 @@ def _add_island(session):
         while True:
             raw = read(msg=f"  {label}: ", empty=True, additionalValues=["'"])
             if raw == "'":
-                print(f"\n  {C.WA}Wizard cancelled — no island was added.{C.R}")
+                print(f"\n  {C.WA}Wizard cancelled - no island was added.{C.R}")
                 enter()
                 return
             if raw == "":
@@ -1127,7 +1127,7 @@ def _add_island(session):
 
     # ── Step 7: Post-colonize cooldown ────────────────────────────────────────
     banner()
-    _banner("Add Island  —  Step 7 of 7: Cooldown After Sending")
+    _banner("Add Island  -  Step 7 of 7: Cooldown After Sending")
     print(f"  Island: {C.CY}{island_name} [{x}:{y}]{C.R}\n")
     print(f"  {C.D}After a colonization ship is sent to this island, the monitor will{C.R}")
     print(f"  {C.D}skip it for this many minutes before scanning again.{C.R}")
@@ -1142,7 +1142,7 @@ def _add_island(session):
 
     # ── Confirmation ──────────────────────────────────────────────────────────
     banner()
-    _banner("Add Island  —  Confirm")
+    _banner("Add Island  -  Confirm")
 
     res_parts = []
     for lbl, val in zip(
@@ -1153,7 +1153,7 @@ def _add_island(session):
             res_parts.append(f"{lbl}: +{addThousandSeparator(val)}")
     res_summary = ", ".join(res_parts) if res_parts else "None (base requirement only)"
 
-    print(f"  {C.B}Island:{C.R}            {island_name} [{x}:{y}] — {tg_label}")
+    print(f"  {C.B}Island:{C.R}            {island_name} [{x}:{y}] - {tg_label}")
     print(f"  {C.B}Priority:{C.R}          {_PRIORITY_LABEL[priority]}")
     print(f"  {C.B}Cities to plant:{C.R}   {max_cities}")
     print(f"  {C.B}Premium slots:{C.R}     "
@@ -1164,7 +1164,7 @@ def _add_island(session):
     print(f"  {C.B}Extra resources:{C.R}   {res_summary}")
     print(f"  {C.B}Ships per send:{C.R}    {ships_total}")
     print(f"  {C.B}Post cooldown:{C.R}     {post_cooldown} minutes")
-    print(f"\n  {C.B}(1){C.R} Confirm — add this island to the watch list")
+    print(f"\n  {C.B}(1){C.R} Confirm - add this island to the watch list")
     print(f"  {C.B}(0){C.R} Cancel")
     if read(min=0, max=1, digit=True) == 0:
         return
@@ -1287,7 +1287,7 @@ def _manage_single_island(session, row):
         print(f"\n  {C.B}(1){C.R} {pause_label} monitoring this island")
         print(f"  {C.B}(2){C.R} Change priority")
         print(f"  {C.B}(3){C.R} Change origin city")
-        print(f"  {C.B}(4){C.R} Reset planted counter — re-arm this island")
+        print(f"  {C.B}(4){C.R} Reset planted counter - re-arm this island")
         print(f"  {C.B}(5){C.R} Remove from watch list")
         print(f"  {C.B}(0){C.R} Back")
         choice = read(min=0, max=5, digit=True)
@@ -1373,7 +1373,7 @@ def _settings_screen(session):
     # Check interval
     print(f"  {C.H}── Check Interval ──{C.R}\n")
     print(f"  {C.D}How often should the monitor scan all islands for open slots?{C.R}")
-    print(f"  {C.D}Enter hours AND minutes — the values are added together.{C.R}")
+    print(f"  {C.D}Enter hours AND minutes - the values are added together.{C.R}")
     print(f"  {C.WA}  Example: 1 hour + 30 min = checks every 1 hour 30 minutes.{C.R}")
     print(f"  {C.WA}  Example: 0 hours + 30 min = checks every 30 minutes.{C.R}\n")
     h = read(min=0, max=24, digit=True, msg="  Hours   (0–24):  ")
@@ -1381,17 +1381,17 @@ def _settings_screen(session):
     total_m = h * 60 + m
     if total_m < 1:
         total_m = 30
-        print(f"  {C.HI}Minimum 1 minute — defaulting to 30 minutes.{C.R}")
+        print(f"  {C.HI}Minimum 1 minute - defaulting to 30 minutes.{C.R}")
     settings["interval_minutes"] = total_m
     print(f"  → Islands will be scanned every {total_m} minute(s).")
 
     # Jitter
     print(f"\n  {C.H}── Random Jitter ──{C.R}\n")
     print(f"  {C.D}Adds a random extra delay to the check interval each cycle.{C.R}")
-    print(f"  {C.D}Makes the bot's scan pattern harder to predict — recommended.{C.R}\n")
-    print(f"  {C.B}(1){C.R} Small jitter — adds 1 to 5 minutes randomly each cycle")
-    print(f"  {C.B}(2){C.R} Large jitter — adds 30 to 60 minutes randomly each cycle")
-    print(f"  {C.B}(3){C.R} No jitter    — scans on the exact interval every time")
+    print(f"  {C.D}Makes the bot's scan pattern harder to predict - recommended.{C.R}\n")
+    print(f"  {C.B}(1){C.R} Small jitter - adds 1 to 5 minutes randomly each cycle")
+    print(f"  {C.B}(2){C.R} Large jitter - adds 30 to 60 minutes randomly each cycle")
+    print(f"  {C.B}(3){C.R} No jitter    - scans on the exact interval every time")
     j = read(min=1, max=3, digit=True)
     settings["jitter_type"] = {1: "small", 2: "large", 3: "none"}[j]
 
@@ -1411,10 +1411,10 @@ def _settings_screen(session):
     # Notification level
     print(f"\n  {C.H}── Notifications ──{C.R}\n")
     print(f"  {C.D}When should notifications be sent to your configured apps?{C.R}\n")
-    print(f"  {C.B}(1){C.R} All events   — colonization sent, heartbeat status, and errors")
-    print(f"  {C.B}(2){C.R} Colonize + errors only — silent unless a city is sent or "
+    print(f"  {C.B}(1){C.R} All events   - colonization sent, heartbeat status, and errors")
+    print(f"  {C.B}(2){C.R} Colonize + errors only - silent unless a city is sent or "
           f"something breaks")
-    print(f"  {C.B}(3){C.R} Errors only  — completely silent unless something goes wrong")
+    print(f"  {C.B}(3){C.R} Errors only  - completely silent unless something goes wrong")
     nl = read(min=1, max=3, digit=True)
     settings["notif_level"] = {1: "all", 2: "colonize", 3: "errors"}[nl]
 
@@ -1422,8 +1422,8 @@ def _settings_screen(session):
     print(f"\n  {C.H}── Heartbeat Notifications ──{C.R}\n")
     print(f"  {C.D}Sends a regular 'still running' message to your notification app.{C.R}")
     print(f"  {C.D}If the messages stop arriving, the monitor may have crashed.{C.R}")
-    print(f"  {C.D}This is optional — set to 0 to disable.{C.R}\n")
-    print(f"  {C.B}(0){C.R} Disabled — no heartbeat messages")
+    print(f"  {C.D}This is optional - set to 0 to disable.{C.R}\n")
+    print(f"  {C.B}(0){C.R} Disabled - no heartbeat messages")
     print(f"  {C.B}(N){C.R} Send a heartbeat every N hours (e.g. 1, 2, 4, 6, 12, 24)")
     hb = read(min=0, max=48, digit=True, msg="  Hours between heartbeats (0 = off): ")
     settings["heartbeat_hours"] = hb
