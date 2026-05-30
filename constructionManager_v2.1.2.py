@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 import csv
 import glob
@@ -943,6 +943,25 @@ def _add_to_queue(session):
         f"{bcolors.ENDC}\n"
     )
 
+    # ---- session-default transport mode ----
+    print(
+        "  Default transport mode for this add session:\n"
+        "  (1) jit  — ship resources just in time for each level [default]\n"
+        "  (2) bulk — ship all pending costs upfront\n"
+        "  (3) none — rely on existing stock only"
+    )
+    sess_tm = read(
+        min=1, max=3, digit=True, empty=True, additionalValues=["'"],
+    )
+    if sess_tm == "'":
+        print("\n  Exited via '. Nothing was added.")
+        enter()
+        return
+    session_default_mode = {1: "jit", 2: "bulk", 3: "none", "": "jit"}.get(
+        sess_tm, "jit"
+    )
+    print(f"  Session default: {session_default_mode}\n")
+
     positions     = city.get("position", [])
     max_slot      = len(positions) - 1
     slot_targets  = 0          # distinct slot-target picks this session
@@ -954,10 +973,10 @@ def _add_to_queue(session):
         remaining = ADD_SESSION_SLOT_CAP - slot_targets
         print(
             f"  Enter slot number (0–{max_slot})  |  S=re-show  |  "
-            f"'=exit  |  Enter=finish   [{remaining} left]:"
+            f"'=exit  |  Enter/d/done=finish   [{remaining} left]:"
         )
         raw = read(empty=True).strip()
-        if raw == "":
+        if raw == "" or raw.lower() in ("d", "done"):
             break
         if raw == "'":
             exit_to_menu = True
@@ -1191,10 +1210,11 @@ def _add_to_queue(session):
 
         # ---- transport mode ----
         print(
-            "\n  Transport mode for this slot-target:\n"
-            "  (1) jit  — ship resources just in time for each level [default]\n"
-            "  (2) bulk — ship all pending costs upfront\n"
-            "  (3) none — rely on existing stock only"
+            f"\n  Transport mode for this slot-target "
+            f"(Enter = session default '{session_default_mode}'):\n"
+            f"  (1) jit  — ship resources just in time for each level\n"
+            f"  (2) bulk — ship all pending costs upfront\n"
+            f"  (3) none — rely on existing stock only"
         )
         tm_choice = read(
             min=1, max=3, digit=True, empty=True,
@@ -1205,9 +1225,9 @@ def _add_to_queue(session):
             break
         if tm_choice == "=":
             continue
-        transport_mode = {1: "jit", 2: "bulk", 3: "none", "": "jit"}.get(
-            tm_choice, "jit"
-        )
+        transport_mode = {
+            1: "jit", 2: "bulk", 3: "none", "": session_default_mode,
+        }.get(tm_choice, session_default_mode)
 
         # ---- build row dicts (qid placeholder 0; assigned by _csv_insert_at) ----
         now_ts = int(time.time())
@@ -1279,16 +1299,6 @@ def _add_to_queue(session):
 
         if slot_targets >= ADD_SESSION_SLOT_CAP:
             print(f"\n  Slot-target cap ({ADD_SESSION_SLOT_CAP}) reached for this session.")
-            break
-
-        print("\n  Add another slot-target? [Y/n]   '=exit to main menu")
-        again = read(
-            values=["y", "Y", "n", "N", "", "'"], default="Y"
-        )
-        if again == "'":
-            exit_to_menu = True
-            break
-        if again.lower() == "n":
             break
 
     if not added_ids:
