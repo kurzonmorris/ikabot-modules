@@ -437,6 +437,7 @@ SCHEDULE_COLUMNS = [
     "bulk_csv_path",
     "bulk_run_column",
     "ap_max_wait_minutes",
+    "min_shipment_threshold",
     "interval_hours",
     "notif_level",
     "status",
@@ -451,6 +452,7 @@ SCHEDULE_COLUMNS = [
 SCHEDULE_INT_COLS = {
     "schedule_id", "interval_hours", "total_shipments",
     "created_at", "schema_version", "ap_max_wait_minutes",
+    "min_shipment_threshold",
 }
 SCHEDULE_INT_OR_BLANK_COLS = {"last_run", "next_run"}
 SCHEDULE_JSON_COLS = {
@@ -765,7 +767,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
                        dest_targets=None, source_reserves=None,
                        dest_minimums=None, bulk_csv_path="",
                        bulk_run_column="", ap_max_wait_minutes=120,
-                       interval_hours=0,
+                       min_shipment_threshold=0, interval_hours=0,
                        notif_level="none", status="pending",
                        notes=""):
     now_ts = int(time.time())
@@ -783,6 +785,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "bulk_csv_path":   bulk_csv_path,
         "bulk_run_column": bulk_run_column,
         "ap_max_wait_minutes": ap_max_wait_minutes,
+        "min_shipment_threshold": min_shipment_threshold,
         "interval_hours":  interval_hours,
         "notif_level":     notif_level,
         "status":          status,
@@ -900,7 +903,8 @@ def wait_for_action_points(session, origin_city_id, status_prefix="",
 
 def send_shipment(session, route, useFreighters, notif_config, log_path,
                   mode_name, dest_island_coords="", dest_player="",
-                  max_lock_retries=3, next_shipment_str=None):
+                  max_lock_retries=3, next_shipment_str=None,
+                  min_threshold=0):
     origin_city = route[0]
     dest_city = route[1]
     resources = list(route[3:])
@@ -908,7 +912,15 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
     ship_type_name = "freighters" if useFreighters else "merchant ships"
     prefix = f"{origin_city['name']} -> {dest_city['name']} | "
 
-    result = {"success": False, "error": None, "ships_used": 0, "no_ap": False}
+    result = {"success": False, "error": None, "ships_used": 0,
+              "no_ap": False, "below_threshold": False}
+
+    if min_threshold > 0 and total_cargo < min_threshold:
+        result["below_threshold"] = True
+        result["error"] = (
+            f"Below minimum ({total_cargo:,} < {min_threshold:,})"
+        )
+        return result
 
     # 1. Wait for ships (with timeout)
     available = wait_for_ships(session, useFreighters, prefix)
@@ -1607,84 +1619,86 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
         print_module_banner("Shipment Log Setup")
         log_path = get_log_path(session)
 
-        print_module_banner()
-        print(f"  {_scheduler_status_line(session)}")
-        worker_running = _is_transport_worker_running(session)
-        if not worker_running:
-            counts = transport_csv_count_by_status(session)
-            if counts.get("active", 0) + counts.get("pending", 0) > 0:
-                print(f"  {C.WARN}Schedules exist but the scheduler is stopped."
-                      f" Press (s) to start it.{C.RESET}")
-        print(f"\n  {C.BOLD}(s){C.RESET} Start scheduler   "
-              f"{C.BOLD}(o){C.RESET} Stop scheduler   "
-              f"{C.BOLD}(x){C.RESET} Clear all schedules")
-        print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
-              f" to run it.{C.RESET}")
+        while True:
+            print_module_banner()
+            print(f"  {_scheduler_status_line(session)}")
+            worker_running = _is_transport_worker_running(session)
+            if not worker_running:
+                counts = transport_csv_count_by_status(session)
+                if counts.get("active", 0) + counts.get("pending", 0) > 0:
+                    print(f"  {C.WARN}Schedules exist but the scheduler is stopped."
+                          f" Press (s) to start it.{C.RESET}")
+            print(f"\n  {C.BOLD}(s){C.RESET} Start scheduler   "
+                  f"{C.BOLD}(o){C.RESET} Stop scheduler   "
+                  f"{C.BOLD}(x){C.RESET} Clear all schedules")
+            print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
+                  f" to run it.{C.RESET}")
 
-        print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Consolidate")
-        print(f"  {C.DIM}    Collect resources from multiple cities into one destination.{C.RESET}")
-        print(f"  {C.BOLD}(2){C.RESET} Distribute")
-        print(f"  {C.DIM}    Send resources from one city out to several destinations.{C.RESET}")
-        print(f"  {C.BOLD}(3){C.RESET} Even Distribution")
-        print(f"  {C.DIM}    Spread a resource evenly across selected cities so each has the same.{C.RESET}")
-        print(f"  {C.BOLD}(4){C.RESET} Auto Send")
-        print(f"  {C.DIM}    Request a total amount — the system gathers it from all your cities.{C.RESET}")
-        print(f"  {C.BOLD}(5){C.RESET} Bulk Distribution")
-        print(f"  {C.DIM}    Send to many cities at once using a CSV spreadsheet file.{C.RESET}")
-        print(f"  {C.BOLD}(6){C.RESET} Keep Topped Up")
-        print(f"  {C.DIM}    Automatically refill cities when resources drop below a target.{C.RESET}")
+            print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Consolidate")
+            print(f"  {C.DIM}    Collect resources from multiple cities into one destination.{C.RESET}")
+            print(f"  {C.BOLD}(2){C.RESET} Distribute")
+            print(f"  {C.DIM}    Send resources from one city out to several destinations.{C.RESET}")
+            print(f"  {C.BOLD}(3){C.RESET} Even Distribution")
+            print(f"  {C.DIM}    Spread a resource evenly across selected cities so each has the same.{C.RESET}")
+            print(f"  {C.BOLD}(4){C.RESET} Auto Send")
+            print(f"  {C.DIM}    Request a total amount — the system gathers it from all your cities.{C.RESET}")
+            print(f"  {C.BOLD}(5){C.RESET} Bulk Distribution")
+            print(f"  {C.DIM}    Send to many cities at once using a CSV spreadsheet file.{C.RESET}")
+            print(f"  {C.BOLD}(6){C.RESET} Keep Topped Up")
+            print(f"  {C.DIM}    Automatically refill cities when resources drop below a target.{C.RESET}")
 
-        print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
-        print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
-        print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
-        print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
+            print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
+            print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
+            print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
+            print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
 
-        shipping_mode = read(min=1, max=7, digit=True,
-                             additionalValues=["'", "s", "S", "o", "O",
-                                                "x", "X"])
-        if shipping_mode == "'":
-            event.set()
+            shipping_mode = read(min=1, max=7, digit=True,
+                                 additionalValues=["'", "s", "S", "o", "O",
+                                                    "x", "X"])
+            if shipping_mode == "'":
+                event.set()
+                return
+
+            if isinstance(shipping_mode, str):
+                letter = shipping_mode.lower()
+                if letter == "s":
+                    _activate_transport_worker(session, event)
+                    return
+                elif letter == "o":
+                    _stop_transport_worker(session)
+                    continue
+                elif letter == "x":
+                    _clear_all_schedules(session)
+                    continue
+
+            if shipping_mode == 7:
+                manage_schedules_menu(session, event, telegram_enabled,
+                                      log_path)
+                continue
+
+            if shipping_mode == 1:
+                consolidateMode(session, event, stdin_fd, predetermined_input,
+                                telegram_enabled, log_path)
+            elif shipping_mode == 2:
+                distributeMode(session, event, stdin_fd, predetermined_input,
+                               telegram_enabled, log_path)
+            elif shipping_mode == 3:
+                evenDistributionMode(session, event, stdin_fd,
+                                     predetermined_input, telegram_enabled,
+                                     log_path)
+            elif shipping_mode == 4:
+                autoSendMode(session, event, stdin_fd, predetermined_input,
+                             telegram_enabled, log_path)
+            elif shipping_mode == 5:
+                bulkDistributionMode(session, event, stdin_fd,
+                                     predetermined_input, telegram_enabled,
+                                     log_path)
+            elif shipping_mode == 6:
+                topUpMode(session, event, stdin_fd,
+                          predetermined_input, telegram_enabled,
+                          log_path)
             return
-
-        if isinstance(shipping_mode, str):
-            letter = shipping_mode.lower()
-            if letter == "s":
-                _activate_transport_worker(session, event)
-                return
-            elif letter == "o":
-                _stop_transport_worker(session)
-                event.set()
-                return
-            elif letter == "x":
-                _clear_all_schedules(session)
-                event.set()
-                return
-
-        if shipping_mode == 1:
-            consolidateMode(session, event, stdin_fd, predetermined_input,
-                            telegram_enabled, log_path)
-        elif shipping_mode == 2:
-            distributeMode(session, event, stdin_fd, predetermined_input,
-                           telegram_enabled, log_path)
-        elif shipping_mode == 3:
-            evenDistributionMode(session, event, stdin_fd,
-                                 predetermined_input, telegram_enabled,
-                                 log_path)
-        elif shipping_mode == 4:
-            autoSendMode(session, event, stdin_fd, predetermined_input,
-                         telegram_enabled, log_path)
-        elif shipping_mode == 5:
-            bulkDistributionMode(session, event, stdin_fd,
-                                 predetermined_input, telegram_enabled,
-                                 log_path)
-        elif shipping_mode == 6:
-            topUpMode(session, event, stdin_fd,
-                      predetermined_input, telegram_enabled,
-                      log_path)
-        elif shipping_mode == 7:
-            manage_schedules_menu(session, event, telegram_enabled,
-                                  log_path)
 
     except KeyboardInterrupt:
         event.set()
@@ -1956,6 +1970,8 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                     "resources": to_send,
                 })
 
+        min_threshold = 0
+
         # Final confirmation with dry-run option
         while True:
             print_module_banner("Consolidate — Summary")
@@ -1969,6 +1985,8 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
             int_label = "One-time" if interval_hours == 0 else f"Every {interval_hours}h"
             print(f"  {C.BOLD}Interval:{C.RESET}    {int_label}")
+            if min_threshold > 0:
+                print(f"  {C.BOLD}Min ship:{C.RESET}    {min_threshold:,} total resources")
             print(f"  {C.BOLD}Total:{C.RESET}       {C.OK}{addThousandSeparator(sum(total_send))}{C.RESET} resources")
             if space_warnings:
                 print(f"\n  {C.WARN}Some amounts reduced (warehouse space):{C.RESET}")
@@ -1977,11 +1995,27 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             print("")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
                   f"{C.CYAN}(D){C.RESET} Dry run preview  "
+                  f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
-            rta = read(values=["y", "Y", "n", "N", "d", "D", ""])
+            rta = read(values=["y", "Y", "n", "N", "d", "D", "t", "T", ""])
             if rta.lower() == "n":
                 event.set()
                 return
+            if rta.lower() == "t":
+                print(f"\n  Current minimum: "
+                      f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
+                print("  Minimum total resources per shipment (0=off):")
+                t_input = read(min=0, digit=True, additionalValues=["'"])
+                if t_input == "'":
+                    continue
+                min_threshold = int(t_input)
+                if min_threshold > 0:
+                    print(f"  {C.OK}Shipments below {min_threshold:,} "
+                          f"will be skipped{C.RESET}")
+                else:
+                    print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
+                enter()
+                continue
             if rta.lower() == "d":
                 run_dry_preview(preview_routes, "Consolidate")
                 print("Press Enter to continue...")
@@ -2005,6 +2039,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         resource_config=resource_config,
         send_mode="keep" if send_mode == 1 else "send",
         dest_minimums=dest_minimums or [0, 0, 0, 0, 0],
+        min_shipment_threshold=min_threshold,
         interval_hours=interval_hours,
         notif_level=notif_config.get("level", "none"),
         notes=f"{src_names} -> {destination_city['name']}",
@@ -2112,6 +2147,8 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
                 "resources": resource_config,
             })
 
+        min_threshold = 0
+
         while True:
             print_module_banner("Distribute — Summary")
             ship_label = "Freighters" if useFreighters else "Merchant ships"
@@ -2122,14 +2159,32 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
                 print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
             int_label = "One-time" if interval_hours == 0 else f"Every {interval_hours}h"
             print(f"  {C.BOLD}Interval:{C.RESET}      {int_label}")
+            if min_threshold > 0:
+                print(f"  {C.BOLD}Min ship:{C.RESET}      {min_threshold:,} total resources")
             print(f"  {C.BOLD}Total:{C.RESET}         {C.OK}{addThousandSeparator(grand)}{C.RESET} resources\n")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
                   f"{C.CYAN}(D){C.RESET} Dry run preview  "
+                  f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
-            rta = read(values=["y", "Y", "n", "N", "d", "D", ""])
+            rta = read(values=["y", "Y", "n", "N", "d", "D", "t", "T", ""])
             if rta.lower() == "n":
                 event.set()
                 return
+            if rta.lower() == "t":
+                print(f"\n  Current minimum: "
+                      f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
+                print("  Minimum total resources per shipment (0=off):")
+                t_input = read(min=0, digit=True, additionalValues=["'"])
+                if t_input == "'":
+                    continue
+                min_threshold = int(t_input)
+                if min_threshold > 0:
+                    print(f"  {C.OK}Shipments below {min_threshold:,} "
+                          f"will be skipped{C.RESET}")
+                else:
+                    print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
+                enter()
+                continue
             if rta.lower() == "d":
                 run_dry_preview(preview_routes, "Distribute")
                 print("Press Enter to continue...")
@@ -2152,6 +2207,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         dest_city_ids=[str(c["id"]) for c in destination_cities],
         resource_config=resource_config,
         dest_minimums=dest_minimums or [0, 0, 0, 0, 0],
+        min_shipment_threshold=min_threshold,
         interval_hours=interval_hours,
         notif_level=notif_config.get("level", "none"),
         notes=f"{origin_city['name']} -> {dest_names[:30]}",
@@ -2290,16 +2346,36 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
             event.set()
             return
 
+        min_threshold = 0
+
         # Confirmation with dry run
         while True:
             print(f"\n  {C.BOLD}{len(preview_routes)} shipment(s) planned.{C.RESET}")
+            if min_threshold > 0:
+                print(f"  {C.BOLD}Min ship:{C.RESET} {min_threshold:,} total resources")
             print(f"  {C.OK}(Y){C.RESET} Confirm — start balancing")
             print(f"  {C.CYAN}(D){C.RESET} Dry run — preview shipments")
+            print(f"  {C.CYAN}(T){C.RESET} Min shipment")
             print(f"  {C.WARN}(N){C.RESET} Cancel")
-            choice = read(values=["y", "Y", "n", "N", "d", "D", ""])
+            choice = read(values=["y", "Y", "n", "N", "d", "D", "t", "T", ""])
             if choice.lower() == "n":
                 event.set()
                 return
+            if choice.lower() == "t":
+                print(f"\n  Current minimum: "
+                      f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
+                print("  Minimum total resources per shipment (0=off):")
+                t_input = read(min=0, digit=True, additionalValues=["'"])
+                if t_input == "'":
+                    continue
+                min_threshold = int(t_input)
+                if min_threshold > 0:
+                    print(f"  {C.OK}Shipments below {min_threshold:,} "
+                          f"will be skipped{C.RESET}")
+                else:
+                    print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
+                enter()
+                continue
             if choice.lower() == "d":
                 run_dry_preview(preview_routes, "Even Distribution")
                 print("Press Enter to continue...")
@@ -2325,6 +2401,7 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         ship_type="f" if useFreighters else "m",
         source_city_ids=city_ids_for_balance,
         resource_config=resource_indices,
+        min_shipment_threshold=min_threshold,
         interval_hours=0,
         notif_level=notif_config.get("level", "none"),
         notes=f"Balance {selected_names}",
@@ -2352,6 +2429,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
             event.set()
             return
         useFreighters = (shiptype == 2)
+        min_threshold = 0
 
         while True:
             print_module_banner("Auto Send — Destination")
@@ -2455,7 +2533,6 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                 elif choice == "E":
                     break
                 elif choice == "D":
-                    # Dry run
                     preview = []
                     for route in routes:
                         preview.append({
@@ -2466,6 +2543,20 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                     run_dry_preview(preview, "Auto Send")
                     print("Press Enter to continue...")
                     enter()
+                    continue
+                elif choice == "T":
+                    print(f"\n  Current minimum: "
+                          f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
+                    print("  Minimum total resources per shipment (0=off):")
+                    t_input = read(min=0, digit=True, additionalValues=["'"])
+                    if t_input != "'":
+                        min_threshold = int(t_input)
+                        if min_threshold > 0:
+                            print(f"  {C.OK}Shipments below {min_threshold:,} "
+                                  f"will be skipped{C.RESET}")
+                        else:
+                            print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
+                        enter()
                     continue
                 else:
                     # Notifications
@@ -2481,6 +2572,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                         ship_type="f" if useFreighters else "m",
                         dest_city_ids=[str(destination_city["id"])],
                         resource_config=list(requested),
+                        min_shipment_threshold=min_threshold,
                         interval_hours=0,
                         notif_level=notif_config.get("level", "none"),
                         notes=f"Auto Send -> {destination_city['name']}",
@@ -2575,9 +2667,11 @@ def render_auto_send_review(destination_city, destination_island, routes,
 
     print(f"  {C.OK}(Y){C.RESET} Proceed")
     print(f"  {C.CYAN}(D){C.RESET} Dry run preview")
+    print(f"  {C.CYAN}(T){C.RESET} Min shipment")
     print(f"  {C.YELLOW}(E){C.RESET} Edit — re-enter amounts")
     print(f"  {C.WARN}(C){C.RESET} Cancel")
-    choice = read(values=["y", "Y", "e", "E", "c", "C", "d", "D", ""])
+    choice = read(values=["y", "Y", "e", "E", "c", "C", "d", "D",
+                          "t", "T", ""])
     if choice == "" or choice.upper() == "Y":
         return "Y"
     return choice.upper()
@@ -3164,6 +3258,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             return
 
         ap_max_wait = 120  # default 2 hours
+        min_threshold = 0  # 0 = disabled (no minimum)
 
         # Final confirmation with dry run
         while True:
@@ -3171,14 +3266,19 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             print(f"  {C.BOLD}CSV rows:{C.RESET}  {len(rows)}")
             print(f"  {C.BOLD}Interval:{C.RESET}  every {interval_hours}h")
             print(f"  {C.BOLD}AP wait:{C.RESET}   {ap_max_wait} min")
+            if min_threshold > 0:
+                print(f"  {C.BOLD}Min ship:{C.RESET}  {min_threshold:,} total resources")
+            else:
+                print(f"  {C.BOLD}Min ship:{C.RESET}  {C.DIM}off{C.RESET}")
             print(f"  {C.BOLD}Run slot:{C.RESET}  {run_column[4:]}\n")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
                   f"{C.CYAN}(D){C.RESET} Dry run preview  "
                   f"{C.YELLOW}(E){C.RESET} Edit CSV  "
                   f"{C.CYAN}(A){C.RESET} AP wait timer  "
+                  f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", "e", "E",
-                               "a", "A", "", "'"],
+                               "a", "A", "t", "T", "", "'"],
                        additionalValues=["'"])
             if rta == "'" or rta.lower() == "n":
                 event.set()
@@ -3194,6 +3294,21 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                     continue
                 ap_max_wait = int(ap_input)
                 print(f"  {C.OK}AP wait set to {ap_max_wait} min{C.RESET}")
+                enter()
+                continue
+            if rta.lower() == "t":
+                print(f"\n  Current minimum: "
+                      f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
+                print("  Minimum total resources per shipment (0=off):")
+                t_input = read(min=0, digit=True, additionalValues=["'"])
+                if t_input == "'":
+                    continue
+                min_threshold = int(t_input)
+                if min_threshold > 0:
+                    print(f"  {C.OK}Shipments below {min_threshold:,} "
+                          f"will be skipped{C.RESET}")
+                else:
+                    print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
                 enter()
                 continue
             if rta.lower() == "d":
@@ -3219,6 +3334,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         bulk_csv_path=csv_path,
         bulk_run_column=run_column,
         ap_max_wait_minutes=ap_max_wait,
+        min_shipment_threshold=min_threshold,
         interval_hours=interval_hours,
         notif_level=notif_config.get("level", "none"),
         notes=f"CSV: {os.path.basename(csv_path)}",
@@ -3499,6 +3615,8 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         if notif_config is None:
             return
 
+        min_threshold = 0
+
         # --- Step 8: Final summary + dry run ---
         while True:
             print_module_banner("Keep Topped Up — Summary")
@@ -3525,14 +3643,32 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
             else:
                 print(f"  {C.BOLD}Reserve protection:{C.RESET} none")
             print(f"  {C.BOLD}Check interval:{C.RESET} every {interval_hours}h")
+            if min_threshold > 0:
+                print(f"  {C.BOLD}Min ship:{C.RESET}       {min_threshold:,} total resources")
             print("")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
                   f"{C.CYAN}(D){C.RESET} Dry run preview  "
+                  f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
-            rta = read(values=["y", "Y", "n", "N", "d", "D", ""])
+            rta = read(values=["y", "Y", "n", "N", "d", "D", "t", "T", ""])
             if rta.lower() == "n":
                 event.set()
                 return
+            if rta.lower() == "t":
+                print(f"\n  Current minimum: "
+                      f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
+                print("  Minimum total resources per shipment (0=off):")
+                t_input = read(min=0, digit=True, additionalValues=["'"])
+                if t_input == "'":
+                    continue
+                min_threshold = int(t_input)
+                if min_threshold > 0:
+                    print(f"  {C.OK}Shipments below {min_threshold:,} "
+                          f"will be skipped{C.RESET}")
+                else:
+                    print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
+                enter()
+                continue
             if rta.lower() == "d":
                 preview_routes = _top_up_dry_run(
                     session, destinations, dest_configs,
@@ -3561,6 +3697,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         dest_city_ids=[str(d["id"]) for d in destinations],
         dest_targets=dest_configs,
         source_reserves=source_reserves,
+        min_shipment_threshold=min_threshold,
         interval_hours=interval_hours,
         notif_level=notif_config.get("level", "none"),
         notes=f"TopUp: {dest_names[:30]}",
@@ -3723,6 +3860,28 @@ def _is_transport_worker_running(session):
 #  Mode-specific single-cycle handlers
 # ----------------------------------------------------------------------------
 
+_RES_NAMES = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
+
+
+def _notify_small_shipments(session, notif_config, mode_label,
+                            small_shipments, min_threshold):
+    if not small_shipments:
+        return
+    if not should_notify(notif_config, "partial"):
+        return
+    lines = [f"SMALL SHIPMENTS SKIPPED (below {min_threshold:,})"]
+    total_unshipped = [0] * 5
+    for src, dst, res in small_shipments:
+        parts = [f"{_RES_NAMES[i]}:{v:,}" for i, v in enumerate(res) if v > 0]
+        lines.append(f"  {src} -> {dst}: {', '.join(parts)}")
+        for i in range(min(5, len(res))):
+            total_unshipped[i] += res[i]
+    tot_parts = [f"{_RES_NAMES[i]}:{v:,}"
+                 for i, v in enumerate(total_unshipped) if v > 0]
+    lines.append(f"Total unshipped: {', '.join(tot_parts)}")
+    sendToBot(session, f"{mode_label}\n" + "\n".join(lines))
+
+
 def run_consolidate_cycle(session, sched, notif_config, log_path):
     source_city_ids = sched.get("source_city_ids") or []
     dest_city_ids = sched.get("dest_city_ids") or []
@@ -3754,6 +3913,8 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
 
     excluded = _rrs_excluded_set(session)
     summary = _rrs_load_summary(session)
+    min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    small_shipments = []
 
     cycle_sent = 0
     for cid in source_city_ids:
@@ -3794,13 +3955,18 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
             route = (oc_fresh, destination_city, island["id"], *toSend)
             result = send_shipment(
                 session, route, useFreighters, notif_config, log_path,
-                "Consolidate", coords,
+                "Consolidate", coords, min_threshold=min_threshold,
             )
-            if result["success"]:
+            if result.get("below_threshold"):
+                small_shipments.append(
+                    (oc_fresh["name"], destination_city["name"], toSend))
+            elif result["success"]:
                 cycle_sent += 1
                 html = session.get(city_url + dest_city_id)
                 destination_city = getCity(html)
 
+    _notify_small_shipments(session, notif_config, "CONSOLIDATE",
+                            small_shipments, min_threshold)
     return cycle_sent
 
 
@@ -3819,6 +3985,8 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
     if _rrs_is_excluded(session, src_city_id):
         return 0
 
+    min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    small_shipments = []
     cycle_sent = 0
 
     for dcid in dest_city_ids:
@@ -3862,11 +4030,16 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
             route = (origin_city, dest_city, dest_island["id"], *toSend)
             result = send_shipment(
                 session, route, useFreighters, notif_config, log_path,
-                "Distribute", coords,
+                "Distribute", coords, min_threshold=min_threshold,
             )
-            if result["success"]:
+            if result.get("below_threshold"):
+                small_shipments.append(
+                    (origin_city["name"], dest_city["name"], toSend))
+            elif result["success"]:
                 cycle_sent += 1
 
+    _notify_small_shipments(session, notif_config, "DISTRIBUTE",
+                            small_shipments, min_threshold)
     return cycle_sent
 
 
@@ -3883,6 +4056,8 @@ def run_topup_cycle(session, sched, notif_config, log_path):
 
     excluded = _rrs_excluded_set(session)
     summary = _rrs_load_summary(session)
+    min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    small_shipments = []
 
     cycle_sent = 0
     for dcid in dest_city_ids:
@@ -3937,9 +4112,12 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                 route = (src_fresh, dest_fresh, dest_island["id"], *to_send)
                 result = send_shipment(
                     session, route, useFreighters, notif_config, log_path,
-                    "TopUp", coords,
+                    "TopUp", coords, min_threshold=min_threshold,
                 )
-                if result["success"]:
+                if result.get("below_threshold"):
+                    small_shipments.append(
+                        (src_fresh["name"], dest_fresh["name"], to_send))
+                elif result["success"]:
                     cycle_sent += 1
                     try:
                         html = session.get(city_url + dcid_str)
@@ -3947,6 +4125,8 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                     except (AttributeError, TypeError, KeyError):
                         break
 
+    _notify_small_shipments(session, notif_config, "TOPUP",
+                            small_shipments, min_threshold)
     return cycle_sent
 
 
@@ -3961,6 +4141,8 @@ def run_even_cycle(session, sched, notif_config, log_path):
 
     excluded = _rrs_excluded_set(session)
     summary = _rrs_load_summary(session)
+    min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    small_shipments = []
 
     all_cities = []
     for cid in city_ids:
@@ -4024,9 +4206,15 @@ def run_even_cycle(session, sched, notif_config, log_path):
 
                 result = send_shipment(
                     session, route, useFreighters, notif_config, log_path,
-                    "Even Distribution", coords,
+                    "Even Distribution", coords, min_threshold=min_threshold,
                 )
-                if result["success"]:
+                if result.get("below_threshold"):
+                    small_shipments.append(
+                        (senders[si]["from"]["name"],
+                         receivers[ri]["to"]["name"], toSend))
+                    s_rem -= amount
+                    r_rem -= amount
+                elif result["success"]:
                     cycle_sent += 1
                     s_rem -= amount
                     r_rem -= amount
@@ -4042,6 +4230,8 @@ def run_even_cycle(session, sched, notif_config, log_path):
                 if ri < len(receivers):
                     r_rem = receivers[ri]["amount"]
 
+    _notify_small_shipments(session, notif_config, "EVEN DIST",
+                            small_shipments, min_threshold)
     return cycle_sent
 
 
@@ -4094,17 +4284,24 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
                       f"{destination_city['name']}")
         return 0
 
+    min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    small_shipments = []
     cycle_sent = 0
     for route in routes:
         result = send_shipment(
             session, route, useFreighters, notif_config, log_path,
-            "Auto Send",
+            "Auto Send", min_threshold=min_threshold,
         )
-        if result["success"]:
+        if result.get("below_threshold"):
+            small_shipments.append(
+                (route[0]["name"], route[1]["name"], list(route[3:])))
+        elif result["success"]:
             cycle_sent += 1
         elif result["error"] and "lock" in result["error"].lower():
             break
 
+    _notify_small_shipments(session, notif_config, "AUTO SEND",
+                            small_shipments, min_threshold)
     return cycle_sent
 
 
@@ -4370,9 +4567,11 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     deferred_routes = []     # routes deferred due to no AP
     ap_wait_mins = int(sched.get("ap_max_wait_minutes", 120) or 120)
     max_ap_retries = max(0, ap_wait_mins // 5)  # e.g. 120min / 5 = 24 retries
+    min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    small_shipments = []     # (src_name, dest_name, resources) below threshold
 
     def _try_send_route(route_info):
-        """Attempt to send one route. Returns (success, deferred)."""
+        """Attempt to send one route. Returns (success, deferred, small)."""
         (row_num, route, resources, dest_name,
          player, rx, ry, src_name, src_idx,
          row_freighters, parsed_res) = route_info
@@ -4380,7 +4579,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         src_city_id = str(route[0]["id"])
 
         if src_city_id in ap_blocked_cities:
-            return False, True
+            return False, True, False
 
         has_except = any(m == "except" for m, _ in parsed_res)
         if has_except:
@@ -4407,21 +4606,26 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 if i < len(dest_space):
                     resources[i] = min(resources[i], dest_space[i])
             if sum(resources) == 0:
-                return False, False
+                return False, False, False
             route = (src_fresh, dest_fresh, route[2], *resources)
 
         coords = f"[{rx}:{ry}]"
         result = send_shipment(
             session, route, row_freighters, notif_config,
             log_path, "Bulk Distribution", coords, player,
+            min_threshold=min_threshold,
         )
+
+        if result.get("below_threshold"):
+            small_shipments.append((src_name, dest_name, list(route[3:])))
+            return False, False, True
 
         if result.get("no_ap"):
             ap_blocked_cities[src_city_id] = time.time()
             session.setStatus(
                 f"[AP BLOCKED] {src_name} — deferring, will retry in 5min"
             )
-            return False, True
+            return False, True, False
 
         if result["success"]:
             from_val = parse_from_column(rows[row_num - 1].get("From", ""))
@@ -4450,9 +4654,40 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 write_csv_atomic(csv_path, fieldnames, rows)
             except Exception as _csv_err:
                 session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
-            return True, False
+            return True, False, False
 
-        return False, False
+        return False, False, False
+
+    def _mark_route_complete(route_info):
+        """Mark a route's run column entry as done (for small-shipment skips)."""
+        (row_num, route, _res, _dn, _pl, _rx, _ry, _sn, src_idx,
+         _fr, _pr) = route_info
+        from_val = parse_from_column(rows[row_num - 1].get("From", ""))
+        cur = rows[row_num - 1].get(run_column, "").strip()
+        done = set()
+        if cur and cur.upper() != "X":
+            for p in cur.split(","):
+                p = p.strip()
+                if p.isdigit():
+                    done.add(int(p))
+        done.add(src_idx)
+        try:
+            expected = get_source_cities_for_row(
+                session, from_val, city_cache
+            )
+            expected_indices = {i for i, _ in expected}
+        except Exception:
+            expected_indices = done
+        if done >= expected_indices:
+            rows[row_num - 1][run_column] = "X"
+        else:
+            rows[row_num - 1][run_column] = ",".join(
+                str(d) for d in sorted(done)
+            )
+        try:
+            write_csv_atomic(csv_path, fieldnames, rows)
+        except Exception:
+            pass
 
     # --- First pass: send all routes, deferring AP-blocked ones ---
     for idx, route_info in enumerate(routes):
@@ -4462,8 +4697,11 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             f"[SENDING] Bulk Dist [{idx+1}/{total}] "
             f"{src_name} -> {dest_name}"
         )
-        success, deferred = _try_send_route(route_info)
+        success, deferred, small = _try_send_route(route_info)
         if success:
+            completed += 1
+        elif small:
+            _mark_route_complete(route_info)
             completed += 1
         elif deferred:
             deferred_routes.append(route_info)
@@ -4508,8 +4746,11 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             session.setStatus(
                 f"[RETRY] Bulk Dist {src_name} -> {dest_name}"
             )
-            success, deferred = _try_send_route(route_info)
+            success, deferred, small = _try_send_route(route_info)
             if success:
+                completed += 1
+            elif small:
+                _mark_route_complete(route_info)
                 completed += 1
             elif deferred:
                 still_deferred.append(route_info)
@@ -4529,10 +4770,15 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                       f"{ap_wait_mins}min)\n"
                       f"Cities: {', '.join(sorted(blocked_names))}")
 
+    _notify_small_shipments(session, notif_config, "BULK DIST",
+                            small_shipments, min_threshold)
+
     if should_notify(notif_config, "complete"):
         summ_str = f"{completed}/{total} sent"
         if skipped:
             summ_str += f", {skipped} skipped"
+        if small_shipments:
+            summ_str += f", {len(small_shipments)} below min"
         run_done = sum(
             1 for r in rows
             if normalize_text(r.get(run_column, "")) == "x"
@@ -4650,11 +4896,16 @@ def transport_scheduler_loop(session, stop_event):
                     total_shipments=total, status="active",
                 )
             else:
-                transport_csv_update(
-                    session, sid,
-                    last_run=now, status="completed",
-                    total_shipments=total,
-                )
+                transport_csv_delete(session, sid)
+
+        # Auto-cleanup: delete one-time schedules older than 24h
+        schedules = transport_csv_load(session)
+        for s in schedules:
+            if s.get("interval_hours", 0) == 0:
+                created = s.get("created_at", 0)
+                if isinstance(created, int) and created > 0:
+                    if now - created > 86400:
+                        transport_csv_delete(session, s.get("schedule_id"))
 
         schedules = transport_csv_load(session)
         active = [s for s in schedules if s.get("status") == "active"]
@@ -4843,7 +5094,6 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
     while True:
         if not enforce_transport_schema_or_abort(session):
             enter()
-            event.set()
             return
 
         counts = transport_csv_count_by_status(session)
@@ -4863,7 +5113,6 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
 
         choice = read(min=1, max=4, digit=True, additionalValues=["'"])
         if choice == "'":
-            event.set()
             return
 
         if choice == 1:
@@ -5246,6 +5495,26 @@ def _toggle_schedule_pause(session):
     enter()
 
 
+def _parse_id_ranges(text):
+    """Parse comma-separated IDs and ranges (e.g. '1-20, 25-90, 3')."""
+    ids = set()
+    for part in text.split(","):
+        part = part.strip()
+        if "-" in part:
+            bounds = part.split("-", 1)
+            try:
+                lo, hi = int(bounds[0].strip()), int(bounds[1].strip())
+                ids.update(range(lo, hi + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                ids.add(int(part))
+            except ValueError:
+                continue
+    return sorted(ids)
+
+
 def _delete_schedules(session):
     rows = transport_csv_load(session)
     if not rows:
@@ -5254,14 +5523,13 @@ def _delete_schedules(session):
         return
 
     _view_schedules_compact(rows)
-    print("  Enter schedule ID(s) to delete (comma-separated, or ' to cancel):")
+    print("  Enter ID(s) to delete (comma-sep, ranges with -, e.g. 1-20, 25-90):")
     sid_input = read(additionalValues=["'"])
     if sid_input == "'":
         return
 
-    try:
-        sids = [int(x.strip()) for x in sid_input.split(",")]
-    except ValueError:
+    sids = _parse_id_ranges(sid_input)
+    if not sids:
         print("  Invalid input.")
         enter()
         return
@@ -5277,7 +5545,7 @@ def _delete_schedules(session):
         enter()
         return
 
-    print(f"  Delete schedule(s) {to_delete}? [y/N]")
+    print(f"  Delete {len(to_delete)} schedule(s)? [y/N]")
     confirm = read(values=["y", "Y", "n", "N", ""])
     if confirm.lower() != "y":
         return
