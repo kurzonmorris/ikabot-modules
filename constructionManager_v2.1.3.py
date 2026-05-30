@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.1.2"
+__version__ = "2.1.3"
 
 import csv
 import glob
@@ -352,6 +352,34 @@ def csv_update(session, queue_id, **fields):
                     )
                 break
     _csv_modify(session, _apply)
+
+
+def csv_skip_rest_of_slot(session, city_id, slot_position, after_queue_id,
+                          reason):
+    """Mark every pending row for (city_id, slot_position) with
+    queue_id > after_queue_id as skipped.
+
+    Used when a row fails on resource shortage: higher-level upgrades of the
+    same building cost more and won't fit either, so don't bother trying.
+    Returns the list of queue_ids that were skipped.
+    """
+    cid = int(city_id)
+    sp  = int(slot_position)
+    aft = int(after_queue_id)
+    skipped = []
+    note = f"skipped: {reason}"
+
+    def _apply(rows):
+        for r in rows:
+            if (r["status"] == "pending"
+                    and r["city_id"] == cid
+                    and r["slot_position"] == sp
+                    and r["queue_id"] > aft):
+                r["status"] = "skipped"
+                r["notes"] = note
+                skipped.append(r["queue_id"])
+    _csv_modify(session, _apply)
+    return skipped
 
 
 def csv_next_queue_id(session):
@@ -1944,12 +1972,18 @@ def spawn_shipment(session, city_id, row, cost):
                     status="skipped",
                     notes="insufficient supply across all cities",
                 )
+                also = csv_skip_rest_of_slot(
+                    session, city_id, row["slot_position"], queue_id,
+                    "lower-level row skipped — insufficient supply",
+                )
                 shortage_event_queue.put({
                     "city_id": city_id,
                     "row_id":  queue_id,
                     "msg": (
                         f"City {city.get('cityName', city_id)}: "
                         f"total shortage — row {queue_id} skipped"
+                        + (f"; also skipped same-slot row(s) {also}"
+                           if also else "")
                     ),
                 })
                 return
@@ -2286,11 +2320,17 @@ def service_city(session, city_id, st, rows, stop_event):
                 status="skipped",
                 notes="resources did not arrive in time",
             )
+            also = csv_skip_rest_of_slot(
+                session, city_id, row["slot_position"], row["queue_id"],
+                "lower-level row skipped — shipment timeout",
+            )
             try:
                 sendToBot(
                     session,
                     f"City {city.get('cityName', city_id)}: shipment timeout — "
-                    f"row {row['queue_id']} skipped",
+                    f"row {row['queue_id']} skipped"
+                    + (f"; also skipped same-slot row(s) {also}"
+                       if also else ""),
                 )
             except Exception:
                 pass
