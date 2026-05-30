@@ -1,0 +1,174 @@
+# Kurzon — How I Work & What I Need
+
+> **Purpose:** Read this file at the start of every session to understand how Kurzon operates, what he expects, and what regular tasks look like. Pair with `Explained-ikariam_ikabot.md` for full technical context.
+
+---
+
+## 1. Communication Style
+
+- Short, direct requests. Does not explain context unless asked.
+- Requests often say "increase version", "add X to Y", "fix this error" — find the relevant files yourself.
+- Shows log output or tracebacks verbatim when reporting bugs.
+- "Revert" means `git revert HEAD --no-edit`.
+- After every completed task: **commit and push to the branch without being asked.**
+
+---
+
+## 2. Workflow
+
+- Kurzon runs multiple ikabot instances simultaneously — one per game account. Each opens separately and enters the vault password. Concurrent vault access is expected and handled.
+- External modules are the primary way new features are delivered. They are dropped into a configured folder, not merged into core ikabot files.
+- Automation sequences (AutoHotkey scripts historically, Sequence Runner going forward) pre-load a fixed set of menu selections to perform a "daily routine" without manual input.
+
+---
+
+## 3. Version Update Rules
+
+- `IKABOT_VERSION` — only changes when syncing with upstream ikabot releases.
+- `IKABOT_MOD_VERSION` — increments when significant features or fixes are added to the mod.
+- External module filename version — increments when the module has a releasable update.
+- Changing a version number means: update `config.py` AND rename the version marker file (`ikabot/version_vX.Y.Z`).
+- **Never change version numbers without being explicitly told the new version number.**
+- When a version bump is requested: only change what was explicitly asked — do not change other version numbers.
+
+---
+
+## 4. Code Standards Kurzon Expects
+
+- No unnecessary comments — only comment when the WHY is non-obvious.
+- No docstrings beyond a one-liner maximum.
+- No error handling for impossible cases.
+- No feature flags or backwards-compat shims.
+- Minimal, focused changes — fix exactly what was asked, nothing more.
+- External modules must be self-contained — not require changes to ikabot core files unless truly necessary.
+- Don't add features, refactor, or introduce abstractions beyond what the task requires.
+- Don't design for hypothetical future requirements.
+
+---
+
+## 5. Frequently Requested Operations
+
+| What Kurzon says | What it means |
+|------------------|---------------|
+| "Check the logs" | Read from `LOGS_DIRECTORY` (`~/.ikabot/logs/`) for the relevant account |
+| "Add to the guide" | Update `GUIDE.md` (end-user facing, no build/compile references) |
+| "Add to release notes" | Update `RELEASE_NOTES.md` |
+| "Make it work like RTM" | Follow the Resource Transport Manager's pattern for that feature |
+| "Add notification support" | Use `notificationDataIsValid()` + `sendToBot()`, not Telegram-specific calls |
+| "Revert" | `git revert HEAD --no-edit` |
+| "Increase version" | Only change the version explicitly named — nothing else |
+
+---
+
+## 6. Mandatory Post-Coding Review Protocol
+
+After every coding session, before declaring work complete:
+
+### Step 1: Syntax check
+```bash
+python3 -c "import ast; ast.parse(open('myfile.py').read()); print('OK')"
+```
+Run for every modified file.
+
+### Step 2: Review checklist
+- [ ] `event.set()` called exactly once in every code path
+- [ ] `set_child_mode()` called before any game actions
+- [ ] No bare `session.get()` calls (always pass a view parameter)
+- [ ] All `read()` calls have appropriate `min`/`max`/`digit` constraints
+- [ ] No `input()` calls — only `read()`
+- [ ] All loops have a `wait()` call to prevent server hammering
+- [ ] All exceptions caught in long-running loops with `sendToBot()` notification
+- [ ] No endless loops possible (all loops have a termination condition or `wait()`)
+- [ ] `session.logout()` in `finally` block
+- [ ] New functions imported and registered in `command_line.py` if built-in
+- [ ] `MODULE_NAME` and `MODULE_ENTRY` defined if external module
+- [ ] Version number in filename if external module
+- [ ] Data files stored under `IKABOT_DATA_DIR`
+- [ ] `banner()` called at start of each interactive screen
+
+### Step 3: Commit and push
+All changes committed to the working branch and pushed to `kurzonmorris/ikabot-modules`.
+
+### Step 4: Report
+Provide a summary covering:
+1. What was coded (each function/change listed briefly)
+2. Result of the review checklist (any issues found and fixed)
+3. Any design decisions or trade-offs made
+4. Any known limitations or future considerations
+
+---
+
+## 7. Visual & Structural Consistency Rules
+
+All modules — internal and external — must look and behave the same way.
+
+### Visual rules
+1. Every interactive screen starts with `banner()` — clears screen, shows ASCII art with both version tags.
+2. Section headers use the double-line box style:
+   ```
+   ╔══════════════════════════════════════════════════╗
+   ║          MY MODULE NAME                          ║
+   ╚══════════════════════════════════════════════════╝
+   ```
+3. Use `bcolors.GREEN`, `bcolors.RED`, `bcolors.WARNING`, `bcolors.ENDC` for coloured feedback.
+4. Menus always start at `(0) Back` or `(0) Exit`.
+5. Numbers formatted with `addThousandSeparator()`.
+6. Time durations formatted with `daysHoursMinutes()`.
+7. All `read()` calls must have correct `min`/`max`/`digit` constraints.
+
+### Structural rules
+1. Entry function → interactive config → `set_child_mode()` + `event.set()` → `do_it()`.
+2. Separate interactive config from the working loop — never mix them.
+3. `do_it()` handles the main loop or one-shot action.
+4. Long-running tasks use `while True:` with `wait()` between iterations.
+5. All errors caught and sent via `sendToBot()`.
+6. Process status updated via `session.setStatus("...")` and `updateProcessList()`.
+7. `setInfoSignal(session, info)` called after `set_child_mode()`.
+
+---
+
+## 8. Notification Rules
+
+- Always use `notificationDataIsValid(session)` — not Telegram-specific checks — unless Telegram is specifically required.
+- All notification calls go through `sendToBot(session, message)`.
+- Three backends supported: Telegram, Discord, ntfy.sh. Never assume only Telegram.
+
+---
+
+## 9. Existing Modules (Reference)
+
+| Module | File | What it does |
+|--------|------|--------------|
+| Resource Transport Manager | `modules/resourceTransportManager_v9.4.0.py` | Automates resource movement between cities, ship routing, notifications |
+| Resource Reservation System | `modules/resourceReservationSystem_v1.0.0.py` | Reserves resources across cities to prevent over-spending |
+| Construction Manager | `modules/constructionManager_v2.1.3.py` | CSV-backed multi-city building upgrade queue |
+| Tavern Manager | `modules/tavernManager_v2.0.1.py` | Monitors wine and satisfaction, auto-adjusts tavern settings |
+| Auto Recruitment Manager | `modules/autoRecruitmentManager_v2.2.0.py` | Automates unit and ship training across barracks/shipyards |
+| Island Colonize Monitor | `modules/islandColonizeMonitor_v1.5.0.py` | Monitors islands for colonisation opportunities |
+| Sequence Runner | `modules/sequenceRunner.py` | Stores named input sequences to automate daily routines (WIP) |
+
+---
+
+## 10. Repository Layout (Reference)
+
+```
+ikabot-modules/
+├── ikabot/                   ← mod source (core ikabot + kurzon changes)
+├── modules/                  ← active external modules (drop-in folder)
+├── installer/                ← mod installer scripts
+├── tools/                    ← standalone utilities
+├── releases/                 ← downloadable zips
+├── config-examples/          ← example CSV/config files
+├── archive/                  ← deprecated/reference material
+├── wip/                      ← non-functioning or prototype code
+├── GUIDE.md                  ← end-user guide
+├── RELEASE_NOTES.md          ← changelog
+├── MIGRATION_GUIDE.md
+├── RRS_INTEGRATION_GUIDE.md
+├── Explained-ikariam_ikabot.md  ← full technical reference
+└── Explained-user_kurzon.md     ← this file
+```
+
+---
+
+*Last updated: 2026-05-30. Reflects ikabot 7.3.3 / mod v0.9.4.*
