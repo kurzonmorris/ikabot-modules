@@ -14,7 +14,29 @@
 
 ---
 
-## 2. Workflow
+## 2. Platform
+
+- Kurzon codes primarily for **Windows**. All instructions, paths, and commands should be Windows-oriented by default (e.g., use `%APPDATA%`, `.bat` scripts, PowerShell, Windows path separators) unless Linux/Mac is explicitly requested.
+
+---
+
+## 3. File Naming Conventions
+
+- File names should be **descriptive and self-explanatory** — the name alone should tell you what the file does. Examples: `resourceTransportManager`, `constructionManager`, `tavernManager`.
+- Use **camelCase** for multi-word names.
+- Version numbers go **after the file extension**, separated by `_v`:
+  ```
+  resourceTransportManager.py_v1.0.0
+  constructionManager.py_v2.1.3
+  ```
+- Version number format: `MAJOR.MINOR.PATCH`
+  - **MAJOR** — significant/breaking update
+  - **MINOR** — new feature or meaningful improvement
+  - **PATCH** — bug fix
+
+---
+
+## 4. Workflow
 
 - Kurzon runs multiple ikabot instances simultaneously — one per game account. Each opens separately and enters the vault password. Concurrent vault access is expected and handled.
 - External modules are the primary way new features are delivered. They are dropped into a configured folder, not merged into core ikabot files.
@@ -22,7 +44,7 @@
 
 ---
 
-## 3. Version Update Rules
+## 5. Version Update Rules
 
 - `IKABOT_VERSION` — only changes when syncing with upstream ikabot releases.
 - `IKABOT_MOD_VERSION` — increments when significant features or fixes are added to the mod.
@@ -33,7 +55,7 @@
 
 ---
 
-## 4. Code Standards Kurzon Expects
+## 6. Code Standards Kurzon Expects
 
 - No unnecessary comments — only comment when the WHY is non-obvious.
 - No docstrings beyond a one-liner maximum.
@@ -46,7 +68,7 @@
 
 ---
 
-## 5. Frequently Requested Operations
+## 7. Frequently Requested Operations
 
 | What Kurzon says | What it means |
 |------------------|---------------|
@@ -60,7 +82,7 @@
 
 ---
 
-## 6. Mandatory Post-Coding Review Protocol
+## 8. Mandatory Post-Coding Review Protocol
 
 After every coding session, before declaring work complete:
 
@@ -98,7 +120,7 @@ Provide a summary covering:
 
 ---
 
-## 7. Visual & Structural Consistency Rules
+## 9. Visual & Structural Consistency Rules
 
 All modules — internal and external — must look and behave the same way.
 
@@ -127,7 +149,7 @@ All modules — internal and external — must look and behave the same way.
 
 ---
 
-## 8. Notification Rules
+## 10. Notification Rules
 
 - Always use `notificationDataIsValid(session)` — not Telegram-specific checks — unless Telegram is specifically required.
 - All notification calls go through `sendToBot(session, message)`.
@@ -135,7 +157,7 @@ All modules — internal and external — must look and behave the same way.
 
 ---
 
-## 9. Existing Modules (Reference)
+## 11. Existing Modules (Reference)
 
 | Module | File | What it does |
 |--------|------|--------------|
@@ -149,7 +171,7 @@ All modules — internal and external — must look and behave the same way.
 
 ---
 
-## 10. Repository Layout (Reference)
+## 12. Repository Layout (Reference)
 
 ```
 ikabot-modules/
