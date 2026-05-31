@@ -12,11 +12,27 @@
 - "Revert" means `git revert HEAD --no-edit`.
 - After every completed task: **commit and push to the branch without being asked.**
 
+### GitHub Branch Naming
+- Branch names must reflect the **topic or feature** being worked on — the name should tell you what the branch is for without needing to look inside it.
+- The key descriptive word(s) must appear in the branch name. Examples:
+  - Work on documentation → branch contains `documentation`
+  - Work on the tavern manager → branch contains `tavern-manager`
+  - A bug fix for transport routing → branch contains `transport-routing-fix`
+- Use hyphens to separate words, all lowercase.
+
 ---
 
-## 2. Platform
+## 2. Platform & Environment
 
-- Kurzon codes primarily for **Windows**. All instructions, paths, and commands should be Windows-oriented by default (e.g., use `%APPDATA%`, `.bat` scripts, PowerShell, Windows path separators) unless Linux/Mac is explicitly requested.
+### Devices
+- **Primary device:** Steam Deck (SteamOS, desktop mode) — and soon a Steam Machine running the same.
+- **Server:** Unraid, with a Windows VM. Most actual code usage (running ikabot, testing modules, etc.) happens inside this Windows VM.
+- **Development instructions** should default to **Windows** (paths like `%APPDATA%`, `.bat` scripts, PowerShell, Windows path separators) unless Linux/SteamOS is explicitly requested.
+
+### OS context when giving instructions
+- If explaining how to run or install something: assume the user is on the **Windows VM** unless told otherwise.
+- If the task is server-related: assume **Unraid**.
+- If the task is desktop/gaming related: assume **SteamOS**.
 
 ---
 
