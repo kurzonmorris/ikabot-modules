@@ -243,10 +243,11 @@ def csv_has_active_orders(session, is_units):
 # =============================================================================
 
 _DEFAULT_CONFIG = {
-    "report_enabled":         False,
-    "report_interval_hours":  4,
-    "resource_import_enabled": False,
-    "last_report_time":       0,
+    "report_enabled":            False,
+    "report_interval_hours":     4,
+    "report_group_completed":    False,
+    "resource_import_enabled":   False,
+    "last_report_time":          0,
 }
 
 
@@ -291,11 +292,13 @@ def _pct(current, total):
     return f"{100 * current / total:.1f}"
 
 
-def _build_progress_report(all_rows):
+def _build_progress_report(all_rows, group_completed=False):
     """
     Build a progress report string from all CSV rows (both units and ships).
 
     Returns a plain-text string suitable for Telegram.
+    When group_completed=True, cities where every order is done are collapsed
+    to a single summary line instead of showing the full unit breakdown.
     """
     now_str = time.strftime("%d %b %Y %H:%M", time.localtime())
     lines = [f"AUTO RECRUITMENT MANAGER — {now_str}", ""]
@@ -343,11 +346,22 @@ def _build_progress_report(all_rows):
             city_order[cname] = len(city_order)
             cities_seen.append(cname)
 
+    completed_summaries = []
+
     for city_name in cities_seen:
         city_unit_rows = [r for r in u_active if r["city_name"] == city_name]
         city_ship_rows = [r for r in s_active if r["city_name"] == city_name]
+        city_all_rows  = city_unit_rows + city_ship_rows
 
-        if not city_unit_rows and not city_ship_rows:
+        if not city_all_rows:
+            continue
+
+        co, ct = _totals(city_all_rows)
+        city_done = (co >= ct)
+
+        # Collapse finished cities into a grouped summary at the bottom
+        if group_completed and city_done:
+            completed_summaries.append(f"  {city_name}: {co:,}/{ct:,} DONE")
             continue
 
         lines.append(f"\n{city_name}")
@@ -355,9 +369,9 @@ def _build_progress_report(all_rows):
         for label, rows in [("Troops", city_unit_rows), ("Ships", city_ship_rows)]:
             if not rows:
                 continue
-            co, ct = _totals(rows)
-            done_mark = " DONE" if co >= ct else ""
-            lines.append(f"  {label} {_ascii_bar(co, ct, 12)} {co:,}/{ct:,}{done_mark}")
+            co2, ct2 = _totals(rows)
+            done_mark = " DONE" if co2 >= ct2 else ""
+            lines.append(f"  {label} {_ascii_bar(co2, ct2, 12)} {co2:,}/{ct2:,}{done_mark}")
             # Per-unit breakdown
             unit_totals = {}
             for r in rows:
@@ -370,11 +384,15 @@ def _build_progress_report(all_rows):
                 done2 = " *" if uo2 >= ut2 else ""
                 lines.append(f"    {uname:<20} {uo2:>5,}/{ut2:,}{done2}")
 
+    if completed_summaries:
+        lines.append(f"\nCOMPLETED ({len(completed_summaries)})")
+        lines.extend(completed_summaries)
+
     lines.append("\n" + "=" * 36)
     return "\n".join(lines)
 
 
-def send_progress_report(session, is_units):
+def send_progress_report(session, is_units, group_completed=False):
     """Send a combined units+ships progress report to the bot."""
     unit_rows = csv_load_orders(session, True)
     ship_rows = csv_load_orders(session, False)
@@ -383,7 +401,7 @@ def send_progress_report(session, is_units):
     if not all_rows:
         return
 
-    report = _build_progress_report(all_rows)
+    report = _build_progress_report(all_rows, group_completed=group_completed)
     sendToBot(session, report)
 
 
@@ -395,7 +413,10 @@ def _maybe_send_report(session, is_units, cfg):
     now = time.time()
     if now - cfg.get("last_report_time", 0) >= interval_secs:
         try:
-            send_progress_report(session, is_units)
+            send_progress_report(
+                session, is_units,
+                group_completed=cfg.get("report_group_completed", False),
+            )
         except Exception:
             pass
         cfg["last_report_time"] = int(now)
@@ -2013,6 +2034,7 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
         report_enabled = report_raw.lower() != "n"
         report_interval = 4
 
+        report_group_completed = False
         if report_enabled:
             interval_raw = read(
                 msg="Report interval in hours (default 4): ",
@@ -2022,6 +2044,14 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 event.set()
                 return
             report_interval = interval_raw if isinstance(interval_raw, int) else 4
+
+            group_raw = read(
+                msg="Collapse completed cities to a single line in reports? [y/N]: ",
+                values=["y", "Y", "n", "N", ""]
+            )
+            report_group_completed = group_raw.lower() == "y"
+            if report_group_completed:
+                print(f"  {bcolors.GREEN}Completed cities will be grouped into a summary line.{bcolors.ENDC}")
             print()
 
         # Resource import option
@@ -2079,10 +2109,11 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
 
         # Build and save config
         cfg = {
-            "report_enabled":         report_enabled,
-            "report_interval_hours":  report_interval,
+            "report_enabled":          report_enabled,
+            "report_interval_hours":   report_interval,
+            "report_group_completed":  report_group_completed,
             "resource_import_enabled": resource_import_enabled,
-            "last_report_time":       0,
+            "last_report_time":        0,
         }
         save_config(session, cfg)
 
@@ -2101,6 +2132,8 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print("  • Will recruit in batches as resources allow (20% threshold)")
             if report_enabled:
                 print(f"  • Progress reports every {report_interval}h via Telegram")
+                if report_group_completed:
+                    print(f"  • Completed cities collapsed to summary line in reports")
             if resource_import_enabled:
                 print("  • Will request resource imports when cities run short")
             print()
