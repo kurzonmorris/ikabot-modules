@@ -1,13 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
 # Build command (run from the ikabot-modules directory):
-#   Windows:  python -m PyInstaller ikabot.spec
-#   Linux:    pyinstaller ikabot.spec
+#   Windows:  python -m PyInstaller installer\ikabot.spec --clean
+#   Linux:    python -m PyInstaller installer/ikabot.spec --clean
 #
 # Output: dist/ikabot/ikabot.exe  +  dist/ikabot/_internal/
 # To distribute: copy the entire dist/ikabot/ folder.
 
+import os
 from PyInstaller.utils.hooks import collect_all, collect_data_files
+
+# SPECPATH is the installer/ directory — step up one level to the repo root
+ROOT = os.path.abspath(os.path.join(SPECPATH, '..'))
 
 # Collect every file inside the ikabot package (submodules, locale, etc.)
 datas, binaries, hiddenimports = collect_all('ikabot')
@@ -16,8 +20,8 @@ datas, binaries, hiddenimports = collect_all('ikabot')
 datas += collect_data_files('ikabot', includes=['locale/**/*'])
 
 a = Analysis(
-    ['ikabot/__main__.py'],
-    pathex=['.'],
+    [os.path.join(ROOT, 'ikabot', '__main__.py')],
+    pathex=[ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports + [
