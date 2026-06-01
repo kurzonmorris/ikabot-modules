@@ -1,11 +1,54 @@
 # Ikabot — Modded by Kurzon v0.9.4
-### Based on Ikabot 7.3.3 (Ikabot-Collective/ikabot)
+### Based on Ikabot 7.4.0 (Ikabot-Collective/ikabot)
 
 ---
 
 ## Changes vs. Original Ikabot
 
-### New Features
+### Upstream 7.4.0 Changes Integrated
+
+**Human-like wait jitter (`varios.py`)**
+- `wait()` now uses a log-normal distribution for random delays instead of uniform random, producing more natural human-like timing patterns.
+
+**French locale number parsing fix (`attackBarbarians.py`, `constructBuilding.py`)**
+- Resource and gold values now strip non-breaking spaces (`\xa0`) and regular spaces in addition to commas, fixing parsing on French-locale game servers.
+
+**Set Academy workers (`modifyProduction.py`)**
+- New `modifyAcademyWorkers()` function sets the scientist percentage for academy buildings across selected cities.
+- Rate-limiting `wait(3,4)` added between city iterations to avoid API flooding.
+- Accessible via `(23) City Management → (2) Set Academy workers`.
+
+**Reorganize city buildings (`reorganizeCityBuildings.py`)**
+- New function: select a template city and apply its building layout to other cities automatically.
+- Simulates realistic drag-and-drop delays between moves.
+- Accessible via `(23) City Management → (3) Reorganize city buildings`.
+
+**Dockyard building support (`constructBuilding.py`)**
+- `"dockyard"` added as a valid space type when listing buildable buildings.
+- Building list now colour-coded: green = can afford, red = insufficient resources.
+- Missing resource details shown when an unaffordable building is selected.
+
+**Combined resource shipments + rounding (`constructionList.py`)**
+- When transporting resources for a building upgrade, resources from the same origin city are now batched into a single shipment instead of one per resource type.
+- Optional "round up" prompt rounds transport amounts to reduce trips.
+
+**URL module download (`loadCustomModule.py`)**
+- Custom modules can now be loaded by pasting an HTTPS URL; the file is downloaded to a local `custom/` subfolder automatically.
+- File existence is validated before the module is added to the session.
+
+**Inventory-aware donations (`donate.py`, `donationBot.py`, `getJson.py`)**
+- `getInventory()` and `getInventoryItem()` added to retrieve player inventory.
+- Donation amounts now include wood held in the player's inventory (item 2201), not just city storage.
+- `donationBot` verifies each donation was accepted before crediting it to the total; rejected donations (e.g., building upgrading) are retried cleanly.
+
+**CRNN pirate captcha model (`piratesDecaptcha.py`)**
+- Replaced YOLOv8 object-detection model with a CRNN + CTC model (`ikaptcha.onnx`).
+- Accuracy improves from ~81% to ~97%.
+- `SuppressStderr` context manager suppresses onnxruntime GPU-discovery log spam on startup.
+
+---
+
+## Fork-Specific Changes vs. Original Ikabot
 
 **Encrypted Credential Vault**
 - Stores game account credentials (email, password, blackbox token, lobby cookie) encrypted on disk using AES-256-GCM with a PBKDF2 master password.
