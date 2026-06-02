@@ -1,0 +1,41 @@
+<div class="ikaeasy-support-form">
+    <div class="ikaeasy-support-subject">
+        <span class="maillabels"><%- lget('support_type') %>:</span>
+        <select name="issueType">
+            <option value="Bug"><%- lget('support_type_bug') %></option>
+            <option value="ToDo"><%- lget('support_type_feature') %></option>
+        </select>
+    </div>
+
+    <div class="ikaeasy-support-subject">
+        <span class="maillabels"><%- lget('support_subject') %>:</span>
+        <input type="text" maxlength="255" name="issueTitle" value="" />
+    </div>
+    <div class="ikaeasy-support-subject">
+        <span class="maillabels"><%- lget('support_email') %>:</span>
+        <input type="text" maxlength="128" name="issueEmail" value="" placeholder="<%- lget('support_placeholder_optional') %>" />
+    </div>
+    <div>
+        <span class="maillabels"><%- lget('support_message_body') %>:</span>
+        <textarea class="textfield" id="js_ikaeasy_support_text" name="content" maxlength="4000" placeholder="<%- lget('support_message_placeholder') %>"></textarea>
+    </div>
+    <div style="margin: 0 32px;">
+        <label class="ikaeasy-form">
+            <input type="checkbox" name="issueDetails" value="1" checked="checked" id="issueDetails" />
+            <i></i><span><%- LANGUAGE.getLocalizedString('support_add_details') %></span>
+        </label>
+        <br/>
+        <small><%- lget('support_add_details_hint') %></small>
+    </div>
+    <div style="margin: 0 32px;">
+        <label class="ikaeasy-form">
+            <input type="checkbox" name="agreeCheck" value="1"/>
+            <i></i><span><%- LANGUAGE.getLocalizedString('support_agree') %></span>
+        </label>
+        <br/>
+        <small><%- lget('support_agree_message') %></small>
+    </div>
+    <div class="centerButton">
+        <button disabled class="button"><%- lget('support_send') %></button>
+    </div>
+</div>

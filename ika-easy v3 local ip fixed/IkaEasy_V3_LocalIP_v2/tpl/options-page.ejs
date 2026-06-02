@@ -1,0 +1,56 @@
+<div class="ikaeasy-options">
+
+
+
+    <div class="btn-line">
+        <%= include('patreon/block.ejs') %>
+    </div>
+
+
+
+    <div class="ikaeasy-option-hint"><%- LANGUAGE.getLocalizedString('option._accept_hint') %></div>
+
+    <% _.each(data.list, function(list, tabName) { %>
+        <div class="contentBox01h">
+            <h3 class="header"><%- LANGUAGE.getLocalizedString(tabName) %></h3>
+            <div class="content">
+                <table class="options table01 ikaeasy-table">
+                    <tbody>
+                        <% _.each(list, function(option, key) { %>
+                            <tr data-option="<%- option %>">
+                                <td class="ikaeasy_option_label">
+                                    <%= LANGUAGE.getLocalizedString(`option.${option}`)%>
+                                </td>
+                                <td class="left">
+                                    <label class="ikaeasy-form">
+                                        <input type="checkbox" name="<%= option %>" value="1" <%= (data._listData[tabName][key].option) ? 'checked="checked"' : '' %> />
+                                        <i></i><span><%- LANGUAGE.getLocalizedString('option._activated') %></span>
+                                    </label>
+
+                                    <% if (data._listData[tabName][key].hasHint) { %>
+                                        <div class="ikaeasy_option_hint"><%= LANGUAGE.getLocalizedString(`option.${option}_hint`) %></div>
+                                    <% } %>
+                                </td>
+                            </tr>
+                    <% }) %>
+                    </tbody>
+                </table>
+            </div>
+            <div class="footer"></div>
+
+        </div>
+    <% }) %>
+    
+
+    <div class="ikaeasy-option-hint"><%- LANGUAGE.getLocalizedString('option._accept_hint') %></div>
+
+    <div style="text-align: center; margin-top: 20px;">
+        <a class="copy" href="https://cookieside.ru?l=<%= (currentLanguage === 'ru') ? 1 : 2 %>&utm_source=work&amp;utm_medium=ikaeasy" target="_blank">
+            <% if (currentLanguage === 'ru') { %>
+                <img src="https://cookieside.ru/buttons/work_brown.png" style="width: 132px;" />
+            <% } else { %>
+                <img src="https://cookieside.ru/buttons/work_brown_eng.png" style="width: 132px;" />
+            <% } %>
+        </a>
+    </div>
+</div>

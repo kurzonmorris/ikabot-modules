@@ -1,0 +1,6 @@
+<div class="ikaeasy_transporter_city ikaeasy_<%= data.city.relationship %> <%= (data.current) ? 'current_city' : '' %>" data-id="<%= data.city.id %>">
+    <div class="ikaeasy_tr_res"   data-js="ajaxHandlerCall('?view=transport&destinationCityId=<%= data.city.id %>');"></div>
+    <div class="ikaeasy_tr_fleet" data-js="ajaxHandlerCall('?view=deployment&deploymentType=fleet&destinationCityId=<%= data.city.id %>');"></div>
+    <div class="ikaeasy_tr_army"  data-js="ajaxHandlerCall('?view=deployment&deploymentType=army&destinationCityId=<%= data.city.id %>');"></div>
+    <span data-js="ajaxHandlerCall('?view=city&cityId=<%= data.city.id %>');"><%- data.city.coords %> <%- data.city.name %></span>
+</div>
