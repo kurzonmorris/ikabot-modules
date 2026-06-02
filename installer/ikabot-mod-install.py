@@ -51,7 +51,7 @@ GITHUB_API = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 # ikabot:    ikabot-v7.3.3-mod-v0.9.4.zip   (mod version used for comparison)
 # installer: ikabot-mod-install_v1.1.0.zip
 # tools:     open close update.zip  (exact, no version in name yet)
-ASSET_IKABOT_RE    = re.compile(r'^ikabot-v[\d.]+-mod-v([\d.]+)\.zip$',       re.IGNORECASE)
+ASSET_IKABOT_RE    = re.compile(r'^ikabot-v([\d.]+)-+mod-v([\d.]+)\.zip$',     re.IGNORECASE)
 ASSET_INSTALLER_RE = re.compile(r'^ikabot-mod-install_v([\d.]+)\.zip$',       re.IGNORECASE)
 ASSET_MODULES_RE   = re.compile(r'^ikabot-modules-[\d]+-[\d]+-[\d]+_.*\.zip$', re.IGNORECASE)
 ASSET_TOOLS_RE     = re.compile(r'^open.close.update.*\.zip$',                 re.IGNORECASE)
@@ -393,22 +393,9 @@ def maint_update_ikabot(install_dir: Path) -> None:
         )
         return
 
-    local_ver    = read_version(template_dir) or "not installed"
-    folder_count = sum(1 for f in ikabot_dir.iterdir()
-                       if f.is_dir() and re.match(r"^ikariam \d+$", f.name))
-
-    if not ask_yes_no(
-        f"Current installed version:  {local_ver}\n"
-        f"ikabot instance folders:    {folder_count}\n\n"
-        "This will:\n"
-        "  - Download the latest ikabot release from GitHub\n"
-        "  - Replace the ikabot template folder\n"
-        f"  - Wipe and re-populate all {folder_count} instance folder(s)\n\n"
-        "Close all running instances before continuing.\n\n"
-        "Proceed?",
-        "Update ikabot",
-    ):
-        return
+    local_mod_ver = read_version(template_dir) or "not installed"
+    folder_count  = sum(1 for f in ikabot_dir.iterdir()
+                        if f.is_dir() and re.match(r"^ikariam \d+$", f.name))
 
     print("Contacting GitHub ...")
     try:
@@ -425,16 +412,35 @@ def maint_update_ikabot(install_dir: Path) -> None:
         )
         return
 
-    url, _, remote_ver = ikabot_asset
-    print(f"Downloading ikabot mod v{remote_ver} ...")
+    url, _, _ = ikabot_asset
+    _m = ASSET_IKABOT_RE.match(url.rsplit("/", 1)[-1])
+    remote_ikabot_ver = _m.group(1) if _m else "?"
+    remote_mod_ver    = _m.group(2) if _m else "?"
+
+    if not ask_yes_no(
+        f"Installed mod version:      {local_mod_ver}\n"
+        f"Latest ikabot version:      {remote_ikabot_ver}\n"
+        f"Latest mod version:         {remote_mod_ver}\n"
+        f"ikabot instance folders:    {folder_count}\n\n"
+        "This will:\n"
+        "  - Download the latest ikabot release from GitHub\n"
+        "  - Replace the ikabot template folder\n"
+        f"  - Wipe and re-populate all {folder_count} instance folder(s)\n\n"
+        "Close all running instances before continuing.\n\n"
+        "Proceed?",
+        "Update ikabot",
+    ):
+        return
+
+    print(f"Downloading ikabot v{remote_ikabot_ver} mod v{remote_mod_ver} ...")
     for item in template_dir.iterdir():
         if item.name.startswith("version"):
             continue
         shutil.rmtree(item) if item.is_dir() else item.unlink()
 
     try:
-        download_zip(url, template_dir, f"ikabot mod v{remote_ver}")
-        write_version(template_dir, remote_ver)
+        download_zip(url, template_dir, f"ikabot v{remote_ikabot_ver} mod v{remote_mod_ver}")
+        write_version(template_dir, remote_mod_ver)
     except Exception as exc:
         show_error(f"Failed to download ikabot:\n\n{exc}")
         return
@@ -444,11 +450,60 @@ def maint_update_ikabot(install_dir: Path) -> None:
 
     show_info(
         f"Update complete!\n\n"
-        f"  ikabot mod version : {remote_ver}\n"
-        f"  Instances updated  : {folder_count}\n\n"
+        f"  ikabot version   : {remote_ikabot_ver}\n"
+        f"  mod version      : {remote_mod_ver}\n"
+        f"  Instances updated: {folder_count}\n\n"
         "All instances are now running the latest version.",
         "Update Complete",
     )
+
+
+def maint_update_modules(install_dir: Path) -> None:
+    modules_dir = install_dir / "modules"
+    modules_dir.mkdir(exist_ok=True)
+
+    print("Contacting GitHub ...")
+    try:
+        releases = fetch_releases()
+    except Exception as exc:
+        show_error(f"Could not contact GitHub:\n\n{exc}")
+        return
+
+    modules_asset = find_asset(releases, ASSET_MODULES_RE)
+    if not modules_asset:
+        show_info(
+            "No modules release found on GitHub.\n\n"
+            "Modules will appear here once a release is published.",
+            "Update Modules",
+        )
+        return
+
+    url, tag, _ = modules_asset
+    if not ask_yes_no(
+        f"Latest modules release:  {tag}\n\n"
+        "This will download and extract the latest modules into:\n"
+        f"  {modules_dir}\n\n"
+        "Existing module files will be replaced.\n\n"
+        "Proceed?",
+        "Update Modules",
+    ):
+        return
+
+    try:
+        download_zip(url, modules_dir, "ikabot modules")
+        for f in list(modules_dir.iterdir()):
+            if not f.is_file() or f.suffix.lower() == ".csv":
+                continue
+            new_stem = re.sub(r"_v.+$", "", f.stem)
+            new_name = new_stem + f.suffix
+            if new_name != f.name:
+                target = f.parent / new_name
+                if target.exists():
+                    target.unlink()
+                f.rename(target)
+        show_info("Modules updated successfully.", "Update Modules — Done")
+    except Exception as exc:
+        show_error(f"Could not update modules:\n\n{exc}")
 
 
 def maintenance_mode(install_dir: Path) -> None:
@@ -456,7 +511,7 @@ def maintenance_mode(install_dir: Path) -> None:
         choice = ask_choice(
             "ikabot Manager",
             "ikabot Manager\n\nSelect an action:",
-            ["Open all instances", "Close all instances", "Update ikabot", "Exit"],
+            ["Open all instances", "Close all instances", "Update ikabot", "Update modules", "Exit"],
         )
         if choice is None or choice == "Exit":
             return
@@ -466,6 +521,8 @@ def maintenance_mode(install_dir: Path) -> None:
             maint_close_all()
         elif choice == "Update ikabot":
             maint_update_ikabot(install_dir)
+        elif choice == "Update modules":
+            maint_update_modules(install_dir)
 
 # ── ikariam folder management ─────────────────────────────────────────────────
 
@@ -674,9 +731,14 @@ def main() -> None:
         return
 
     url, tag, remote_ver = ikabot_asset
+    # Extract both version numbers from the asset filename
+    _m = ASSET_IKABOT_RE.match(url.rsplit("/", 1)[-1])
+    remote_ikabot_ver = _m.group(1) if _m else tag.lstrip("vV")
+    remote_mod_ver    = _m.group(2) if _m else remote_ver
+
     local_ikabot_ver = read_version(template_dir)
-    if local_ikabot_ver is None or is_newer(remote_ver, local_ikabot_ver):
-        print(f"Downloading ikabot mod v{remote_ver} ...")
+    if local_ikabot_ver is None or is_newer(remote_mod_ver, local_ikabot_ver):
+        print(f"Downloading ikabot v{remote_ikabot_ver} mod v{remote_mod_ver} ...")
         for item in template_dir.iterdir():
             if item.name.startswith("version"):
                 continue
@@ -685,16 +747,17 @@ def main() -> None:
             else:
                 item.unlink()
         try:
-            download_zip(url, template_dir, f"ikabot mod v{remote_ver}")
-            write_version(template_dir, remote_ver)
-            print(f"ikabot mod v{remote_ver} downloaded.")
+            download_zip(url, template_dir, f"ikabot v{remote_ikabot_ver} mod v{remote_mod_ver}")
+            write_version(template_dir, remote_mod_ver)
+            print(f"ikabot v{remote_ikabot_ver} mod v{remote_mod_ver} downloaded.")
         except Exception as exc:
             show_error(f"Failed to download ikabot:\n\n{exc}")
             return
     else:
         print(f"ikabot already up to date (mod v{local_ikabot_ver}).")
 
-    ikabot_ver = read_version(template_dir) or remote_ver
+    mod_ver    = read_version(template_dir) or remote_mod_ver
+    ikabot_ver = remote_ikabot_ver
 
     # ── 5b. Install ikabot manager ────────────────────────────────────────────
     # The manager is bundled with the installer. Copy it to its own folder
@@ -913,6 +976,7 @@ def main() -> None:
     show_info(
         "Installation complete!\n\n"
         f"  ikabot version   : {ikabot_ver}\n"
+        f"  mod version      : {mod_ver}\n"
         f"  Installer version: {INSTALLER_VERSION}\n"
         f"  Instances set up : {count}\n"
         f"  Installed to     : {install_dir}\n"
