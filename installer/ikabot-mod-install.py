@@ -51,7 +51,7 @@ GITHUB_API = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 # ikabot:    ikabot-v7.3.3-mod-v0.9.4.zip   (mod version used for comparison)
 # installer: ikabot-mod-install_v1.1.0.zip
 # tools:     open close update.zip  (exact, no version in name yet)
-ASSET_IKABOT_RE    = re.compile(r'^ikabot-v[\d.]+-mod-v([\d.]+)\.zip$',       re.IGNORECASE)
+ASSET_IKABOT_RE    = re.compile(r'^ikabot-v([\d.]+)-mod-v([\d.]+)\.zip$',      re.IGNORECASE)
 ASSET_INSTALLER_RE = re.compile(r'^ikabot-mod-install_v([\d.]+)\.zip$',       re.IGNORECASE)
 ASSET_MODULES_RE   = re.compile(r'^ikabot-modules-[\d]+-[\d]+-[\d]+_.*\.zip$', re.IGNORECASE)
 ASSET_TOOLS_RE     = re.compile(r'^open.close.update.*\.zip$',                 re.IGNORECASE)
@@ -674,9 +674,14 @@ def main() -> None:
         return
 
     url, tag, remote_ver = ikabot_asset
+    # Extract both version numbers from the asset filename
+    _m = ASSET_IKABOT_RE.match(url.rsplit("/", 1)[-1])
+    remote_ikabot_ver = _m.group(1) if _m else tag.lstrip("vV")
+    remote_mod_ver    = _m.group(2) if _m else remote_ver
+
     local_ikabot_ver = read_version(template_dir)
-    if local_ikabot_ver is None or is_newer(remote_ver, local_ikabot_ver):
-        print(f"Downloading ikabot mod v{remote_ver} ...")
+    if local_ikabot_ver is None or is_newer(remote_mod_ver, local_ikabot_ver):
+        print(f"Downloading ikabot v{remote_ikabot_ver} mod v{remote_mod_ver} ...")
         for item in template_dir.iterdir():
             if item.name.startswith("version"):
                 continue
@@ -685,16 +690,17 @@ def main() -> None:
             else:
                 item.unlink()
         try:
-            download_zip(url, template_dir, f"ikabot mod v{remote_ver}")
-            write_version(template_dir, remote_ver)
-            print(f"ikabot mod v{remote_ver} downloaded.")
+            download_zip(url, template_dir, f"ikabot v{remote_ikabot_ver} mod v{remote_mod_ver}")
+            write_version(template_dir, remote_mod_ver)
+            print(f"ikabot v{remote_ikabot_ver} mod v{remote_mod_ver} downloaded.")
         except Exception as exc:
             show_error(f"Failed to download ikabot:\n\n{exc}")
             return
     else:
         print(f"ikabot already up to date (mod v{local_ikabot_ver}).")
 
-    ikabot_ver = read_version(template_dir) or remote_ver
+    mod_ver    = read_version(template_dir) or remote_mod_ver
+    ikabot_ver = remote_ikabot_ver
 
     # ── 5b. Install ikabot manager ────────────────────────────────────────────
     # The manager is bundled with the installer. Copy it to its own folder
@@ -913,6 +919,7 @@ def main() -> None:
     show_info(
         "Installation complete!\n\n"
         f"  ikabot version   : {ikabot_ver}\n"
+        f"  mod version      : {mod_ver}\n"
         f"  Installer version: {INSTALLER_VERSION}\n"
         f"  Instances set up : {count}\n"
         f"  Installed to     : {install_dir}\n"
