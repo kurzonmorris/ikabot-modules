@@ -14,7 +14,7 @@ try {
     $ver   = $null
     foreach ($r in $releases) {
         foreach ($a in $r.assets) {
-            if ($a.name -match '^ikabot-v[\d.]+-mod-v([\d.]+)\.zip$') {
+            if ($a.name -match '^ikabot-v[\d.]+-+mod-v([\d.]+)\.zip$') {
                 $asset = $a
                 $ver   = $matches[1]
                 break

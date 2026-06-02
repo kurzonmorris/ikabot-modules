@@ -51,7 +51,7 @@ GITHUB_API = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 # ikabot:    ikabot-v7.3.3-mod-v0.9.4.zip   (mod version used for comparison)
 # installer: ikabot-mod-install_v1.1.0.zip
 # tools:     open close update.zip  (exact, no version in name yet)
-ASSET_IKABOT_RE    = re.compile(r'^ikabot-v([\d.]+)-mod-v([\d.]+)\.zip$',      re.IGNORECASE)
+ASSET_IKABOT_RE    = re.compile(r'^ikabot-v([\d.]+)-+mod-v([\d.]+)\.zip$',     re.IGNORECASE)
 ASSET_INSTALLER_RE = re.compile(r'^ikabot-mod-install_v([\d.]+)\.zip$',       re.IGNORECASE)
 ASSET_MODULES_RE   = re.compile(r'^ikabot-modules-[\d]+-[\d]+-[\d]+_.*\.zip$', re.IGNORECASE)
 ASSET_TOOLS_RE     = re.compile(r'^open.close.update.*\.zip$',                 re.IGNORECASE)
