@@ -5,10 +5,11 @@
 
 ; ── Config (remembers last-used folders between sessions) ────────────────────
 
-CFG := A_ScriptDir "\ikabot_manager.ini"
+CFG := A_AppData "\ikabot\ikabot_manager.ini"
 
 SaveCfg(key, val) {
     global CFG
+    DirCreate A_AppData "\ikabot"
     IniWrite val, CFG, "Paths", key
 }
 

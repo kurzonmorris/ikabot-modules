@@ -1,7 +1,20 @@
-Version: 1.1.0
+Version: 1.2.0
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 1.2.0
+-----------------
+- Added Install / Maintenance mode selection as first screen
+- Maintenance mode: open all instances, close all instances, update ikabot
+- Added optional ikabot modules download with automatic file renaming
+- Instance count prompt now has a Skip button to keep existing setup
+- Shortcut location prompt clarifies the folder is created automatically
+- Fixed self-update relaunch broken by onedir zip structure
+- Fixed IniWrite error in manager when installed to Program Files
+- Moved PowerShell update script to ikabot_update.ps1 (fixes AHK parse error)
+- Improved instance folder error message to mention closing ikabot
+- Install directory remembered between sessions for Maintenance mode
 
 Changes in 1.1.0
 -----------------

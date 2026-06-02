@@ -43,7 +43,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "1.1.0"
+INSTALLER_VERSION = "1.2.0"
 
 GITHUB_API = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 
@@ -502,7 +502,8 @@ def sync_ikariam_folders(ikabot_dir: Path, count: int, template_dir: Path) -> No
         show_error(
             "Some instance folders could not be set up:\n\n"
             + "\n".join(errors)
-            + "\n\nClose any running ikabot instances and re-run the installer."
+            + "\n\nThis is usually because ikabot is still running.\n"
+            "Please close all ikabot instances and try again."
         )
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -618,8 +619,8 @@ def main() -> None:
                 download_zip(url, update_dir, f"ikabot-mod-install v{remote_ver}")
                 write_version(update_dir, remote_ver)
             except Exception as exc:
-                show_error(f"Failed to download the installer update:\n\n{exc}")
-                return
+                print(f"Warning: could not download installer update: {exc}")
+                # Non-fatal — continue with the current version
 
         update_ver = read_version(update_dir)
         if update_ver and is_newer(update_ver, INSTALLER_VERSION):
