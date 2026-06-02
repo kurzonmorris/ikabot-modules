@@ -372,6 +372,10 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
 
 
 def handleIkabotAPIRequest(session, request):
+    if request.args["action"] == "ikaeasy":
+        from ikabot.helpers.ikaEasyBridge import handle as ikaeasy_handle
+        return ikaeasy_handle(session, request, sys.flask)
+
     if request.args["action"] == "killTask":
         try:
             if isWindows:

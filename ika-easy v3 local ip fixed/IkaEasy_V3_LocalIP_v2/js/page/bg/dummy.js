@@ -44,6 +44,10 @@ class Dummy extends Parent {
                 this.empireModule = this.createModule('empire');
             }
 
+            if (this.options.get('ikabot', true)) {
+                this.ikabotModule = this.createModule('ikabot');
+            }
+
             if (getItem('open_building')) {
                 this.openBuilding();
             }

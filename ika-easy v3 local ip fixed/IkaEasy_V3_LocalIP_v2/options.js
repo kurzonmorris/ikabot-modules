@@ -18,6 +18,7 @@ export default {
     "notes": false,
     "city_hotkeys": true,
     "quick_menu": false,
+    "ikabot": true,
 
     "hide_premium": true,
     "hide_ads": true,
