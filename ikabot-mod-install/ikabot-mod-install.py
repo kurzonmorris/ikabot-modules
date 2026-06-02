@@ -619,8 +619,8 @@ def main() -> None:
                 download_zip(url, update_dir, f"ikabot-mod-install v{remote_ver}")
                 write_version(update_dir, remote_ver)
             except Exception as exc:
-                show_error(f"Failed to download the installer update:\n\n{exc}")
-                return
+                print(f"Warning: could not download installer update: {exc}")
+                # Non-fatal — continue with the current version
 
         update_ver = read_version(update_dir)
         if update_ver and is_newer(update_ver, INSTALLER_VERSION):
