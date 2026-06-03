@@ -2,21 +2,19 @@
 
 (function() {
     window.addEventListener('message', function (event) {
+        // Only accept messages from the same window (not iframes or other origins).
+        if (event.source !== window) {
+            return;
+        }
+        if (event.origin !== location.origin) {
+            return;
+        }
         if ((event.data.type) && ((event.data.type === 'FROM_IKAEASY_V3'))) {
             if (event.data.cmd === 'code_eval') {
                 eval(event.data.code);
             }
         }
     });
-
-    const CONSOLE_ENABLED = true;
-
-    if (CONSOLE_ENABLED) {
-        var i = document.createElement('iframe');
-        i.style.display = 'none';
-        document.body.appendChild(i);
-        window.console = i.contentWindow.console;
-    }
 
     class Front {
         constructor() {
@@ -88,8 +86,6 @@
         _updateResources() {
             if (typeof LocalizationStrings !== 'undefined') {
                 LocalizationStrings.glass = LocalizationStrings.crystal;
-            } else {
-                LocalizationStrings.glass = 'Glass'
             }
 
             let model = ikariam.model;
