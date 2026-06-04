@@ -1,0 +1,92 @@
+<div class="contentBox01h ikaeasy-cm-report" style="margin-top:10px;">
+    <h3 class="header">Construction Manager Queue</h3>
+    <div class="content" style="padding:8px 10px;">
+
+        <% if (!data.ikabotDetected) { %>
+            <p style="color:#888;font-size:0.85em;margin:4px 0;">
+                Play through the ikabot web server to use Construction Manager Report.
+            </p>
+        <% } else if (!data.rows || data.rows.length === 0) { %>
+            <p style="color:#888;font-size:0.85em;margin:4px 0;">
+                No construction queue entries for this city.
+            </p>
+        <% } else { %>
+
+            <table class="table01" style="width:100%;border-collapse:collapse;font-size:0.82em;">
+                <thead>
+                    <tr>
+                        <th style="text-align:left;padding:3px 6px;">Building</th>
+                        <th style="text-align:center;padding:3px 4px;">Pri</th>
+                        <th style="text-align:center;padding:3px 4px;">Lvl</th>
+                        <th style="text-align:center;padding:3px 4px;">
+                            <span class="resource_icon_small icon_wood" title="Wood"></span>
+                        </th>
+                        <th style="text-align:center;padding:3px 4px;">
+                            <span class="resource_icon_small icon_wine" title="Wine"></span>
+                        </th>
+                        <th style="text-align:center;padding:3px 4px;">
+                            <span class="resource_icon_small icon_marble" title="Marble"></span>
+                        </th>
+                        <th style="text-align:center;padding:3px 4px;">
+                            <span class="resource_icon_small icon_glass" title="Crystal Glass"></span>
+                        </th>
+                        <th style="text-align:center;padding:3px 4px;">
+                            <span class="resource_icon_small icon_sulfur" title="Sulphur"></span>
+                        </th>
+                        <th style="text-align:left;padding:3px 6px;">Can start</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <% let priority = 0; %>
+                    <% for (const group of data.groups) { %>
+                        <!-- Building header row -->
+                        <tr style="background:#2a2010;">
+                            <td colspan="9" style="padding:4px 6px;">
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <span class="button_building <%= group.buildingKey %>"
+                                          style="width:32px;height:32px;display:inline-block;flex-shrink:0;"></span>
+                                    <b><%= group.buildingName %></b>
+                                </div>
+                            </td>
+                        </tr>
+                        <!-- Level rows -->
+                        <% for (const row of group.levels) { %>
+                            <% priority++; %>
+                            <tr>
+                                <td style="padding:2px 6px;color:#888;font-size:0.9em;"></td>
+                                <td style="text-align:center;padding:2px 4px;"><%= priority %></td>
+                                <td style="text-align:center;padding:2px 4px;"><%= row.target_level %></td>
+                                <td style="text-align:right;padding:2px 6px;<%= row.cumWood   > 0 ? '' : 'color:#555;' %>">
+                                    <%= row.cumWood   > 0 ? row.cumWood.toLocaleString()   : '—' %>
+                                </td>
+                                <td style="text-align:right;padding:2px 6px;<%= row.cumWine   > 0 ? '' : 'color:#555;' %>">
+                                    <%= row.cumWine   > 0 ? row.cumWine.toLocaleString()   : '—' %>
+                                </td>
+                                <td style="text-align:right;padding:2px 6px;<%= row.cumMarble > 0 ? '' : 'color:#555;' %>">
+                                    <%= row.cumMarble > 0 ? row.cumMarble.toLocaleString() : '—' %>
+                                </td>
+                                <td style="text-align:right;padding:2px 6px;<%= row.cumCrystal > 0 ? '' : 'color:#555;' %>">
+                                    <%= row.cumCrystal > 0 ? row.cumCrystal.toLocaleString() : '—' %>
+                                </td>
+                                <td style="text-align:right;padding:2px 6px;<%= row.cumSulphur > 0 ? '' : 'color:#555;' %>">
+                                    <%= row.cumSulphur > 0 ? row.cumSulphur.toLocaleString() : '—' %>
+                                </td>
+                                <td style="padding:2px 6px;white-space:nowrap;
+                                    <%= row.canStartNow ? 'color:green;' : 'color:#c07000;' %>">
+                                    <%= row.canStartLabel %>
+                                </td>
+                            </tr>
+                        <% } %>
+                    <% } %>
+                </tbody>
+            </table>
+
+            <p style="font-size:0.78em;color:#888;margin:6px 0 0;">
+                Resource totals are cumulative — each row includes all previous entries.
+                "Can start" is an estimate based on current stock and production rate.
+            </p>
+
+        <% } %>
+    </div>
+    <div class="footer"></div>
+</div>

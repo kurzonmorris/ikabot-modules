@@ -11,6 +11,7 @@ class Page extends Parent {
     async init() {
         this.ikariamPremiumToggle([$('#townHall .premiumOffer')]);
         await this.addProductionSection();
+        await this.addCmReport();
     }
 
     async addProductionSection() {
@@ -146,6 +147,104 @@ class Page extends Parent {
         } finally {
             $('#ikaeasy_prod_apply', $section).prop('disabled', false);
         }
+    }
+
+    async addCmReport() {
+        if ($('#ikaeasy_cm_report').length) return;
+
+        let ikabotDetected = false;
+        let rows = [];
+        try {
+            const cityId = this._city && this._city.cityId;
+            const url = `${location.origin}/index.php?ikabot=1&action=ikaeasy&ikaeasy=construction`
+                + (cityId ? `&city_id=${cityId}` : '');
+            const r = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(3000) });
+            if (r.ok) {
+                const data = await r.json();
+                ikabotDetected = true;
+                const cityKey = cityId ? String(cityId) : Object.keys(data.cities || {})[0];
+                rows = (data.cities && data.cities[cityKey]) || [];
+            }
+        } catch (_) {}
+
+        // Sort by slot_position (queue order).
+        rows.sort((a, b) => (a.slot_position || 0) - (b.slot_position || 0));
+
+        // Build cumulative totals and group by building name.
+        const groups = [];
+        let cumWood = 0, cumWine = 0, cumMarble = 0, cumCrystal = 0, cumSulphur = 0;
+        let lastBuilding = null;
+        let currentGroup = null;
+
+        // Current city resources and production rates for time estimates.
+        const res  = (this._city && this._city.resources)  || {};
+        const prod = (this._city && this._city.production)  || {};
+        // IkaEasy resource keys: wood=5, wine=1, marble=2, glass=3, sulfur=4
+        const stock = {
+            wood:    res[5]  || res['wood']    || 0,
+            wine:    res[1]  || res['wine']    || 0,
+            marble:  res[2]  || res['marble']  || 0,
+            crystal: res[3]  || res['glass']   || 0,
+            sulphur: res[4]  || res['sulfur']  || 0,
+        };
+        const rate = {
+            wood:    prod[5]  || prod['wood']   || 0,
+            wine:    prod[1]  || prod['wine']   || 0,
+            marble:  prod[2]  || prod['marble'] || 0,
+            crystal: prod[3]  || prod['glass']  || 0,
+            sulphur: prod[4]  || prod['sulfur'] || 0,
+        };
+
+        for (const row of rows) {
+            cumWood    += row.wood    || 0;
+            cumWine    += row.wine    || 0;
+            cumMarble  += row.marble  || 0;
+            cumCrystal += row.crystal || 0;
+            cumSulphur += row.sulphur || 0;
+
+            // Time-to-start: max hours needed across all resources for this cumulative total.
+            let hoursNeeded = 0;
+            for (const [res, cum] of [
+                ['wood', cumWood], ['wine', cumWine], ['marble', cumMarble],
+                ['crystal', cumCrystal], ['sulphur', cumSulphur],
+            ]) {
+                const deficit = cum - stock[res];
+                if (deficit > 0 && rate[res] > 0) {
+                    hoursNeeded = Math.max(hoursNeeded, deficit / rate[res]);
+                }
+            }
+
+            let canStartLabel;
+            if (hoursNeeded <= 0) {
+                canStartLabel = 'Now';
+            } else if (hoursNeeded < 1) {
+                canStartLabel = `~${Math.ceil(hoursNeeded * 60)} min`;
+            } else if (hoursNeeded < 48) {
+                canStartLabel = `~${Math.ceil(hoursNeeded)} h`;
+            } else {
+                canStartLabel = `~${Math.ceil(hoursNeeded / 24)} d`;
+            }
+
+            const buildingName = row.building || 'Unknown';
+            if (buildingName !== lastBuilding) {
+                currentGroup = { buildingName, buildingKey: buildingName.toLowerCase().replace(/\s+/g, '_'), levels: [] };
+                groups.push(currentGroup);
+                lastBuilding = buildingName;
+            }
+            currentGroup.levels.push({
+                target_level: row.target_level,
+                cumWood, cumWine, cumMarble, cumCrystal, cumSulphur,
+                canStartNow: hoursNeeded <= 0,
+                canStartLabel,
+            });
+        }
+
+        const tpl = await this.render('cm-report', { ikabotDetected, rows, groups });
+        const $section = $(tpl);
+        $section.attr('id', 'ikaeasy_cm_report');
+
+        const $anchor = $('#ikaeasy_prod_wrap, #townHall, .contentBox01h').last();
+        $anchor.after($section);
     }
 }
 
