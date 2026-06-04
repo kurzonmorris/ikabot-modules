@@ -295,6 +295,113 @@ def apply_tavern(session, body):
         return {"ok": False, "error": str(e)}
 
 
+# ── Modify Production ────────────────────────────────────────────────────────
+
+def modify_production(session, body):
+    """Apply worker percentages to resource/tradegood buildings.
+
+    body fields:
+      city_ids        : list of int city IDs to apply to
+      resource_types  : list containing "resource", "tradegood", or both
+      wood_pct        : int 0-100  (used when "resource" is in resource_types)
+      luxury_pct      : int 0-100  (used when "tradegood" is in resource_types)
+      maximise        : bool — if true and pct==100, includes overcharge workers
+    """
+    from ikabot.helpers.getJson import getCity, getIsland
+    from ikabot.config import actionRequest, island_url, city_url
+    import time as _time
+
+    city_ids       = body.get("city_ids") or []
+    resource_types = body.get("resource_types") or []
+    wood_pct       = max(0, min(100, int(body.get("wood_pct", 100))))
+    luxury_pct     = max(0, min(100, int(body.get("luxury_pct", 100))))
+    maximise       = bool(body.get("maximise", False))
+
+    if not city_ids:
+        return {"ok": False, "error": "No cities specified."}
+    if not resource_types:
+        return {"ok": False, "error": "No resource types specified."}
+
+    results = []
+
+    # Group cities by island so we only fetch each island once.
+    island_cache = {}
+    cities_data  = {}
+    for cid in city_ids:
+        try:
+            html = session.get(city_url + str(cid))
+            city = getCity(html)
+            cities_data[cid] = city
+            iid = city.get("islandId")
+            if iid and iid not in island_cache:
+                island_cache[iid] = getIsland(session.get(island_url + str(iid)))
+        except Exception as e:
+            results.append({"city_id": cid, "ok": False, "error": str(e)})
+
+    current_city_id = getCity(session.get()).get("id")
+
+    for cid in city_ids:
+        city = cities_data.get(cid)
+        if not city:
+            continue
+        island_id = city.get("islandId")
+        island    = island_cache.get(island_id, {})
+
+        # Switch session context to this city.
+        try:
+            session.post(params={
+                "action": "header", "function": "changeCurrentCity",
+                "actionRequest": actionRequest, "cityId": cid,
+                "oldView": "city", "backgroundView": "city",
+                "currentCityId": current_city_id, "ajax": "1",
+            })
+            current_city_id = cid
+        except Exception:
+            pass
+
+        city_result = {"city_id": cid, "city_name": city.get("name", str(cid)), "changes": []}
+
+        for rtype in resource_types:
+            pct = wood_pct if rtype == "resource" else luxury_pct
+            try:
+                url = (f"view={rtype}&type={rtype}&islandId={island_id}"
+                       f"&cityId={cid}&backgroundView=island"
+                       f"&currentIslandId={island_id}&actionRequest={actionRequest}&ajax=1")
+                resp      = session.post(url)
+                resp_json = json.loads(resp, strict=False)
+                slider    = resp_json[2][1][f"js_ResourceSlider"]["slider"]
+                max_norm  = slider["max_value"]
+                overcharge = slider.get("overcharge", 0)
+
+                if pct == 100 and maximise:
+                    final = max_norm + overcharge
+                else:
+                    final = int(max_norm * pct / 100)
+
+                worker_key = "rw" if rtype == "resource" else "tw"
+                session.post(params={
+                    "islandId": island_id, "cityId": cid,
+                    "type": rtype, "screen": rtype,
+                    "action": "IslandScreen", "function": "workerPlan",
+                    worker_key: final, "templateView": rtype,
+                    "actionRequest": actionRequest, "ajax": "1",
+                })
+                city_result["changes"].append({
+                    "type": rtype, "pct": pct, "workers": final, "ok": True,
+                })
+            except Exception as e:
+                city_result["changes"].append({
+                    "type": rtype, "pct": pct, "ok": False, "error": str(e),
+                })
+
+            _time.sleep(1)
+
+        city_result["ok"] = all(c["ok"] for c in city_result["changes"])
+        results.append(city_result)
+
+    return {"ok": True, "results": results}
+
+
 # ── Main dispatcher ───────────────────────────────────────────────────────────
 
 def handle(session, request, flask):
@@ -310,6 +417,8 @@ def handle(session, request, flask):
             payload = create_rtm_schedule(session, body)
         elif action == "tavern_apply":
             payload = apply_tavern(session, body)
+        elif action == "modify_production":
+            payload = modify_production(session, body)
         else:
             payload = {"ok": False, "error": "Unknown action."}
 
