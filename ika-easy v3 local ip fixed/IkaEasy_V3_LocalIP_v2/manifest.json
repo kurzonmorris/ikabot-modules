@@ -327,7 +327,8 @@
                 "https://*.ikariam.gameforge.com/*",
                 "https://ikalogs.ru/*",
                 "https://*.ikalogs.ru/*",
-                "http://127.0.0.1/*"
+                "http://127.0.0.1/*",
+                "<all_urls>"
             ]
         }
     ],
