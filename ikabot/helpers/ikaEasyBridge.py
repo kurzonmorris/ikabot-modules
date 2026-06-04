@@ -26,7 +26,8 @@ SCHEDULE_JSON_COLS = {
     "dest_targets", "source_reserves", "dest_minimums",
 }
 SCHEDULE_SCHEMA_VERSION = 1
-CM_INT_COLS = {"city_id", "slot_position", "target_level", "expected_finish"}
+CM_INT_COLS = {"city_id", "slot_position", "target_level", "expected_finish",
+               "wood", "wine", "marble", "crystal", "sulphur"}
 
 
 def _safe(v):
@@ -69,6 +70,11 @@ def get_construction_queue(session):
                     "target_level":   row.get("target_level"),
                     "status":         row.get("status"),
                     "expected_finish": row.get("expected_finish"),
+                    "wood":           row.get("wood") or 0,
+                    "wine":           row.get("wine") or 0,
+                    "marble":         row.get("marble") or 0,
+                    "crystal":        row.get("crystal") or 0,
+                    "sulphur":        row.get("sulphur") or 0,
                 })
     except Exception:
         return {}
