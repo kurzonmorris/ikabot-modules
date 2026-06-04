@@ -3,6 +3,15 @@ import Parent from './dummy.js';
 import { getInt, parseTimeString } from '../../utils.js';
 import { Resources, Movements } from '../../const.js';
 
+const RTM_KEEP_KEY = 'ikaeasy_rtm_keeps';
+
+const RES_NAMES = {
+    wood:   'Wood',
+    wine:   'Wine',
+    marble: 'Marble',
+    glass:  'Crystal',
+    sulfur: 'Sulfur',
+};
 
 class Page extends Parent {
 
@@ -14,6 +23,7 @@ class Page extends Parent {
         await this.updateMinMaxButtons($('#transportGoods'));
 
         this.updateMovements();
+        await this.addRtmSection();
     }
 
     updateMovements() {
@@ -177,6 +187,133 @@ class Page extends Parent {
         }
 
         $input.val(val).focus().blur();
+    }
+
+    // ── RTM inline scheduling ────────────────────────────────────────────────
+
+    async addRtmSection() {
+        if ($('#ikaeasy_rtm_inline').length) {
+            return;
+        }
+
+        let ikabotDetected = false;
+        try {
+            const r = await fetch(
+                `${location.origin}/index.php?ikabot=1&action=ikaeasy&ikaeasy=cities`,
+                { credentials: 'include', signal: AbortSignal.timeout(2000) }
+            );
+            if (r.ok) ikabotDetected = true;
+        } catch (_) {}
+
+        const keeps = this._loadKeeps();
+        const resources = this._getCurrentResources();
+
+        const tpl = await this.render('transport-rtm', { keeps, resources, resNames: RES_NAMES, ikabotDetected });
+        const $section = $(tpl);
+        $section.attr('id', 'ikaeasy_rtm_inline');
+
+        // Insert after the resource assignment block, before the submit button area.
+        const $anchor = $('#transportGoods');
+        if ($anchor.length) {
+            $anchor.after($section);
+        } else {
+            $('#transportForm, #transport').append($section);
+        }
+
+        if (ikabotDetected) {
+            this._bindRtmEvents($section, keeps);
+        }
+    }
+
+    _getCurrentResources() {
+        const res = {};
+        ['wood','wine','marble','glass','sulfur'].forEach((r) => {
+            const v = getInt($(`#textfield_${r}`).val());
+            const $li = $(`#textfield_${r}`).closest('li');
+            const avail = getInt($li.find('.value, .current').first().text()) || 0;
+            res[r] = avail;
+        });
+        return res;
+    }
+
+    _loadKeeps() {
+        try {
+            return JSON.parse(localStorage.getItem(RTM_KEEP_KEY) || '{}');
+        } catch (_) {
+            return {};
+        }
+    }
+
+    _saveKeeps(keeps) {
+        localStorage.setItem(RTM_KEEP_KEY, JSON.stringify(keeps));
+    }
+
+    _bindRtmEvents($section, keeps) {
+        $section.on('input', '.ikaeasy-rtm-keep', function () {
+            keeps[$(this).data('res')] = parseInt($(this).val()) || 0;
+            localStorage.setItem(RTM_KEEP_KEY, JSON.stringify(keeps));
+        });
+
+        $section.on('click', '#ikaeasy_rtm_schedule_btn', (e) => {
+            e.preventDefault();
+            this._scheduleWithRtm($section, keeps);
+        });
+    }
+
+    async _scheduleWithRtm($section, keeps) {
+        const $status  = $('#ikaeasy_rtm_status', $section);
+        const $form    = $('#transportForm, #transport');
+        const destId   = parseInt($form.find('input[name="destinationCityId"]').val());
+        const srcId    = this._data.cities.selectedCityId || this._city.cityId;
+        const interval = parseInt($('#ikaeasy_rtm_interval', $section).val()) || 4;
+
+        // Read current amounts from the transport form's own inputs.
+        const amounts = {};
+        ['wood','wine','marble','glass','sulfur'].forEach((r) => {
+            amounts[r] = getInt($(`#textfield_${r}`).val()) || 0;
+        });
+
+        // Ship type: freighters if premium transport is enabled.
+        const shipType = $('#setPremiumTransports').is(':checked') ? 'freighters' : 'merchant_ships';
+
+        if (!destId) {
+            $status.css('color', 'red').text('No destination selected.');
+            return;
+        }
+        if (!Object.values(amounts).some(v => v > 0)) {
+            $status.css('color', 'red').text('Set at least one resource amount above.');
+            return;
+        }
+
+        $status.text('Scheduling…').css('color', '');
+
+        try {
+            const resp = await fetch(
+                `${location.origin}/index.php?ikabot=1&action=ikaeasy`,
+                {
+                    method:      'POST',
+                    credentials: 'include',
+                    headers:     { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        ikaeasy_action:  'schedule',
+                        source_city_id:  srcId,
+                        dest_city_id:    destId,
+                        resources:       amounts,
+                        keeps:           keeps,
+                        ship_type:       shipType,
+                        interval_hours:  interval,
+                    }),
+                }
+            );
+            const data = await resp.json();
+            if (data.ok) {
+                $status.css('color', 'green').text(`Scheduled — route #${data.schedule_id} added to RTM.`);
+            } else {
+                $status.css('color', 'red').text(data.error || 'Failed.');
+            }
+        } catch (_) {
+            $status.css('color', 'red').text('Could not reach ikabot.');
+        }
     }
 }
 
