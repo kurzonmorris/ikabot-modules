@@ -10,6 +10,7 @@ import time
 from ikabot.helpers.process import updateProcessList
 
 _HOME = os.path.expanduser("~")
+_MODULES_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "modules")
 
 SCHEDULE_COLUMNS = [
     "schedule_id", "mode", "ship_type",
@@ -213,6 +214,87 @@ def create_rtm_schedule(session, body):
     return {"ok": True, "schedule_id": int(row["schedule_id"])}
 
 
+# ── Tavern Manager ───────────────────────────────────────────────────────────
+
+def _tavern_module_path():
+    """Return path to tavernManager_vX.Y.Z.py, or None if not installed."""
+    try:
+        for name in os.listdir(_MODULES_DIR):
+            if re.match(r"tavernManager_v[\d.]+\.py$", name):
+                return os.path.join(_MODULES_DIR, name)
+    except OSError:
+        pass
+    return None
+
+
+def get_tavern_status(session):
+    """Return whether the tavern manager module is present."""
+    return {"available": _tavern_module_path() is not None}
+
+
+def apply_tavern(session, body):
+    """Apply a tavern mode to all cities with a tavern.
+
+    body fields:
+      mode        : "set_pct" | "equilibrium"
+      pct         : int 0-100  (required for set_pct)
+      interval_hrs: int 1-24   (required for equilibrium; 0 = run once)
+    """
+    module_path = _tavern_module_path()
+    if not module_path:
+        return {"ok": False, "error": "tavernManager module not installed."}
+
+    mode = body.get("mode", "")
+    if mode not in ("set_pct", "equilibrium"):
+        return {"ok": False, "error": f"Unknown mode '{mode}'."}
+
+    # Dynamically load the module so we don't need a hard import.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tavernManager", module_path)
+    tm_mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(tm_mod)
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to load tavernManager: {e}"}
+
+    TavernManager = tm_mod.TavernManager
+
+    from ikabot.helpers.pedirInfo import getIdsOfCities
+    try:
+        cities_ids, cities = getIdsOfCities(session)
+    except Exception as e:
+        return {"ok": False, "error": f"Could not fetch city list: {e}"}
+
+    mgr = TavernManager(session, notification_mode=3)
+
+    try:
+        if mode == "set_pct":
+            pct = int(body.get("pct", 0))
+            pct = max(0, min(100, pct))
+            results = []
+            for city_id, city in zip(cities_ids, cities):
+                ok = mgr.set_tavern_pct(city, pct)
+                results.append({"city": city.get("name", str(city_id)), "ok": bool(ok)})
+            return {"ok": True, "mode": "set_pct", "pct": pct, "results": results}
+
+        else:  # equilibrium
+            interval = int(body.get("interval_hrs", 24))
+            interval = max(0, min(24, interval))
+            results = mgr.process_equilibrium(cities_ids, cities)
+            summary = []
+            for r in (results or []):
+                summary.append({
+                    "city":   r.get("name", ""),
+                    "action": r.get("action", ""),
+                    "note":   r.get("note", ""),
+                })
+            return {"ok": True, "mode": "equilibrium", "interval_hrs": interval,
+                    "results": summary}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── Main dispatcher ───────────────────────────────────────────────────────────
 
 def handle(session, request, flask):
@@ -226,6 +308,8 @@ def handle(session, request, flask):
         action = body.get("ikaeasy_action", "")
         if action == "schedule":
             payload = create_rtm_schedule(session, body)
+        elif action == "tavern_apply":
+            payload = apply_tavern(session, body)
         else:
             payload = {"ok": False, "error": "Unknown action."}
 
@@ -243,6 +327,8 @@ def handle(session, request, flask):
         payload = {"construction": get_construction_queue(session)}
     elif sub == "processes":
         payload = {"processes": get_processes(session)}
+    elif sub == "tavern_status":
+        payload = get_tavern_status(session)
     else:
         payload = {
             "construction": get_construction_queue(session),
