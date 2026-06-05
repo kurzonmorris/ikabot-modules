@@ -212,7 +212,12 @@ def print_module_banner(page_title=None):
 #  NOTIFICATION CONFIG  (replaces overloaded telegram_enabled)
 # ============================================================================
 
-def get_notification_config(telegram_enabled, event):
+def get_notification_config(telegram_enabled, event, preset=None):
+    global _NOTIF_PRESET
+    active_preset = preset if preset is not None else _NOTIF_PRESET
+    if active_preset is not None:
+        return active_preset
+
     if telegram_enabled is False:
         print_module_banner()
         print(f"  {C.WARN}Telegram is not set up.{C.RESET}")
@@ -227,13 +232,14 @@ def get_notification_config(telegram_enabled, event):
     print(f"  How much do you want to be notified?\n")
     print(f"  {C.BOLD}(1){C.RESET} Partial — summary at start of each cycle + errors")
     print(f"  {C.BOLD}(2){C.RESET} All — a message for every shipment sent")
-    print(f"  {C.BOLD}(3){C.RESET} Errors only — silent unless something fails")
+    print(f"  {C.BOLD}(3){C.RESET} Problems only — silent unless something goes wrong")
+    print(f"  {C.BOLD}(4){C.RESET} None — no notifications at all")
     print(f"  {C.BOLD}('){C.RESET} Back")
-    choice = read(min=1, max=3, digit=True, additionalValues=["'"])
+    choice = read(min=1, max=4, digit=True, additionalValues=["'"])
     if choice == "'":
         event.set()
         return None
-    levels = {1: "partial", 2: "all", 3: "none"}
+    levels = {1: "partial", 2: "all", 3: "problems", 4: "none"}
     return {"level": levels[choice], "telegram": True}
 
 
@@ -242,11 +248,13 @@ def should_notify(notif_config, event_type):
         return False
     level = notif_config.get("level", "none")
     if level == "none":
-        return event_type == "error"
+        return False
     if level == "all":
         return True
     if level == "partial":
         return event_type in ("start", "error", "complete")
+    if level == "problems":
+        return event_type in ("error",)
     return False
 
 
@@ -469,6 +477,7 @@ VALID_SCHEDULE_STATUSES = (
 WORKER_LOCK_STALE_SECONDS = 600   # 10 min — stale lock threshold
 TICK_BUDGET_SECONDS = 60          # max sleep between scheduler checks
 TRANSPORT_WORKER_PREFS = {}       # runtime state shared with worker process
+_NOTIF_PRESET = None              # user's notification preset (set via (n) menu)
 
 
 def _safe(value):
@@ -1699,6 +1708,38 @@ def _clear_all_schedules(session):
     enter()
 
 
+_NOTIF_LABELS = {
+    "partial": "Partial",
+    "all": "All",
+    "problems": "Problems only",
+    "none": "None",
+}
+
+
+def _configure_notif_preset(telegram_enabled, event):
+    if telegram_enabled is False:
+        print(f"\n  {C.WARN}Telegram is not set up. Cannot configure notifications.{C.RESET}")
+        enter()
+        return None
+
+    print_module_banner("Notification Preset")
+    print(f"  {C.DIM}This applies automatically to all new schedules.{C.RESET}\n")
+    print(f"  {C.BOLD}(1){C.RESET} Partial — cycle start/complete + problems")
+    print(f"  {C.BOLD}(2){C.RESET} All — a message for every shipment")
+    print(f"  {C.BOLD}(3){C.RESET} Problems only — silent unless something goes wrong")
+    print(f"  {C.DIM}    (skips, blockades, occupation, 0 ships, errors){C.RESET}")
+    print(f"  {C.BOLD}(4){C.RESET} None — no notifications at all")
+    print(f"  {C.BOLD}(0){C.RESET} Off — ask each time (default)")
+    print(f"  {C.BOLD}('){C.RESET} Cancel")
+    choice = read(min=0, max=4, digit=True, additionalValues=["'"])
+    if choice == "'":
+        return "CANCEL"
+    if choice == 0:
+        return None
+    levels = {1: "partial", 2: "all", 3: "problems", 4: "none"}
+    return {"level": levels[choice], "telegram": True}
+
+
 def resourceTransportManager(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
@@ -1708,6 +1749,7 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
 
         print_module_banner("Shipment Log Setup")
         log_path = get_log_path(session)
+        notif_preset = None
 
         while True:
             print_module_banner()
@@ -1718,9 +1760,18 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                 if counts.get("active", 0) + counts.get("pending", 0) > 0:
                     print(f"  {C.WARN}Schedules exist but the scheduler is stopped."
                           f" Press (s) to start it.{C.RESET}")
+
+            if notif_preset is not None:
+                preset_label = _NOTIF_LABELS.get(
+                    notif_preset.get("level", ""), "?")
+                notif_display = f"{C.OK}{preset_label}{C.RESET}"
+            else:
+                notif_display = f"{C.DIM}ask each time{C.RESET}"
+
             print(f"\n  {C.BOLD}(s){C.RESET} Start scheduler   "
                   f"{C.BOLD}(o){C.RESET} Stop scheduler   "
                   f"{C.BOLD}(x){C.RESET} Clear all schedules")
+            print(f"  {C.BOLD}(n){C.RESET} Notifications: {notif_display}")
             print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
                   f" to run it.{C.RESET}")
 
@@ -1745,7 +1796,7 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
 
             shipping_mode = read(min=1, max=7, digit=True,
                                  additionalValues=["'", "s", "S", "o", "O",
-                                                    "x", "X"])
+                                                    "x", "X", "n", "N"])
             if shipping_mode == "'":
                 event.set()
                 return
@@ -1760,6 +1811,13 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                     continue
                 elif letter == "x":
                     _clear_all_schedules(session)
+                    continue
+                elif letter == "n":
+                    global _NOTIF_PRESET
+                    result = _configure_notif_preset(telegram_enabled, event)
+                    if result != "CANCEL":
+                        notif_preset = result
+                        _NOTIF_PRESET = result
                     continue
 
             if shipping_mode == 7:
@@ -3957,7 +4015,7 @@ def _notify_small_shipments(session, notif_config, mode_label,
                             small_shipments, min_threshold):
     if not small_shipments:
         return
-    if not should_notify(notif_config, "partial"):
+    if not should_notify(notif_config, "error"):
         return
     lines = [f"SMALL SHIPMENTS SKIPPED (below {min_threshold:,})"]
     total_unshipped = [0] * 5
