@@ -898,6 +898,41 @@ def wait_for_action_points(session, origin_city_id, status_prefix="",
 
 
 # ============================================================================
+#  CITY STATUS CHECKS  (occupation, port blockade)
+# ============================================================================
+
+def _is_city_occupied(html):
+    """Detect if a city is under enemy occupation from page HTML."""
+    if re.search(r'"occupier"\s*:', html):
+        return True
+    if re.search(r'"isOccupied"\s*:\s*true', html, re.IGNORECASE):
+        return True
+    if re.search(r'id="?occupation', html, re.IGNORECASE):
+        return True
+    return False
+
+
+def _is_port_blockaded(html):
+    """Detect if a city's port is blockaded from page HTML."""
+    if re.search(r'"blockade"\s*:\s*["\d{]', html):
+        return True
+    if re.search(r'"isBlockaded"\s*:\s*true', html, re.IGNORECASE):
+        return True
+    if re.search(r'id="?blockade', html, re.IGNORECASE):
+        return True
+    if re.search(r'portBlock', html):
+        return True
+    return False
+
+
+def _check_city_status(session, city_id):
+    """Fetch city page and check for occupation/blockade.
+    Returns (occupied: bool, blockaded: bool)."""
+    html = session.get(city_url + str(city_id))
+    return _is_city_occupied(html), _is_port_blockaded(html)
+
+
+# ============================================================================
 #  SHARED SEND SHIPMENT  (lock → verify → send → verify → unlock → log)
 # ============================================================================
 
@@ -913,13 +948,68 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
     prefix = f"{origin_city['name']} -> {dest_city['name']} | "
 
     result = {"success": False, "error": None, "ships_used": 0,
-              "no_ap": False, "below_threshold": False}
+              "no_ap": False, "below_threshold": False,
+              "city_unavailable": False}
 
     if min_threshold > 0 and total_cargo < min_threshold:
         result["below_threshold"] = True
         result["error"] = (
             f"Below minimum ({total_cargo:,} < {min_threshold:,})"
         )
+        return result
+
+    # 0. Check source city for occupation / blockade
+    src_occ, src_block = _check_city_status(session, origin_city["id"])
+    if src_occ:
+        result["city_unavailable"] = True
+        result["error"] = f"{origin_city['name']} is occupied by enemy"
+        if should_notify(notif_config, "error"):
+            sendToBot(session,
+                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+        log_shipment(log_path, session, mode_name,
+                     origin_city["name"], "", dest_city["name"],
+                     dest_island_coords, dest_player, resources,
+                     0, ship_type_name, "SKIPPED", result["error"],
+                     next_shipment_str)
+        return result
+    if src_block:
+        result["city_unavailable"] = True
+        result["error"] = f"{origin_city['name']} port is blockaded"
+        if should_notify(notif_config, "error"):
+            sendToBot(session,
+                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+        log_shipment(log_path, session, mode_name,
+                     origin_city["name"], "", dest_city["name"],
+                     dest_island_coords, dest_player, resources,
+                     0, ship_type_name, "SKIPPED", result["error"],
+                     next_shipment_str)
+        return result
+
+    # 0b. Check destination city for occupation / blockade
+    dest_occ, dest_block = _check_city_status(session, dest_city["id"])
+    if dest_occ:
+        result["city_unavailable"] = True
+        result["error"] = f"{dest_city['name']} (dest) is occupied by enemy"
+        if should_notify(notif_config, "error"):
+            sendToBot(session,
+                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+        log_shipment(log_path, session, mode_name,
+                     origin_city["name"], "", dest_city["name"],
+                     dest_island_coords, dest_player, resources,
+                     0, ship_type_name, "SKIPPED", result["error"],
+                     next_shipment_str)
+        return result
+    if dest_block:
+        result["city_unavailable"] = True
+        result["error"] = f"{dest_city['name']} (dest) port is blockaded"
+        if should_notify(notif_config, "error"):
+            sendToBot(session,
+                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+        log_shipment(log_path, session, mode_name,
+                     origin_city["name"], "", dest_city["name"],
+                     dest_island_coords, dest_player, resources,
+                     0, ship_type_name, "SKIPPED", result["error"],
+                     next_shipment_str)
         return result
 
     # 1. Wait for ships (with timeout)
