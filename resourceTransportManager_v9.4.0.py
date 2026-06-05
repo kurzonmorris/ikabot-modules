@@ -3410,8 +3410,14 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
 
         # Final confirmation with dry run
         while True:
+            done_count = sum(
+                1 for r in rows
+                if normalize_text(r.get(run_column, "")) == "x"
+            )
+            pending_count = len(rows) - done_count
             print_module_banner("Bulk Distribution — Summary")
             print(f"  {C.BOLD}CSV rows:{C.RESET}  {len(rows)}")
+            print(f"  {C.BOLD}Progress:{C.RESET}  {done_count} done, {pending_count} pending")
             print(f"  {C.BOLD}Interval:{C.RESET}  every {interval_hours}h")
             print(f"  {C.BOLD}AP wait:{C.RESET}   {ap_max_wait} min")
             if min_threshold > 0:
@@ -3422,15 +3428,76 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
                   f"{C.CYAN}(D){C.RESET} Dry run preview  "
                   f"{C.YELLOW}(E){C.RESET} Edit CSV  "
-                  f"{C.CYAN}(A){C.RESET} AP wait timer  "
+                  f"{C.CYAN}(R){C.RESET} Reset progress")
+            print(f"  {C.CYAN}(A){C.RESET} AP wait timer  "
                   f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
             rta = read(values=["y", "Y", "n", "N", "d", "D", "e", "E",
-                               "a", "A", "t", "T", "", "'"],
+                               "a", "A", "t", "T", "r", "R", "", "'"],
                        additionalValues=["'"])
             if rta == "'" or rta.lower() == "n":
                 event.set()
                 return
+            if rta.lower() == "r":
+                print(f"\n  {C.BOLD}Reset Progress{C.RESET}")
+                print(f"  Current: {done_count}/{len(rows)} completed\n")
+                print(f"  {C.BOLD}(1){C.RESET} Reset all — start completely from scratch")
+                print(f"  {C.BOLD}(2){C.RESET} Reset from row — clear from a specific row onwards")
+                print(f"  {C.BOLD}(3){C.RESET} Reset specific rows — pick rows by number/range")
+                print(f"  {C.BOLD}('){C.RESET} Cancel")
+                rc = read(min=1, max=3, digit=True, additionalValues=["'"])
+                if rc == "'":
+                    continue
+                if rc == 1:
+                    for row in rows:
+                        row[run_column] = ""
+                    try:
+                        write_csv_atomic(csv_path, fieldnames, rows)
+                    except Exception as _e:
+                        print(f"  {C.WARN}CSV write error: {_e}{C.RESET}")
+                    print(f"  {C.OK}All {len(rows)} rows reset.{C.RESET}")
+                    enter()
+                    continue
+                if rc == 2:
+                    print(f"  Start from which row? (1-{len(rows)}):")
+                    start_row = read(min=1, max=len(rows), digit=True,
+                                     additionalValues=["'"])
+                    if start_row == "'":
+                        continue
+                    cleared = 0
+                    for i in range(start_row - 1, len(rows)):
+                        if rows[i].get(run_column, "").strip():
+                            rows[i][run_column] = ""
+                            cleared += 1
+                    try:
+                        write_csv_atomic(csv_path, fieldnames, rows)
+                    except Exception as _e:
+                        print(f"  {C.WARN}CSV write error: {_e}{C.RESET}")
+                    print(f"  {C.OK}Cleared {cleared} row(s) from row {start_row} onwards.{C.RESET}")
+                    enter()
+                    continue
+                if rc == 3:
+                    print(f"  Enter row numbers (comma-sep, ranges, e.g. 1-5, 8, 12-20):")
+                    raw = read(additionalValues=["'"])
+                    if raw == "'":
+                        continue
+                    indices = _parse_row_selection(raw, len(rows))
+                    if indices is None or not indices:
+                        print("  Invalid selection.")
+                        enter()
+                        continue
+                    cleared = 0
+                    for idx in indices:
+                        if rows[idx].get(run_column, "").strip():
+                            rows[idx][run_column] = ""
+                            cleared += 1
+                    try:
+                        write_csv_atomic(csv_path, fieldnames, rows)
+                    except Exception as _e:
+                        print(f"  {C.WARN}CSV write error: {_e}{C.RESET}")
+                    print(f"  {C.OK}Cleared {cleared} row(s).{C.RESET}")
+                    enter()
+                    continue
             if rta.lower() == "e":
                 _bulk_editor_menu(session, csv_path, event)
                 return "restart"
