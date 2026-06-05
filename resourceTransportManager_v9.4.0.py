@@ -523,6 +523,32 @@ def transport_stop_flag_path(session):
     )
 
 
+def transport_wake_flag_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_transport_wake_{_account_suffix(session)}",
+    )
+
+
+def _touch_wake_flag(session):
+    try:
+        with open(transport_wake_flag_path(session), "w") as f:
+            f.write(str(int(time.time())))
+    except OSError:
+        pass
+
+
+def _consume_wake_flag(session):
+    path = transport_wake_flag_path(session)
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return True
+    return False
+
+
 # --- Lock helpers (reusable for both shipping lock and CSV lock) ---
 
 def _lock_acquire(lock_path, timeout=30, stale_after=60):
@@ -730,6 +756,7 @@ def _transport_csv_modify(session, fn):
 
 def transport_csv_append(session, row):
     _transport_csv_modify(session, lambda rows: rows.append(row))
+    _touch_wake_flag(session)
 
 
 def transport_csv_delete(session, schedule_id):
@@ -799,7 +826,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "notif_level":     notif_level,
         "status":          status,
         "last_run":        "",
-        "next_run":        now_ts if interval_hours > 0 else "",
+        "next_run":        now_ts,
         "total_shipments": 0,
         "created_at":      now_ts,
         "notes":           notes,
@@ -5063,6 +5090,20 @@ def execute_schedule(session, sched, notif_config, log_path):
     return cycle_sent
 
 
+WAKE_POLL_SECONDS = 2
+
+def _wait_or_wake(session, stop_event, total_seconds):
+    elapsed = 0
+    while elapsed < total_seconds:
+        if stop_event.is_set():
+            return
+        chunk = min(WAKE_POLL_SECONDS, total_seconds - elapsed)
+        stop_event.wait(chunk)
+        elapsed += chunk
+        if _consume_wake_flag(session):
+            return
+
+
 # ----------------------------------------------------------------------------
 #  Scheduler main loop
 # ----------------------------------------------------------------------------
@@ -5086,7 +5127,7 @@ def transport_scheduler_loop(session, stop_event):
 
         if not active:
             session.setStatus("Transport worker: no active schedules, sleeping...")
-            stop_event.wait(TICK_BUDGET_SECONDS)
+            _wait_or_wake(session, stop_event, TICK_BUDGET_SECONDS)
             continue
 
         for sched in active:
@@ -5144,10 +5185,11 @@ def transport_scheduler_loop(session, stop_event):
         except Exception:
             pass
 
-        stop_event.wait(sleep_for)
+        _wait_or_wake(session, stop_event, sleep_for)
 
     # Cleanup
     _rrs_release_all(session)
+    _consume_wake_flag(session)
     try:
         os.remove(transport_stop_flag_path(session))
     except OSError:
