@@ -2226,11 +2226,28 @@ def massDistributionMode(session, event, stdin_fd, predetermined_input,
                 event.set()
                 return
             if rta.lower() == "d":
-                preview = _scan_csv_for_preview(session, rows, run_column)
+                preview, skip_reasons = _scan_csv_for_preview(
+                    session, rows, run_column
+                )
                 if preview:
                     run_dry_preview(preview, "Mass Distribution")
+                    if skip_reasons:
+                        # Even with some matches we still want to flag
+                        # the rows that fell out, so the user can fix
+                        # them before kicking off the real run.
+                        print()
+                        print("  Some rows were skipped during the scan:")
+                        print(_format_skip_reasons(skip_reasons, len(rows)))
                 else:
-                    print("  No valid routes found in scan.")
+                    print("  No valid routes found in dry-run scan.")
+                    print()
+                    print(_format_skip_reasons(skip_reasons, len(rows)))
+                    print()
+                    print("  Note: the dry-run only looks at the CSV. It does")
+                    print("  not fetch live stock, so 'except' (reserve) rows")
+                    print("  that show here aren't guaranteed to ship during")
+                    print("  the real run if your source cities don't actually")
+                    print("  have surplus when the cycle fires.")
                 print("Press Enter to continue...")
                 enter()
                 continue
@@ -2258,25 +2275,55 @@ def massDistributionMode(session, event, stdin_fd, predetermined_input,
 
 
 def _scan_csv_for_preview(session, rows, run_column):
-    """Quick scan for dry-run preview. Returns list of route info dicts."""
+    """Quick scan for dry-run preview.
+
+    Returns (preview, skip_reasons) where preview is the list of
+    route-info dicts that WOULD be shown and skip_reasons is a dict
+    of {reason_text: count} for rows that were dropped. The caller
+    uses skip_reasons to explain *why* the preview is empty instead
+    of just saying 'no routes' and leaving the user guessing.
+
+    Reasons we surface:
+      - already marked done in this run slot      (run cell == "x")
+      - has unresolved Issues from a prior cycle  (Issues non-empty)
+      - no resources requested                    (all five amounts 0)
+      - From column empty or unparseable          (no source set)
+    Note: this scan is CSV-only — it does NOT fetch live stock from
+    the server, so 'except' rows that would resolve to 0 against
+    current stock still show up as candidates here. That's by design
+    (a dry-run should be cheap), but the caller surfaces the caveat
+    when the preview is empty so the user knows the real run may
+    behave differently.
+    """
     csv_res_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
     preview = []
+    skip_reasons = {}
+    def _skip(reason):
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
     for row in rows:
         if normalize_text(row.get(run_column, "")) == "x":
+            _skip("already marked done in this run slot")
             continue
         if row.get("Issues", "").strip():
+            _skip("has unresolved Issues from a prior cycle "
+                  "(clear the Issues column to re-try)")
             continue
         parsed = [parse_resource_value(row.get(col, "0")) for col in csv_res_cols]
         has_resources = any(amt > 0 or mode == "except" for mode, amt in parsed)
         if not has_resources:
+            _skip("no resources requested (all five amounts are 0)")
+            continue
+        from_val_check = parse_from_column(row.get("From", ""))
+        if from_val_check is None:
+            _skip("From column is empty or unparseable "
+                  "(needs 'a' for all, or city indices like 1,3,5)")
             continue
         resources = [amt for _, amt in parsed]
         city_name = row.get("City", "?")
         player = row.get("Player", "?")
-        from_val = parse_from_column(row.get("From", ""))
-        if from_val is None:
-            src_label = "From: (not set)"
-        elif from_val == "all":
+        from_val = from_val_check
+        if from_val == "all":
             src_label = "All cities"
         else:
             src_label = f"Cities {','.join(str(i) for i in from_val)}"
@@ -2286,7 +2333,20 @@ def _scan_csv_for_preview(session, rows, run_column):
             "dest": f"{city_name} ({player})",
             "resources": resources,
         })
-    return preview
+    return preview, skip_reasons
+
+
+def _format_skip_reasons(skip_reasons, total_rows):
+    """Render a {reason: count} dict as a bulleted block, with a
+    line at the end telling the user how many rows we looked at
+    and how many were skipped."""
+    if not skip_reasons:
+        return f"  (Scanned {total_rows} row(s), no rows were skipped — but no routes were produced either.)"
+    skipped = sum(skip_reasons.values())
+    lines = [f"  Scanned {total_rows} row(s), skipped {skipped}:"]
+    for reason, count in sorted(skip_reasons.items(), key=lambda kv: -kv[1]):
+        lines.append(f"    - {count} row(s): {reason}")
+    return "\n".join(lines)
 
 
 # ============================================================================
@@ -2442,6 +2502,40 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
 
         # ---- PHASE 2: Build routes from validated rows ----
         routes = []
+        # Track per-reason counts AND a few sample rows for each reason,
+        # so that when 'routes' ends up empty we can explain exactly
+        # what happened instead of the old "No valid routes found"
+        # one-liner that left the user guessing.
+        skip_reasons = {}
+        skip_samples = {}
+
+        def _drop(reason, row_num, row):
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            samples = skip_samples.setdefault(reason, [])
+            if len(samples) < 3:
+                label = (f"row {row_num} "
+                         f"({row.get('Player','?')}/{row.get('City','?')} "
+                         f"[{row.get('X','?')}:{row.get('Y','?')}])")
+                samples.append(label)
+
+        # Rows skipped during phase 1 also belong in the breakdown, or
+        # the count won't add up to "rows in the CSV".
+        for row_num, row in enumerate(rows, start=1):
+            run_val_p1 = normalize_text(row.get(run_column, ""))
+            if run_val_p1 == "x":
+                _drop("already marked done in this run slot", row_num, row)
+                continue
+            if row_num not in validated_cities:
+                # Either it had no resources requested, an Issue from
+                # validation, or one of the from-column / city-match
+                # failures. The Issues column already carries the detail
+                # for failures; we only need a coarse bucket here.
+                parsed_p1 = [parse_resource_value(row.get(col, "0")) for col in csv_resource_cols]
+                if not any(amt > 0 or mode == "except" for mode, amt in parsed_p1):
+                    _drop("no resources requested (all five amounts are 0)", row_num, row)
+                else:
+                    _drop("failed pre-scan validation (see Issues column)", row_num, row)
+
         session.setStatus(
             f"[PROCESSING] Mass Distribution | "
             f"Building routes for {len(validated_cities)} row(s)..."
@@ -2471,6 +2565,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                 )
             except Exception as e:
                 row["Issues"] = f"Error resolving source cities: {e}"
+                _drop(f"error resolving source cities ({e})", row_num, row)
                 continue
 
             done_indices = set()
@@ -2485,21 +2580,32 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                 dest_city = getCity(dest_html)
             except Exception as e:
                 row["Issues"] = f"Error fetching city details: {e}"
+                _drop(f"error fetching destination city ({e})", row_num, row)
                 try:
                     write_csv_atomic(csv_path, fieldnames, rows)
                 except Exception:
                     pass
                 continue
 
+            row_produced_route = False
+            row_all_sources_done = True
+            row_all_sources_empty = True
             for src_idx, src_city in src_cities:
                 if src_idx in done_indices:
                     continue
+                row_all_sources_done = False
                 resources = resolve_resources(
                     parsed_resources, src_city.get("availableResources", []),
                     row, csv_resource_cols
                 )
                 if sum(resources) == 0:
+                    # Either an 'exact' row asked for 0 of everything
+                    # (caught earlier) or 'except' (reserve) found
+                    # nothing above the reserve. resolve_resources
+                    # already wrote a note to row['Issues'] in that case.
                     continue
+                row_all_sources_empty = False
+                row_produced_route = True
                 route = (src_city, dest_city, island["id"], *resources)
                 routes.append((
                     row_num, route, resources, dest_city["name"],
@@ -2507,9 +2613,46 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                     row_use_freighters
                 ))
 
+            if not row_produced_route:
+                if not src_cities:
+                    _drop("From column resolved to zero source cities "
+                          "(check From values vs your city list)",
+                          row_num, row)
+                elif row_all_sources_done:
+                    _drop("every source city for this row is already "
+                          "marked done in this run slot",
+                          row_num, row)
+                elif row_all_sources_empty:
+                    _drop("no source city had enough surplus above the "
+                          "reserve to ship anything (see Issues column "
+                          "for the per-resource detail)",
+                          row_num, row)
+                else:
+                    _drop("produced no routes for an unexpected reason",
+                          row_num, row)
+
         if not routes:
+            # Build a human-readable explanation. The old code just
+            # said 'No valid routes found' with no context — useless
+            # when you're trying to figure out why your run is a no-op.
+            if skip_reasons:
+                lines = [
+                    f"MASS DIST: No valid routes this cycle ({len(rows)} row(s) scanned)."
+                ]
+                for reason, count in sorted(skip_reasons.items(), key=lambda kv: -kv[1]):
+                    lines.append(f"  • {count}× {reason}")
+                    for sample in skip_samples.get(reason, []):
+                        lines.append(f"      e.g. {sample}")
+                detail = "\n".join(lines)
+            else:
+                detail = (
+                    f"MASS DIST: No valid routes this cycle. "
+                    f"({len(rows)} row(s) scanned, none qualified — "
+                    f"check the CSV directives and the Issues column.)"
+                )
+            print(detail)
             if should_notify(notif_config, "error"):
-                sendToBot(session, "MASS DIST: No valid routes found")
+                sendToBot(session, detail)
         else:
             if should_notify(notif_config, "start"):
                 sendToBot(session,
