@@ -570,20 +570,114 @@ def get_source_cities_for_row(session, from_val, city_cache):
 
 
 def ensure_issues_column(fieldnames, rows):
-    """Add Issues column if missing (backward compatibility). Returns updated fieldnames."""
-    if "Issues" not in fieldnames:
-        insert_idx = len(fieldnames)
-        if "Hours" in fieldnames:
-            insert_idx = fieldnames.index("Hours") + 1
-        else:
-            for i, col in enumerate(fieldnames):
-                if col.startswith("Run_"):
-                    insert_idx = i
-                    break
-        fieldnames.insert(insert_idx, "Issues")
-        for row in rows:
-            row["Issues"] = ""
+    """LEGACY: previously inserted a single global Issues column. Mass
+    distribution now uses one Issues column per Run_ slot (see
+    ensure_per_slot_issues_columns). This function is kept only so
+    callers outside the migration path don't break — it no longer
+    inserts a column."""
     return fieldnames
+
+
+def issues_col_for(run_column):
+    """Map a Run_<slot> column name to its sibling Issues_<slot> column.
+
+    Run column names are produced by build_run_column_name as
+    'Run_YYYY-MM-DD_HH:MM'. The Issues column for the same slot
+    is just that with 'Run_' replaced by 'Issues_'.
+    """
+    if not run_column or not run_column.startswith("Run_"):
+        return "Issues"  # graceful fallback, shouldn't fire in practice
+    return "Issues_" + run_column[len("Run_"):]
+
+
+def ensure_per_slot_issues_columns(fieldnames, rows, run_columns):
+    """Make sure there's an Issues_<slot> column immediately after each
+    Run_<slot> column. Backward-compatibility: if the CSV still has the
+    old global 'Issues' column, its values are copied into the OLDEST
+    slot's Issues column (best-effort context preservation) and the
+    old column is removed. Returns the updated fieldnames list.
+
+    Idempotent — calling on an already-migrated CSV is a no-op.
+    """
+    # Step 1: insert missing per-slot Issues columns next to each Run_.
+    for run_col in run_columns:
+        issues_col = issues_col_for(run_col)
+        if issues_col in fieldnames:
+            continue
+        insert_idx = fieldnames.index(run_col) + 1
+        fieldnames.insert(insert_idx, issues_col)
+        for row in rows:
+            row[issues_col] = ""
+
+    # Step 2: migrate any legacy global 'Issues' column.
+    if "Issues" in fieldnames:
+        # Pick the oldest run slot to receive legacy values — it's the
+        # safest dumping ground because (a) the user is most likely
+        # working in newer slots and (b) the migrated context becomes
+        # historical rather than blocking the current cycle. If no
+        # run column parses as a datetime, fall back to the first
+        # available run column so we never silently drop content.
+        oldest_run = None
+        oldest_dt = None
+        for run_col in run_columns:
+            dt = parse_run_column_datetime(run_col)
+            if dt is None:
+                continue
+            if oldest_dt is None or dt < oldest_dt:
+                oldest_dt = dt
+                oldest_run = run_col
+        if oldest_run is None and run_columns:
+            oldest_run = run_columns[0]
+        target_issues = issues_col_for(oldest_run) if oldest_run else None
+        if target_issues and target_issues in fieldnames:
+            for row in rows:
+                legacy = (row.get("Issues") or "").strip()
+                if not legacy:
+                    continue
+                existing = (row.get(target_issues) or "").strip()
+                if existing:
+                    row[target_issues] = f"{existing}; (migrated) {legacy}"
+                else:
+                    row[target_issues] = f"(migrated) {legacy}"
+        fieldnames.remove("Issues")
+        for row in rows:
+            row.pop("Issues", None)
+
+    return fieldnames
+
+
+def ensure_shipped_column(fieldnames, rows):
+    """Add a 'Shipped' tracker column if missing.
+
+    Stores a comma-separated list of resource names (Wood, Wine, ...)
+    that have ever successfully shipped for this row. Used by the
+    cancel-after-dribble logic for 'except' (reserve) orders: we only
+    cancel a reserve order's resource if we've shipped it at least
+    once before, so brand-new orders don't get killed off before they
+    ever get a chance to send anything.
+    """
+    if "Shipped" not in fieldnames:
+        # Put it near the other status/tracking columns. After
+        # 'From' is a sensible neighbourhood; otherwise append.
+        insert_idx = len(fieldnames)
+        if "From" in fieldnames:
+            insert_idx = fieldnames.index("From") + 1
+        fieldnames.insert(insert_idx, "Shipped")
+        for row in rows:
+            row.setdefault("Shipped", "")
+    return fieldnames
+
+
+def parse_shipped_set(val):
+    """Parse the Shipped cell into a set of resource names."""
+    if not val:
+        return set()
+    return {p.strip() for p in str(val).split(",") if p.strip()}
+
+
+def format_shipped_set(s):
+    """Render a set of resource names as a stable, sorted CSV string."""
+    return ",".join(sorted(s))
 
 
 def parse_resource_value(val):
@@ -596,23 +690,48 @@ def parse_resource_value(val):
     return ("exact", int(val) if val.isdigit() else 0)
 
 
-def resolve_resources(parsed, source_available, row, csv_resource_cols):
+def resolve_resources(parsed, source_available, row, csv_resource_cols,
+                      issues_col="Issues"):
     """Resolve parsed resource values against source city stock.
-    'except' mode: send (available - reserve), log issue if insufficient."""
+
+    Modes:
+      'exact':  send the literal amount unless source has less. If source
+                stock < requested, ship min(stock, requested) and surface
+                a note. The caller (mass distribution Phase 2) decides
+                whether to cancel the resource based on its own policy
+                (see do_it_mass_distribution).
+      'except': send (available - reserve). If available <= reserve, ship
+                0 and log a note.
+
+    `issues_col` names the column to append notes to (per-slot Issues
+    in mass distribution; falls back to the legacy 'Issues' otherwise).
+    """
     resolved = []
     for i, (mode, amount) in enumerate(parsed):
+        avail = source_available[i] if i < len(source_available) else 0
         if mode == "except":
-            avail = source_available[i] if i < len(source_available) else 0
             if avail <= amount:
                 resolved.append(0)
                 if row is not None:
-                    prev = row.get("Issues", "")
+                    prev = row.get(issues_col, "")
                     note = f"{csv_resource_cols[i]}: stock {avail} <= reserve {amount}"
-                    row["Issues"] = f"{prev}; {note}" if prev else note
+                    row[issues_col] = f"{prev}; {note}" if prev else note
             else:
                 resolved.append(avail - amount)
         else:
-            resolved.append(amount)
+            # Exact mode: cap to whatever's actually in stock. If we have
+            # to cap, leave a note — the caller may decide to cancel.
+            if amount > 0 and avail < amount:
+                resolved.append(avail)
+                if row is not None and avail < amount:
+                    prev = row.get(issues_col, "")
+                    note = (
+                        f"{csv_resource_cols[i]}: requested {amount}, "
+                        f"source had {avail} — capped to {avail}"
+                    )
+                    row[issues_col] = f"{prev}; {note}" if prev else note
+            else:
+                resolved.append(amount)
     return resolved
 
 
@@ -2190,14 +2309,31 @@ def massDistributionMode(session, event, stdin_fd, predetermined_input,
         fieldnames, run_columns = ensure_run_columns(fieldnames, rows)
         fieldnames = ensure_transport_column(fieldnames, rows)
         fieldnames = ensure_from_column(fieldnames, rows)
-        fieldnames = ensure_issues_column(fieldnames, rows)
+        fieldnames = ensure_shipped_column(fieldnames, rows)
+        # Per-slot Issues columns replace the old single global 'Issues'
+        # column. Migration is handled inside the helper (legacy 'Issues'
+        # values get copied into the oldest slot's column).
+        fieldnames = ensure_per_slot_issues_columns(fieldnames, rows, run_columns)
 
         mode, run_column = choose_run_slot(session, event, rows, run_columns)
         if run_column is None:
             return
 
-        fieldnames_no_runs = [c for c in fieldnames if not c.startswith("Run_")]
-        fieldnames = fieldnames_no_runs + run_columns
+        # Reassemble fieldnames with stable column order: everything that
+        # isn't a Run_/Issues_ slot first, then each Run_ slot followed
+        # by its matching Issues_ slot. This keeps the per-day Issues
+        # column visually next to its Run column when you open the CSV.
+        fieldnames_no_runs = [
+            c for c in fieldnames
+            if not c.startswith("Run_") and not c.startswith("Issues_")
+        ]
+        run_and_issues = []
+        for run_col in run_columns:
+            run_and_issues.append(run_col)
+            issues_col = issues_col_for(run_col)
+            if issues_col in fieldnames:
+                run_and_issues.append(issues_col)
+        fieldnames = fieldnames_no_runs + run_and_issues
         backup_path = f"{csv_path}.bak"
         try:
             write_csv_atomic(csv_path, fieldnames, rows)
@@ -2298,6 +2434,7 @@ def _scan_csv_for_preview(session, rows, run_column):
     csv_res_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
     preview = []
     skip_reasons = {}
+    issues_col = issues_col_for(run_column)
     def _skip(reason):
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
 
@@ -2305,9 +2442,12 @@ def _scan_csv_for_preview(session, rows, run_column):
         if normalize_text(row.get(run_column, "")) == "x":
             _skip("already marked done in this run slot")
             continue
-        if row.get("Issues", "").strip():
-            _skip("has unresolved Issues from a prior cycle "
-                  "(clear the Issues column to re-try)")
+        # Slot-scoped Issues: the dry-run only checks the issues column
+        # for THIS slot, so a problem recorded against a different day
+        # doesn't block the current cycle.
+        if row.get(issues_col, "").strip():
+            _skip(f"has unresolved Issues in {issues_col} from this slot's "
+                  "last cycle (clear that column to re-try)")
             continue
         parsed = [parse_resource_value(row.get(col, "0")) for col in csv_res_cols]
         has_resources = any(amt > 0 or mode == "except" for mode, amt in parsed)
@@ -2373,23 +2513,38 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
             time.sleep(3600)
             continue
 
-        # Ensure run column exists
-        if run_column not in (fieldnames or []):
-            fieldnames, run_columns = ensure_run_columns(fieldnames, rows)
-            if run_column not in run_columns:
-                run_column = run_columns[0]
-            try:
-                write_csv_atomic(csv_path, fieldnames, rows)
-            except Exception:
-                time.sleep(3600)
-                continue
+        # Ensure run column exists — always call (idempotent) so we have
+        # the up-to-date list of run slots for the per-slot Issues mirror
+        # below.
+        fieldnames, run_columns = ensure_run_columns(fieldnames, rows)
+        if run_column not in run_columns:
+            run_column = run_columns[0]
 
-        # Ensure Transport, From and Issues columns exist; clear Issues for this cycle
+        # Ensure Transport, From, Shipped, and per-slot Issues columns
+        # exist. The Issues helper also migrates the legacy single
+        # 'Issues' column into the oldest slot, then drops it.
         fieldnames = ensure_transport_column(fieldnames, rows)
         fieldnames = ensure_from_column(fieldnames, rows)
-        fieldnames = ensure_issues_column(fieldnames, rows)
+        fieldnames = ensure_shipped_column(fieldnames, rows)
+        fieldnames = ensure_per_slot_issues_columns(fieldnames, rows, run_columns)
+
+        # The Issues column for THIS run slot. All per-cycle writes go
+        # here so a problem recorded against day N doesn't pollute the
+        # display for day M.
+        current_issues_col = issues_col_for(run_column)
+
+        # Clear THIS slot's Issues column at the start of the cycle. We
+        # deliberately do NOT touch other slots' Issues — those record
+        # the state of their respective last runs and are user-facing
+        # history.
         for row in rows:
-            row["Issues"] = ""
+            row[current_issues_col] = ""
+
+        try:
+            write_csv_atomic(csv_path, fieldnames, rows)
+        except Exception:
+            time.sleep(3600)
+            continue
 
         city_cache = {}
         mismatches = []
@@ -2421,7 +2576,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                 from_val = parse_from_column(row.get("From", ""))
                 if from_val is None:
                     issue = "From column is empty (required: a, or city indices like 1,3,5)"
-                    row["Issues"] = issue
+                    row[current_issues_col] = issue
                     mismatches.append(f"Row {row_num}: {issue}")
                     continue
                 if isinstance(from_val, list):
@@ -2433,7 +2588,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                     bad = [str(i) for i in from_val if i > max_idx]
                     if bad:
                         issue = f"From: city index {','.join(bad)} out of range (max {max_idx})"
-                        row["Issues"] = issue
+                        row[current_issues_col] = issue
                         mismatches.append(f"Row {row_num}: {issue}")
                         continue
 
@@ -2472,7 +2627,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                 if matched_city is None:
                     issue = (f"City not found: {expected_player}/"
                              f"{expected_city} at [{x}:{y}]")
-                    row["Issues"] = issue
+                    row[current_issues_col] = issue
                     mismatches.append(f"Row {row_num}: {issue}")
                     continue
 
@@ -2486,7 +2641,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
 
             except Exception as e:
                 issue = f"Error: {e}"
-                row["Issues"] = issue
+                row[current_issues_col] = issue
                 mismatches.append(f"Row {row_num}: {issue}")
 
         # Save CSV after pre-scan (persists Issues + City_Location auto-fills)
@@ -2544,6 +2699,24 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
         # Refresh city cache for "except" resolution
         city_cache.pop("objects", None)
 
+        # Per-ship cargo capacity — needed by the partial-fill /
+        # "dribble" detector. Both kinds (merchant + freighter) get
+        # looked up once per cycle; per-row we pick the appropriate
+        # one based on the row's Transport column.
+        try:
+            base_ship_cap, base_freighter_cap = getShipCapacity(session)
+        except Exception:
+            # If the lookup fails we still want the cycle to run; the
+            # cancellation rule simply doesn't fire when we don't know
+            # the capacity (treating it as "infinite" so no shipment
+            # ever looks tiny).
+            base_ship_cap = base_freighter_cap = 10 ** 9
+
+        # Cancellations accumulated across the whole cycle so we send
+        # one batched Telegram message at the end (or fall back to a
+        # local print) rather than one alert per resource.
+        cancellations_queue = []
+
         for row_num, row in enumerate(rows, start=1):
             run_val = normalize_text(row.get(run_column, ""))
             if run_val == "x":
@@ -2559,12 +2732,14 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
 
             from_val = parse_from_column(row.get("From", ""))
             row_use_freighters = parse_transport_value(row.get("Transport", "m"))
+            per_ship_cap = base_freighter_cap if row_use_freighters else base_ship_cap
+
             try:
                 src_cities = get_source_cities_for_row(
                     session, from_val, city_cache
                 )
             except Exception as e:
-                row["Issues"] = f"Error resolving source cities: {e}"
+                row[current_issues_col] = f"Error resolving source cities: {e}"
                 _drop(f"error resolving source cities ({e})", row_num, row)
                 continue
 
@@ -2579,7 +2754,7 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                 dest_html = session.get(city_url + str(matched_city["id"]))
                 dest_city = getCity(dest_html)
             except Exception as e:
-                row["Issues"] = f"Error fetching city details: {e}"
+                row[current_issues_col] = f"Error fetching city details: {e}"
                 _drop(f"error fetching destination city ({e})", row_num, row)
                 try:
                     write_csv_atomic(csv_path, fieldnames, rows)
@@ -2596,13 +2771,88 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                 row_all_sources_done = False
                 resources = resolve_resources(
                     parsed_resources, src_city.get("availableResources", []),
-                    row, csv_resource_cols
+                    row, csv_resource_cols, current_issues_col
                 )
+
+                # ---- Per-resource cancel-on-partial-fill analysis ----
+                # Decides per resource whether to send what we've got
+                # and stop trying. Rules (chosen via AskUserQuestion):
+                #   exact   : ANY shortfall — source had less than the
+                #             requested amount — cancel.
+                #   except  : cancel only if (a) we've shipped this
+                #             resource before (Shipped tracker proves
+                #             it) AND (b) this cycle's shipment is
+                #             below per-ship capacity (a 'dribble').
+                # Cancelling: zero the request cell so future cycles
+                # don't re-attempt; append a note to THIS slot's
+                # Issues column; queue a Telegram alert; remove the
+                # resource from the current cycle's `resources` list
+                # so the dribble itself doesn't get shipped either
+                # (matches user intent: stop pestering with tiny
+                # shipments).
+                shipped_set = parse_shipped_set(row.get("Shipped", ""))
+                cancellations_this_pass = []
+                avail_list = src_city.get("availableResources") or []
+                for i, res_name in enumerate(csv_resource_cols):
+                    mode, requested = parsed_resources[i]
+                    stock = avail_list[i] if i < len(avail_list) else 0
+                    shipped_this = resources[i] if i < len(resources) else 0
+                    if mode == "exact":
+                        if requested > 0 and stock < requested:
+                            cancellations_this_pass.append((
+                                res_name,
+                                f"exact request {requested}, source had "
+                                f"{stock}, delivered {shipped_this} — "
+                                f"cancelling further attempts"
+                            ))
+                    else:  # except (reserve) mode
+                        if (res_name in shipped_set
+                                and shipped_this < per_ship_cap):
+                            cancellations_this_pass.append((
+                                res_name,
+                                f"reserve-order dribble: shipped "
+                                f"{shipped_this} (< per-ship capacity "
+                                f"{per_ship_cap}) after prior successful "
+                                f"shipments — cancelling"
+                            ))
+
+                if cancellations_this_pass:
+                    cancelled_names = {n for n, _ in cancellations_this_pass}
+                    for res_name, reason in cancellations_this_pass:
+                        i = csv_resource_cols.index(res_name)
+                        prev = row.get(current_issues_col, "")
+                        note = f"{res_name}: {reason}"
+                        row[current_issues_col] = (
+                            f"{prev}; {note}" if prev else note
+                        )
+                        # Zero the request cell. If the user wants to
+                        # re-arm this resource later, they put a number
+                        # back into the cell.
+                        row[res_name] = "0"
+                        # Drop from Shipped so future cycles don't see
+                        # this resource as a candidate for the except-
+                        # mode dribble rule.
+                        shipped_set.discard(res_name)
+                        # Zero in the live cycle so the dribble itself
+                        # doesn't ship.
+                        if i < len(resources):
+                            resources[i] = 0
+                        cancellations_queue.append({
+                            "row_num": row_num,
+                            "player": row.get("Player", "?"),
+                            "city": row.get("City", "?"),
+                            "x": row.get("X", "?"),
+                            "y": row.get("Y", "?"),
+                            "src": src_city.get("name", "?"),
+                            "resource": res_name,
+                            "reason": reason,
+                        })
+                    row["Shipped"] = format_shipped_set(shipped_set)
+
                 if sum(resources) == 0:
-                    # Either an 'exact' row asked for 0 of everything
-                    # (caught earlier) or 'except' (reserve) found
-                    # nothing above the reserve. resolve_resources
-                    # already wrote a note to row['Issues'] in that case.
+                    # Either nothing was requested for this pass,
+                    # resolve_resources zeroed it (reserve >= stock),
+                    # or the cancellation logic just zeroed everything.
                     continue
                 row_all_sources_empty = False
                 row_produced_route = True
@@ -2689,6 +2939,18 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                 if result["success"]:
                     completed += 1
                     print(f"    SUCCESS ({completed}/{total})")
+                    # Update the Shipped tracker for any non-zero
+                    # resource in this shipment. The except-mode
+                    # cancellation rule keys off this set: a resource
+                    # only becomes eligible for "dribble" cancellation
+                    # once it has shipped successfully at least once.
+                    cur_shipped = parse_shipped_set(
+                        rows[row_num - 1].get("Shipped", "")
+                    )
+                    for i, res_name in enumerate(csv_resource_cols):
+                        if i < len(resources) and resources[i] > 0:
+                            cur_shipped.add(res_name)
+                    rows[row_num - 1]["Shipped"] = format_shipped_set(cur_shipped)
                     # Per-city checkpoint
                     from_val = parse_from_column(rows[row_num - 1].get("From", ""))
                     cur = rows[row_num - 1].get(run_column, "").strip()
@@ -2741,6 +3003,38 @@ def do_it_mass_distribution(session, csv_path, interval_hours,
                           f"Slot: {run_column[4:]}\n"
                           f"Cycle: {completed}/{total}\n"
                           f"Progress: {run_done}/{len(rows)}")
+
+        # Batched cancellation alert. Each entry in cancellations_queue
+        # is one (row, resource) decision; we group by row so the
+        # user sees one block per affected destination rather than a
+        # wall of repetitive lines.
+        if cancellations_queue:
+            grouped = {}
+            for c in cancellations_queue:
+                key = (c["row_num"], c["player"], c["city"], c["x"], c["y"])
+                grouped.setdefault(key, []).append(c)
+            lines = ["MASS DIST: resources auto-cancelled this cycle."]
+            lines.append("(Cell zeroed in the CSV; re-arm by typing a "
+                         "new amount. Detail also in the slot's Issues column.)")
+            for (row_num, player, city, rx, ry), items in grouped.items():
+                lines.append(f"\nRow {row_num} — {player}/{city} [{rx}:{ry}]:")
+                for c in items:
+                    lines.append(
+                        f"  • {c['resource']} (from {c['src']}): {c['reason']}"
+                    )
+            detail = "\n".join(lines)
+            print()
+            print(detail)
+            if should_notify(notif_config, "error"):
+                sendToBot(session, detail)
+
+        # Persist Shipped + Issues + zeroed cells. Without this write,
+        # the per-resource cancellations applied above would be lost
+        # if the next cycle started reading from a stale CSV.
+        try:
+            write_csv_atomic(csv_path, fieldnames, rows)
+        except Exception as we:
+            print(f"    WARNING: end-of-cycle CSV write failed: {we}")
 
         # Schedule next cycle
         next_run = datetime.datetime.now() + datetime.timedelta(
