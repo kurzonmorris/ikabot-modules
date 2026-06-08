@@ -24,8 +24,6 @@ class Page extends Parent {
             let $cargo = $tr.find('td:eq(1) > .tooltip tr');
             let resources = {};
             if ($cargo.length > 1) {
-                let resList = [Resources.WOOD, Resources.WINE, Resources.MARBLE, Resources.SULFUR, Resources.GLASS];
-
                 _.each($cargo, ($ctr, k) => {
                     $ctr = $($ctr);
                     if (k === 0) {
@@ -42,7 +40,6 @@ class Page extends Parent {
                 eventId = parseInt($tr.find('td a.action_icon').attr('href').match(/eventId=([0-9]+)/)[1]);
             }
 
-            // Ищем movement подходящий по параметрам
             let tmpCnt = 0;
             let movement = _.find(this._ieData.movements, (m) => {
                 if (m.id === eventId) {
@@ -86,8 +83,6 @@ class Page extends Parent {
             let $a = $(e.currentTarget);
             let href = $a.attr('href');
             let eventId = parseInt(href.match(/eventId=([0-9]+)/)[1]);
-
-            // Удаляем такой маршрут
             Front.ikaeasyData.removeMovement(eventId);
         });
     }

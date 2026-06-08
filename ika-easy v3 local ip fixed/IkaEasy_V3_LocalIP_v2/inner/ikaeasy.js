@@ -2,21 +2,22 @@
 
 (function() {
     window.addEventListener('message', function (event) {
-        if ((event.data.type) && ((event.data.type === 'FROM_IKAEASY_V3'))) {
+        // Security: only accept messages that originate from this same window.
+        // event.source === window blocks injection from embedded iframes or
+        // other windows, which is the actual cross-frame attack surface here.
+        // (We deliberately do NOT compare event.origin: legitimate
+        // content-script -> page messages can arrive with an empty/"null"
+        // origin in some Chrome builds and proxied contexts, and rejecting
+        // those silently breaks the entire IkaEasy data bridge.)
+        if (event.source !== window) {
+            return;
+        }
+        if ((event.data) && (event.data.type) && ((event.data.type === 'FROM_IKAEASY_V3'))) {
             if (event.data.cmd === 'code_eval') {
                 eval(event.data.code);
             }
         }
     });
-
-    const CONSOLE_ENABLED = true;
-
-    if (CONSOLE_ENABLED) {
-        var i = document.createElement('iframe');
-        i.style.display = 'none';
-        document.body.appendChild(i);
-        window.console = i.contentWindow.console;
-    }
 
     class Front {
         constructor() {
@@ -88,8 +89,6 @@
         _updateResources() {
             if (typeof LocalizationStrings !== 'undefined') {
                 LocalizationStrings.glass = LocalizationStrings.crystal;
-            } else {
-                LocalizationStrings.glass = 'Glass'
             }
 
             let model = ikariam.model;
