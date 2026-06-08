@@ -200,7 +200,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v9.5.0                  \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v9.6.0                  \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -985,7 +985,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
 
     result = {"success": False, "error": None, "ships_used": 0,
               "no_ap": False, "below_threshold": False,
-              "city_unavailable": False}
+              "city_unavailable": False, "shortfalls": {}}
 
     if min_threshold > 0 and total_cargo < min_threshold:
         result["below_threshold"] = True
@@ -1121,6 +1121,37 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                          0, ship_type_name, "DELAYED", result["error"],
                          next_shipment_str)
             return result
+
+        # 3a. Re-check source city for resource exhaustion
+        try:
+            html_recheck = session.get(city_url + str(origin_city["id"]))
+            src_fresh = getCity(html_recheck)
+            shortfalls = {}
+            adjusted = list(resources)
+            for i in range(min(len(adjusted), 5)):
+                if adjusted[i] <= 0:
+                    continue
+                actual_avail = src_fresh["availableResources"][i]
+                if actual_avail < adjusted[i]:
+                    shortfalls[i] = adjusted[i] - actual_avail
+                    adjusted[i] = max(0, actual_avail)
+            if shortfalls:
+                result["shortfalls"] = shortfalls
+                resources = adjusted
+                total_cargo = sum(resources)
+                route = (origin_city, dest_city, route[2], *resources)
+                if total_cargo == 0:
+                    result["success"] = True
+                    result["ships_used"] = 0
+                    log_shipment(log_path, session, mode_name,
+                                 origin_city["name"], "", dest_city["name"],
+                                 dest_island_coords, dest_player, resources,
+                                 0, ship_type_name, "EXHAUSTED",
+                                 "All planned resources exhausted at source",
+                                 next_shipment_str)
+                    return result
+        except Exception:
+            pass
 
         session.setStatus(f"{prefix}Sending resources...")
         executeRoutes(session, [route], useFreighters)
@@ -4105,6 +4136,28 @@ def _is_transport_worker_running(session):
 _RES_NAMES = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
 
 
+def _notify_resource_exhaustion(session, notif_config, mode_label,
+                                exhaustion_log):
+    if not exhaustion_log:
+        return
+    if not should_notify(notif_config, "error"):
+        return
+    lines = ["RESOURCE SUPPLY EXHAUSTED"]
+    total_missing = [0] * 5
+    for src_name, dst_name, shortfalls_dict in exhaustion_log:
+        parts = [f"{_RES_NAMES[i]}:{v:,}" for i, v in shortfalls_dict.items()
+                 if v > 0]
+        lines.append(f"  {src_name} -> {dst_name}: missing {', '.join(parts)}")
+        for i, v in shortfalls_dict.items():
+            if i < 5:
+                total_missing[i] += v
+    tot_parts = [f"{_RES_NAMES[i]}:{v:,}"
+                 for i, v in enumerate(total_missing) if v > 0]
+    lines.append(f"Total cancelled: {', '.join(tot_parts)}")
+    lines.append("These resources were cancelled for this cycle.")
+    sendToBot(session, f"{mode_label}\n" + "\n".join(lines))
+
+
 def _notify_small_shipments(session, notif_config, mode_label,
                             small_shipments, min_threshold):
     if not small_shipments:
@@ -4157,6 +4210,7 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
     summary = _rrs_load_summary(session)
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
     small_shipments = []
+    exhaustion_log = []
 
     cycle_sent = 0
     for cid in source_city_ids:
@@ -4206,9 +4260,15 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                 cycle_sent += 1
                 html = session.get(city_url + dest_city_id)
                 destination_city = getCity(html)
+            if result.get("shortfalls"):
+                exhaustion_log.append(
+                    (oc_fresh["name"], destination_city["name"],
+                     result["shortfalls"]))
 
     _notify_small_shipments(session, notif_config, "CONSOLIDATE",
                             small_shipments, min_threshold)
+    _notify_resource_exhaustion(session, notif_config, "CONSOLIDATE",
+                                exhaustion_log)
     return cycle_sent
 
 
@@ -4229,6 +4289,8 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
 
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
     small_shipments = []
+    exhaustion_log = []
+    exhausted_res = set()
     cycle_sent = 0
 
     for dcid in dest_city_ids:
@@ -4251,6 +4313,8 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
         toSend = [0] * len(materials_names)
         total = 0
         for i in range(len(materials_names)):
+            if i in exhausted_res:
+                continue
             if i >= len(resource_config) or resource_config[i] is None:
                 continue
             avail = _rrs_free_amount(session, origin_city, i)
@@ -4279,9 +4343,16 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
                     (origin_city["name"], dest_city["name"], toSend))
             elif result["success"]:
                 cycle_sent += 1
+            if result.get("shortfalls"):
+                exhaustion_log.append(
+                    (origin_city["name"], dest_city["name"],
+                     result["shortfalls"]))
+                exhausted_res.update(result["shortfalls"].keys())
 
     _notify_small_shipments(session, notif_config, "DISTRIBUTE",
                             small_shipments, min_threshold)
+    _notify_resource_exhaustion(session, notif_config, "DISTRIBUTE",
+                                exhaustion_log)
     return cycle_sent
 
 
@@ -4300,6 +4371,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
     summary = _rrs_load_summary(session)
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
     small_shipments = []
+    exhaustion_log = []
 
     cycle_sent = 0
     for dcid in dest_city_ids:
@@ -4318,12 +4390,15 @@ def run_topup_cycle(session, sched, notif_config, log_path):
         dest_island = getIsland(html_isl)
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
 
+        exhausted_res = set()
         for cid in source_city_ids:
             cid_str = str(cid)
             if int(cid) in excluded:
                 continue
             needed = [0] * len(materials_names)
             for i in range(len(materials_names)):
+                if i in exhausted_res:
+                    continue
                 if i >= len(targets) or targets[i] is None:
                     continue
                 gap = targets[i] - dest_fresh["availableResources"][i]
@@ -4366,9 +4441,16 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                         dest_fresh = getCity(html)
                     except (AttributeError, TypeError, KeyError):
                         break
+                if result.get("shortfalls"):
+                    exhaustion_log.append(
+                        (src_fresh["name"], dest_fresh["name"],
+                         result["shortfalls"]))
+                    exhausted_res.update(result["shortfalls"].keys())
 
     _notify_small_shipments(session, notif_config, "TOPUP",
                             small_shipments, min_threshold)
+    _notify_resource_exhaustion(session, notif_config, "TOPUP",
+                                exhaustion_log)
     return cycle_sent
 
 
@@ -4385,6 +4467,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
     summary = _rrs_load_summary(session)
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
     small_shipments = []
+    exhaustion_log = []
 
     all_cities = []
     for cid in city_ids:
@@ -4463,6 +4546,15 @@ def run_even_cycle(session, sched, notif_config, log_path):
                 else:
                     break
 
+                if result.get("shortfalls"):
+                    shortfall_amt = result["shortfalls"].get(res_idx, 0)
+                    exhaustion_log.append(
+                        (senders[si]["from"]["name"],
+                         receivers[ri]["to"]["name"],
+                         result["shortfalls"]))
+                    if shortfall_amt > 0:
+                        s_rem = 0
+
             if s_rem == 0:
                 si += 1
                 if si < len(senders):
@@ -4474,6 +4566,8 @@ def run_even_cycle(session, sched, notif_config, log_path):
 
     _notify_small_shipments(session, notif_config, "EVEN DIST",
                             small_shipments, min_threshold)
+    _notify_resource_exhaustion(session, notif_config, "EVEN DIST",
+                                exhaustion_log)
     return cycle_sent
 
 
@@ -4528,6 +4622,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
 
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
     small_shipments = []
+    exhaustion_log = []
     cycle_sent = 0
     for route in routes:
         result = send_shipment(
@@ -4541,9 +4636,15 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
             cycle_sent += 1
         elif result["error"] and "lock" in result["error"].lower():
             break
+        if result.get("shortfalls"):
+            exhaustion_log.append(
+                (route[0]["name"], route[1]["name"],
+                 result["shortfalls"]))
 
     _notify_small_shipments(session, notif_config, "AUTO SEND",
                             small_shipments, min_threshold)
+    _notify_resource_exhaustion(session, notif_config, "AUTO SEND",
+                                exhaustion_log)
     return cycle_sent
 
 
@@ -4811,6 +4912,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     max_ap_retries = max(0, ap_wait_mins // 5)  # e.g. 120min / 5 = 24 retries
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
     small_shipments = []     # (src_name, dest_name, resources) below threshold
+    exhaustion_log = []
+    exhausted_by_src = {}    # {src_city_id: set(resource_indices)}
 
     def _try_send_route(route_info):
         """Attempt to send one route. Returns (success, deferred, small)."""
@@ -4822,6 +4925,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
         if src_city_id in ap_blocked_cities:
             return False, True, False
+
+        src_exhausted = exhausted_by_src.get(src_city_id, set())
 
         has_except = any(m == "except" for m, _ in parsed_res)
         if has_except:
@@ -4847,9 +4952,20 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             for i in range(len(resources)):
                 if i < len(dest_space):
                     resources[i] = min(resources[i], dest_space[i])
+            for i in src_exhausted:
+                if i < len(resources):
+                    resources[i] = 0
             if sum(resources) == 0:
                 return False, False, False
             route = (src_fresh, dest_fresh, route[2], *resources)
+        elif src_exhausted:
+            resources = list(route[3:])
+            for i in src_exhausted:
+                if i < len(resources):
+                    resources[i] = 0
+            if sum(resources) == 0:
+                return False, False, False
+            route = (route[0], route[1], route[2], *resources)
 
         coords = f"[{rx}:{ry}]"
         result = send_shipment(
@@ -4857,6 +4973,12 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             log_path, "Bulk Distribution", coords, player,
             min_threshold=min_threshold,
         )
+
+        if result.get("shortfalls"):
+            exhaustion_log.append((src_name, dest_name, result["shortfalls"]))
+            if src_city_id not in exhausted_by_src:
+                exhausted_by_src[src_city_id] = set()
+            exhausted_by_src[src_city_id].update(result["shortfalls"].keys())
 
         if result.get("below_threshold"):
             small_shipments.append((src_name, dest_name, list(route[3:])))
@@ -5014,6 +5136,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     _notify_small_shipments(session, notif_config, "BULK DIST",
                             small_shipments, min_threshold)
+    _notify_resource_exhaustion(session, notif_config, "BULK DIST",
+                                exhaustion_log)
 
     if should_notify(notif_config, "complete"):
         summ_str = f"{completed}/{total} sent"
@@ -5021,6 +5145,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             summ_str += f", {skipped} skipped"
         if small_shipments:
             summ_str += f", {len(small_shipments)} below min"
+        if exhaustion_log:
+            summ_str += f", {len(exhaustion_log)} resource(s) exhausted"
         run_done = sum(
             1 for r in rows
             if normalize_text(r.get(run_column, "")) == "x"
