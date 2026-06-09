@@ -65,42 +65,67 @@ def get_vault_location() -> str:
     return custom if custom else IKABOT_DATA_DIR
 
 
-def set_vault_location(new_dir: str) -> None:
+def set_vault_location(new_dir: str) -> str:
     """Move the vault to new_dir and persist the new location.
+
+    Returns a human-readable status string describing what happened.
 
     If new_dir is empty or matches the default, the override config is removed
     (resetting to the default location).  The existing vault file is moved if
-    present.  Raises OSError on filesystem errors.
+    present.  Raises OSError on filesystem errors.  Raises FileExistsError if
+    a vault file already exists at the destination (to prevent silent overwrite).
     """
     import shutil
     new_dir = os.path.abspath(os.path.expanduser(new_dir.strip())) if new_dir.strip() else ""
     default_dir = IKABOT_DATA_DIR
 
     old_path = _vault_path()
+    vault_exists_at_source = os.path.isfile(old_path)
 
     if not new_dir or os.path.normcase(new_dir) == os.path.normcase(default_dir):
         # Reset to default — remove override config if present.
         new_vault_path = os.path.join(default_dir, "vault")
-        if os.path.isfile(old_path) and os.path.normcase(old_path) != os.path.normcase(new_vault_path):
+        if vault_exists_at_source and os.path.normcase(old_path) != os.path.normcase(new_vault_path):
+            if os.path.isfile(new_vault_path):
+                raise FileExistsError(
+                    f"A vault file already exists at {new_vault_path}. "
+                    "Remove it manually before resetting the location."
+                )
             os.makedirs(default_dir, exist_ok=True)
             shutil.copy2(old_path, new_vault_path)
             os.unlink(old_path)
+            status = f"Vault moved from {old_path} to {new_vault_path}"
+        elif vault_exists_at_source:
+            status = "Vault location reset to default (vault already in default location)"
+        else:
+            status = "Vault location reset to default (vault will be created here when needed)"
         try:
             os.unlink(_VAULT_LOCATION_FILE)
         except FileNotFoundError:
             pass
-        return
+        return status
 
     os.makedirs(new_dir, exist_ok=True)
     new_vault_path = os.path.join(new_dir, "vault")
 
-    if os.path.isfile(old_path) and os.path.normcase(old_path) != os.path.normcase(new_vault_path):
+    if vault_exists_at_source and os.path.normcase(old_path) != os.path.normcase(new_vault_path):
+        if os.path.isfile(new_vault_path):
+            raise FileExistsError(
+                f"A vault file already exists at {new_vault_path}. "
+                "Remove it manually before changing the location."
+            )
         shutil.copy2(old_path, new_vault_path)
         os.unlink(old_path)
+        status = f"Vault moved from {old_path} to {new_vault_path}"
+    elif vault_exists_at_source:
+        status = "Location unchanged (vault is already at that path)"
+    else:
+        status = f"Vault location set to {new_dir} (vault will be created here when needed)"
 
     os.makedirs(IKABOT_DATA_DIR, exist_ok=True)
     with open(_VAULT_LOCATION_FILE, "w", encoding="utf-8") as f:
         f.write(new_dir)
+    return status
 
 
 def _vault_path() -> str:

@@ -697,9 +697,10 @@ def _vault_change_location():
         enter()
         return
     try:
-        set_vault_location(new_path)
-        new_loc = get_vault_location()
-        print(f"Vault location updated to: {new_loc}")
+        status = set_vault_location(new_path)
+        print(status)
+    except FileExistsError as exc:
+        print(f"Aborted: {exc}")
     except OSError as exc:
         print(f"Failed to move vault: {exc}")
     enter()
