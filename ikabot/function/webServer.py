@@ -333,10 +333,13 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                     break
                 port = str(int(port) + 1)
 
-        # try to get local network ip if possible
+        # try to get local network ip if possible (PR#408: use UDP routing trick
+        # instead of gethostbyname which returns APIPA/loopback on some systems)
         local_network_ip = None
         try:
-            local_network_ip = socket.gethostbyname(socket.gethostname())
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+                _s.connect(("192.168.0.1", 80))
+                local_network_ip = _s.getsockname()[0]
         except:
             pass
         print(
