@@ -67,6 +67,7 @@ from ikabot.function.developer import developer
 from ikabot.helpers.pluginLoader import discover_plugins
 from ikabot.helpers.credentialStore import (
     vault_exists, create_vault, open_vault,
+    get_vault_location, set_vault_location,
     VaultWrongPasswordError, VaultCorruptError, VaultVersionError,
 )
 
@@ -549,8 +550,9 @@ def _manage_vault_menu(session):
         print("(3) Remove an account from vault")
         print("(4) Change master password")
         print("(5) Rename an account")
+        print("(6) Change vault location")
 
-        choice = read(min=0, max=5, digit=True)
+        choice = read(min=0, max=6, digit=True)
         if choice == 0:
             return
         elif choice == 1:
@@ -563,6 +565,8 @@ def _manage_vault_menu(session):
             _vault_change_master_password()
         elif choice == 5:
             _vault_rename_account()
+        elif choice == 6:
+            _vault_change_location()
 
 
 def _vault_list_accounts():
@@ -675,6 +679,29 @@ def _vault_change_master_password():
         return
     vs.change_master_password(new_pw)
     print("Master password changed successfully.")
+    enter()
+
+
+def _vault_change_location():
+    current = get_vault_location()
+    print(f"\nCurrent vault location: {current}")
+    print("Enter a new folder path, or leave blank to reset to the default location.")
+    new_path = read(msg="New location: ").strip()
+    if new_path == "":
+        confirm_msg = "Reset vault to the default location?"
+    else:
+        confirm_msg = f"Move vault to '{new_path}'?"
+    print(confirm_msg + " [y/N]")
+    if read(values=["y", "Y", "n", "N", ""]) not in ("y", "Y"):
+        print("Cancelled.")
+        enter()
+        return
+    try:
+        set_vault_location(new_path)
+        new_loc = get_vault_location()
+        print(f"Vault location updated to: {new_loc}")
+    except OSError as exc:
+        print(f"Failed to move vault: {exc}")
     enter()
 
 
