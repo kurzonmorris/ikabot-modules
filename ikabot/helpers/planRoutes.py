@@ -194,7 +194,11 @@ def getMinimumWaitingTime(session):
         the minimum waiting time for the closest fleet to arrive
     """
     html = session.get()
-    idCiudad = re.search(r"currentCityId:\s(\d+),", html).group(1)
+    match = re.search(r"currentCityId:\s(\d+),", html)
+    if match is None:
+        # Unexpected server response (session error / maintenance page); wait 5 min and retry
+        return 300 + get_random_wait_time()
+    idCiudad = match.group(1)
     url = "view=militaryAdvisor&oldView=city&oldBackgroundView=city&backgroundView=city&currentCityId={}&actionRequest={}&ajax=1".format(
         idCiudad, actionRequest
     )
