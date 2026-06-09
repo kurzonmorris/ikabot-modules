@@ -131,24 +131,29 @@ class AESCipher:
             return False
 
     @staticmethod
-    def _acquire_lock(lock_path, timeout=10):
+    def _acquire_lock(lock_path, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 try:
-                    os.write(fd, str(os.getpid()).encode())
+                    os.write(fd, f"{os.getpid()}:{time.time():.3f}".encode())
                 finally:
                     os.close(fd)
                 return
             except FileExistsError:
-                # Check whether the lock belongs to a dead process (crash remnant).
+                # Check whether the lock belongs to a dead process or is stale.
                 try:
                     with open(lock_path, "r") as f:
-                        pid_str = f.read().strip()
-                    if pid_str and not AESCipher._pid_alive(int(pid_str)):
-                        os.unlink(lock_path)
-                        continue  # retry immediately
+                        content = f.read().strip()
+                    if content:
+                        parts = content.split(":", 1)
+                        pid = int(parts[0])
+                        lock_age = time.time() - float(parts[1]) if len(parts) > 1 else 31
+                        # Clear if owner is dead OR lock is older than 30s (guards against PID reuse)
+                        if not AESCipher._pid_alive(pid) or lock_age > 30:
+                            os.unlink(lock_path)
+                            continue  # retry immediately
                 except (OSError, ValueError):
                     pass
                 time.sleep(0.05)

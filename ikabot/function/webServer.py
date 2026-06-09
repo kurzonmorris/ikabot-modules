@@ -119,6 +119,11 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
         app.logger = getLogger(__name__)
         app.logger.setLevel(logging.ERROR)
 
+        # Tracks the last currentCity the browser user explicitly visited.
+        # Injected into GET requests that don't specify currentCity so that
+        # ikabot's background city navigation doesn't disrupt the user's view.
+        last_user_city_id = [None]
+
         @app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
         @app.route("/<path:path>", methods=["GET", "POST"])
         def webServer(path):
@@ -189,6 +194,15 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                 pass
             for arg in request.args:
                 new_data[arg] = unquote_plus(request.args[arg])
+
+            # Track the last city the browser user explicitly visited.
+            if "currentCity" in new_data and new_data["currentCity"]:
+                last_user_city_id[0] = new_data["currentCity"]
+            # On GET requests, restore the user's last city so ikabot's background
+            # navigation doesn't change what the user sees in their browser.
+            elif request.method == "GET" and not is_image and last_user_city_id[0] is not None:
+                new_data["currentCity"] = last_user_city_id[0]
+
             for arg in new_data:
                 if arg == "actionRequest":
                     new_data[arg] = (
