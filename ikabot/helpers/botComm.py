@@ -483,7 +483,7 @@ def updateTelegramData(session, event=None, stdin_fd=None, predetermined_input=[
                             update["message"]["text"].strip()
                             == "/ikabot {}".format(rand)
                         ):
-                            user_id = update["message"]["from"]["id"]
+                            user_id = update.get("message", {}).get("from", {}).get("id")
                             break
             time.sleep(2)
             print(" " * 100, end="\r")

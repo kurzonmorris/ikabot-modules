@@ -111,7 +111,10 @@ class Session:
     def __logout(self, html):
         if html is not None:
             idCiudad = getCity(html)["id"]
-            token = re.search(r'actionRequest"?:\s*"(.*?)"', html).group(1)
+            _m = re.search(r'actionRequest"?:\s*"(.*?)"', html)
+            if _m is None:
+                return
+            token = _m.group(1)
             urlLogout = "action=logoutAvatar&function=logout&sideBarExt=undefined&startPageShown=1&detectedDevice=1&cityId={0}&backgroundView=city&currentCityId={0}&actionRequest={1}".format(
                 idCiudad, token
             )
@@ -608,7 +611,7 @@ class Session:
                         json=data,
                     ).json()
                     _captcha_attempts += 1
-                    if captcha_sent["status"] == "solved":
+                    if captcha_sent.get("status") == "solved":
                         self.headers = {
                             "Accept": "*/*",
                             "Accept-Language": "en-US,en;q=0.5",
@@ -723,7 +726,10 @@ class Session:
         self.s.headers.clear()
         self.s.headers.update(self.headers)
         r = self.s.get("https://lobby.ikariam.gameforge.com/api/users/me/accounts")
-        accounts = json.loads(r.text, strict=False)
+        try:
+            accounts = json.loads(r.text, strict=False)
+        except (json.JSONDecodeError, ValueError):
+            accounts = []
 
         # get servers
         self.headers = {
@@ -740,7 +746,10 @@ class Session:
         self.s.headers.clear()
         self.s.headers.update(self.headers)
         r = self.s.get("https://lobby.ikariam.gameforge.com/api/servers")
-        servers = json.loads(r.text, strict=False)
+        try:
+            servers = json.loads(r.text, strict=False)
+        except (json.JSONDecodeError, ValueError):
+            servers = []
 
         if not self.logged:
 
@@ -1029,7 +1038,7 @@ class Session:
     def __backoff(self):
         self.logger.info("__backoff()")
         if self.padre is False:
-            time.sleep(5 * random.randint(0, 10))
+            time.sleep(random.randint(2, 8))
 
     def __sessionExpired(self, _retries=5):
         self.logger.info("__sessionExpired()")
@@ -1112,7 +1121,10 @@ class Session:
             a string representing a valid actionRequest token
         """
         html = self.get()
-        return re.search(r'actionRequest"?:\s*"(.*?)"', html).group(1)
+        _m = re.search(r'actionRequest"?:\s*"(.*?)"', html)
+        if _m is None:
+            raise RuntimeError("Could not find actionRequest token in page (unexpected server response)")
+        return _m.group(1)
 
     def get(
         self, url='', params={}, ignoreExpire=False, noIndex=False, fullResponse=False, noQuery=False, **kwargs
