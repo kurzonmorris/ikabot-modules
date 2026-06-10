@@ -1,0 +1,13 @@
+<div class="ikaeasy-notes-list">
+    <div class="ikaeasy-notes-list-content">
+        <% _.each(data.list, function(note) { %>
+            <div class="<%= (note.system) ? 'ikaeasy-notes-list-system' : '' %>" data-id="<%= note.id %>">
+                <%- note.title || lget('note.title_undefined') %>
+            </div>
+        <% }) %>
+    </div>
+
+    <div class="ikaeasy-notes-list-button">
+        <a href="#" class="button js-ikaeasy-notes-create"><%= lget('note.create_note') %></a>
+    </div>
+</div>

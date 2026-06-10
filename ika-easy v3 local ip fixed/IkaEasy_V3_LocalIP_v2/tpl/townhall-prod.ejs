@@ -1,0 +1,119 @@
+<div class="contentBox01h ikaeasy-prod-wrap" style="margin-top:10px;">
+    <h3 class="header">ikabot Production Manager</h3>
+    <div class="content" style="padding:8px 10px;">
+
+        <% if (!data.ikabotDetected) { %>
+            <p style="color:#888;font-size:0.85em;margin:4px 0;">
+                Play through the ikabot web server to use Production Manager.
+            </p>
+        <% } else { %>
+
+            <table class="table01" style="width:100%;margin-bottom:8px;">
+
+                <!-- Scope -->
+                <tr>
+                    <td style="width:120px;"><b>Apply to</b></td>
+                    <td>
+                        <label class="ikaeasy-form" style="margin-right:14px;">
+                            <input type="radio" name="ikaeasy_prod_scope" value="city"
+                                <%= data.saved.scope === 'city' ? 'checked' : '' %> />
+                            This city only
+                        </label>
+                        <label class="ikaeasy-form">
+                            <input type="radio" name="ikaeasy_prod_scope" value="all"
+                                <%= data.saved.scope === 'all' ? 'checked' : '' %> />
+                            All cities
+                            <span style="font-size:0.78em;color:#c07000;">
+                                &#9888; changes every city
+                            </span>
+                        </label>
+                    </td>
+                </tr>
+
+                <!-- Resource type -->
+                <tr>
+                    <td><b>Resource</b></td>
+                    <td>
+                        <label class="ikaeasy-form" style="margin-right:10px;">
+                            <input type="radio" name="ikaeasy_prod_types" value="wood"
+                                <%= data.saved.types === 'wood' ? 'checked' : '' %> />
+                            Wood
+                        </label>
+                        <label class="ikaeasy-form" style="margin-right:10px;">
+                            <input type="radio" name="ikaeasy_prod_types" value="luxury"
+                                <%= data.saved.types === 'luxury' ? 'checked' : '' %> />
+                            Luxury
+                        </label>
+                        <label class="ikaeasy-form">
+                            <input type="radio" name="ikaeasy_prod_types" value="both"
+                                <%= data.saved.types === 'both' ? 'checked' : '' %> />
+                            Both
+                        </label>
+                    </td>
+                </tr>
+
+                <!-- Wood slider -->
+                <tr id="ikaeasy_prod_wood_row">
+                    <td>
+                        <span class="resource_icon_small icon_wood"></span>
+                        <b>Wood %</b>
+                    </td>
+                    <td>
+                        <div class="minusPlusValueOuterContainer" style="display:inline-flex;align-items:center;gap:8px;">
+                            <input type="range" id="ikaeasy_prod_wood_slider"
+                                class="slider"
+                                min="0" max="100" step="1"
+                                value="<%= data.saved.woodPct %>"
+                                style="width:160px;" />
+                            <span id="ikaeasy_prod_wood_label"
+                                style="min-width:38px;text-align:right;">
+                                <%= data.saved.woodPct %>%
+                            </span>
+                        </div>
+                    </td>
+                </tr>
+
+                <!-- Luxury slider -->
+                <tr id="ikaeasy_prod_lux_row">
+                    <td>
+                        <span class="resource_icon_small icon_tradegood"></span>
+                        <b>Luxury %</b>
+                    </td>
+                    <td>
+                        <div class="minusPlusValueOuterContainer" style="display:inline-flex;align-items:center;gap:8px;">
+                            <input type="range" id="ikaeasy_prod_lux_slider"
+                                class="slider"
+                                min="0" max="100" step="1"
+                                value="<%= data.saved.luxPct %>"
+                                style="width:160px;" />
+                            <span id="ikaeasy_prod_lux_label"
+                                style="min-width:38px;text-align:right;">
+                                <%= data.saved.luxPct %>%
+                            </span>
+                        </div>
+                    </td>
+                </tr>
+
+                <!-- Maximise (overcharge) -->
+                <tr>
+                    <td><b>Maximise</b></td>
+                    <td>
+                        <label class="ikaeasy-form">
+                            <input type="checkbox" id="ikaeasy_prod_maximise"
+                                <%= data.saved.maximise ? 'checked' : '' %> />
+                            Use overcharge workers when slider is at 100%
+                        </label>
+                    </td>
+                </tr>
+
+            </table>
+
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <a class="button" id="ikaeasy_prod_apply" href="#">Apply</a>
+                <span id="ikaeasy_prod_status" style="font-size:0.85em;line-height:28px;"></span>
+            </div>
+
+        <% } %>
+    </div>
+    <div class="footer"></div>
+</div>

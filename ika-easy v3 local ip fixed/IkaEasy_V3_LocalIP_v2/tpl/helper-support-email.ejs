@@ -1,0 +1,32 @@
+<%= data.text %>
+
+---
+
+|Поле|Значение|
+|-----|--------|
+|email|*<%= data.email || '-' %>*|
+|version|*<%= Front.app_version || '-' %>*|
+|server|*<%= PARAMS.lang %>*|
+|world|*<%= PARAMS.serverWorld %>*|
+
+---
+
+<% if (data.details) { %>
+|Поле|Значение|
+|-----|--------|
+|background|*<%= Front.bg %>*|
+|template|*<%= Front.tpl || '-' %>*|
+|avatarId|*<%= Front.data.avatarId %>*|
+|cityId|*<%= data.cityId %>*|
+
+---
+### Data
+
+<details>
+    <summary>Click to show JSON data</summary>
+
+
+    <%= JSON.stringify(Front.ikaeasyDataJson) %>
+
+</details>
+<% } %>

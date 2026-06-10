@@ -1,0 +1,19 @@
+(function() {
+    ikariam.createPopup(
+        "reportConfirmPopup",
+        "<%- data.txtAreYouSure %>",
+        [
+            "<%- data.txtAreYouSure %>",
+            ["<%= data.code %>;ikariam.closePopup();return false;"],
+            LocalizationStrings.yes,
+            LocalizationStrings.abort
+        ],
+        1
+    );
+
+
+    let $tip = $('.bubble_tip');
+    let left = parseInt($tip.css('left'));
+    let top = parseInt($tip.css('top'));
+    $tip.css({'left': left - 70, top: top - 20});
+})();

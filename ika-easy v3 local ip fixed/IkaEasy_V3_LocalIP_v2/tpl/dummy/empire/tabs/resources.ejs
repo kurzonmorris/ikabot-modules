@@ -1,0 +1,138 @@
+<div style="position: relative;">
+    <% if (data.manager.info._government === Const.Government.ANARCHY) { %>
+        <div class="ikaeasy-option-hint js-need-open-palace">
+            <%= LANGUAGE.getLocalizedString('empire.notice_anarchy') %>
+        </div>
+    <% } %>
+
+    <div class="empire-tab-overlay" id="empire-sync-resource">
+        <img src="<%= url('/images/loading.gif') %>" />
+        <div><%= lget('empire.refreshing') %></div>
+    </div>
+
+
+    <table class="table01 dotted empire-resource-table">
+        <thead>
+        <tr>
+            <th class="center empire_city"><a id="empire_sync" href="#"></a><%- LANGUAGE.getLocalizedString('empire.city') %></th>
+            <th class="empire_transport"><div></div></th>
+            <th class="empire-resources empire-resources-corruption empire-border-right-dotted"><div></div></th>
+            <th class="empire-resources empire-resources-population empire-border-right-dotted" colspan="2"><div></div></th>
+            <th class="empire-resources empire-resources-research empire-border-right-dotted"><div></div></th>
+
+            <th class="empire-resources empire-resource empire-resource-wood"><div></div></th>
+            <th class="empire-resources empire-resource empire-resource-wine"><div></div></th>
+            <th class="empire-resources empire-resource empire-resource-marble"><div></div></th>
+            <th class="empire-resources empire-resource empire-resource-glass"><div></div></th>
+            <th class="empire-resources empire-resource empire-resource-sulfur"><div></div></th>
+        </tr>
+        </thead>
+
+        <tbody>
+        <% let total = data._total;
+        <!-- data.cities=[...data.cities, ...data.cities, ...data.cities, ...data.cities, ...data.cities, ...data.cities]; - for tests!-->
+            _.each(data.cities, function(city) {
+                let mcity = city._mcity;
+
+                let updatingTime = city._updatingTime;
+                let popData = city._popData;
+                let resInfo = city._resInfo;
+        %>
+            <tr class="empire_city_row <%= (city.id === data.selectedCityId) ? 'current_city' : '' %>"  data-id="<%= city.id %>" >
+                <td class="empire_city ikaeasy_tradegood ikaeasy_tradegood_<%= city.tradegood %>">
+                    <span><%- city.coords %> <%- city.name %></span>
+                </td>
+                <td class="empire_transport">
+                    <div>
+                        <div class="ikaeasy_tr_res"   data-js="ajaxHandlerCall('?view=transport&destinationCityId=<%= city.id %>');"></div>
+                        <div class="ikaeasy_tr_fleet" data-js="ajaxHandlerCall('?view=deployment&deploymentType=fleet&destinationCityId=<%= city.id %>');"></div>
+                        <div class="ikaeasy_tr_army"  data-js="ajaxHandlerCall('?view=deployment&deploymentType=army&destinationCityId=<%= city.id %>');"></div>
+                    </div>
+                </td>
+                <%
+                if ((mcity) && (mcity.buildings)) { %>
+                    <td class="center empire-border-right-dotted empire-corruption <%= (mcity._corruption === 0) ? 'green' : 'red' %>">
+                        <%= Math.floor(mcity._corruption * 100) %>%
+                    </td>
+                    <td class="empire-happiness-wrapper empire-happiness">
+                        <% if (popData) { %>
+                            <div class="happiness happiness_<%= popData.happinessClass %>"></div>
+                        <% } %>
+                    </td>
+                    <td class="empire-border-right-dotted">
+                        <% if (popData) { %>
+                            <div class="empire-row">
+                                <div class="empire-row-left">
+                                    <%
+                                    let maxPop = popData.max;
+                                    let currPop = num(Math.floor(popData.population), 0, false);
+                                    let diffPop = num(popData.max - Math.floor(popData.population), 0, false);
+                                    let diffPopOutput = diffPop > 0 ? '∆ ' + diffPop : 'max';
+                                    %>
+                                    <%= currPop %> / <%= maxPop %> (<%= diffPopOutput %>)
+                                </div>
+                                <div class="empire-row-right <%= (popData.growth >= 0) ? 'green' : 'red' %>">
+                                    <%= num(popData.growth.toFixed(2)) %>
+                                </div>
+                            </div>
+                            <div class="ikaeasy-progressbar mt-5px">
+                                <span class="<% if(diffPop==0){%> bg-red <%}%>" style="width: <%= popData.percent %>%"></span>
+                            </div>
+                            </div>
+                        <% } else { %>
+                            &mdash;
+                        <% } %>
+                    </td>
+                    <td class="center empire-border-right-dotted empire-research">
+                        <%= num(Math.floor(mcity._scientists), 0, false) %> / <%= num(Math.floor(mcity._maxScientists), 0, false) %>
+                        <div class="ikaeasy-progressbar mt-5px">
+                            <span style="width: <%= mcity._scientistsPercent %>%"></span>
+                        </div>
+                    </td>
+
+                    <%= include('dummy/empire/other/resource.ejs', { type: Const.Resources.WOOD,   resInfo: resInfo, city: mcity, total: total }) %>
+                    <%= include('dummy/empire/other/resource.ejs', { type: Const.Resources.WINE,   resInfo: resInfo, city: mcity, total: total }) %>
+                    <%= include('dummy/empire/other/resource.ejs', { type: Const.Resources.MARBLE, resInfo: resInfo, city: mcity, total: total }) %>
+                    <%= include('dummy/empire/other/resource.ejs', { type: Const.Resources.GLASS,  resInfo: resInfo, city: mcity, total: total }) %>
+                    <%= include('dummy/empire/other/resource.ejs', { type: Const.Resources.SULFUR, resInfo: resInfo, city: mcity, total: total }) %>
+
+                <% } else { %>
+                    <td colspan="<%= _.size(Const.Buildings) %>" class="empire-no-data">
+                        <%= LANGUAGE.getLocalizedString('empire.no_city_data') %>
+                    </td>
+                <%  } %>
+            </tr>
+        <% }) %>
+        </tbody>
+        <tfoot>
+            <tr>
+                <td colspan="2" class="empire-border-right-dotted">
+                    <img src="<%= url('/images/sigma.png') %>" />
+                </td>
+                <td class="center empire-border-right-dotted">
+                    <%= Math.floor(total.corruption / data.cities.length) %>%
+                </td>
+                <td></td>
+                <td class="empire-border-right-dotted">
+                    <div class="empire-row">
+                        <div class="empire-row-left">
+                            <%= num(total.population, 0, false) %> (<%= num(total.max - total.population, 0, false) %>)
+                        </div>
+                        <div class="empire-row-right <%= (total.growth >= 0) ? 'green' : 'red' %>">
+                            <%= num(total.growth.toFixed(2)) %>
+                        </div>
+                    </div>
+                </td>
+                <td class="center empire-border-right-dotted">
+                    <%= num(total.research, 0, false) %>
+                </td>
+
+                <%= include('dummy/empire/other/resourceTotal.ejs', { type: Const.Resources.WOOD,   total: total.resource }) %>
+                <%= include('dummy/empire/other/resourceTotal.ejs', { type: Const.Resources.WINE,   total: total.resource }) %>
+                <%= include('dummy/empire/other/resourceTotal.ejs', { type: Const.Resources.MARBLE, total: total.resource }) %>
+                <%= include('dummy/empire/other/resourceTotal.ejs', { type: Const.Resources.GLASS,  total: total.resource }) %>
+                <%= include('dummy/empire/other/resourceTotal.ejs', { type: Const.Resources.SULFUR, total: total.resource }) %>
+            </tr>
+        </tfoot>
+    </table>
+</div>

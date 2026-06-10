@@ -1,0 +1,100 @@
+<%= include('patreon/block.ejs') %>
+
+
+
+<% if (data.text) { %>
+    <div class="ikaeasy-whatnews-text">
+        <br>
+        <%= data.text %>
+    </div>
+<% } %>
+
+<% if (data.hotfix.length) { %>
+    <div class="contentBox01h">
+        <h3 class="header"><%- LANGUAGE.getLocalizedString('whatnews.hotfix') %></h3>
+        <div class="content">
+            <table class="options table01 ikaeasy-table">
+                <tbody>
+                    <% _.each(data.hotfix, function(v) { %>
+                        <tr>
+                            <td class="left"><%= v %></td>
+                        </tr>
+                    <% }) %>
+                </tbody>
+            </table>
+        </div>
+        <div class="footer"></div>
+    </div>
+
+    <div class="ikaeasy-whatnews-text">
+        <%= LANGUAGE.getLocalizedString('whatnews.after_hotfix') %>
+    </div>
+<% } %>
+
+<% if (data.new.length) { %>
+    <div class="contentBox01h">
+        <h3 class="header"><%- LANGUAGE.getLocalizedString('whatnews.new') %></h3>
+        <div class="content">
+            <table class="options table01 ikaeasy-table">
+                <tbody>
+                    <% _.each(data.new, function(v) { %>
+                        <tr>
+                            <td class="left"><%= v %></td>
+                        </tr>
+                    <% }) %>
+                </tbody>
+            </table>
+        </div>
+        <div class="footer"></div>
+    </div>
+<% } %>
+
+<% if (data.fixed.length) { %>
+    <div class="contentBox01h">
+        <h3 class="header"><%- LANGUAGE.getLocalizedString('whatnews.fixed') %></h3>
+        <div class="content">
+            <table class="options table01 ikaeasy-table">
+                <tbody>
+                    <% _.each(data.fixed, function(v) { %>
+                        <tr>
+                            <td class="left"><%= v %></td>
+                        </tr>
+                    <% }) %>
+                </tbody>
+            </table>
+        </div>
+        <div class="footer"></div>
+    </div>
+<% } %>
+
+<% if (data.newOptions.length) { %>
+    <div class="contentBox01h">
+        <h3 class="header"><%- LANGUAGE.getLocalizedString('whatnews.options') %></h3>
+        <div class="content">
+            <table class="options table01 ikaeasy-table">
+                <tbody>
+                    <% _.each(data.newOptions, function(option, key) { %>
+                        <tr data-option="<%- option %>">
+                            <td class="ikaeasy_option_label">
+                                <%= LANGUAGE.getLocalizedString(`option.${option}`)%>
+                            </td>
+                            <td class="left">
+                                <label class="ikaeasy-form">
+                                    <input type="checkbox" name="<%= option %>" value="1" <%= (data._newOptionsData[key].option) ? 'checked="checked"' : '' %> />
+                                    <i></i><span><%- LANGUAGE.getLocalizedString('option._activated') %></span>
+                                </label>
+
+                                <% if (data._newOptionsData[key].hasHint) { %>
+                                    <div class="ikaeasy_option_hint"><%= LANGUAGE.getLocalizedString(`option.${option}_hint`) %></div>
+                                <% } %>
+                            </td>
+                        </tr>
+                    <% }) %>
+                </tbody>
+            </table>
+        </div>
+        <div class="footer"></div>
+    </div>
+
+    <div class="ikaeasy-option-hint"><%- LANGUAGE.getLocalizedString('option._accept_hint') %></div>
+<% } %>

@@ -1,0 +1,14 @@
+<% if (data.bg === 'city') { %>
+    <div><%= lget('queue.warning_1', {SECOND: data.time}) %></div>
+    <% if (data.otherCity) { %>
+        <div><%= lget('queue.warning_2_city') %></div>
+    <% } else if (data.tpl) { %>
+        <div><%= lget('queue.warning_2') %></div>
+    <% } %>
+<% } else { %>
+    <div><%= lget('queue.warning_change_view', {SECOND: data.time}) %></div>
+<% } %>
+<div>
+    <a href="#"><%= lget('queue.defer_btn') %></a>
+</div>
+

@@ -1,0 +1,52 @@
+<div class="empire-table-scroll-wrapper">
+    <table class="table01 dotted">
+        <thead>
+            <tr>
+                <th class="center empire_city"><%- LANGUAGE.getLocalizedString('empire.city') %></th>
+                <th class="empire_transport"><div></div></th>
+                <% let ok = false; _.each(data.buildings, function(b, building) { %>
+                    <% for(let i = 0; i < b.cnt; i++) { ok = true;  %>
+                        <th class="empire-building empire-building-<%= building %>" data-building="<%= building %>" title="<%- b.name %>">
+                            <div></div>
+                        </th>
+                    <% } %>
+                <% }) %>
+                <% if (!ok) { %>
+                    <th class="">
+                        <div></div>
+                    </th>
+                <% } %>
+            </tr>
+        </thead>
+
+        <tbody>
+            <% _.each(data.cities, function(city) {
+                let mcity = city._mcity;
+                let discount = city._discount;
+            %>
+                <tr class="empire_city_row <%= (city.id === data.selectedCityId) ? 'current_city' : '' %>"  data-id="<%= city.id %>" data-can-build="<%= mcity && !mcity._hasConstructingBuilding %>">
+                    <td class="empire_city ikaeasy_tradegood ikaeasy_tradegood_<%= city.tradegood %>">
+                        <span><%- city.coords %> <%- city.name %></span>
+                    </td>
+                    <td class="empire_transport">
+                        <div>
+                            <div class="ikaeasy_tr_res"   data-js="ajaxHandlerCall('?view=transport&destinationCityId=<%= city.id %>');"></div>
+                            <div class="ikaeasy_tr_fleet" data-js="ajaxHandlerCall('?view=deployment&deploymentType=fleet&destinationCityId=<%= city.id %>');"></div>
+                            <div class="ikaeasy_tr_army"  data-js="ajaxHandlerCall('?view=deployment&deploymentType=army&destinationCityId=<%= city.id %>');"></div>
+                        </div>
+                    </td>
+                    <%
+                    if (city._buildings && city._buildings.length) {
+                        city._buildings.forEach((item) => {
+                            print( include('dummy/empire/other/building.ejs', {item: item})) ;
+                        });
+                    } else { %>
+                        <td colspan="<%= _.size(Const.Buildings) %>" class="empire-no-data">
+                            <%= LANGUAGE.getLocalizedString('empire.no_city_data') %>
+                        </td>
+                    <%  } %>
+                </tr>
+            <% }) %>
+        </tbody>
+    </table>
+</div>

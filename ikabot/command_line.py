@@ -62,7 +62,8 @@ from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.process import updateProcessList
 from ikabot.web.session import *
 from ikabot.function.UpgradeUnits import UpgradeUnits
-from ikabot.function.modifyProduction import modifyProduction
+from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWorkers
+from ikabot.function.reorganizeCityBuildings import reorganizeCityBuildings
 from ikabot.function.developer import developer
 from ikabot.helpers.pluginLoader import discover_plugins
 from ikabot.helpers.credentialStore import (
@@ -118,7 +119,9 @@ def menu(session, checkUpdate=True):
         2107: loadCustomModule,
         2108: developer,
         22: consolidateResources,
-        23: modifyProduction,
+        2301: modifyProduction,
+        2302: modifyAcademyWorkers,
+        2303: reorganizeCityBuildings,
         25: sendCulturalTreatyRequests,
     }
 
@@ -196,7 +199,7 @@ def menu(session, checkUpdate=True):
         print("(20) Dump / Monitor world")
         print("(21) Options / Settings")
         print("(22) Consolidate resources")
-        print("(23) Set Production of Saw mill / Luxury good")
+        print("(23) City Management")
         print("(25) Send cultural treaty requests")
 
         plugins = discover_plugins()
@@ -296,6 +299,17 @@ def menu(session, checkUpdate=True):
                 _manage_vault_menu(session)
                 continue
             selected += 2100
+
+        if selected == 23:
+            banner()
+            print("(0) Back")
+            print("(1) Set Production of Saw mill / Luxury good")
+            print("(2) Set Academy workers")
+            print("(3) Reorganize city buildings")
+            selected = read(min=0, max=3, digit=True)
+            if selected == 0:
+                continue
+            selected += 2300
 
         if selected == 30:
             while True:
