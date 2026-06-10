@@ -1,0 +1,15 @@
+<div class="ikaeasy-notes">
+    <% if (data.list.length === 0) { %>
+        <div class="ikaeasy-notes-empty">
+            <div>
+                <%= lget('note.no_any_note') %>
+            </div>
+            <a href="" class="button js-ikaeasy-notes-create"><%= lget('note.create_note') %></a>
+        </div>
+    <% } else { %>
+        <div class="ikaeasy-notes-content">
+            <%= include('dummy/notes/note-list.ejs', data) %>
+            <div class="ikaeasy-notes-text"></div>
+        </div>
+    <% } %>
+</div>

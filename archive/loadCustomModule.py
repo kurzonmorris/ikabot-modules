@@ -1,0 +1,172 @@
+#! /usr/bin/env python3
+# -*- coding: utf-8 -*-
+import sys
+import os
+import re
+import traceback
+from ikabot.helpers.pedirInfo import read, enter
+from ikabot.helpers.gui import *
+from ikabot.config import *
+from importlib.machinery import SourceFileLoader
+
+
+def _module_function_name(filename):
+    """Derive the entry-point function name from a module filename.
+
+    A file may carry a version suffix like _v2, _v2.0, or _v2.0.0 so
+    older copies can sit alongside newer ones on disk. The suffix is
+    stripped here so the function inside the file can keep a stable
+    name (e.g. tavernManager_v2.0.0.py defines `def tavernManager`).
+    """
+    stem = os.path.basename(filename).replace('.py', '')
+    return re.sub(r'_v\d+(?:\.\d+)*$', '', stem)
+
+
+def loadCustomModule(session, event, stdin_fd, predetermined_input):
+    """
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    event : multiprocessing.Event
+    stdin_fd: int
+    predetermined_input : multiprocessing.managers.SyncManager.list
+    """
+    # Fix for Linux: Reopen stdin to ensure terminal interaction works in threads
+    if sys.platform != "win32":
+        try:
+            sys.stdin = open('/dev/tty', 'r')
+        except Exception:
+            sys.stdin = os.fdopen(stdin_fd)
+    else:
+        sys.stdin = os.fdopen(stdin_fd)
+
+    config.predetermined_input = predetermined_input
+    
+    while True:
+        try:
+            banner()
+            sessionData = session.getSessionData()
+            shared_data = sessionData.get('shared', {})
+            
+            # Load only files that actually exist on the system
+            modules = [path for path in shared_data.get('customModules', []) if os.path.exists(path)]
+            
+            print("0) Back")
+            print("1) Add new module")
+            print("2) Remove a module")
+            
+            # List custom modules starting from index 3
+            for i, module in enumerate(modules):
+                print(f"{i + 3}) {module}")
+
+            choice = read(min=0, max=len(modules) + 2, digit=True)
+
+            if choice == 0:
+                event.set()
+                return
+
+            elif choice == 1:
+                banner()
+                print(f'        {bcolors.WARNING}[WARNING]{bcolors.ENDC} Running third party code can be dangerous.')
+                print('Enter the full path to the .py module:')
+                path = read().strip().replace('\\', '/')
+                
+                if not path.endswith('.py'):
+                    print('Error: The file must be a .py file!')
+                    enter()
+                    continue
+                
+                if path not in modules:
+                    modules.append(path)
+                    shared_data['customModules'] = modules
+                    # Persist changes to session file
+                    session.setSessionData(shared_data, shared=True)
+                    print("\nModule added successfully.")
+                    enter()
+                continue
+
+            elif choice == 2:
+                banner()
+                if not modules:
+                    print("No modules available to remove.")
+                    enter()
+                    continue
+                
+                print("Select the module to remove:")
+                for i, m in enumerate(modules):
+                    print(f"{i}) {m}")
+                
+                del_choice = read(min=0, max=len(modules) - 1, digit=True)
+                removed = modules.pop(del_choice)
+                
+                shared_data['customModules'] = modules
+                # Persist deletion to session file
+                session.setSessionData(shared_data, shared=True)
+                
+                print(f"\nModule {os.path.basename(removed)} removed.")
+                enter()
+                continue
+
+            else:
+                # Execution logic
+                path = modules[choice - 3]
+                file_stem = os.path.basename(path).replace('.py', '')
+                # Strip a trailing _vN(.N)* from the file stem to get the
+                # function name. Lets us keep tavernManager.py and
+                # tavernManager_v2.0.0.py on disk side-by-side; both
+                # invoke `def tavernManager(...)`.
+                func_name = _module_function_name(path)
+
+                # Rewrite our entry in processList so ikabot's running-task
+                # display (main menu, killTasks, web server) shows the actual
+                # module name instead of 'loadCustomModule'. The processList
+                # row was created by the menu launcher with action set to the
+                # loader's __name__; replace it now that we know which module
+                # was picked.
+                try:
+                    sd = session.getSessionData()
+                    plist = sd.get('processList', [])
+                    my_pid = os.getpid()
+                    for p in plist:
+                        if p.get('pid') == my_pid:
+                            p['action'] = func_name
+                            break
+                    sd['processList'] = plist
+                    session.setSessionData(sd)
+                except Exception:
+                    pass
+
+                banner()
+                if file_stem != func_name:
+                    print(f'Running module: {func_name} (from {file_stem}.py)...\n')
+                else:
+                    print(f'Running module: {func_name}...\n')
+
+                # Dynamic module loading. Loader uses file_stem as the
+                # module identifier (must be a legal Python identifier
+                # for sys.modules) but the entry-point is func_name.
+                module = SourceFileLoader(file_stem.replace('.', '_'), path).load_module()
+
+                try:
+                    entrypoint = getattr(module, func_name)
+                except AttributeError:
+                    print(
+                        f"Error: {os.path.basename(path)} must define "
+                        f"`def {func_name}(session, event, stdin_fd, "
+                        f"predetermined_input)`."
+                    )
+                    enter()
+                    event.set()
+                    return
+
+                entrypoint(session, event, stdin_fd, predetermined_input)
+
+                event.set()
+                return
+
+        except Exception:
+            print('\n>> Error in Custom Module Manager:')
+            traceback.print_exc()
+            enter()
+            event.set()
+            break

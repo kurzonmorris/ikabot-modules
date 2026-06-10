@@ -1,0 +1,32 @@
+<div class="ikaeasy_watcher_title">
+    <%- data.build.name %> <%= data.build.level %>
+</div>
+<div class="ikaeasy_watcher_buttons">
+    <div class="watche_up"></div>
+    <div class="watche_down"></div>
+</div>
+<table class="<%= (data.ok) ? '' : 'ikaeasy-building-insufficient' %>">
+    <thead>
+        <tr>
+            <th></th>
+            <th><%= lget('building.cost_to_next_level') %></th>
+            <th><%= lget('building.resource_cost_diff') %></th>
+        </tr>
+    </thead>
+    <tbody>
+        <% _.each(data.list, function(v) { %>
+            <tr class="<%= (v.need < 0) ? 'ikaeasy_red' : '' %>">
+                <td>
+                    <div class="ikaeasy-building-resource ikaeasy-building-resource-<%= v.resource %>"></div>
+                </td>
+                <td><%= num(v.cost, 0, false) %></td>
+                <td>
+                    <%= num(v.need, 0, false) %>
+                    <% if (data.production > 0) { %>
+                        <div><%= Utils.secondToTime((-data.need / data.production) * 3600) %></div>
+                    <% } %>
+                </td>
+            </tr>
+        <% }) %>
+    </tbody>
+</table>

@@ -1,0 +1,101 @@
+<div class="ikaeasy-port-rtm contentBox01h">
+    <h3 class="header">
+        <label class="ikaeasy-form ikaeasy-rtm-toggle-label">
+            <input type="checkbox" id="ikaeasy_rtm_enable" />
+            <i></i>
+            <span>ikabot RTM Schedule</span>
+        </label>
+    </h3>
+    <div class="content ikaeasy-rtm-panel" id="ikaeasy_rtm_panel" style="display:none;">
+
+        <table class="table01 ikaeasy-rtm-config" style="width:100%;margin-bottom:8px;">
+            <tr>
+                <td style="width:110px;"><b>Ship type</b></td>
+                <td>
+                    <label class="ikaeasy-form" style="margin-right:12px;">
+                        <input type="radio" name="ikaeasy_rtm_shiptype" value="merchant_ships" checked /> Trade ships
+                    </label>
+                    <label class="ikaeasy-form">
+                        <input type="radio" name="ikaeasy_rtm_shiptype" value="freighters" /> Freighters
+                    </label>
+                </td>
+            </tr>
+            <tr>
+                <td><b>Destination</b></td>
+                <td>
+                    <select id="ikaeasy_rtm_dest" class="ikaeasy-rtm-select">
+                        <% _.each(data.cities, function(city) { %>
+                            <% if (!city.isOwn) { return; } %>
+                            <option value="<%= city.id %>"><%= city.name %></option>
+                        <% }); %>
+                    </select>
+                </td>
+            </tr>
+            <tr>
+                <td><b>Interval</b></td>
+                <td>
+                    every <input type="number" id="ikaeasy_rtm_interval" value="4" min="1" max="720"
+                        style="width:55px;display:inline-block;" /> hours
+                </td>
+            </tr>
+        </table>
+
+        <table class="table01 ikaeasy-rtm-resources" style="width:100%;">
+            <thead>
+                <tr>
+                    <th style="width:90px;">Resource</th>
+                    <th style="width:80px;">Available</th>
+                    <th style="width:80px;">Keep</th>
+                    <th style="width:80px;">Send</th>
+                    <th>Amount</th>
+                </tr>
+            </thead>
+            <tbody>
+                <% var resOrder = ['wood','wine','marble','glass','sulfur']; %>
+                <% _.each(resOrder, function(res) { %>
+                    <% var avail = data.resources[res] || 0; %>
+                    <tr class="ikaeasy-rtm-row" data-res="<%= res %>">
+                        <td>
+                            <span class="ikaeasy-rtm-res-icon resource_icon_small icon_<%= res %>"></span>
+                            <%= data.resNames[res] %>
+                        </td>
+                        <td class="ikaeasy-rtm-avail"><%= avail.toLocaleString() %></td>
+                        <td>
+                            <input type="number" class="ikaeasy-rtm-keep" data-res="<%= res %>"
+                                value="<%= data.keeps[res] || 0 %>" min="0"
+                                style="width:70px;" />
+                        </td>
+                        <td class="ikaeasy-rtm-sendval">0</td>
+                        <td>
+                            <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+                                <input type="range" class="ikaeasy-rtm-slider" data-res="<%= res %>"
+                                    min="0" max="<%= avail %>" value="0" step="500"
+                                    style="width:140px;" />
+                                <a class="button ikaeasy_transport_button_trigger ikaeasy-rtm-btn"
+                                    data-res="<%= res %>" data-mode="100k" href="#">100k</a>
+                                <a class="button ikaeasy_transport_button_trigger ikaeasy-rtm-btn"
+                                    data-res="<%= res %>" data-mode="1m" href="#">1M</a>
+                                <a class="button ikaeasy_transport_button_trigger ikaeasy-rtm-btn"
+                                    data-res="<%= res %>" data-mode="all" href="#">All</a>
+                            </div>
+                        </td>
+                    </tr>
+                <% }); %>
+            </tbody>
+        </table>
+
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+            <a class="button" id="ikaeasy_rtm_sendnow" href="#">Send Now</a>
+            <% if (data.ikabotDetected) { %>
+                <a class="button" id="ikaeasy_rtm_schedule" href="#">Schedule with RTM</a>
+                <span id="ikaeasy_rtm_status" style="line-height:28px;font-size:0.85em;"></span>
+            <% } else { %>
+                <span style="line-height:28px;font-size:0.85em;color:#888;">
+                    (Play through ikabot web server to enable RTM scheduling)
+                </span>
+            <% } %>
+        </div>
+
+    </div>
+    <div class="footer"></div>
+</div>

@@ -1,0 +1,50 @@
+<div id="ikaeasy_islandsSearch">
+    <div id="ikaeasy_islandSearch_counter">
+        <span class="ikaeasy_iSS_cnt_current">0</span>
+        <span class="ikaeasy_iSS_cnt_sep">/</span>
+        <span class="ikaeasy_iSS_cnt_from">0</span>
+    </div>
+    <div class="ikaeasy_islandSearch_general_buttons">
+        <button class="ikaeasy_islandSearch_gbutton button reset" data-name="reset" data-type="general">
+            <%= lget('world_search_restart') %>
+        </button>
+        <button class="ikaeasy_islandSearch_gbutton button" data-name="full" data-type="general">
+            <%= lget('world_search_full') %>
+        </button>
+        <button class="ikaeasy_islandSearch_gbutton button" data-name="empty" data-type="general">
+            <%= lget('world_search_empty') %>
+        </button>
+    </div>
+    <div class="ikaeasy_islandSearch_resources">
+        <a id="ikaeasy_islandSearch_prev" class="button unactive" href="" data-act="-1">&lt;</a>
+        <%
+            _.each(data.db.images.resources, function(imgUrl, name) {
+                if (['wood', 'all', 'small'].indexOf(name) === -1) {
+                    print(`<button class="ikaeasy_islandSearch_resource_btn button" data-name="${data.resources[name.toUpperCase()]}" data-type="tradegood"><img src="${imgUrl}"></button>`);
+                }
+            })
+        %>
+        <a id="ikaeasy_islandSearch_next" class="button unactive" href="" data-act="1">&gt;</a>
+    </div>
+    <div class="ikaeasy_islandSearch_wonders">
+        <%
+            _.each(data.db.images.wonders, function(imgUrl, name) {
+                print(`<button class="ikaeasy_islandSearch_wonder_btn button" data-name="${name}" data-type="wonder"><img src="${imgUrl}"></button>`);
+            })
+        %>
+    </div>
+    <div class="ikaeasy_island_show_resources">
+        <span>
+            <%= lget('world_show_island_resources_level') %>
+        </span>
+        <button class="button" data-name="wood">
+            <%= lget('resources.wood') %>
+        </button>
+        <button class="button" data-name="mine">
+            <%= lget('resources.mine') %>
+        </button>
+        <button class="button" data-name="wonder">
+            <%= lget('resources.wonder') %>
+        </button>
+    </div>
+</div>

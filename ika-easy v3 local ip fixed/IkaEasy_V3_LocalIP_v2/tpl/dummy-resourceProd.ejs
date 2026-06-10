@@ -1,0 +1,11 @@
+<div class="ikaeasy_delete_me">
+    <span class="ikaeasy_resources_<%= ((data.cnt < 0) ? 'negative' : 'positive') %>">
+        <%= data.cntFormatted %>
+
+        <% if ((data.resource === 'wine') && (data.cnt < 0)) { %>
+            <span class="ikaeasy_wine_left_time">
+                (<%= data.wineLeftTime %>)
+            </span>
+        <% } %>
+    </span>
+</div>

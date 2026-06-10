@@ -1,0 +1,43 @@
+{
+    "version": "3.1.0.24",
+    "enabled": true,
+    "text": {
+        "ru": "Мы вернулись :) В связи с новыми требования от Google мы были вынуждены переделать большую часть расширения, к сожалению это могло породить множество новых багов.",
+        "en": "We are back :) Because of new Google requirements for extensions we had to change most part of the app. This could make a lot of new issues."
+    },
+    "new": {
+        "ru": [
+            "Добавлена поддержка нового здания: Храм богов"
+        ],
+        "en": [
+            "Added a new building: Shrine Of Olympus"
+        ]
+    },
+    "fixed": {
+        "ru": [
+            "Исправлено отображение кружков в городе после добавления новых зданий в игру",
+            "Исправлено отображание кнопков в транспорте ресурсов",
+            "Убрано ограничение на максимальный уровень склада в докладе шпиона",
+            "Исправлена ошибка показывающая требование ввода логина и пароля если в сообщении была ссылка на картинку",
+            "Исправлено суммирование ресурсов в транспорте (теперь учитываются постфиксы \"k\")",
+            "Другие баги"
+        ],
+        "en": [
+            "Fixed the display of circles in the city after adding new buildings to the game",
+            "The issue of showing buttons in the transport window.",
+            "The restriction on the maximum warehouse level has been removed in the spy report",
+            "Fixed a bug demanding login and password input if there was a link to an image in the message",
+            "Fixed the summation of resources in transport (now the 'k' postfixes are taken into account)",
+            "Other bugs"
+        ]
+    },
+    "hotfix": {
+        "ru": [
+            "Исправлено отображение прироста золота"
+        ],
+        "en": [
+            "Gold gain display has been fixed"
+        ]
+    },
+    "options": []
+}

@@ -1,0 +1,1025 @@
+#heliosConstruction .contentBox01h
+.content{position:relative}.heliosSelection{position:absolute;left:18px;top:0px;width:288px;height:279px;background:url(/cdn/all/both/helios/towerconfig_bg.png) top left no-repeat}.heliosSelection .top, .heliosSelection .mid, .heliosSelection
+.base{position:relative}.heliosSelection
+.top{width:100%;height:100px;margin-bottom:2px}.heliosSelection
+.mid{width:100%;height:75px;margin-bottom:2px}.heliosSelection
+.base{width:100%;height:100px;margin-bottom:2px}.heliosSelection a
+.textLabel{top:-9999px;position:absolute;width:1px;height:1px}.heliosSelection
+a.next{position:absolute;top:25px;left:6px;width:70px;height:50px;background-image:url(/cdn/all/both/pirateFortress/button_arrow_70x50_sprite.png);background-repeat:no-repeat;background-position:0 0}.heliosSelection a.next:hover{background-position:0 -50px}.heliosSelection a.next:active{background-position:0 -100px}.heliosSelection
+a.previous{position:absolute;top:25px;right:6px;width:70px;height:50px;background-image:url(/cdn/all/both/pirateFortress/button_arrow_70x50_sprite.png);background-repeat:no-repeat;background-position:-70px 0}.heliosSelection a.previous:hover{background-position:-70px -50px}.heliosSelection a.previous:active{background-position:-70px -100px}.heliosSelection .mid
+a{top:12px}.heliosSelection .top .img,
+.heliosSelection .mid .img,
+.heliosSelection .base
+.img{position:absolute;top:0px;left:84px;border:2px
+solid #eac486;background:url(/cdn/all/both/helios/helios_side.png) no-repeat}.heliosSelection .top
+.img{width:116px;height:96px;background-position: -1px -1px}.heliosSelection .mid
+.img{width:116px;height:71px;background-position: -1px -98px}.heliosSelection .base
+.img{width:116px;height:96px;background-position: -1px -170px}.heliosSelection .top
+.img1{background-position:   -1px   -1px}.heliosSelection .top
+.img2{background-position: -118px   -1px}.heliosSelection .top
+.img3{background-position: -235px   -1px}.heliosSelection .mid
+.img1{background-position:   -1px  -98px}.heliosSelection .mid
+.img2{background-position: -118px  -98px}.heliosSelection .mid
+.img3{background-position: -235px  -98px}.heliosSelection .base
+.img1{background-position:   -1px -170px}.heliosSelection .base
+.img2{background-position: -118px -170px}.heliosSelection .base
+.img3{background-position: -235px -170px}.heliosPreview{position:relative;margin:10px
+18px 0px auto;width:340px;height:313px;overflow:hidden}.heliosPreview
+.island{position:absolute;z-index:100}.heliosPreview
+.island1{top:-380px;left:-207px}.heliosPreview
+.island2{top:-610px;left:-337px}.heliosPreview
+.island3{top:-300px;left:-847px}.heliosPreview
+.island4{top:-433px;left:-737px}.heliosPreview
+.island5{top:-320px;left:-887px}#island .heliosPreview .island1
+.heliosLocation{top:491px;left:342px}#island .heliosPreview .island2
+.heliosLocation{top:733px;left:475px}#island .heliosPreview .island3
+.heliosLocation{top:423px;left:981px}#island .heliosPreview .island4
+.heliosLocation{top:549px;left:860px}#island .heliosPreview .island5
+.heliosLocation{top:443px;left:1015px}.heliosPreview
+.frame{position:absolute;width:100%;height:100%;background:url(/cdn/all/both/helios/previewframe.png) top left no-repeat;z-index:500}.heliosPreview
+.premiumbutton{position:absolute;left:51px;bottom:10px}.premiumbutton{display:table;vertical-align:middle;height:42px;width:242px;border-top:solid 1px #bfb3a3;border-right:solid 2px #bd8331;border-bottom:solid 2px #bd8331;border-left:solid 1px #bfb3a3;background:url(/cdn/all/both/helios/button_ambrosia_bg.png) repeat-x;background-position:0px 0px;position:relative}.premiumbutton
+.textLabel{display:table-cell;vertical-align:middle;text-align:center;font-weight:bold;font-size:14px;line-height:19px;padding-left:17px}.premiumbutton .textLabel:before{content:url(/cdn/all/both/helios/ambrosia_y60_8.png);position:absolute;top:-10px;left:-17px}.premiumbutton.down .textLabel:before{top:-9px;left:-16px}.forwarding.premiumbutton .textLabel:before{content:url(/cdn/all/both/helios/ambrosia_icon_arrow.png);position:absolute;top:-1px;left:-12px}.forwarding.premiumbutton.down .textLabel:before{top:0px;left:-11px}.premiumbutton .textLabel
+img{vertical-align:text-bottom}.premiumbutton:hover{background-position:0px -42px;text-decoration:none}.premiumbutton.down{padding-top:1px;padding-left:1px;border-right-width:1px;border-bottom-width:1px;background-position:0px -84px}.notenough.premiumbutton{border-right-color:#bd3131;border-bottom-color:#bd3131;background-position:0px -126px}.notenough.premiumbutton:hover{background-position:0px -168px}.notenough.premiumbutton.down{padding-top:1px;padding-left:1px;border-right-width:1px;border-bottom-width:1px;background-position:0px -210px}.notenough.premiumbutton
+.textLabel{display:table-cell;vertical-align:middle;text-align:center;font-weight:bold;font-size:12px;line-height:18px}.notenough.premiumbutton
+.youremissing{color:#8a0000}.notenough.premiumbutton
+.getitnow{color:#fce2d4}#container #heliosConstruction
+h4{margin:4px
+12px;font-size:18px;font-weight:bold;color:#d05a04}#heliosConstruction .heliosInfo
+.premiumbutton{margin-left:373px;margin-bottom:10px}#heliosConstruction
+strong{font-weight:bold}#heliosConstruction
+.feature1{margin:9px
+6px}#heliosConstruction .feature1
+img{display:block;float:right;margin:0px
+12px}#heliosConstruction
+.feature2{clear:both;margin:9px
+6px}#heliosConstruction .feature2
+.img{display:block;position:relative;float:left;margin:0px
+12px}#heliosConstruction .feature2 .img
+.heliosName{position:absolute;width:156px;top:115px;left:24px;font-size:10px}#container .contentBox01h .scroll_img
+.center{text-align:left}#heliosConstruction
+.orderButton{position:relative;top:230px;left:120px}#heliosConstruction
+.orderAvailable{border:1px
+solid #eac486;position:relative;top:230px;left:120px}#island #worldview .cityinfo, #island #worldview
+.cityactions{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}#island #worldmap, #island #worldmap
+#island_ocean{height:1900px;width:5240px}#island
+.location_list{height:100%;left:1567px;margin:0;overflow:hidden;position:absolute;top:347px;width:100%}#island .location_list
+.cityLocationScroll{cursor:pointer;position:absolute}#island .location_list .cityLocation a:hover{text-decoration:none}#island
+.island_feature_img{background-position:center bottom;background-repeat:no-repeat}#island .islandfeature
+.scroll_img{bottom:10px}#island
+a.island_feature_img{display:block}#island
+#cities{background:none no-repeat 265px 117px transparent}#island #cities .buildplace
+.island_feature_img{background-image:url(/cdn/all/both/img/island/flag_buildingground.png);background-repeat:no-repeat;background-position:0 0 !important;width:61px;height:70px;margin-left:43px}#island #cities .premium.buildplace
+.island_feature_img{background-image:url(/cdn/all/both/img/island/flag_premium.png);background-repeat:no-repeat;background-position:0 0 !important;width:66px;height:83px;margin-left:19px;margin-top: -5px}#island #cities .buildplace.animated
+.link_img{background-image:url(/cdn/all/both/img/island/flag_buildingground_animated.png)}#island #cities .buildplace.animated
+.position{position:absolute;left:46px;top:5px}#island #cities .premium.buildplace.animated
+.link_img{background-image:url(/cdn/all/both/img/island/Premium_bauplatz_neu.png)}#island #cities .premium.buildplace.animated
+.position{position:absolute;left:53px;top:0px}#island #cities .buildplace
+.island_feature_img.hover{background-image:url(/cdn/all/both/img/island/hover/flag_buildingground_glow.png);left:-9px;top:-5px}#island #cities .premium.buildplace
+.island_feature_img.hover{background-image:url(/cdn/all/both/img/island/hover/Premium_bauplatz_neu_glow.png);left:-7px;top:1px;width:75px}#island #cities .buildplace.animated
+.island_feature_img.hover{background-image:url(/cdn/all/both/img/island/hover/flag_buildingground_animated_glow.png);left:-8px;top:-4px}#island #cities .premium.buildplace.animated
+.island_feature_img.hover{background-image:url(/cdn/all/both/img/island/hover/Premium_bauplatz_neu_glow.png);left:-6px;top:1px}#island
+.heliosLocation{position:absolute;overflow:visible;width:100px;height:60px;z-index:500;display:block}#island .island1
+.heliosLocation{top:607px;left:608px}#island .island2
+.heliosLocation{top:848px;left:741px}#island .island3
+.heliosLocation{top:540px;left:1247px}#island .island4
+.heliosLocation{top:664px;left:1127px}#island .island5
+.heliosLocation{top:562px;left:1282px}#island
+.heliosWreckage{position:absolute;width:100px;height:105px;left:0px;bottom:-10px}#island
+.heliosTower{position:absolute;width:100px;height:123px;left:0px;bottom:0px}#island .heliosLocation
+a{display:block;position:absolute;width:100%;height:100%;z-index:500}#island .heliosLocation a
+.textLabel{top:-9999px;position:absolute;width:1px;height:1px}#island
+.heliosWreckage{background:url(/cdn/all/both/img/island/helios_wreckage.png) 0px 0px no-repeat}#island
+.heliosWreckage.glow{background:url(/cdn/all/both/img/island/helios_wreckage.png) -100px 0px no-repeat}#island .heliosWreckage
+.flag{position:absolute;top:11px;left:37px;width:17px;height:10px;background-image:url(/cdn/all/both/img/island/flag_red_big.png)}#island .heliosTower #island_heliosTowerTop,
+#island .heliosTower #island_heliosTowerMid,
+#island .heliosTower #island_heliosTowerBase,
+#island .heliosTower #heliosConstruction_topIso,
+#island .heliosTower #heliosConstruction_midIso,
+#island .heliosTower
+#heliosConstruction_baseIso{position:absolute;left:0px;background-image:url(/cdn/all/both/img/island/heliostower.png);background-repeat:no-repeat;width:100px}#island .heliosLocation
+.scroll_img{position:absolute;bottom:-20px;left:-5px}#island .heliosLocation
+.scroll_img.long{position:absolute;left:-40px}#island .heliosTower #heliosConstruction_topIso,
+#island .heliosTower
+#island_heliosTowerTop{height:45px;top:10px;z-index:300}#island .heliosTower
+#island_heliosTowerTop.active{height:130px;top:-64px}#island .heliosTower #heliosConstruction_midIso, #island .heliosTower
+#island_heliosTowerMid{height:50px;top:36px;z-index:200}#island .heliosTower #heliosConstruction_baseIso, #island .heliosTower
+#island_heliosTowerBase{height:60px;top:60px;z-index:100}#island .heliosTower
+.top1.active{background-position:-52px -7px}#island .heliosTower
+.top1{background-position:-52px -135px}#island .heliosTower
+.mid1{background-position:-52px -182px}#island .heliosTower
+.base1{background-position:-52px -237px}#island .heliosTower.glow
+.top1.active{background-position:-249px -7px}#island .heliosTower.glow
+.top1{background-position:-249px -135px}#island .heliosTower.glow
+.mid1{background-position:-249px -182px}#island .heliosTower.glow
+.base1{background-position:-249px -237px}#island .heliosTower
+.top2.active{background-position:-448px -7px}#island .heliosTower
+.top2{background-position:-448px -135px}#island .heliosTower
+.mid2{background-position:-448px -182px}#island .heliosTower
+.base2{background-position:-448px -237px}#island .heliosTower.glow
+.top2.active{background-position:-646px -7px}#island .heliosTower.glow
+.top2{background-position:-646px -135px}#island .heliosTower.glow
+.mid2{background-position:-646px -182px}#island .heliosTower.glow
+.base2{background-position:-646px -237px}#island .heliosTower
+.top3.active{background-position:-843px -7px}#island .heliosTower
+.top3{background-position:-843px -135px}#island .heliosTower
+.mid3{background-position:-843px -182px}#island .heliosTower
+.base3{background-position:-843px -237px}#island .heliosTower.glow
+.top3.active{background-position:-1041px -7px}#island .heliosTower.glow
+.top3{background-position:-1041px -135px}#island .heliosTower.glow
+.mid3{background-position:-1041px -182px}#island .heliosTower.glow
+.base3{background-position:-1041px -237px}#island .heliosTower
+.top1_ruin.active{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-52px -7px}#island .heliosTower
+.top1_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-52px -135px}#island .heliosTower
+.mid1_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-52px -182px}#island .heliosTower
+.base1_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-52px -237px}#island .heliosTower.glow
+.top1_ruin.active{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-249px -7px}#island .heliosTower.glow
+.top1_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-249px -135px}#island .heliosTower.glow
+.mid1_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-249px -182px}#island .heliosTower.glow
+.base1_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-249px -237px}#island .heliosTower
+.top2_ruin.active{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-448px -7px}#island .heliosTower
+.top2_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-448px -135px}#island .heliosTower
+.mid2_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-448px -182px}#island .heliosTower
+.base2_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-448px -237px}#island .heliosTower.glow
+.top2_ruin.active{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-646px -7px}#island .heliosTower.glow
+.top2_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-646px -135px}#island .heliosTower.glow
+.mid2_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-646px -182px}#island .heliosTower.glow
+.base2_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-646px -237px}#island .heliosTower
+.top3_ruin.active{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-843px -7px}#island .heliosTower
+.top3_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-843px -135px}#island .heliosTower
+.mid3_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-843px -182px}#island .heliosTower
+.base3_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-843px -237px}#island .heliosTower.glow
+.top3_ruin.active{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-1041px -7px}#island .heliosTower.glow
+.top3_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-1041px -135px}#island .heliosTower.glow
+.mid3_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-1041px -182px}#island .heliosTower.glow
+.base3_ruin{background-image:url(/cdn/all/both/img/island/heliostowerruin.png)!important;background-position:-1041px -237px}#island #worldmap #cities
+.cityLocation{z-index:300;position:absolute;cursor:pointer}#island .location_list
+.cityLocationScroll{position:absolute;line-height:23px;height:23px;font-size:10px;width:79px;z-index:350 !important}#island .island1 #cities
+#cityLocation0{top:500px;left:427px}#island .island1 #cities
+#cityLocation1{top:385px;left:475px}#island .island1 #cities
+#cityLocation2{top:409px;left:622px}#island .island1 #cities
+#cityLocation3{top:350px;left:735px}#island .island1 #cities
+#cityLocation4{top:263px;left:883px}#island .island1 #cities
+#cityLocation5{top:312px;left:1286px}#island .island1 #cities
+#cityLocation6{top:453px;left:1348px}#island .island1 #cities
+#cityLocation7{top:566px;left:1371px}#island .island1 #cities
+#cityLocation8{top:458px;left:1167px}#island .island1 #cities
+#cityLocation9{top:688px;left:1379px}#island .island1 #cities
+#cityLocation10{top:736px;left:1215px}#island .island1 #cities
+#cityLocation11{top:805px;left:1073px}#island .island1 #cities
+#cityLocation12{top:851px;left:763px}#island .island1 #cities
+#cityLocation13{top:715px;left:700px}#island .island1 #cities
+#cityLocation14{top:755px;left:546px}#island .island1 #cities
+#cityLocation15{top:693px;left:385px}#island .island1 #cities
+#cityLocation16{top:236px;left:1130px}#island .island1 #cities
+#cityLocation0Scroll{top:570px;left:427px}#island .island1 #cities
+#cityLocation1Scroll{top:455px;left:475px}#island .island1 #cities
+#cityLocation2Scroll{top:479px;left:622px}#island .island1 #cities
+#cityLocation3Scroll{top:420px;left:735px}#island .island1 #cities
+#cityLocation4Scroll{top:333px;left:883px}#island .island1 #cities
+#cityLocation5Scroll{top:382px;left:1286px}#island .island1 #cities
+#cityLocation6Scroll{top:523px;left:1348px}#island .island1 #cities
+#cityLocation7Scroll{top:636px;left:1371px}#island .island1 #cities
+#cityLocation8Scroll{top:528px;left:1167px}#island .island1 #cities
+#cityLocation9Scroll{top:758px;left:1379px}#island .island1 #cities
+#cityLocation10Scroll{top:806px;left:1215px}#island .island1 #cities
+#cityLocation11Scroll{top:875px;left:1073px}#island .island1 #cities
+#cityLocation12Scroll{top:921px;left:763px}#island .island1 #cities
+#cityLocation13Scroll{top:785px;left:700px}#island .island1 #cities
+#cityLocation14Scroll{top:825px;left:546px}#island .island1 #cities
+#cityLocation15Scroll{top:763px;left:385px}#island .island1 #cities
+#cityLocation16Scroll{top:306px;left:1130px}#island .island1 #cities #cityLocation0
+.occupied{left:14px;top:-20px}#island .island1 #cities #cityLocation1
+.occupied{left:93px;top:10px}#island .island1 #cities #cityLocation2
+.occupied{left:-10px;top:20px}#island .island1 #cities #cityLocation3
+.occupied{left:0px;top:0px}#island .island1 #cities #cityLocation4
+.occupied{left:0px;top:0px}#island .island1 #cities #cityLocation5
+.occupied{left:0px;top:0px}#island .island1 #cities #cityLocation6
+.occupied{left:86px;top:22px}#island .island1 #cities #cityLocation7
+.occupied{left:93px;top:22px}#island .island1 #cities #cityLocation8
+.occupied{left:0px;top:16px}#island .island1 #cities #cityLocation9
+.occupied{left:0px;top:0px}#island .island1 #cities #cityLocation10
+.occupied{left:88px;top:0px}#island .island1 #cities #cityLocation11
+.occupied{left:0px;top:0px}#island .island1 #cities #cityLocation12
+.occupied{left:0px;top:0px}#island .island1 #cities #cityLocation13
+.occupied{left:0px;top:10px}#island .island1 #cities #cityLocation14
+.occupied{left:0px;top:0px}#island .island1 #cities #cityLocation15
+.occupied{left:-3px;top:10px}#island .island1 #cities #cityLocation16
+.occupied{left:83px;top:15px}#island .island1 #cities #cityLocation0
+.fleetAction{left:-56px;top:30px}#island .island1 #cities #cityLocation1
+.fleetAction{left:-53px;top:25px}#island .island1 #cities #cityLocation2
+.fleetAction{left:14px;top:-39px}#island .island1 #cities #cityLocation3
+.fleetAction{left:67px;top:-36px}#island .island1 #cities #cityLocation4
+.fleetAction{left:37px;top:-47px}#island .island1 #cities #cityLocation5
+.fleetAction{left:71px;top:-35px}#island .island1 #cities #cityLocation6
+.fleetAction{left:88px;top:-35px}#island .island1 #cities #cityLocation7
+.fleetAction{left:130px;top:-9px}#island .island1 #cities #cityLocation8
+.fleetAction{left:-63px;top:50px}#island .island1 #cities #cityLocation9
+.fleetAction{left:117px;top:25px}#island .island1 #cities #cityLocation10
+.fleetAction{left:23px;top:95px}#island .island1 #cities #cityLocation11
+.fleetAction{left:23px;top:95px}#island .island1 #cities #cityLocation12
+.fleetAction{left:23px;top:95px}#island .island1 #cities #cityLocation13
+.fleetAction{left:-35px;top:70px}#island .island1 #cities #cityLocation14
+.fleetAction{left:33px;top:95px}#island .island1 #cities #cityLocation15
+.fleetAction{left:23px;top:95px}#island .island1 #cities #cityLocation16
+.fleetAction{left:89px;top:-27px}#island .island1 #cities
+.islandfeature.wood{left:845px;top:413px}#island .island1 #cities
+#islandresourceScroll{left:845px;top:475px}#island .island1 #cities
+.islandfeature.tradegood{left:841px;top:604px}#island .island1 #cities
+#islandtradegoodScroll{left:841px;top:685px}#island .island1 #cities
+.islandfeature.wonder{position:absolute;left:975px;top:371px;background-repeat:no-repeat;z-index:100}#island .island1 #cities
+#islandwonderScroll{left:968px;top:519px}#island .island1 #cities
+.islandfeature.forum{left:718px;top:476px}#island .island1
+#barbarianVillage{left:1023px;top:555px}#island .island1 #cities
+#barbarianScroll{left:1038px;top:660px}#island .island1 #cities
+#islandagoraScroll{left:718px;top:551px}#island .island1 #cities
+#islandTowerScroll{left:601px;top:662px}#island .island2 #cities
+#cityLocation0{top:496px;left:425px}#island .island2 #cities
+#cityLocation1{top:358px;left:455px}#island .island2 #cities
+#cityLocation2{top:276px;left:758px}#island .island2 #cities
+#cityLocation3{top:250px;left:920px}#island .island2 #cities
+#cityLocation4{top:313px;left:1094px}#island .island2 #cities
+#cityLocation5{top:242px;left:1230px}#island .island2 #cities
+#cityLocation6{top:477px;left:1419px}#island .island2 #cities
+#cityLocation7{top:658px;left:1453px}#island .island2 #cities
+#cityLocation8{top:740px;left:1270px}#island .island2 #cities
+#cityLocation9{top:714px;left:1076px}#island .island2 #cities
+#cityLocation10{top:525px;left:1221px}#island .island2 #cities
+#cityLocation11{top:518px;left:816px}#island .island2 #cities
+#cityLocation12{top:637px;left:617px}#island .island2 #cities
+#cityLocation13{top:859px;left:907px}#island .island2 #cities
+#cityLocation14{top:776px;left:506px}#island .island2 #cities
+#cityLocation15{top:664px;left:379px}#island .island2 #cities
+#cityLocation16{top:591px;left:1010px}#island .island2 #cities
+#cityLocation0Scroll{top:566px;left:425px}#island .island2 #cities
+#cityLocation1Scroll{top:428px;left:455px}#island .island2 #cities
+#cityLocation2Scroll{top:346px;left:758px}#island .island2 #cities
+#cityLocation3Scroll{top:320px;left:920px}#island .island2 #cities
+#cityLocation4Scroll{top:383px;left:1094px}#island .island2 #cities
+#cityLocation5Scroll{top:312px;left:1230px}#island .island2 #cities
+#cityLocation6Scroll{top:547px;left:1419px}#island .island2 #cities
+#cityLocation7Scroll{top:728px;left:1453px}#island .island2 #cities
+#cityLocation8Scroll{top:810px;left:1270px}#island .island2 #cities
+#cityLocation9Scroll{top:784px;left:1076px}#island .island2 #cities
+#cityLocation10Scroll{top:595px;left:1221px}#island .island2 #cities
+#cityLocation11Scroll{top:588px;left:816px}#island .island2 #cities
+#cityLocation12Scroll{top:707px;left:617px}#island .island2 #cities
+#cityLocation13Scroll{top:929px;left:907px}#island .island2 #cities
+#cityLocation14Scroll{top:846px;left:506px}#island .island2 #cities
+#cityLocation15Scroll{top:734px;left:379px}#island .island2 #cities
+#cityLocation16Scroll{top:661px;left:1010px}#island .island2 #cities #cityLocation0
+.occupied{left:86px;top:-10px}#island .island2 #cities #cityLocation1
+.occupied{left:90px;top:20px}#island .island2 #cities #cityLocation2
+.occupied{left:90px;top:0px}#island .island2 #cities #cityLocation3
+.occupied{left:0px;top:-5px}#island .island2 #cities #cityLocation4
+.occupied{left:90px;top:-40px}#island .island2 #cities #cityLocation5
+.occupied{left:0px;top:0px}#island .island2 #cities #cityLocation6
+.occupied{left:38px;top:-50px}#island .island2 #cities #cityLocation7
+.occupied{left:-20px;top:-15px}#island .island2 #cities #cityLocation8
+.occupied{left:92px;top:16px}#island .island2 #cities #cityLocation9
+.occupied{left:0px;top:19px}#island .island2 #cities #cityLocation10
+.occupied{left:-2px;top:6px}#island .island2 #cities #cityLocation11
+.occupied{left:0px;top:-10px}#island .island2 #cities #cityLocation12
+.occupied{left:0px;top:-10px}#island .island2 #cities #cityLocation13
+.occupied{left:0px;top:-10px}#island .island2 #cities #cityLocation14
+.occupied{left:6px;top:-10px}#island .island2 #cities #cityLocation15
+.occupied{left:90px;top:21px}#island .island2 #cities #cityLocation16
+.occupied{left:90px;top:10px}#island .island2 #cities #cityLocation0
+.fleetAction{left:-9px;top:-12px}#island .island2 #cities #cityLocation1
+.fleetAction{left:-35px;top:25px}#island .island2 #cities #cityLocation2
+.fleetAction{left:-37px;top:-10px}#island .island2 #cities #cityLocation3
+.fleetAction{left:91px;top:-15px}#island .island2 #cities #cityLocation4
+.fleetAction{left:-24px;top:0px}#island .island2 #cities #cityLocation5
+.fleetAction{left:91px;top:-15px}#island .island2 #cities #cityLocation6
+.fleetAction{left:110px;top:20px}#island .island2 #cities #cityLocation7
+.fleetAction{left:110px;top:20px}#island .island2 #cities #cityLocation8
+.fleetAction{left:37px;top:95px}#island .island2 #cities #cityLocation9
+.fleetAction{left:27px;top:95px}#island .island2 #cities #cityLocation10
+.fleetAction{left:-48px;top:30px}#island .island2 #cities #cityLocation11
+.fleetAction{left:110px;top:33px}#island .island2 #cities #cityLocation12
+.fleetAction{left:120px;top:0px}#island .island2 #cities #cityLocation13
+.fleetAction{left:10px;top:95px}#island .island2 #cities #cityLocation14
+.fleetAction{left:18px;top:95px}#island .island2 #cities #cityLocation15
+.fleetAction{left:18px;top:95px}#island .island2 #cities #cityLocation16
+.fleetAction{left:-67px;top:50px}#island .island2 #cities
+.islandfeature.wood{left:1168px;top:433px}#island .island2 #cities
+#islandresourceScroll{left:1168px;top:495px}#island .island2 #cities
+.islandfeature.tradegood{left:849px;top:397px}#island .island2 #cities
+#islandtradegoodScroll{left:849px;top:478px}#island .island2
+#barbarianVillage{left:974px;top:440px}#island .island2 #cities
+#barbarianScroll{left:989px;top:546px}#island .island2 #cities
+.islandfeature.wonder{position:absolute;left:802px;top:599px;background-repeat:no-repeat;z-index:100}#island .island2 #cities
+#islandwonderScroll{left:795px;top:747px}#island .island2 #cities
+.islandfeature.forum{left:673px;top:403px}#island .island2 #cities
+#islandagoraScroll{left:673px;top:478px}#island .island2 #cities
+#islandTowerScroll{left:734px;top:901px}#island .island3 #cities
+#cityLocation0{top:547px;left:380px}#island .island3 #cities
+#cityLocation1{top:428px;left:537px}#island .island3 #cities
+#cityLocation2{top:320px;left:474px}#island .island3 #cities
+#cityLocation3{top:327px;left:631px}#island .island3 #cities
+#cityLocation4{top:241px;left:937px}#island .island3 #cities
+#cityLocation5{top:289px;left:1069px}#island .island3 #cities
+#cityLocation6{top:227px;left:1230px}#island .island3 #cities
+#cityLocation7{top:283px;left:1384px}#island .island3 #cities
+#cityLocation8{top:416px;left:1331px}#island .island3 #cities
+#cityLocation9{top:614px;left:1439px}#island .island3 #cities
+#cityLocation10{top:671px;left:1296px}#island .island3 #cities
+#cityLocation11{top:564px;left:1038px}#island .island3 #cities
+#cityLocation12{top:633px;left:843px}#island .island3 #cities
+#cityLocation13{top:705px;left:1047px}#island .island3 #cities
+#cityLocation14{top:758px;left:590px}#island .island3 #cities
+#cityLocation15{top:718px;left:419px}#island .island3 #cities
+#cityLocation16{top:204px;left:703px}#island .island3 #cities
+#cityLocation0Scroll{top:617px;left:380px}#island .island3 #cities
+#cityLocation1Scroll{top:498px;left:537px}#island .island3 #cities
+#cityLocation2Scroll{top:390px;left:474px}#island .island3 #cities
+#cityLocation3Scroll{top:397px;left:631px}#island .island3 #cities
+#cityLocation4Scroll{top:311px;left:937px}#island .island3 #cities
+#cityLocation5Scroll{top:359px;left:1069px}#island .island3 #cities
+#cityLocation6Scroll{top:297px;left:1230px}#island .island3 #cities
+#cityLocation7Scroll{top:353px;left:1384px}#island .island3 #cities
+#cityLocation8Scroll{top:486px;left:1331px}#island .island3 #cities
+#cityLocation9Scroll{top:684px;left:1439px}#island .island3 #cities
+#cityLocation10Scroll{top:741px;left:1296px}#island .island3 #cities
+#cityLocation11Scroll{top:634px;left:1038px}#island .island3 #cities
+#cityLocation12Scroll{top:703px;left:843px}#island .island3 #cities
+#cityLocation13Scroll{top:775px;left:1047px}#island .island3 #cities
+#cityLocation14Scroll{top:828px;left:590px}#island .island3 #cities
+#cityLocation15Scroll{top:788px;left:419px}#island .island3 #cities
+#cityLocation16Scroll{top:274px;left:703px}#island .island3 #cities #cityLocation0
+.occupied{left:90px;top:-10px}#island .island3 #cities #cityLocation1
+.occupied{left:-20px;top:6px}#island .island3 #cities #cityLocation2
+.occupied{left:95px;top:20px}#island .island3 #cities #cityLocation3
+.occupied{left:88px;top:20px}#island .island3 #cities #cityLocation4
+.occupied{left:90px;top:0px}#island .island3 #cities #cityLocation5
+.occupied{left:12px;top:-13px}#island .island3 #cities #cityLocation6
+.occupied{left:-3px;top:20px}#island .island3 #cities #cityLocation7
+.occupied{left:-5px;top:29px}#island .island3 #cities #cityLocation8
+.occupied{left:87px;top:20px}#island .island3 #cities #cityLocation9
+.occupied{left:46px;top:-51px}#island .island3 #cities #cityLocation10
+.occupied{left:-3px;top:-10px}#island .island3 #cities #cityLocation11
+.occupied{left:96px;top:23px}#island .island3 #cities #cityLocation12
+.occupied{left:-3px;top:20px}#island .island3 #cities #cityLocation13
+.occupied{left:-3px;top:20px}#island .island3 #cities #cityLocation14
+.occupied{left:85px;top:20px}#island .island3 #cities #cityLocation15
+.occupied{left:21px;top:-23px}#island .island3 #cities #cityLocation16
+.occupied{left:88px;top:20px}#island .island3 #cities #cityLocation0
+.fleetAction{left:-13px;top:-21px}#island .island3 #cities #cityLocation1
+.fleetAction{left:105px;top:7px}#island .island3 #cities #cityLocation2
+.fleetAction{left:-40px;top:30px}#island .island3 #cities #cityLocation3
+.fleetAction{left:112px;top:0px}#island .island3 #cities #cityLocation4
+.fleetAction{left:-20px;top:-15px}#island .island3 #cities #cityLocation5
+.fleetAction{left:50px;top:-50px}#island .island3 #cities #cityLocation6
+.fleetAction{left:75px;top:-35px}#island .island3 #cities #cityLocation7
+.fleetAction{left:95px;top:-5px}#island .island3 #cities #cityLocation8
+.fleetAction{left:100px;top:5px}#island .island3 #cities #cityLocation9
+.fleetAction{left:110px;top:5px}#island .island3 #cities #cityLocation10
+.fleetAction{left:75px;top:100px}#island .island3 #cities #cityLocation11
+.fleetAction{left:105px;top:95px}#island .island3 #cities #cityLocation12
+.fleetAction{left:115px;top:25px}#island .island3 #cities #cityLocation13
+.fleetAction{left:16px;top:-28px}#island .island3 #cities #cityLocation14
+.fleetAction{left:-32px;top:95px}#island .island3 #cities #cityLocation15
+.fleetAction{left:-40px;top:30px}#island .island3 #cities #cityLocation16
+.fleetAction{left:-4px;top:-34px}#island .island3 #cities
+.islandfeature.wood{left:1166px;top:357px}#island .island3 #cities
+#islandresourceScroll{left:1166px;top:419px}#island .island3 #cities
+.islandfeature.tradegood{left:836px;top:500px}#island .island3 #cities
+#islandtradegoodScroll{left:836px;top:581px}#island .island3 #cities
+.islandfeature.wonder{position:absolute;left:661px;top:448px;background-repeat:no-repeat;z-index:100}#island .island3 #cities
+#islandwonderScroll{left:654px;top:610px}#island .island3 #cities
+.islandfeature.forum{left:844px;top:359px}#island .island3
+#barbarianVillage{left:1010px;top:385px}#island .island3 #cities
+#barbarianScroll{left:1024px;top:490px}#island .island3 #cities
+#islandagoraScroll{left:844px;top:434px}#island .island3 #cities
+#islandTowerScroll{left:1239px;top:591px}#island .island4 #cities
+#cityLocation0{left:410px;top:391px}#island .island4 #cities
+#cityLocation1{left:400px;top:281px}#island .island4 #cities
+#cityLocation2{left:581px;top:230px}#island .island4 #cities
+#cityLocation3{left:574px;top:496px}#island .island4 #cities
+#cityLocation4{left:740px;top:314px}#island .island4 #cities
+#cityLocation5{left:1056px;top:232px}#island .island4 #cities
+#cityLocation6{left:1454px;top:520px}#island .island4 #cities
+#cityLocation7{left:1440px;top:663px}#island .island4 #cities
+#cityLocation8{left:1298px;top:760px}#island .island4 #cities
+#cityLocation9{left:1134px;top:804px}#island .island4 #cities
+#cityLocation10{left:963px;top:900px}#island .island4 #cities
+#cityLocation11{left:1144px;top:377px}#island .island4 #cities
+#cityLocation12{left:687px;top:690px}#island .island4 #cities
+#cityLocation13{left:796px;top:816px}#island .island4 #cities
+#cityLocation14{left:495px;top:760px}#island .island4 #cities
+#cityLocation15{left:430px;top:637px}#island .island4 #cities
+#cityLocation16{left:1353px;top:404px}#island .island4 #cities
+#cityLocation0Scroll{left:410px;top:461px}#island .island4 #cities
+#cityLocation1Scroll{left:400px;top:351px}#island .island4 #cities
+#cityLocation2Scroll{left:581px;top:300px}#island .island4 #cities
+#cityLocation3Scroll{left:574px;top:566px}#island .island4 #cities
+#cityLocation4Scroll{left:740px;top:384px}#island .island4 #cities
+#cityLocation5Scroll{left:1056px;top:302px}#island .island4 #cities
+#cityLocation6Scroll{left:1454px;top:590px}#island .island4 #cities
+#cityLocation7Scroll{left:1440px;top:733px}#island .island4 #cities
+#cityLocation8Scroll{left:1298px;top:830px}#island .island4 #cities
+#cityLocation9Scroll{left:1134px;top:874px}#island .island4 #cities
+#cityLocation10Scroll{left:963px;top:970px}#island .island4 #cities
+#cityLocation11Scroll{left:1144px;top:447px}#island .island4 #cities
+#cityLocation12Scroll{left:687px;top:760px}#island .island4 #cities
+#cityLocation13Scroll{left:796px;top:886px}#island .island4 #cities
+#cityLocation14Scroll{left:495px;top:830px}#island .island4 #cities
+#cityLocation15Scroll{left:430px;top:707px}#island .island4 #cities
+#cityLocation16Scroll{left:1353px;top:474px}#island .island4 #cities #cityLocation0
+.occupied{left:121px;top:-3px}#island .island4 #cities #cityLocation1
+.occupied{left:78px;top:-33px}#island .island4 #cities #cityLocation2
+.occupied{left:-10px;top:15px}#island .island4 #cities #cityLocation3
+.occupied{left:120px;top:19px}#island .island4 #cities #cityLocation4
+.occupied{left:90px;top:-10px}#island .island4 #cities #cityLocation5
+.occupied{left:-14px;top:7px}#island .island4 #cities #cityLocation6
+.occupied{left:-10px;top:0px}#island .island4 #cities #cityLocation7
+.occupied{left:18px;top:-25px}#island .island4 #cities #cityLocation8
+.occupied{left:95px;top:0px}#island .island4 #cities #cityLocation9
+.occupied{left:-10px;top:15px}#island .island4 #cities #cityLocation10
+.occupied{left:97px;top:10px}#island .island4 #cities #cityLocation11
+.occupied{left:13px;top:-21px}#island .island4 #cities #cityLocation12
+.occupied{left:-23px;top:-20px}#island .island4 #cities #cityLocation13
+.occupied{left:20px;top:-36px}#island .island4 #cities #cityLocation14
+.occupied{left:90px;top:20px}#island .island4 #cities #cityLocation15
+.occupied{left:90px;top:-20px}#island .island4 #cities #cityLocation16
+.occupied{left:10px;top:-17px}#island .island4 #cities #cityLocation0
+.fleetAction{left:-40px;top:70px}#island .island4 #cities #cityLocation1
+.fleetAction{left:-36px;top:-12px}#island .island4 #cities #cityLocation2
+.fleetAction{left:138px;top:10px}#island .island4 #cities #cityLocation3
+.fleetAction{left:-33px;top:14px}#island .island4 #cities #cityLocation4
+.fleetAction{left:55px;top:-50px}#island .island4 #cities #cityLocation5
+.fleetAction{left:94px;top:-20px}#island .island4 #cities #cityLocation6
+.fleetAction{left:100px;top:30px}#island .island4 #cities #cityLocation7
+.fleetAction{left:94px;top:20px}#island .island4 #cities #cityLocation8
+.fleetAction{left:85px;top:100px}#island .island4 #cities #cityLocation9
+.fleetAction{left:24px;top:100px}#island .island4 #cities #cityLocation10
+.fleetAction{left:-65px;top:55px}#island .island4 #cities #cityLocation11
+.fleetAction{left:109px;top:25px}#island .island4 #cities #cityLocation12
+.fleetAction{left:96px;top:5px}#island .island4 #cities #cityLocation13
+.fleetAction{left:10px;top:100px}#island .island4 #cities #cityLocation14
+.fleetAction{left:54px;top:100px}#island .island4 #cities #cityLocation15
+.fleetAction{left:-50px;top:25px}#island .island4 #cities #cityLocation16
+.fleetAction{left:97px;top:-65px}#island .island4 #cities
+.islandfeature.wood{left:1028px;top:467px}#island .island4 #cities
+#islandresourceScroll{left:1028px;top:529px}#island .island4 #cities
+.islandfeature.tradegood{left:1007px;top:594px}#island .island4 #cities
+#islandtradegoodScroll{left:1007px;top:675px}#island .island4 #cities
+.islandfeature.wonder{left:902px;top:314px}#island .island4 #cities
+#islandwonderScroll{left:895px;top:462px}#island .island4 #cities
+.islandfeature.forum{left:686px;top:422px}#island .island4
+#barbarianVillage{left:807px;top:523px}#island .island4 #cities
+#barbarianScroll{left:821px;top:628px}#island .island4 #cities
+#islandagoraScroll{left:686px;top:497px}#island .island4 #cities
+#islandTowerScroll{left:1121px;top:721px}#island .island5 #cities
+#cityLocation0{top:491px;left:375px}#island .island5 #cities
+#cityLocation1{top:340px;left:557px}#island .island5 #cities
+#cityLocation2{top:256px;left:677px}#island .island5 #cities
+#cityLocation3{top:247px;left:917px}#island .island5 #cities
+#cityLocation4{top:312px;left:1091px}#island .island5 #cities
+#cityLocation5{top:373px;left:1280px}#island .island5 #cities
+#cityLocation6{top:500px;left:1437px}#island .island5 #cities
+#cityLocation7{top:740px;left:1412px}#island .island5 #cities
+#cityLocation8{top:680px;left:1207px}#island .island5 #cities
+#cityLocation9{top:790px;left:1088px}#island .island5 #cities
+#cityLocation10{top:760px;left:908px}#island .island5 #cities
+#cityLocation11{top:810px;left:735px}#island .island5 #cities
+#cityLocation12{top:846px;left:490px}#island .island5 #cities
+#cityLocation13{top:620px;left:756px}#island .island5 #cities
+#cityLocation14{top:688px;left:503px}#island .island5 #cities
+#cityLocation15{top:591px;left:440px}#island .island5 #cities
+#cityLocation16{top:433px;left:722px}#island .island5 #cities
+#cityLocation0Scroll{top:561px;left:375px}#island .island5 #cities
+#cityLocation1Scroll{top:410px;left:557px}#island .island5 #cities
+#cityLocation2Scroll{top:326px;left:677px}#island .island5 #cities
+#cityLocation3Scroll{top:317px;left:917px}#island .island5 #cities
+#cityLocation4Scroll{top:382px;left:1091px}#island .island5 #cities
+#cityLocation5Scroll{top:443px;left:1280px}#island .island5 #cities
+#cityLocation6Scroll{top:570px;left:1437px}#island .island5 #cities
+#cityLocation7Scroll{top:810px;left:1412px}#island .island5 #cities
+#cityLocation8Scroll{top:750px;left:1207px}#island .island5 #cities
+#cityLocation9Scroll{top:860px;left:1088px}#island .island5 #cities
+#cityLocation10Scroll{top:830px;left:908px}#island .island5 #cities
+#cityLocation11Scroll{top:880px;left:735px}#island .island5 #cities
+#cityLocation12Scroll{top:916px;left:490px}#island .island5 #cities
+#cityLocation13Scroll{top:690px;left:756px}#island .island5 #cities
+#cityLocation14Scroll{top:758px;left:503px}#island .island5 #cities
+#cityLocation15Scroll{top:661px;left:440px}#island .island5 #cities
+#cityLocation16Scroll{top:503px;left:722px}#island .island5 #cities #cityLocation0
+.occupied{left:61px;top:-35px}#island .island5 #cities #cityLocation1
+.occupied{left:87px;top:-15px}#island .island5 #cities #cityLocation2
+.occupied{left:90px;top:20px}#island .island5 #cities #cityLocation3
+.occupied{left:96px;top:14px}#island .island5 #cities #cityLocation4
+.occupied{left:93px;top:13px}#island .island5 #cities #cityLocation5
+.occupied{left:20px;top:-31px}#island .island5 #cities #cityLocation6
+.occupied{left:-15px;top:-17px}#island .island5 #cities #cityLocation7
+.occupied{left:-10px;top:23px}#island .island5 #cities #cityLocation8
+.occupied{left:90px;top:0px}#island .island5 #cities #cityLocation9
+.occupied{left:-10px;top:0px}#island .island5 #cities #cityLocation10
+.occupied{left:-10px;top:16px}#island .island5 #cities #cityLocation11
+.occupied{left:-10px;top:12px}#island .island5 #cities #cityLocation12
+.occupied{left:106px;top:15px}#island .island5 #cities #cityLocation13
+.occupied{left:85px;top:-22px}#island .island5 #cities #cityLocation14
+.occupied{left:105px;top:10px}#island .island5 #cities #cityLocation15
+.occupied{left:65px;top:-37px}#island .island5 #cities #cityLocation16
+.occupied{left:90px;top:0px}#island .island5 #cities #cityLocation0
+.fleetAction{left:-45px;top:25px}#island .island5 #cities #cityLocation1
+.fleetAction{left:-45px;top:25px}#island .island5 #cities #cityLocation2
+.fleetAction{left:-11px;top:-11px}#island .island5 #cities #cityLocation3
+.fleetAction{left:95px;top:-20px}#island .island5 #cities #cityLocation4
+.fleetAction{left:95px;top:-20px}#island .island5 #cities #cityLocation5
+.fleetAction{left:95px;top:-20px}#island .island5 #cities #cityLocation6
+.fleetAction{left:95px;top:-30px}#island .island5 #cities #cityLocation7
+.fleetAction{left:95px;top:-30px}#island .island5 #cities #cityLocation8
+.fleetAction{left:40px;top:100px}#island .island5 #cities #cityLocation9
+.fleetAction{left:70px;top:100px}#island .island5 #cities #cityLocation10
+.fleetAction{left:0px;top:100px}#island .island5 #cities #cityLocation11
+.fleetAction{left:16px;top:100px}#island .island5 #cities #cityLocation12
+.fleetAction{left:40px;top:100px}#island .island5 #cities #cityLocation13
+.fleetAction{left:-6px;top:-3px}#island .island5 #cities #cityLocation14
+.fleetAction{left:-45px;top:25px}#island .island5 #cities #cityLocation15
+.fleetAction{left:-45px;top:25px}#island .island5 #cities #cityLocation16
+.fleetAction{left:40px;top:125px}#island .island5 #cities
+.islandfeature.wood{left:1077px;top:575px}#island .island5 #cities
+#islandresourceScroll{left:1077px;top:637px}#island .island5 #cities
+.islandfeature.tradegood{left:904px;top:593px}#island .island5 #cities
+#islandtradegoodScroll{left:904px;top:665px}#island .island5 #cities
+.islandfeature.wonder{left:1000px;top:355px}#island .island5 #cities
+#islandwonderScroll{left:993px;top:503px}#island .island5
+#barbarianVillage{left:1127px;top:386px}#island .island5 #cities
+#barbarianScroll{left:1142px;top:490px}#island .island5 #cities
+.islandfeature.forum{left:827px;top:307px}#island .island5 #cities
+#islandagoraScroll{left:827px;top:382px}#island .island5 #cities
+#islandTowerScroll{left:1277px;top:613px}#island #cities .occupied,
+#island #cities .occupied
+.hover{display:block;position:absolute;width:21px;height:47px}#island #cities .occupied
+.hover{left:0;top:0;display:none}#island #cities .city
+.foreignOccupier{background-image:url(/cdn/all/both/img/island/soldat_red.png)}#island #cities .city
+.ownOccupier{background-image:url(/cdn/all/both/img/island/soldat_blue.png)}#island #cities .city
+.allyOccupier{background-image:url(/cdn/all/both/img/island/soldat_green.png)}#island #cities .city
+.treatyOccupier{background-image:url(/cdn/all/both/img/island/soldat_yellow.png)}#island #cities .city .foreignOccupier
+.hover{background-image:url(/cdn/all/both/img/island/hover/soldat_red.png) !important}#island #cities .city .ownOccupier
+.hover{background-image:url(/cdn/all/both/img/island/hover/soldat_red.png) !important}#island #cities .city .allyOccupier
+.hover{background-image:url(/cdn/all/both/img/island/hover/soldat_red.png) !important}#island #cities .city .treatyOccupier
+.hover{background-image:url(/cdn/all/both/img/island/hover/soldat_red.png) !important}#island #cities .city .foreignBlocker
+.hover{background-image:url(/cdn/all/both/img/island/hover/schiff_red.png) !important}#island #cities .city .treatyBlocker
+.hover{background-image:url(/cdn/all/both/img/island/hover/schiff_red.png) !important}#island #cities .city .ownBlocker
+.hover{background-image:url(/cdn/all/both/img/island/hover/schiff_red.png) !important}#island #cities .city .allyBlocker
+.hover{background-image:url(/cdn/all/both/img/island/hover/schiff_red.png) !important}#island #cities .city .seafight
+.hover{background-image:url(/cdn/all/both/img/island/hover/schiffe_kampf_static.png) !important}#island #cities .city .seafight.animated
+.hover{background-image:url(/cdn/all/both/img/island/hover/schiffe_kampf.png) !important}#island #cities .fleetAction,
+#island #cities .fleetAction
+.hover{background-repeat:no-repeat;background-position:left top;display:block;height:53px;position:absolute;width:63px}#island #cities .fleetAction
+.hover{display:none;left:0;top:0}#island #cities
+.foreignBlocker{background-image:url(/cdn/all/both/img/island/schiff_red.png)}#island #cities
+.treatyBlocker{background-image:url(/cdn/all/both/img/island/schiff_yellow.png)}#island #cities
+.ownBlocker{background-image:url(/cdn/all/both/img/island/schiff_blue.png)}#island #cities
+.allyBlocker{background-image:url(/cdn/all/both/img/island/schiff_green.png)}#island #cities
+.seafight{background-image:url(/cdn/all/both/img/island/schiffe_kampf_static.png)}#island #cities
+.seafight.animated{background-image:url(/cdn/all/both/img/island/schiffe_kampf.png)}#island #cities .seafight.animated
+.fire_small{top:-21px;left:6px}#island #cities
+.fight{display:block;position:absolute;background-image:url(/cdn/all/both/img/island/feuer.png);width:49px;height:41px;left:20px;bottom:10px}.cityLocationScroll
+.bonusIcon{background-image:url(/cdn/all/both/resources/Bonus-Effekt_20x20.jpg);width:20px;height:20px;position:absolute;right:-7px;top: -8px;z-index:1}#island #cities
+.fire_position{left:51px;top:-24px}#island #cities .level1
+.fire_position{left:40px;top:-24px}#island #cities .level2 .fire_position,
+#island #cities .level3
+.fire_position{left:44px;top:-24px}#island #cities .level4 .fire_position,
+#island #cities .level5 .fire_position,
+#island #cities .level6
+.fire_position{left:48px;top:-24px}#island #cities .level7 .fire_position,
+#island #cities .level8 .fire_position,
+#island #cities .level9
+.fire_position{left:41px;top:-24px}#island #cities .level10 .fire_position,
+#island #cities .level11 .fire_position,
+#island #cities .level12
+.fire_position{left:24px;top:-33px}#island #cities .level13 .fire_position,
+#island #cities .level14 .fire_position,
+#island #cities .level15
+.fire_position{left:24px;top:-34px}#island #cities .level16 .fire_position,
+#island #cities .level17
+.fire_position{left:16px;top:-32px}#island #cities .city
+.island_feature_img{margin:0
+20px;width:70px;height:70px}#island #cities .cityLocation.city.level0.constr
+.island_feature_img{display:block;position:relative;background-image:url(/cdn/all/both/img/island/city_constr.png);background-position:20px 0px;width:90px;height:63px}#island #cities .cityLocation.city.level0.constr .island_feature_img.hover, #island #cities .cityLocation.city.level0.constr .island_feature_img
+.position{display:none !important}#island #cities .city
+.position{position:absolute;left:53px;top:-3px}#island #cities .city.level1
+.position{left:41px;top:16px}#island #cities .city.level2 .position,
+#island #cities .city.level3
+.position{left:45px;top:16px}#island #cities .city.level4 .position,
+#island #cities .city.level5 .position,
+#island #cities .city.level6
+.position{left:44px;top:9px}#island #cities .city.level7 .position,
+#island #cities .city.level8 .position,
+#island #cities .city.level9
+.position{left:48px;top:7px}#island #cities .city.level10 .position,
+#island #cities .city.level11 .position,
+#island #cities .city.level12
+.position{left:62px;top:3px}#island #cities .city.level13 .position,
+#island #cities .city.level14 .position,
+#island #cities .city.level15
+.position{left:60px;top:2px}#island #cities .city.level16 .position,
+#island #cities .city.level17
+.position{left:53px;top:5px}#island #cities .city
+.island_feature_img{background-image:url(/cdn/all/both/img/island/city_red.png)}#island #cities .city.own
+.island_feature_img{background-image:url(/cdn/all/both/img/island/city_blue.png)}#island #cities .city.ally
+.island_feature_img{background-image:url(/cdn/all/both/img/island/city_green.png)}#island #cities .city.treaty
+.island_feature_img{background-image:url(/cdn/all/both/img/island/city_yellow.png)}#island #cities .animated.city
+.island_feature_img{background-image:url(/cdn/all/both/img/island/city_red_animated.png)}#island #cities .animated.city.own
+.island_feature_img{background-image:url(/cdn/all/both/img/island/city_blue_animated.png)}#island #cities .animated.city.ally
+.island_feature_img{background-image:url(/cdn/all/both/img/island/city_green_animated.png)}#island #cities .animated.city.treaty
+.island_feature_img{background-image:url(/cdn/all/both/img/island/city_yellow_animated.png)}#island #cities
+.hover{top: -3px;left:0px;position:absolute}#island #cities .islandfeature
+.hover{top:0px;left:0px}#island #cities .city
+.hover{background-image:url(/cdn/all/both/img/island/hover/city_red_glow.png)}#island #cities .city.own
+.hover{background-image:url(/cdn/all/both/img/island/hover/city_blue_glow.png)}#island #cities .city.ally
+.hover{background-image:url(/cdn/all/both/img/island/hover/city_green_glow.png)}#island #cities .city.treaty
+.hover{background-image:url(/cdn/all/both/img/island/hover/city_yellow_glow.png)}#island #cities .city.animated
+.hover{background-image:url(/cdn/all/both/img/island/hover/city_red_animated_glow.png)}#island #cities .city.animated.own
+.hover{background-image:url(/cdn/all/both/img/island/hover/city_blue_animated_glow.png)}#island #cities .city.animated.ally
+.hover{background-image:url(/cdn/all/both/img/island/hover/city_green_animated_glow.png)}#island #cities .city.animated.treaty
+.hover{background-image:url(/cdn/all/both/img/island/hover/city_yellow_animated_glow.png)}#island #cities .city.selected
+.hover{display:block !important}#island #cities .cityLocation.city
+.island_feature_img{background-position: -527px 0px}#island #cities .cityLocation.level1
+.island_feature_img{background-position: -3px 0px}#island #cities .cityLocation.level2 .island_feature_img,
+#island #cities .cityLocation.level3
+.island_feature_img{background-position: -74px 0px}#island #cities .cityLocation.level4 .island_feature_img,
+#island #cities .cityLocation.level5 .island_feature_img,
+#island #cities .cityLocation.level6
+.island_feature_img{background-position: -149px 0px}#island #cities .cityLocation.level7 .island_feature_img,
+#island #cities .cityLocation.level8 .island_feature_img,
+#island #cities .cityLocation.level9
+.island_feature_img{background-position: -228px 0px}#island #cities .cityLocation.level10 .island_feature_img,
+#island #cities .cityLocation.level11 .island_feature_img,
+#island #cities .cityLocation.level12
+.island_feature_img{background-position: -300px 0px}#island #cities .cityLocation.level13 .island_feature_img,
+#island #cities .cityLocation.level14 .island_feature_img,
+#island #cities .cityLocation.level15
+.island_feature_img{background-position: -378px 0px}#island #cities .cityLocation.level16 .island_feature_img,
+#island #cities .cityLocation.level17
+.island_feature_img{background-position: -454px 0px}#island  .scroll_img
+.before.specialServerBadge{position:absolute;top:0;width:12px;height:23px}#island .scroll_img
+.before{display:none}#island .scroll_img
+.before.specialServerBadge{background-image:url(/cdn/all/both/specialServerBadges/Erweiterung_Schriftrolle_mit_Badge-Basis_Links.png);top: -11px;height:63px;width:40px;display:block;z-index:100;left: -16px}#island .hover .scroll_img .before.specialServerBadge,
+#island .selected .scroll_img
+.before.specialServerBadge{background-image:url(/cdn/all/both/specialServerBadges/Erweiterung_Schriftrolle_mit_Badge-Basis_Links_Glow.png);top: -3px;height:63px;width:40px;display:block;z-index:100;left: -16px}#island .hover .scroll_img
+.before.specialServerBadge{}#island #cities
+.badgeText{margin-left:2px;padding-top:10px;text-align:center}#island #cities
+.badgeImage{background:url(/cdn/all/both/specialServerBadges/Warserver_Sprites_8_Icons.png) no-repeat scroll 0 0 transparent;width:28px;height:24px;position:relative;top:10px;left:7px}#island #cities
+.badgeImage.category0{background-position: -112px 0px}#island #cities
+.badgeImage.category1{background-position: -196px 0px}#island #cities
+.badgeImage.category2{background-position: -84px 0px}#island #cities
+.badgeImage.category3{background-position: -140px 0px}#island #cities
+.badgeImage.category4{background-position: -168px 0px}#island #cities
+.badgeImage.category5{background-position: -56px 0px}#island #cities
+.badgeImage.category6{background-position:0px 0px}#island #cities
+.badgeImage.category7{background-position: -28px 0px}#island #cities .islandfeature.wonder a, #island #cities .islandfeature.wonder
+.hover{height:166px;width:104px;margin-top:0px;background-repeat:no-repeat !important;background-position:bottom center !important}#island  #cities .islandfeature.wonder
+.scroll_img{margin-top: -8px;bottom:10px;left: -7px}#island  #cities .islandfeature.wonder1
+a{background:url(/cdn/all/both/wonder/w1.png)}#island  #cities .islandfeature.wonder2
+a{background:url(/cdn/all/both/wonder/w2.png)}#island  #cities .islandfeature.wonder3
+a{background:url(/cdn/all/both/wonder/w3.png)}#island  #cities .islandfeature.wonder4
+a{background:url(/cdn/all/both/wonder/w4.png)}#island  #cities .islandfeature.wonder5
+a{background:url(/cdn/all/both/wonder/w5.png)}#island  #cities .islandfeature.wonder6
+a{background:url(/cdn/all/both/wonder/w6.png)}#island  #cities .islandfeature.wonder7
+a{background:url(/cdn/all/both/wonder/w7.png)}#island  #cities .islandfeature.wonder8
+a{background:url(/cdn/all/both/wonder/w8.png)}#island  #cities .islandfeature.wonder1
+.hover{background:url(/cdn/all/both/img/island/hover/w1.png)}#island  #cities .islandfeature.wonder2
+.hover{background:url(/cdn/all/both/img/island/hover/w2.png)}#island  #cities .islandfeature.wonder3
+.hover{background:url(/cdn/all/both/img/island/hover/w3.png)}#island  #cities .islandfeature.wonder4
+.hover{background:url(/cdn/all/both/img/island/hover/w4.png)}#island  #cities .islandfeature.wonder5
+.hover{background:url(/cdn/all/both/img/island/hover/w5.png)}#island  #cities .islandfeature.wonder6
+.hover{background:url(/cdn/all/both/img/island/hover/w6.png)}#island  #cities .islandfeature.wonder7
+.hover{background:url(/cdn/all/both/img/island/hover/w7.png)}#island  #cities .islandfeature.wonder8
+.hover{background:url(/cdn/all/both/img/island/hover/w8.png)}#island  #cities
+.islandfeature.wonder7{margin-left: -10px}#island  #cities .islandfeature.tradegood
+.island_feature_img{width:100px;height:76px}#island  #cities .islandfeature.marble
+.island_feature_img{background-image:url(/cdn/all/both/img/island/stein_abbau_leer.png);width:106px;height:91px}#island  #cities .islandfeature.marble.static
+.island_feature_img{background-image:url(/cdn/all/both/img/island/stein_abbau_statisch.png);width:106px;height:91px}#island  #cities .islandfeature.crystal
+.island_feature_img{background-image:url(/cdn/all/both/img/island/kristall_auf_der_insel_leer_neu.png);width:125px;height:88px}#island  #cities .islandfeature.crystal.static
+.island_feature_img{background-image:url(/cdn/all/both/img/island/crystal.png)}#island  #cities .islandfeature.sulfur
+.island_feature_img{background-image:url(/cdn/all/both/img/island/schwefel_auf_der_insel_leer_neu.png);width:116px;height:97px}#island  #cities .islandfeature.sulfur.static
+.island_feature_img{background-image:url(/cdn/all/both/img/island/sulfur.png)}#island  #cities .islandfeature.wood
+.island_feature_img{background-image:url(/cdn/all/both/img/island/holz_abbau_leer.png);width:97px;height:72px}#island  #cities .islandfeature.wood.static
+.island_feature_img{background-image:url(/cdn/all/both/img/island/holz_abbau_statisch.png);width:97px;height:72px}#island  #cities .islandfeature.wine
+.island_feature_img{background-image:url(/cdn/all/both/img/island/weinanbau_auf_der_insel_leer.png);width:89px;height:79px;background-position:0 20px !important}#island  #cities .islandfeature.wine.static
+.island_feature_img{background-image:url(/cdn/all/both/img/island/weinanbau_auf_der_insel_.png)}#island  #cities .islandfeature
+.hover{position:absolute;width:100px;height:76px}#island  #cities .islandfeature.marble
+.hover{background-image:url(/cdn/all/both/img/island/hover/stein_abbau_leer_glow.png);width:118px;height:98px;left:-6px;top:-7px}#island  #cities .islandfeature.marble.static
+.hover{background-image:url(/cdn/all/both/img/island/hover/stein_abbau_statisch_glow.png);width:118px;height:98px;left:-6px;top:-7px}#island  #cities .islandfeature.crystal
+.hover{background-image:url(/cdn/all/both/img/island/hover/kristall_auf_der_insel_leer_neu_glow.png);width:125px;height:88px}#island  #cities .islandfeature.crystal.static
+.hover{background-image:url(/cdn/all/both/img/island/hover/crystal_glow.png)}#island  #cities .islandfeature.sulfur
+.hover{background-image:url(/cdn/all/both/img/island/hover/schwefel_auf_der_insel_leer_neu_glow.png);width:116px;height:97px}#island  #cities .islandfeature.sulfur.static
+.hover{background-image:url(/cdn/all/both/img/island/hover/sulfur_glow.png)}#island #cities .islandfeature.wood
+.hover{background-image:url(/cdn/all/both/img/island/hover/holz_abbau_leer_glow.png);left: -3px;top: -6px}#island #cities .islandfeature.wood.static
+.hover{background-image:url(/cdn/all/both/img/island/hover/holz_abbau_statisch_glow.png);left: -3px;top: -6px}#island #cities .islandfeature.wine
+.hover{background:url(/cdn/all/both/img/island/hover/weinanbau_auf_der_insel_leer_glow.png) 0px 21px no-repeat;width:89px;height:80px}#island #cities .islandfeature.wine.static
+.hover{background-image:url(/cdn/all/both/img/island/hover/weinanbau_auf_der_insel_glow.png)}#island #barbarianVillage.islandfeature .hover,
+#island #barbarianVillage
+a{background-repeat:no-repeat;height:150px;width:150px}#island #barbarianVillage.kingOlaf
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Olaf.png)}#island #barbarianVillage.kingOlaf.destroyed
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Olaf_zerstoert.png)}#island #barbarianVillage.kingOlaf
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Olaf_glow.png)}#island #barbarianVillage.kingOlaf.destroyed
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Olaf_zerstoert_glow.png)}#island #barbarianVillage.kingMattis
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Mattis.png)}#island #barbarianVillage.kingMattis.destroyed
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Mattis_zerstoert.png)}#island #barbarianVillage.kingMattis
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Mattis_glow.png)}#island #barbarianVillage.kingMattis.destroyed
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Mattis_zerstoert_glow.png)}#island #barbarianVillage.kingEzekiel
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Ezekiel.png)}#island #barbarianVillage.kingEzekiel.destroyed
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Ezekiel__zerstoert.png)}#island #barbarianVillage.kingEzekiel
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Ezekiel_glow.png)}#island #barbarianVillage.kingEzekiel.destroyed
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Ezekiel__zerstoert_glow.png)}#island #barbarianVillage.kingLatu
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Latu.png)}#island #barbarianVillage.kingLatu.destroyed
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Latu_zerstoert.png)}#island #barbarianVillage.kingLatu
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Latu_glow.png)}#island #barbarianVillage.kingLatu.destroyed
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Latu_zerstoert_glow.png)}#island #barbarianVillage.kingNeon
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Neon.png)}#island #barbarianVillage.kingNeon.destroyed
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Neon_zerstoert.png)}#island #barbarianVillage.kingNeon
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Neon_glow.png)}#island #barbarianVillage.kingNeon.destroyed
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Neon_zerstoert_glow.png)}#island #barbarianVillage.kingSina
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Sina.png)}#island #barbarianVillage.kingSina.destroyed
+a{background-image:url(/cdn/all/both/img/island/2015-09-28_IK_In_Game_Barbarendorf_Sina_zerstoert.png)}#island #barbarianVillage.kingSina
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Sina_glow.png)}#island #barbarianVillage.kingSina.destroyed
+.hover{background-image:url(/cdn/all/both/img/island/hover/2015-09-28_IK_In_Game_Barbarendorf_Sina_zerstoert_glow.png)}#island #barbarianVillage
+.fire_position{left:51px;top:0px}#island #barbarianVillage
+#js_tutorialArrow{margin-top:30px;margin-left:30px}#island #cities .islandfeature.forum
+a{background-image:url(/cdn/all/both/img/island/agora.png);width:115px;height:85px}#island #cities .islandfeature.forum
+.hover{background-image:url(/cdn/all/both/img/island/hover/agora_glow.png);left:7px;top: -6px}#island #cities
+.city.vacation{color:#363}#island #cities
+.city.inactive{color:#999}#island #cities .scroll_img
+.city_state_icon{bottom:4px;position:absolute;vertical-align:middle;z-index:511;margin-left:2px}#island #cities .hover .scroll_img .city_state_icon,
+#island #cities .selected .scroll_img
+.city_state_icon{bottom:11px}#island #cities .city.vacation
+.city_state_icon{background-image:url(/cdn/all/both/layout/icon-palm.png);height:16px;width:16px}#island #cities .city.banned
+.city_state_icon{background-image:url(/cdn/all/both/icons/player_banned_14x14.png);height:14px;width:14px}#island #cities .city.noob
+.city_state_icon{background-image:url(/cdn/all/both/img/island/noobschutz.png);width:18px;height:27px;margin-left:5px}#island #cities .city.target
+.city_state_icon{background-image:url(/cdn/all/both/icons/war.png);width:15px;height:15px}#island .city
+.enter_icon{display:none;float:left;width:13px;height:23px}#island .city.can_be_entered
+.enter_icon{background:url(/cdn/all/both/img/island/viewAble.png) no-repeat scroll center center transparent;display:block}#island .city.can_be_entered.hover .enter_icon, #island .city.can_be_entered.selected
+.enter_icon{height:38px}#island
+li.noobModeInfo{font-size:10px;padding:5px
+2px 0 0}#notices
+.warning_small{background:none #FCDDD2 !important;min-height:inherit !important}#island #cities
+.piracyRaid{background-image:url(/cdn/all/both/resources/capturePoints_small.png);position:relative;height:10px;width:20px;top:58px;left:55px}#allyPage
+.allypage{text-align:left;padding:4px
+12px}.scroll_img
+.upgradeIcon{background:url(/cdn/all/both/icons/arrow_upgrade.png) no-repeat left center;padding-left:18px;display:inline;height:20px}.barbarianVillage
+.barbarianCityPortrait{display:inline-block;width:155px;height:155px;padding:0px;margin:15px;border:solid 2px #c9a584}.barbarianVillage
+.barbarianCityPortrait.kingOlaf{background-image:url(/cdn/all/both/barbarians/olaf.jpg)}.barbarianVillage
+.barbarianCityPortrait.kingMattis{background-image:url(/cdn/all/both/barbarians/mattis.jpg)}.barbarianVillage
+.barbarianCityPortrait.kingLatu{background-image:url(/cdn/all/both/barbarians/latu.jpg)}.barbarianVillage
+.barbarianCityPortrait.kingNeon{background-image:url(/cdn/all/both/barbarians/neon.jpg)}.barbarianVillage
+.barbarianCityPortrait.kingSina{background-image:url(/cdn/all/both/barbarians/sina.jpg)}.barbarianVillage
+.barbarianCityPortrait.kingEzekiel{background-image:url(/cdn/all/both/barbarians/halvar.jpg)}.barbarianVillage
+.barbarianCityPortrait.destroyed{background-image:url(/cdn/all/both/barbarians/2015-11-11_IK_Profilbild_fuer_besiegte_Barbarendoerfer.jpg)}.barbarianVillage
+.barbarianCityPortrait.shadyTrader{background-image:url(/cdn/all/both/barbarians/2016-02-24_IK_Barbaren-Flotte_Haendler.jpg)}.barbarianVillage
+.barbarianCityInfos{display:inline-block;margin:15px;width:454px;vertical-align:top;height:150px}.barbarianVillage .barbarianCityInfos
+td{padding:0
+10px 4px 0}.barbarianVillage
+.barbarianCityKingSpeech{padding:5px;width:640px;margin:0
+15px 15px 15px;background-color:#f8ebbd}#barbarianTruce ul.resources,
+#container .barbarianVillage
+ul.resources{background-color:#f8ebbd;height:50px;padding:4px}#barbarianTruce
+ul.resources.ambrosia{height:12px}#barbarianTruce ul.resources li,
+#container .barbarianVillage ul.resources
+li{float:left;width:60px;background-color:#f8ebbd}.barbarianVillage
+.barbarianCityInfosText{height:85px}.barbarianVillage
+#barbarianCityTipTable{height:120px}#container .barbarianCityInfos
+.itemlist{position:relative;right: -369px;top: -58px;border-left:solid 12px #fdf7dd;height:60px;padding:8px
+10px}#container .barbarianCityInfos #barbarianVillageItemLoot.itemlist
+a.itemMapPiece{display:inline;height:40px;line-height:40px;width:40px}#container .barbarianCityInfos #barbarianVillageItemLoot.itemlist a.itemMapPiece:hover{text-decoration:none;font-weight:bold}#barbarianTruce
+.containerTribute{width:472px;margin-top:15px;display:inline-block}#barbarianTruce
+.boxTribute{vertical-align:top;background-color:#f8ebbd;padding:4px;margin-bottom:15px}#barbarianTruce
+.boxImage{display:inline-block;width:155px;height:155px;margin:15px;vertical-align:top;background-image:url(/cdn/all/both/barbarians/2015-11-13_IK_Profilbild_fuer_Waffenstillstand_Screen_155x155.jpg);border:solid 2px #c9a584}#barbarianTruce
+.resourcesContainer{clear:both;overflow:hidden;min-height:55px}#barbarianTruce .resourcesContainer .anotherBox,
+#barbarianTruce .resourcesContainer
+.buy_ambrosia{vertical-align:middle;line-height:16px;display:inline-block;padding:2px
+10px;width:140px;text-align:center}#container #barbarianTruce ul.resources
+li{}#container #barbarianTruce
+ul.resources{display:inline-block;width:286px;height:24px}#island
+#islandtradegood.cityLocation{z-index:auto!important}#island #islandtradegood
+#js_islandTradegoodLink{z-index:300}#island #islandtradegood
+#js_islandHighwayMen1.islandHighwayMen1{animation-delay:0s;display:block}#island #islandtradegood
+#js_islandHighwayMen2.islandHighwayMen2{animation-delay:0.5s;display:block}#island .island1 #islandtradegood
+.islandHighwayMen1{top:105px;right:46px;z-index:350}#island .island1 #islandtradegood
+.islandHighwayMen2{top:105px;right:110px;z-index:300}#island .island2 #islandtradegood
+.islandHighwayMen1{top:15px;right:90px;z-index:350}#island .island2 #islandtradegood
+.islandHighwayMen2{top:0px;right:150px;z-index:350}#island .island3 #islandtradegood
+.islandHighwayMen1{top: -26px;right: -20px;z-index:350}#island .island3 #islandtradegood
+.islandHighwayMen2{top: -34px;right:29px;z-index:350}#island .island4 #islandtradegood
+.islandHighwayMen1{top:50px;right:86px;z-index:290}#island .island4 #islandtradegood
+.islandHighwayMen2{top:80px;right:122px;z-index:350}#island .island5 #islandtradegood
+.islandHighwayMen1{top:92px;right:18px;z-index:290}#island .island5 #islandtradegood
+.islandHighwayMen2{top:140px;right:60px;z-index:290}#barbarianShadyTraderCurrentAmountBox{width:600px;margin:0
+auto}#container
+.barbarianShadyTraderProduct.bright_box{width:295px;min-height:150px;float:left;padding:10px;margin:10px
+0 10px 15px;background-color:#ECD5AC;border-top:4px solid #ba7b38}#container
+.barbarianShadyTraderNoPremium{margin-top:40px;border:1px
+solid #e7b671}.barbarianShadyTraderProductIcon{width:98px;height:98px;float:left;margin:5px
+0 5px 0}.barbarianShadyTraderProductIcon.productOnePiece{background-image:url(/cdn/all/both/barbarians/2016-02-24_IK_Barbaren-Flotte_einzelnes_Kartenstueck.jpg)}.barbarianShadyTraderProductIcon.productCompleteMap{background-image:url(/cdn/all/both/barbarians/2016-02-24_IK_Barbaren-Flotte_Karte_vervollstaendigen.jpg)}.barbarianShadyTraderProductDescription{padding:12px;width:170px;height:72px;background-color:#FAF3D7;margin:5px
+0 5px 0;float:left;border:1px
+solid #e7b671;border-left:none}.barbarianShadyTraderProductPriceBox
+.button{float:right;margin:1px
+2px 0 0 }.barbarianShadyTraderProductPrice{width:200px;height:110px}.barbarianShadyTraderProductPrice
+span{line-height:30px}.barbarianShadyTraderProductPrice>span:first-of-type{display:inline-block;margin-right:20px}#container .resUpgrade
+.building_level{background-color:#E3C38C;border:1px
+solid #EBD0A7;padding:3px;position:absolute;right:22px;top:69px;width:50px}#container .resUpgrade
+.is_upgrading{background:url(/cdn/all/both/upgrade/nextlevelarrow.png) no-repeat transparent;padding-left:31px}#container .resUpgrade
+.note{background:url(/cdn/all/both/layout/help_smaller.png) no-repeat;width:9px;height:15px}#container .resUpgrade
+.title_img{display:block}#container .resUpgrade .donate
+.input_symbol.input_wood{margin:0
+11px 0px 3px}#container .resUpgrade .donate
+.input_symbol.input_ambrosia{margin:0
+21px -7px 4px}#container .resUpgrade .donate .donate_label, #container .resUpgrade .donate
+.donate_max{padding:5px}#container .resUpgrade .donate
+.donate_max{cursor:pointer}#container
+.ambrosiaDonateForm{border-color:#ffd26e}#setWorkers
+#workersWrapper{height:180px}#setWorkers
+.content{min-height:258px}#setWorkers
+.assign_workers{position:relative;height:120px}#setWorkers
+.citizens{position:absolute;top:16px;left:12px;width:100px;height:120px;background:url(/cdn/all/both/characters/y100_citizen_faceright.png) no-repeat 30px 16px}#setWorkers .citizens .scroll_view, #setWorkers .workers
+.scroll_view{position:absolute;top:123px;left:14px}#setWorkers
+.workers{position:absolute;top:16px;left:538px;width:100px;height:120px}#resource #setWorkers
+.workers{background:url(/cdn/all/both/characters/y100_worker_wood_faceleft.png) no-repeat 11px 16px}#tradegood #setWorkers
+.workers{background:url(/cdn/all/both/characters/y100_worker_tradegood_faceleft.png) no-repeat 21px 16px}#setWorkers
+.gain{position:absolute;top:4px;left:113px;width:250px}#setWorkers .gain
+#gainPoints{width:140px;height:20px;line-height:20px;overflow:hidden}#setWorkers .gain
+.gainPerHour{position:absolute;top:22px;left:145px}#setWorkers
+.resourceTabletHelpButton{position:absolute;top:20px;left:364px;width:39px}#setWorkers
+.questionMark{background:url(/cdn/all/both/layout/help_smaller.png) no-repeat;cursor:help;width:9px;height:15px;margin-left:2px}#setWorkers
+.costs{position:absolute;top:4px;left:404px;width:120px}#setWorkers
+#overchargeMsg.status{position:absolute;left:200px;top:60px;width:250px;height:20px;font-weight:bold;text-align:center}#setWorkers
+#overchargeMsg.nooc{display:none}#setWorkers
+#overchargeMsg.ocready{color:#d30c0c}#setWorkers
+#overchargeMsg.oced{font-style:italic;color:#d30c0c}#setWorkers
+.textfield{width:90px;height:20px;text-align:center;position:absolute;top:140px;left:229px}#setWorkers
+.button{left:330px;position:absolute;top:139px;width:180px}#resourceUsers tr.own
+td{font-weight:bold;color:#060}#resourceUsers
+td.ownerName{font-weight:bold}#resourceUsers td.cityLevel, #resourceUsers
+td.cityWorkers{text-align:left}#resourceUsers
+td.ownerDonation{text-align:right}#resourceUsers td.ownerDonation
+img{vertical-align:middle}#resourceUsers
+td.actions{border-left:2px solid #faeac6}#noluxury #researchFocus.dynamic h4,
+#noluxury #researchFocus.dynamic
+h4{color:#906646;font-size:18px;font-weight:bold;margin:4px}#noluxury #researchFocus.dynamic,
+#noluxury
+#researchLibrary.dynamic{text-align:center}.reportPlayers
+a.reportPlayer{display:block;position:relative;margin:4px;padding:3px;border:1px
+solid hsl(37, 81%, 83%);background-image: -moz-linear-gradient(top, #F9EBCC 0%,#F2D39D 100%);background-image: -webkit-gradient(linear, left top, left bottom, color-stop(0%,#F9EBCC), color-stop(100%,#F2D39D));background-image: -webkit-linear-gradient(top, #F9EBCC 0%,#F2D39D 100%);background-image: -o-linear-gradient(top, #F9EBCC 0%,#F2D39D 100%);background-image: -ms-linear-gradient(top, #F9EBCC 0%,#F2D39D 100%);background-image:linear-gradient(top, #F9EBCC 0%,#F2D39D 100%);box-shadow:inset 0px 0px 1px 1px hsla(0, 100%, 100%, 0.5);border-radius:3px;-moz-border-radius:3px;-webkit-border-radius:3px}.reportPlayers a.reportPlayer
+.textLabel{display:block;margin-left:40px;min-height:40px}.reportPlayers a.reportPlayer .textLabel:before{content:url(/cdn/all/both/helios/reportPlayer.png);position:absolute;left:0px;top:0px}#helios
+.flame{position:relative;background-color:#ffefce;border-bottom:1px solid #f3ddb2;margin:0px
+3px;padding:10px
+20px}#helios .flame
+h4{font-size:18px;font-weight:bold;margin-left:0px}#helios .flame h4:before{float:left;margin-right:20px}#helios .flame.on h4:before{content:url(/cdn/all/both/helios/helios_on.png)}#helios .flame.off h4:before{content:url(/cdn/all/both/helios/helios_off.png)}#helios .flame.on
+h4{color:#d05a04}#helios .flame.on
+.effects{font-weight:bold}#helios .flame .effects
+li{width:auto;height:auto;margin-left:216px}#helios .flame .effects:before,
+#helios .flame .effects:after{content:" ";display:table}#helios .flame .effects:after{clear:both}#helios .flame.off
+h4{color:#617bab}#helios .flame.off
+.effects{color:#9a9a9a;text-decoration:line-through}.donation{display:table;width:630px;height:110px;margin:10px
+auto;background:url(/cdn/all/both/helios/scroll_630x110.jpg) top left no-repeat;padding-top:2px}.donation
+div{display:table-cell;text-align:center;vertical-align:middle}.donation
+p{font-weight:bold}.donation p
+.donorName{display:block;color:#00820f}.premiumitem{position:relative;background-color:#faeac6;border:1px
+solid #e4b773;margin:10px
+24px;padding:4px
+8px}.premiumitem
+p{margin-right:275px}#helios .premiumitem
+h4{margin-left:0px}.premiumitem
+h4{color:#d05a04;font-weight:bold}.premiumitem h4:before{content:url(/cdn/all/both/helios/lampoil_icon_60x60.png);float:left;margin-right:12px}.premiumitem
+.premiumbutton{position:absolute;top:12px;right:8px}.premiumbutton.disabled
+.textLabel{color:#9a9a9a}#helios
+.orderButton{position:absolute;right:60px;top:0px}#helios
+.orderAvailable{position:absolute;right:7px;top:0}#helios .premiumitem:after{content:" ";display:table}#helios .premiumitem:after{clear:both}#spyMissions .realMission, #spyMissions
+.decoyMission{margin-left:10px;width:284px}#spyMissions
+.city_name{width:92px;text-align:center}#spyMissions
+.margin_left90{margin-left:90px !important}#spyMissions .spyImg-big{margin:50px
+4px;background:url(/cdn/all/both/spy/spy_70x100.png) no-repeat;width:70px;height:100px}#spyMissions .spyImg_small, #spyMissions
+.decoyImg_small{background:url(/cdn/all/both/characters/40h/spy_r.png) no-repeat;height:40px;width:19px}#spyMissions
+.decoyImg_small{background:url(/cdn/all/both/characters/40h/citizen_r.png) no-repeat}#spyMissions
+.missionImg{border:1px
+solid #E4B873;height:200px;width:280px}#spyMissions
+.missionImg.mission_colonies{background:url(/cdn/all/both/spy/mission_colonies.jpg)}#spyMissions
+.missionImg.mission_diplomacy{background:url(/cdn/all/both/spy/mission_diplomacy.jpg)}#spyMissions
+.missionImg.mission_garrison{background:url(/cdn/all/both/spy/mission_garrison.jpg)}#spyMissions
+.missionImg.mission_invasion{background:url(/cdn/all/both/spy/mission_invasion.jpg)}#spyMissions
+.missionImg.mission_messages{background:url(/cdn/all/both/spy/mission_messages.jpg)}#spyMissions
+.missionImg.mission_military_movements{background:url(/cdn/all/both/spy/mission_military_movements.jpg)}#spyMissions
+.missionImg.mission_offices{background:url(/cdn/all/both/spy/mission_offices.jpg)}#spyMissions
+.missionImg.mission_online_status{background:url(/cdn/all/both/spy/mission_onlinestatus.jpg)}#spyMissions
+.missionImg.mission_research{background:url(/cdn/all/both/spy/mission_research.jpg)}#spyMissions
+.missionImg.mission_retreat{background:url(/cdn/all/both/spy/mission_retreat.jpg)}#spyMissions
+.missionImg.mission_storage{background:url(/cdn/all/both/spy/mission_storage.jpg)}#spyMissions
+.missionImg.decoy_mission_gold{background:url(/cdn/all/both/spy/decoy_gold.jpg)}#spyMissions
+.missionImg.decoy_mission_wine{background:url(/cdn/all/both/spy/decoy_wine.jpg)}#spyMissions
+.missionImg.decoy_mission_sulfur{background:url(/cdn/all/both/spy/decoy_sulfur.jpg)}#spyMissions
+.spyMissionSelect{width:500px;height:25px;margin:0px
+auto}#spyMissions
+.scroll_view{padding:0
+12px 0 0;position:relative;text-align:right;width:30px}#spyMissions
+.city_name_header{text-align:center;width:90px;margin:20px
+10px 10px 77px}#spyMissions
+.slider_header{margin-top:20px}#spyMissions
+.slider_row{height:40px}#spyMissions
+.sliderinput{margin:0
+auto;top: -26px;width:178px}#spyMissions .sliderinput
+.sliderbg{background:url(/cdn/all/both/spy/slider_build_bg.png) no-repeat;height:25px;width:110px}#spyMissions .sliderinput .sliderbg
+.sliderthumb{background-image:url(/cdn/all/both/spy/slider_build_thumb.png);height:25px;width:15px}#spyMissions .sliderinput .setMin, #spyMissions  .sliderinput
+.setMax{top:0px}#spyMissions .sliderinput
+.setMax{left:154px}#spyMissions .sliderinput .sliderbg
+.actualValue{background-image:url(/cdn/all/both/spy/slider_build_red.png)}#spyMissions
+.forminput{left:240px;position:relative;top: -55px;width:32px}#spyMissions
+.infoList{padding:0
+8px}#spyMissions .infoList
+.normal_field{border-bottom:1px dotted #fae1b0;padding-bottom:7px}#spyMissions .infoList
+.questionMark{background:url(/cdn/all/both/layout/help_smaller.png) no-repeat;cursor:help;width:9px;height:15px;margin-left:2px}#spyMissions .infoList
+.progbar_field{border-bottom:1px dotted #8F7647;height:25px;padding-top:5px}#spyMissions .infoList
+.progbarWrapper{background-color:#FFF1CF;border:1px
+solid #EDD8A8;height:5px;margin-top:2px;width:260px}#spyMissions .infoList
+.progbar{background:url(/cdn/all/both/spy/spy-progbar.png) repeat-y left top;line-height:5px;font-size:1px !important;height:5px;width:0}#spyMissions .infoList
+.progbar_right{background-position:left bottom}#spyMissions .spy_summary
+.summary_time{background:url(/cdn/all/both/spy/bg-spy2-box.png) no-repeat left top;width:300px;height:54px;margin:0
+20px;padding:5px
+0 5px}#spyMissions
+.spy_target_city{margin:12px
+14px}#safehouseMissions
+.button{display:block;left:470px;position:absolute;top:50px;text-decoration:none}#safehouseMissions
+.statusBar{height:20px;width:300px;margin:0px
+auto}#safehouseMissions  .statusBar
+.bar{background:url(/cdn/all/both/layout/bg-spy-detection-bar.png) no-repeat}#safehouseMissions
+#missionlist{margin:20px
+0px 10px 0px;padding-left:30px;padding:0;margin:0px
+auto}#safehouseMissions  #missionlist
+li{position:relative;margin-bottom:25px;border-bottom:1px solid #E4B873;width:580px;padding:10px
+0px;margin:0px
+auto}#safehouseMissions
+.missionText{margin:0px;position:relative;margin-bottom:10px}#safehouseMissions  li
+div.missionType{font-weight:bold}#safehouseMissions  li
+div.missionDesc{padding:10px
+5px;width:450px}#safehouseMissions  li  .missionCosts
+.gold{padding:2px
+20px 2px 0px;background:url(/cdn/all/both/resources/icon_gold.png) no-repeat right}#safehouseMissions
+div.percentage{font-weight:bold;text-align:left;position:absolute;top:20px;left:500px}#safehouse #buildForm
+.scroll_view{margin-top:10px}#safehouse #buildForm
+.sliderinput{margin: -28px 0 0 100px}#safehouse #buildForm
+.button{bottom:60px;position:absolute}#safehouse #buildForm
+.textfield{bottom:20px;position:absolute}#safehouse
+.costs{height:26px;margin:4px
+0 0 69px}#safehouse .costs .resources
+li{float:left;width:80px}#safehouse
+.spy_img{background:url(/cdn/all/both/characters/military/120x100/spy_120x100.png) no-repeat -32px 0 transparent;min-height:100px;padding-left:75px}#safehouse
+.whiteLine{border:1px
+solid #FEFBE8;color:#FEFBE8}#safehouse
+.spyinfo{background:url(/cdn/all/both/layout/spy-test.jpg) no-repeat 10px 10px;position:relative;border:1px
+solid #f3ddb2;padding:10px
+0}#safehouse .spyinfo
+li{padding:5px
+0px 5px 25px;font-weight:bold;display:inline-block;clear:both;float:left}#safehouse .spyinfo
+li.city{background:url(/cdn/all/both/layout/icon-city2.png) no-repeat left center}#safehouse .spyinfo
+li.status{background:url(/cdn/all/both/layout/icon-status-small.png) no-repeat left center;width:260px}#safehouse .spyinfo
+ul{margin-left:130px;clear:both;overflow:hidden}#safehouse ul
+.risk{position:relative}#safehouse ul .risk .statusBar, #safehouseMissions
+.statusBar{width:205px;height:10px;border:1px
+solid #775726;background-color:#fefbe8;overflow:hidden}#safehouse ul .risk .statusBar .bar, #safehouseMissions  .statusBar
+.bar{height:100%;background-color:#deaf64;border-right:1px solid #960;background:url(/cdn/all/both/layout/bg-spy-detection-bar-205.png) no-repeat;overflow:hidden}#safehouse ul li.risk
+div.percentage{width:30px;text-align:left;position:absolute;top:18px;left:240px;font-weight:bold;display:inline}#safehouse .spyinfo div
+a{font-size:10px}#safehouse .spyinfo
+div.missionSendSpies{background:url(/cdn/all/both/actions/espionage_disabled.png) no-repeat center top;width:54px;height:50px;position:absolute;top:10px;left:425px}#safehouse .spyinfo
+.missionBtn{width:80px;height:50px;position:absolute;top:10px}#safehouse .spyinfo
+.missionSendSpies{left:425px}#safehouse .spyinfo
+.missionButton{left:475px}#safehouse .spyinfo
+.missionButton.shifted{left:500px}#safehouse .spyinfo
+.missionAbort{left:575px}#safehouse .spyinfo .missionBtn
+a{display:block;text-align:center;padding-top:35px;color:#542c0f;text-decoration:none}#safehouse .spyinfo div.missionSendSpies
+a{background:url(/cdn/all/both/actions/espionage.png) no-repeat center top}#safehouse .spyinfo div.missionSendSpies
+a.disabled{background:url(/cdn/all/both/actions/espionage_disabled.png) no-repeat center top;cursor:default}#safehouse .spyinfo .missionButton
+a{background:url(/cdn/all/both/layout/icon-mission.png) no-repeat center top}#safehouse .spyinfo div.missionButton
+a.disabled{background:url(/cdn/all/both/actions/espionage_disabled.png) no-repeat center top;cursor:default}#safehouse .spyinfo .missionAbort
+a{background:url(/cdn/all/both/layout/icon-missionAbort.png) no-repeat center top}#safehouse .spyinfo div.missionAbort
+a.disabled{background:url(/cdn/all/both/actions/espionage_retreat_disabled.png) no-repeat center top;cursor:default}#safehouse .spyinfo
+.table01{margin:5px
+0px}#safehouse .table01
+td.icon{width:20px;height:20px;background-position:center;background-repeat:no-repeat}#safehouse .table01
+td.time{background-image:url(/cdn/all/both/layout/icon-clock.png)}#safehouse .table01
+td.money{background-image:url(/cdn/all/both/layout/gold.png)}#safehouse .table01
+td.garrison{background-image:url(/cdn/all/both/layout/icon-spyreport-garrison.png)}#safehouse .table01
+td.arrived{background-image:url(/cdn/all/both/layout/icon-city2.png)}#safehouse .table01
+td.return{background-image:url(/cdn/all/both/layout/icon-backx20.png)}#safehouse .table01
+td.message{background-image:url(/cdn/all/both/layout/icon-message.png)}#safehouse .table01
+td.fleet{background-image:url(/cdn/all/both/layout/icon-spyreport-fleet.png)}#safehouse .table01
+td.research{background-image:url(/cdn/all/both/layout/icon-spyreport-research.png)}#safehouse .table01
+td.online{background-image:url(/cdn/all/both/layout/icon-status-small.png)}#safehouse
+.summary{color:#906646;font-size:18px;text-align:left}#safehouse .reportText .noReport, #safehouse .reportText .report, #safehouse .reportText .reportTable
+th{font-weight:bold;text-align:left;margin:10px
+0px;padding:4px}#safehouse .table01
+.reportText{background-color:#FAEAC6}#safehouse .table01 .record, #safehouse .table01 .record
+.reportTable{width:100%}#safehouse .table01 .record .reportTable
+th{background-color:#FDF7DD;border:2px
+solid #FAEAC6}#safehouse .table01 .record
+tr{background-color:transparent}#safehouse .table01.dotted .record
+td{border-bottom:none}#safehouse .table01 .record .reportTable tr
+.category{width:300px}#safehouse .reportText
+td.job{font-weight:bold;width:120px}#safehouse .reportText
+tr.status{border-bottom:2px dotted #e4b873;border-collapse:separate;padding:3px
+6px}#safehouse tr.pgnt
+div.last{float:left;width:15%}#safehouse tr.pgnt
+div.text{float:left;width:80%;padding:5px
+0px;text-align:center}#safehouse tr.pgnt
+div.next{float:right;width:5%}
