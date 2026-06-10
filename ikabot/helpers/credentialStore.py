@@ -23,6 +23,7 @@ from ikabot.config import isWindows, IKABOT_DATA_DIR
 
 _VAULT_VERSION = 1
 _PBKDF2_ITERATIONS = 200_000
+_VAULT_LOCATION_FILE = os.path.join(IKABOT_DATA_DIR, "vault_location.conf")
 
 
 # ---------------------------------------------------------------------------
@@ -45,10 +46,93 @@ class VaultVersionError(Exception):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _vault_path() -> str:
-    """Return the vault file path inside the ikabot data directory."""
+def _get_custom_vault_dir() -> str:
+    """Return the custom vault directory from config, or None if not set."""
+    try:
+        if os.path.isfile(_VAULT_LOCATION_FILE):
+            with open(_VAULT_LOCATION_FILE, "r", encoding="utf-8") as f:
+                path = f.read().strip()
+            if path:
+                return path
+    except OSError:
+        pass
+    return None
+
+
+def get_vault_location() -> str:
+    """Return the directory where the vault file is (or will be) stored."""
+    custom = _get_custom_vault_dir()
+    return custom if custom else IKABOT_DATA_DIR
+
+
+def set_vault_location(new_dir: str) -> str:
+    """Move the vault to new_dir and persist the new location.
+
+    Returns a human-readable status string describing what happened.
+
+    If new_dir is empty or matches the default, the override config is removed
+    (resetting to the default location).  The existing vault file is moved if
+    present.  Raises OSError on filesystem errors.  Raises FileExistsError if
+    a vault file already exists at the destination (to prevent silent overwrite).
+    """
+    import shutil
+    new_dir = os.path.abspath(os.path.expanduser(new_dir.strip())) if new_dir.strip() else ""
+    default_dir = IKABOT_DATA_DIR
+
+    old_path = _vault_path()
+    vault_exists_at_source = os.path.isfile(old_path)
+
+    if not new_dir or os.path.normcase(new_dir) == os.path.normcase(default_dir):
+        # Reset to default — remove override config if present.
+        new_vault_path = os.path.join(default_dir, "vault")
+        if vault_exists_at_source and os.path.normcase(old_path) != os.path.normcase(new_vault_path):
+            if os.path.isfile(new_vault_path):
+                raise FileExistsError(
+                    f"A vault file already exists at {new_vault_path}. "
+                    "Remove it manually before resetting the location."
+                )
+            os.makedirs(default_dir, exist_ok=True)
+            shutil.copy2(old_path, new_vault_path)
+            os.unlink(old_path)
+            status = f"Vault moved from {old_path} to {new_vault_path}"
+        elif vault_exists_at_source:
+            status = "Vault location reset to default (vault already in default location)"
+        else:
+            status = "Vault location reset to default (vault will be created here when needed)"
+        try:
+            os.unlink(_VAULT_LOCATION_FILE)
+        except FileNotFoundError:
+            pass
+        return status
+
+    os.makedirs(new_dir, exist_ok=True)
+    new_vault_path = os.path.join(new_dir, "vault")
+
+    if vault_exists_at_source and os.path.normcase(old_path) != os.path.normcase(new_vault_path):
+        if os.path.isfile(new_vault_path):
+            raise FileExistsError(
+                f"A vault file already exists at {new_vault_path}. "
+                "Remove it manually before changing the location."
+            )
+        shutil.copy2(old_path, new_vault_path)
+        os.unlink(old_path)
+        status = f"Vault moved from {old_path} to {new_vault_path}"
+    elif vault_exists_at_source:
+        status = "Location unchanged (vault is already at that path)"
+    else:
+        status = f"Vault location set to {new_dir} (vault will be created here when needed)"
+
     os.makedirs(IKABOT_DATA_DIR, exist_ok=True)
-    return os.path.join(IKABOT_DATA_DIR, "vault")
+    with open(_VAULT_LOCATION_FILE, "w", encoding="utf-8") as f:
+        f.write(new_dir)
+    return status
+
+
+def _vault_path() -> str:
+    """Return the vault file path (custom location or default data directory)."""
+    base = _get_custom_vault_dir() or IKABOT_DATA_DIR
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "vault")
 
 
 def _legacy_vault_path() -> str:

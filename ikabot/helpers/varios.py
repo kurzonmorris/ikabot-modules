@@ -83,7 +83,10 @@ def getCurrentCityId(session):
     session : ikabot.web.session.Session
     """
     html = session.get()
-    return re.search(r"currentCityId:\s(\d+),", html).group(1)
+    match = re.search(r"currentCityId:\s(\d+),", html)
+    if match is None:
+        raise RuntimeError("Could not parse currentCityId from page (unexpected server response)")
+    return match.group(1)
 
 
 def getDateTime(timestamp=None):
