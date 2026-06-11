@@ -200,7 +200,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v9.6.0                  \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v9.6.2                  \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -1264,6 +1264,12 @@ def ensure_run_columns(fieldnames, rows, max_slots=7):
             run_columns.append(col)
             for row in rows:
                 row[col] = ""
+    for rc in run_columns:
+        issues_col = rc.replace("Run_", "Issues_", 1)
+        if issues_col not in fieldnames:
+            fieldnames.append(issues_col)
+            for row in rows:
+                row[issues_col] = ""
     return fieldnames, run_columns
 
 
@@ -1349,21 +1355,8 @@ def get_source_cities_for_row(session, from_val, city_cache):
     return result
 
 
-def ensure_issues_column(fieldnames, rows):
-    """Add Issues column if missing (backward compatibility). Returns updated fieldnames."""
-    if "Issues" not in fieldnames:
-        insert_idx = len(fieldnames)
-        if "Hours" in fieldnames:
-            insert_idx = fieldnames.index("Hours") + 1
-        else:
-            for i, col in enumerate(fieldnames):
-                if col.startswith("Run_"):
-                    insert_idx = i
-                    break
-        fieldnames.insert(insert_idx, "Issues")
-        for row in rows:
-            row["Issues"] = ""
-    return fieldnames
+def issues_col_for_run(run_column):
+    return run_column.replace("Run_", "Issues_", 1)
 
 
 def parse_resource_value(val):
@@ -1378,7 +1371,8 @@ def parse_resource_value(val):
     return ("exact", int(val_clean) if val_clean.isdigit() else 0)
 
 
-def resolve_resources(parsed, source_available, row, csv_resource_cols):
+def resolve_resources(parsed, source_available, row, csv_resource_cols,
+                      issues_key="Issues"):
     """Resolve parsed resource values against source city stock.
     'except' mode: send (available - reserve), log issue if insufficient."""
     resolved = []
@@ -1388,9 +1382,9 @@ def resolve_resources(parsed, source_available, row, csv_resource_cols):
             if avail <= amount:
                 resolved.append(0)
                 if row is not None:
-                    prev = row.get("Issues", "")
+                    prev = row.get(issues_key, "")
                     note = f"{csv_resource_cols[i]}: stock {avail} <= reserve {amount}"
-                    row["Issues"] = f"{prev}; {note}" if prev else note
+                    row[issues_key] = f"{prev}; {note}" if prev else note
             else:
                 resolved.append(avail - amount)
         else:
@@ -1446,10 +1440,15 @@ def choose_run_slot(session, event, rows, run_columns):
             if col == oldest_col:
                 run_columns[i] = new_col
                 break
+        old_issues = oldest_col.replace("Run_", "Issues_", 1)
+        new_issues = new_col.replace("Run_", "Issues_", 1)
         for row in rows:
             row[new_col] = ""
+            row[new_issues] = ""
             if oldest_col in row:
                 del row[oldest_col]
+            if old_issues in row:
+                del row[old_issues]
         return mode, new_col
 
     # Resume mode
@@ -2889,7 +2888,7 @@ def render_auto_send_review(destination_city, destination_island, routes,
 
 BULK_CSV_COLUMNS = [
     "Transport", "X", "Y", "Player", "City", "City_Location",
-    "Wood", "Wine", "Marble", "Crystal", "Sulphur", "From", "Hours", "Issues",
+    "Wood", "Wine", "Marble", "Crystal", "Sulphur", "From", "Hours",
 ]
 
 
@@ -3358,7 +3357,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         else:
             print(f"  Enter the full path to your CSV file:")
         print(f"\n  {C.HINT}CSV columns: Transport, X, Y, Player, City, City_Location,{C.RESET}")
-        print(f"  {C.HINT}  Wood, Wine, Marble, Crystal, Sulphur, From, Hours, Issues{C.RESET}")
+        print(f"  {C.HINT}  Wood, Wine, Marble, Crystal, Sulphur, From, Hours{C.RESET}")
         print(f"  {C.HINT}  Transport: m = merchant, f = freighter{C.RESET}")
         print(f"  {C.HINT}  Resources: 500 = send 500, e0 = send all, e10000 = all except 10k{C.RESET}")
         print(f"  {C.HINT}  From: a = all cities, or city numbers like 1,3,5{C.RESET}")
@@ -3440,14 +3439,19 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         fieldnames, run_columns = ensure_run_columns(fieldnames, rows)
         fieldnames = ensure_transport_column(fieldnames, rows)
         fieldnames = ensure_from_column(fieldnames, rows)
-        fieldnames = ensure_issues_column(fieldnames, rows)
 
         mode, run_column = choose_run_slot(session, event, rows, run_columns)
         if run_column is None:
             return
 
-        fieldnames_no_runs = [c for c in fieldnames if not c.startswith("Run_")]
-        fieldnames = fieldnames_no_runs + run_columns
+        fieldnames_no_runs = [c for c in fieldnames
+                              if not c.startswith("Run_")
+                              and not c.startswith("Issues_")]
+        run_issue_pairs = []
+        for rc in run_columns:
+            run_issue_pairs.append(rc)
+            run_issue_pairs.append(rc.replace("Run_", "Issues_", 1))
+        fieldnames = fieldnames_no_runs + run_issue_pairs
         backup_path = f"{csv_path}.bak"
         try:
             write_csv_atomic(csv_path, fieldnames, rows)
@@ -3630,11 +3634,12 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
 def _scan_csv_for_preview(session, rows, run_column):
     """Quick scan for dry-run preview. Returns list of route info dicts."""
     csv_res_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
+    ic = issues_col_for_run(run_column)
     preview = []
     for row in rows:
         if normalize_text(row.get(run_column, "")) == "x":
             continue
-        if row.get("Issues", "").strip():
+        if row.get(ic, "").strip():
             continue
         parsed = [parse_resource_value(row.get(col, "0")) for col in csv_res_cols]
         has_resources = any(amt > 0 or mode == "except" for mode, amt in parsed)
@@ -4676,12 +4681,14 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             write_csv_atomic(csv_path, fieldnames, rows)
         except Exception:
             return 0
+    else:
+        fieldnames, _ = ensure_run_columns(fieldnames, rows)
 
     fieldnames = ensure_transport_column(fieldnames, rows)
     fieldnames = ensure_from_column(fieldnames, rows)
-    fieldnames = ensure_issues_column(fieldnames, rows)
+    issues_col = issues_col_for_run(run_column)
     for row in rows:
-        row["Issues"] = ""
+        row[issues_col] = ""
 
     city_cache = {}
     mismatches = []
@@ -4720,7 +4727,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             from_val = parse_from_column(row.get("From", ""))
             if from_val is None:
                 issue = "From column is empty"
-                row["Issues"] = issue
+                row[issues_col] = issue
                 mismatches.append(f"Row {row_num}: {issue}")
                 continue
             if isinstance(from_val, list):
@@ -4732,7 +4739,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 bad = [str(i) for i in from_val if i > max_idx]
                 if bad:
                     issue = f"From: city index {','.join(bad)} out of range"
-                    row["Issues"] = issue
+                    row[issues_col] = issue
                     mismatches.append(f"Row {row_num}: {issue}")
                     continue
 
@@ -4767,7 +4774,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             if matched_city is None:
                 issue = (f"City not found: {expected_player}/"
                          f"{expected_city} at [{x}:{y}]")
-                row["Issues"] = issue
+                row[issues_col] = issue
                 mismatches.append(f"Row {row_num}: {issue}")
                 continue
 
@@ -4780,7 +4787,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
         except Exception as e:
             issue = f"Error: {e}"
-            row["Issues"] = issue
+            row[issues_col] = issue
             mismatches.append(f"Row {row_num}: {issue}")
 
     try:
@@ -4823,7 +4830,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 session, from_val, city_cache
             )
         except Exception as e:
-            row["Issues"] = f"Error resolving source cities: {e}"
+            row[issues_col] = f"Error resolving source cities: {e}"
             continue
 
         done_indices = set()
@@ -4837,7 +4844,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             dest_html = session.get(city_url + str(matched_city["id"]))
             dest_city = getCity(dest_html)
         except Exception as e:
-            row["Issues"] = f"Error fetching city details: {e}"
+            row[issues_col] = f"Error fetching city details: {e}"
             try:
                 write_csv_atomic(csv_path, fieldnames, rows)
             except Exception as _csv_err:
@@ -4864,6 +4871,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             resources = resolve_resources(
                 parsed_resources, adjusted_avail,
                 row, csv_resource_cols,
+                issues_key=issues_col,
             )
             for i in range(len(resources)):
                 if i < len(dest_space):

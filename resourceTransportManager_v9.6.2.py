@@ -1440,10 +1440,15 @@ def choose_run_slot(session, event, rows, run_columns):
             if col == oldest_col:
                 run_columns[i] = new_col
                 break
+        old_issues = oldest_col.replace("Run_", "Issues_", 1)
+        new_issues = new_col.replace("Run_", "Issues_", 1)
         for row in rows:
             row[new_col] = ""
+            row[new_issues] = ""
             if oldest_col in row:
                 del row[oldest_col]
+            if old_issues in row:
+                del row[old_issues]
         return mode, new_col
 
     # Resume mode
