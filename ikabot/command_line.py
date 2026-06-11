@@ -53,17 +53,22 @@ from ikabot.function.vacationMode import vacationMode
 from ikabot.function.webServer import webServer
 from ikabot.function.loadCustomModule import loadCustomModule
 from ikabot.function.activateShrine import activateShrine
+from ikabot.function.alertMessages import alertMessages
+from ikabot.function.inactivePlayersRadiusMonitor import inactivePlayersRadiusMonitor
+from ikabot.function.sendCulturalTreatyRequests import sendCulturalTreatyRequests
 from ikabot.helpers.botComm import telegramDataIsValid, notificationDataIsValid
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.process import updateProcessList
 from ikabot.web.session import *
 from ikabot.function.UpgradeUnits import UpgradeUnits
-from ikabot.function.modifyProduction import modifyProduction
+from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWorkers
+from ikabot.function.reorganizeCityBuildings import reorganizeCityBuildings
 from ikabot.function.developer import developer
 from ikabot.helpers.pluginLoader import discover_plugins
 from ikabot.helpers.credentialStore import (
     vault_exists, create_vault, open_vault,
+    get_vault_location, set_vault_location,
     VaultWrongPasswordError, VaultCorruptError, VaultVersionError,
 )
 
@@ -84,6 +89,7 @@ def menu(session, checkUpdate=True):
         6: loginDaily,
         701: alertAttacks,
         702: alertLowWine,
+        703: alertMessages,
         801: buyResources,
         802: sellResources,
         901: donate,
@@ -103,6 +109,7 @@ def menu(session, checkUpdate=True):
         1902: autoBarbarians,
         2001: searchForIslandSpaces,
         2002: dumpWorld,
+        2003: inactivePlayersRadiusMonitor,
         2101: proxyConf,
         2102: notificationSetup,
         2103: killTasks,
@@ -112,7 +119,10 @@ def menu(session, checkUpdate=True):
         2107: loadCustomModule,
         2108: developer,
         22: consolidateResources,
-        23: modifyProduction,
+        2301: modifyProduction,
+        2302: modifyAcademyWorkers,
+        2303: reorganizeCityBuildings,
+        25: sendCulturalTreatyRequests,
     }
 
     while True:
@@ -189,7 +199,8 @@ def menu(session, checkUpdate=True):
         print("(20) Dump / Monitor world")
         print("(21) Options / Settings")
         print("(22) Consolidate resources")
-        print("(23) Set Production of Saw mill / Luxury good")
+        print("(23) City Management")
+        print("(25) Send cultural treaty requests")
 
         plugins = discover_plugins()
         if plugins:
@@ -208,7 +219,8 @@ def menu(session, checkUpdate=True):
             print("(0) Back")
             print("(1) Alert attacks")
             print("(2) Alert wine running out")
-            selected = read(min=0, max=2, digit=True)
+            print("(3) Alert in-game messages")
+            selected = read(min=0, max=3, digit=True)
             if selected == 0:
                 continue
             selected += 700
@@ -259,7 +271,8 @@ def menu(session, checkUpdate=True):
             print("(0) Back")
             print("(1) Monitor islands")
             print("(2) Dump & Search world")
-            selected = read(min=0, max=2, digit=True)
+            print("(3) Monitor inactive players in radius")
+            selected = read(min=0, max=3, digit=True)
             if selected == 0:
                 continue
             selected += 2000
@@ -286,6 +299,17 @@ def menu(session, checkUpdate=True):
                 _manage_vault_menu(session)
                 continue
             selected += 2100
+
+        if selected == 23:
+            banner()
+            print("(0) Back")
+            print("(1) Set Production of Saw mill / Luxury good")
+            print("(2) Set Academy workers")
+            print("(3) Reorganize city buildings")
+            selected = read(min=0, max=3, digit=True)
+            if selected == 0:
+                continue
+            selected += 2300
 
         if selected == 30:
             while True:
@@ -424,9 +448,11 @@ def _prompt_vault_login():
     for attempt in range(1, MAX_ATTEMPTS + 1):
         master_pw = getpass.getpass(
             f"Vault master password (attempt {attempt}/{MAX_ATTEMPTS}): "
-        )
+        ).rstrip("\r\n")
         try:
             vault_session = open_vault(master_pw)
+            if not vault_session.verify_password():
+                raise VaultWrongPasswordError("Wrong master password.")
             break
         except VaultWrongPasswordError:
             print("Wrong master password.")
@@ -449,8 +475,8 @@ def _prompt_vault_login():
 
     banner()
     print("Stored accounts:\n")
-    for idx, label in accounts:
-        print(f"  ({idx + 1}) {label}")
+    for pos, (idx, label) in enumerate(accounts, start=1):
+        print(f"  ({pos}) {label}")
     print(f"  (0) Log in manually\n")
 
     choice = read(min=0, max=len(accounts), digit=True)
@@ -461,9 +487,14 @@ def _prompt_vault_login():
     try:
         creds = vault_session.get_credentials(acct_idx)
     except VaultWrongPasswordError:
-        print("Credential decryption failed — vault may be corrupt.")
-        enter()
-        return None, None, None
+        # Re-read the vault from disk in case in-memory state is stale, then retry.
+        try:
+            vault_session = open_vault(master_pw)
+            creds = vault_session.get_credentials(acct_idx)
+        except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError):
+            print("Credential decryption failed — vault may be corrupt.")
+            enter()
+            return None, None, None
 
     return creds, vault_session, acct_idx
 
@@ -481,8 +512,8 @@ def _offer_save_to_vault(session):
     if not vault_exists():
         print("\nCreating a new vault. Choose a master password.")
         print("This password protects all stored accounts — do not forget it.\n")
-        master_pw = getpass.getpass("New master password: ")
-        confirm_pw = getpass.getpass("Confirm master password: ")
+        master_pw = getpass.getpass("New master password: ").rstrip("\r\n")
+        confirm_pw = getpass.getpass("Confirm master password: ").rstrip("\r\n")
         if master_pw != confirm_pw:
             print("Passwords do not match. Vault not created.")
             enter()
@@ -494,7 +525,7 @@ def _offer_save_to_vault(session):
             enter()
             return
     else:
-        master_pw = getpass.getpass("Vault master password: ")
+        master_pw = getpass.getpass("Vault master password: ").rstrip("\r\n")
         try:
             vault_session = open_vault(master_pw)
         except VaultWrongPasswordError:
@@ -533,8 +564,9 @@ def _manage_vault_menu(session):
         print("(3) Remove an account from vault")
         print("(4) Change master password")
         print("(5) Rename an account")
+        print("(6) Change vault location")
 
-        choice = read(min=0, max=5, digit=True)
+        choice = read(min=0, max=6, digit=True)
         if choice == 0:
             return
         elif choice == 1:
@@ -547,6 +579,8 @@ def _manage_vault_menu(session):
             _vault_change_master_password()
         elif choice == 5:
             _vault_rename_account()
+        elif choice == 6:
+            _vault_change_location()
 
 
 def _vault_list_accounts():
@@ -554,7 +588,7 @@ def _vault_list_accounts():
         print("No vault found.")
         enter()
         return
-    master_pw = getpass.getpass("Master password: ")
+    master_pw = getpass.getpass("Master password: ").rstrip("\r\n")
     try:
         vs = open_vault(master_pw)
     except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
@@ -566,8 +600,8 @@ def _vault_list_accounts():
         print("Vault is empty.")
     else:
         print()
-        for idx, label in accounts:
-            print(f"  ({idx + 1}) {label}")
+        for pos, (idx, label) in enumerate(accounts, start=1):
+            print(f"  ({pos}) {label}")
     enter()
 
 
@@ -576,7 +610,7 @@ def _vault_remove_account():
         print("No vault found.")
         enter()
         return
-    master_pw = getpass.getpass("Master password: ")
+    master_pw = getpass.getpass("Master password: ").rstrip("\r\n")
     try:
         vs = open_vault(master_pw)
     except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
@@ -590,8 +624,8 @@ def _vault_remove_account():
         return
     print("\nSelect account to remove:")
     print("  (0) Cancel")
-    for idx, label in accounts:
-        print(f"  ({idx + 1}) {label}")
+    for pos, (idx, label) in enumerate(accounts, start=1):
+        print(f"  ({pos}) {label}")
     choice = read(min=0, max=len(accounts), digit=True)
     if choice == 0:
         return
@@ -605,7 +639,7 @@ def _vault_rename_account():
         print("No vault found.")
         enter()
         return
-    master_pw = getpass.getpass("Master password: ")
+    master_pw = getpass.getpass("Master password: ").rstrip("\r\n")
     try:
         vs = open_vault(master_pw)
     except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
@@ -619,8 +653,8 @@ def _vault_rename_account():
         return
     print("\nSelect account to rename:")
     print("  (0) Cancel")
-    for idx, label in accounts:
-        print(f"  ({idx + 1}) {label}")
+    for pos, (idx, label) in enumerate(accounts, start=1):
+        print(f"  ({pos}) {label}")
     choice = read(min=0, max=len(accounts), digit=True)
     if choice == 0:
         return
@@ -640,7 +674,7 @@ def _vault_change_master_password():
         print("No vault found.")
         enter()
         return
-    old_pw = getpass.getpass("Current master password: ")
+    old_pw = getpass.getpass("Current master password: ").rstrip("\r\n")
     try:
         vs = open_vault(old_pw)
     except VaultWrongPasswordError:
@@ -651,14 +685,38 @@ def _vault_change_master_password():
         print(f"Vault error: {exc}")
         enter()
         return
-    new_pw = getpass.getpass("New master password: ")
-    confirm_pw = getpass.getpass("Confirm new master password: ")
+    new_pw = getpass.getpass("New master password: ").rstrip("\r\n")
+    confirm_pw = getpass.getpass("Confirm new master password: ").rstrip("\r\n")
     if new_pw != confirm_pw:
         print("Passwords do not match. Password not changed.")
         enter()
         return
     vs.change_master_password(new_pw)
     print("Master password changed successfully.")
+    enter()
+
+
+def _vault_change_location():
+    current = get_vault_location()
+    print(f"\nCurrent vault location: {current}")
+    print("Enter a new folder path, or leave blank to reset to the default location.")
+    new_path = read(msg="New location: ").strip()
+    if new_path == "":
+        confirm_msg = "Reset vault to the default location?"
+    else:
+        confirm_msg = f"Move vault to '{new_path}'?"
+    print(confirm_msg + " [y/N]")
+    if read(values=["y", "Y", "n", "N", ""]) not in ("y", "Y"):
+        print("Cancelled.")
+        enter()
+        return
+    try:
+        status = set_vault_location(new_path)
+        print(status)
+    except FileExistsError as exc:
+        print(f"Aborted: {exc}")
+    except OSError as exc:
+        print(f"Failed to move vault: {exc}")
     enter()
 
 

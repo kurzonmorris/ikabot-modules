@@ -1,0 +1,37 @@
+<div style="padding: 20px;">
+    <% if ((isRussianSupported) || (window.currentLanguage === 'ru')) { %>
+        <div class="centerButton">
+            <iframe src="https://yoomoney.ru/quickpay/fundraise/button?billNumber=DOy7tAQUiec.231126&" width="330" height="50" frameborder="0" allowtransparency="true" scrolling="no"></iframe>
+        </div>
+    <% } %>
+
+    <div class="donation-crypto">
+        <div class="donate-title"><%= lget('donate.cryptocurrency') %></div>
+
+        <div>
+            <a href="https://ton.org/" target="_blank">TON</a>
+            <input type="text" value="UQB8NW4c48kR0L1oTvseprwP2NHIJpEPAHPkgp8yRaIfU69n" readonly="readonly" class="donate-input" />
+            <a href="javascript:void(0);" class="donate-copy" data-clipboard-text="UQB8NW4c48kR0L1oTvseprwP2NHIJpEPAHPkgp8yRaIfU69n"></a>
+        </div>
+        <div>
+            <a href="https://ethereum.org/" target="_blank">ETH</a>
+            <input type="text" value="0xc481b1f2cE5B8F56C7EFc9dF9F320E68b71DeCC4" readonly="readonly" class="donate-input" />
+            <a href="javascript:void(0);" class="donate-copy" data-clipboard-text="0xc481b1f2cE5B8F56C7EFc9dF9F320E68b71DeCC4"></a>
+        </div>
+        <div>
+            <a href="https://www.bitcoin.org/" target="_blank">BTC</a>
+            <input type="text" value="bc1qhz50yan4knlkdfy4dm4amu0p052k5rc9fz7xqr" readonly="readonly" class="donate-input" />
+            <a href="javascript:void(0);" class="donate-copy" data-clipboard-text="bc1qhz50yan4knlkdfy4dm4amu0p052k5rc9fz7xqr"></a>
+        </div>
+        <div>
+            <a href="https://www.tron.network/" target="_blank">TRX</a>
+            <input type="text" value="TQ3Sh1qZA2RCargeKuE5NwcVHVpNSn2Skj" readonly="readonly" class="donate-input" />
+            <a href="javascript:void(0);" class="donate-copy" data-clipboard-text="TQ3Sh1qZA2RCargeKuE5NwcVHVpNSn2Skj"></a>
+        </div>
+        <div>
+            <a href="https://tether.to/" target="_blank">USDT</a>
+            <input type="text" value="TQ3Sh1qZA2RCargeKuE5NwcVHVpNSn2Skj" readonly="readonly" class="donate-input" />
+            <a href="javascript:void(0);" class="donate-copy" data-clipboard-text="TQ3Sh1qZA2RCargeKuE5NwcVHVpNSn2Skj"></a>
+        </div>
+    </div>
+</div>

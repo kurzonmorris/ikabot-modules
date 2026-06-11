@@ -1,0 +1,74 @@
+<div class="contentBox01h ikaeasy-tavern-mgr-wrap" style="margin-top:10px;">
+    <h3 class="header">ikabot Tavern Manager</h3>
+    <div class="content" style="padding:8px 10px;">
+
+        <% if (!data.tavernAvailable) { %>
+            <p style="color:#888;font-size:0.85em;margin:4px 0;">
+                Tavern Manager module not detected — play through the ikabot web server
+                with the tavernManager module installed to use this feature.
+            </p>
+        <% } else { %>
+
+            <p style="font-size:0.82em;color:#c07000;margin:0 0 8px;">
+                &#9888; Changes made here affect <strong>all taverns in every city</strong>.
+                To adjust a single city use the ikabot Tavern Manager terminal option directly.
+            </p>
+
+            <table class="table01" style="width:100%;margin-bottom:8px;">
+                <tr id="ikaeasy_tavern_slider_row" style="display:none;">
+                    <td style="width:110px;"><b>Wine level</b></td>
+                    <td>
+                        <input type="range" id="ikaeasy_tavern_slider"
+                            min="0" max="100" value="50" step="1"
+                            style="width:160px;vertical-align:middle;" />
+                        <span id="ikaeasy_tavern_pct_label" style="margin-left:6px;">50%</span>
+                    </td>
+                </tr>
+                <tr>
+                    <td><b>Mode</b></td>
+                    <td>
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                            <a class="button ikaeasy-tavern-mode-btn" data-mode="set_pct"
+                                href="#" title="Set all taverns to the % shown on the slider above">
+                                Set %
+                            </a>
+                            <a class="button ikaeasy-tavern-mode-btn" data-mode="zero"
+                                href="#" title="Set all taverns to 0% wine consumption">
+                                0% Usage
+                            </a>
+                            <a class="button ikaeasy-tavern-mode-btn" data-mode="max"
+                                href="#" title="Set all taverns to 100% wine consumption">
+                                100% Usage
+                            </a>
+                            <a class="button ikaeasy-tavern-mode-btn" data-mode="equilibrium"
+                                href="#" title="100% wine until max citizens reached, then drop to the lowest level keeping satisfaction 5+ above 0">
+                                Equilibrium
+                            </a>
+                        </div>
+                        <div style="font-size:0.8em;color:#666;margin-top:4px;" id="ikaeasy_tavern_mode_desc">
+                            Select a mode above.
+                        </div>
+                    </td>
+                </tr>
+                <tr>
+                    <td><b>Check every</b></td>
+                    <td>
+                        <input type="number" id="ikaeasy_tavern_interval"
+                            value="<%= data.savedInterval %>" min="1" max="24"
+                            style="width:55px;display:inline-block;" /> hours
+                        <span style="font-size:0.8em;color:#888;margin-left:6px;">
+                            (how often ikabot re-checks — applies to Equilibrium)
+                        </span>
+                    </td>
+                </tr>
+            </table>
+
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <a class="button" id="ikaeasy_tavern_apply" href="#">Apply</a>
+                <span id="ikaeasy_tavern_status" style="font-size:0.85em;line-height:28px;"></span>
+            </div>
+
+        <% } %>
+    </div>
+    <div class="footer"></div>
+</div>

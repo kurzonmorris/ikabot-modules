@@ -1,0 +1,26 @@
+<div class="empire-tooltip">
+    <div class="empire-tooltip-title">
+        <%= LANGUAGE.getLocalizedString('empire.happiness_title') %>
+    </div>
+
+    <div class="empire-tooltip-content">
+        <div class="empire-tooltip-content-values">
+            <span class="<%= (data.popData.growth >= 0) ? 'green' : 'red' %>"><%= num(data.popData.growth.toFixed(2)) %></span>
+            <%= LANGUAGE.getLocalizedString('empire.happiness_growth_hour') %>:
+        </div>
+
+        <div class="empire-tooltip-content-values">
+            <span class="<%= (data.popData.growth >= 0) ? 'green' : 'red' %>"><%= num((data.popData.growth * 24).toFixed(2)) %></span>
+            <%= LANGUAGE.getLocalizedString('empire.happiness_growth_day') %>:
+        </div>
+
+        <div class="empire-tooltip-content-values">
+            <span><%= num(Math.floor(data.popData.happiness), 0, false) %></span>
+            <%= LANGUAGE.getLocalizedString('empire.happiness_satisfaction') %>:
+        </div>
+
+        <div style="text-align: center !important; padding: 5px 0;">
+            <div class="happiness happiness_<%= data.popData.happinessClass %>"></div>
+        </div>
+    </div>
+</div>

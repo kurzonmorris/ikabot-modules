@@ -1,0 +1,20 @@
+<% if(data.item.type === 'td_content') { %>
+    <td class="center empire-building empire-building-can-hover"
+    data-can-upgrade="<%= data.item.b.canUpgrade %>"
+    data-data="<%- JSON.stringify(data.item.buildingInfo) %>"
+    data-building="<%= data.item.building %>"
+    data-position="<%= data.item.buildingInfo.position %>"
+    data-upgrading="<%= data.item.buildingInfo.is_upgrading %>"
+    data-final="<%= data.item.buildingInfo.is_finished %>"
+    data-resources-enough="<%= data.item.buildingInfo.resources_enough %>"
+    data-url="/index.php?view=<%= data.item.buildingInfo.building %>&cityId=<%= data.item.city.cityId %>&position=<%= data.item.buildingInfo.position %>&backgroundView=city&currentCityId=<%= data.item.city.cityId %>">
+        <%= data.item.buildingInfo.level %>
+        <% if (data.item.buildingInfo.is_upgrading) { %>
+            <span>&gt; <%= data.item.buildingInfo.level + 1 %></span>
+        <% } %>
+    </td>
+<% } else if (data.item.type === 'td_empty_content') { %>
+    <td class="center empire-no-building empire-building">&mdash;</td>
+<% } else if (data.item.type === 'td_empty_b_content') { %>
+    <td class="center empire-no-building empire-building" data-building="<%= data.item.building %>">&mdash;</td>
+<% } %>

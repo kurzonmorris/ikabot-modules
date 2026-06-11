@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import random
 import re
 import time
@@ -57,7 +58,7 @@ def daysHoursMinutes(totalSeconds):
 
 
 def wait(seconds, maxrandom=0):
-    """This function will wait the provided number of seconds plus a random number of seconds between 0 and maxrandom
+    """This function will wait the provided number of seconds plus a random number of seconds drawn from a log-normal distribution capped at maxrandom
     Parameters
     -----------
     seconds : int
@@ -67,15 +68,12 @@ def wait(seconds, maxrandom=0):
     """
     if seconds <= 0:
         return
-    randomTime = random.randint(0, maxrandom)
-    ratio = (1 + 5**0.5) / 2 - 1  # 0.6180339887498949
-    comienzo = time.time()
-    fin = comienzo + seconds
-    restantes = seconds
-    while restantes > 0:
-        time.sleep(restantes * ratio)
-        restantes = fin - time.time()
-    time.sleep(randomTime)
+    if maxrandom > 0:
+        mu = math.log(maxrandom / 2)
+        jitter = min(random.lognormvariate(mu, 0.5), maxrandom)
+    else:
+        jitter = 0
+    time.sleep(seconds + jitter)
 
 
 def getCurrentCityId(session):
@@ -85,7 +83,10 @@ def getCurrentCityId(session):
     session : ikabot.web.session.Session
     """
     html = session.get()
-    return re.search(r"currentCityId:\s(\d+),", html).group(1)
+    match = re.search(r"currentCityId:\s(\d+),", html)
+    if match is None:
+        raise RuntimeError("Could not parse currentCityId from page (unexpected server response)")
+    return match.group(1)
 
 
 def getDateTime(timestamp=None):

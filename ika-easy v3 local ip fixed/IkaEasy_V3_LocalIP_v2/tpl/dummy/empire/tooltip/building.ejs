@@ -1,0 +1,37 @@
+<div class="empire-tooltip">
+    <div class="empire-tooltip-title">
+        <%- data.name %> <%= data.level %>
+    </div>
+
+    <% if (!data.is_finished) { %>
+        <div class="empire-tooltip-subtitle">
+            <%= LANGUAGE.getLocalizedString('empire.cost_to_next_level') %>
+        </div>
+    <% } %>
+
+    <div class="empire-tooltip-content" data-finished="<%= data.is_finished %>">
+        <% if (data.is_finished) { %>
+            <% if (data.is_upgrading) { %>
+                <div class="center">
+                    <%= LANGUAGE.getLocalizedString('empire.upgrading_to_max_level') %>
+                </div>
+            <% } else { %>
+                <div class="center">
+                    <%= LANGUAGE.getLocalizedString('empire.reach_max_level') %>
+                </div>
+            <% } %>
+        <% } else { %>
+            <% _.each(data.resources, function(v, k) { %>
+                <div>
+                    <div class="empire_resource_<%= k %>" data-enough="<%= v.enough %>">
+                        <%= num(v.amount, 0, false) %>
+
+                        <% if (!v.enough) { %>
+                        <span>(<%= num(v.required) %>)</span>
+                        <% } %>
+                    </div>
+                </div>
+            <% }) %>
+        <% } %>
+    </div>
+</div>

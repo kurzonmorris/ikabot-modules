@@ -1,0 +1,42 @@
+<tr class="ikaeasy_finance_tr">
+    <td class="left reason">
+        <img src="skin/layout/sigma.png" alt="">
+        <input class="textfield" id="ikaeasy_gold_calc" type="number" name="ikaeasy_gold_calc" value="2" size="4" min="1" max="5000">
+        <%- LANGUAGE.char_hour %>
+    </td>
+    <td class="costs"></td>
+    <td class="left bar"></td>
+    <td id="ikaeasy_gold_custom" class="hidden bold <%= (data.gold < 0) ? 'red' : '' %>">
+        <%= num(data.gold * 2) %>
+    </td>
+</tr>
+<tr class="ikaeasy_finance_tr">
+    <td class="left reason">
+        <img src="skin/layout/sigma.png" alt="Сумма"> <%- LANGUAGE.per_day %>
+    </td>
+    <td class="costs"></td>
+    <td class="left bar"></td>
+    <td class="hidden bold <%= (data.gold < 0) ? 'red' : '' %>">
+        <%= num(data.gold * 24) %>
+    </td>
+</tr>
+<tr class="ikaeasy_finance_tr">
+    <td class="left reason">
+        <img src="skin/layout/sigma.png" alt="Сумма"> <%- LANGUAGE.per_week %>
+    </td>
+    <td class="costs"></td>
+    <td class="left bar"></td>
+    <td class="hidden bold <%= (data.gold < 0) ? 'red' : '' %>">
+        <%= num(data.gold * 168) %>
+    </td>
+</tr>
+<tr class="ikaeasy_finance_tr">
+    <td class="left reason">
+        <img src="skin/layout/sigma.png" alt="Сумма"> <%- LANGUAGE.per_month %>
+    </td>
+    <td class="costs"></td>
+    <td class="left bar"></td>
+    <td class="hidden bold <%= (data.gold < 0) ? 'red' : '' %>">
+        <%= num(data.gold * 730) %>
+    </td>
+</tr>

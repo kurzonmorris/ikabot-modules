@@ -1,0 +1,16 @@
+<tr class="altTooltip ikaeasy_delete_me">
+    <td class="smallFont left"><%- lget('wine_left') %></td>
+    <td class="rightText"><%= data.wineLeftTime %></td>
+</tr>
+<tr class="altTooltip ikaeasy_delete_me">
+    <td class="smallFont left"><%- lget('per_day') %></td>
+    <td class="rightText"><%= num(data.cnt * 24) %></td>
+</tr>
+<tr class="altTooltip ikaeasy_delete_me">
+    <td class="smallFont left"><%- lget('per_week') %></td>
+    <td class="rightText"><%= num(data.cnt * 168) %></td>
+</tr>
+<tr class="altTooltip ikaeasy_delete_me">
+    <td class="smallFont left"><%- lget('per_month') %></td>
+    <td class="rightText"><%= num(data.cnt * 730) %></td>
+</tr>

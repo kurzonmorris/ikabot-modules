@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import traceback
+import signal
 from datetime import datetime, timedelta
 from io import BytesIO
 from urllib.parse import unquote_plus, parse_qs
@@ -118,6 +119,11 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
         app.logger = getLogger(__name__)
         app.logger.setLevel(logging.ERROR)
 
+        # Tracks the last currentCity the browser user explicitly visited.
+        # Injected into GET requests that don't specify currentCity so that
+        # ikabot's background city navigation doesn't disrupt the user's view.
+        last_user_city_id = [None]
+
         @app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
         @app.route("/<path:path>", methods=["GET", "POST"])
         def webServer(path):
@@ -188,6 +194,15 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                 pass
             for arg in request.args:
                 new_data[arg] = unquote_plus(request.args[arg])
+
+            # Track the last city the browser user explicitly visited.
+            if "currentCity" in new_data and new_data["currentCity"]:
+                last_user_city_id[0] = new_data["currentCity"]
+            # On GET requests, restore the user's last city so ikabot's background
+            # navigation doesn't change what the user sees in their browser.
+            elif request.method == "GET" and not is_image and last_user_city_id[0] is not None:
+                new_data["currentCity"] = last_user_city_id[0]
+
             for arg in new_data:
                 if arg == "actionRequest":
                     new_data[arg] = (
@@ -318,10 +333,13 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                     break
                 port = str(int(port) + 1)
 
-        # try to get local network ip if possible
+        # try to get local network ip if possible (PR#408: use UDP routing trick
+        # instead of gethostbyname which returns APIPA/loopback on some systems)
         local_network_ip = None
         try:
-            local_network_ip = socket.gethostbyname(socket.gethostname())
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+                _s.connect(("192.168.0.1", 80))
+                local_network_ip = _s.getsockname()[0]
         except:
             pass
         print(
@@ -352,11 +370,18 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
             "\nPress [ENTER] if you want to run the web server now, or CTRL+C to go back to the main menu"
         )
         enter()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         session.setStatus(
             f"""running on http://127.0.0.1:{port} {'and '+'http://' + str(local_network_ip) + ':' + port if local_network_ip else ''}"""
         )
         event.set()
-        app.run(host="0.0.0.0", port=int(port), threaded=True)
+
+        try:
+            app.run(host="0.0.0.0", port=int(port), threaded=True, use_reloader=False)
+        except (KeyboardInterrupt, SystemExit):
+            pass
+        finally:
+            event.set()
 
     except Exception:
         event.set()
@@ -364,6 +389,10 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
 
 
 def handleIkabotAPIRequest(session, request):
+    if request.args["action"] == "ikaeasy":
+        from ikabot.helpers.ikaEasyBridge import handle as ikaeasy_handle
+        return ikaeasy_handle(session, request, sys.flask)
+
     if request.args["action"] == "killTask":
         try:
             if isWindows:

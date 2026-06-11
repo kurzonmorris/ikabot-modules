@@ -55,14 +55,47 @@ def loadCustomModule(session, event, stdin_fd, predetermined_input):
             elif choice == 1:
                 banner()
                 print(f'        {bcolors.WARNING}[WARNING]{bcolors.ENDC} Running third party code can be dangerous.')
-                print('Enter the full path to the .py module:')
-                path = read().strip().replace('\\', '/')
-                
-                if not path.endswith('.py'):
+                print('You can add a local .py file or download one from the internet.')
+                print('Example: https://raw.githubusercontent.com/Ikabot-Collective/ikabot/refs/heads/master/ikabot/function/logs.py')
+                print('Enter the full path or URL to the .py module:')
+                input_val = read().strip().replace('\\', '/')
+
+                if not input_val.endswith('.py'):
                     print('Error: The file must be a .py file!')
                     enter()
                     continue
-                
+
+                is_url = input_val.startswith(('http://', 'https://'))
+
+                if is_url:
+                    try:
+                        import urllib.request
+                        custom_dir = os.path.join(os.path.dirname(__file__), 'custom')
+                        os.makedirs(custom_dir, exist_ok=True)
+
+                        filename = os.path.basename(input_val)
+                        local_path = os.path.join(custom_dir, filename)
+
+                        urllib.request.urlretrieve(input_val, local_path)
+
+                        if not os.path.isfile(local_path):
+                            print(f'\nError: Failed to download file from {input_val}')
+                            enter()
+                            continue
+
+                        path = local_path.replace('\\', '/')
+                        print(f'\nModule downloaded to: {local_path}')
+                    except Exception as e:
+                        print(f'\nError downloading module: {e}')
+                        enter()
+                        continue
+                else:
+                    if not os.path.isfile(input_val):
+                        print(f'\nError: file not found at {input_val}')
+                        enter()
+                        continue
+                    path = input_val
+
                 if path not in modules:
                     modules.append(path)
                     shared_data['customModules'] = modules

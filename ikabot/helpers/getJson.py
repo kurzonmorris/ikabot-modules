@@ -460,17 +460,25 @@ def getTransportLoadingAndTravelTime(html: str, totalResources = 0, useFreighter
     assert capacityPerTransportPercent in [100, 80, 60, 40, 20], 'Please enter valid capacityPerTransportPercent, available values are 100, 80, 60, 40, 20'
     assert tritonBoostPercent in [0, 100, 200, 300], 'Please enter valid tritonBoostPercent, available values are 0, 100, 200, 300'
     
-    # get relevant bonuses and parmeters from response
-    transporterSpeed = float(re.search(r"'transporterSpeed': ([\d\.]+),", html).group(1))
-    worldBonus = float(re.search(r"'worldBonus': ([\d\.]+),", html).group(1))
-    governmentBonus = float(re.search(r"'governmentBonus': ([\d\.]+),", html).group(1))
-    poseidonEffect = float(re.search(r"'poseidonEffect': ([\d\.]+),", html).group(1))
-    marineChartArchiveBonus = float(re.search(r"'marineChartArchiveBonus': ([\d\.]+),", html).group(1))
-    minimumJourneyDuration = int(re.search(r"'minimumJourneyDuration': (\d+),", html).group(1))
-    distance = float(re.search(r"'distance': ([\d\.]+),", html).group(1))
-    fleetJourneyTime = int(re.search(r"'fleetJourneyTime': (\d+),", html).group(1))
-    queueTime = int(re.search(r"'queueTime': (\d+),", html).group(1))
-    loadingSpeed = float(re.search(r"'loadingSpeed': ([\d\.]+),", html).group(1))
+    def _re_float(pattern, default=1.0):
+        m = re.search(pattern, html)
+        return float(m.group(1)) if m else default
+
+    def _re_int(pattern, default=0):
+        m = re.search(pattern, html)
+        return int(m.group(1)) if m else default
+
+    # get relevant bonuses and parameters from response
+    transporterSpeed = _re_float(r"'transporterSpeed': ([\d\.]+),")
+    worldBonus = _re_float(r"'worldBonus': ([\d\.]+),")
+    governmentBonus = _re_float(r"'governmentBonus': ([\d\.]+),")
+    poseidonEffect = _re_float(r"'poseidonEffect': ([\d\.]+),", default=0.0)
+    marineChartArchiveBonus = _re_float(r"'marineChartArchiveBonus': ([\d\.]+),")
+    minimumJourneyDuration = _re_int(r"'minimumJourneyDuration': (\d+),")
+    distance = _re_float(r"'distance': ([\d\.]+),")
+    fleetJourneyTime = _re_int(r"'fleetJourneyTime': (\d+),", default=1)
+    queueTime = _re_int(r"'queueTime': (\d+),")
+    loadingSpeed = _re_float(r"'loadingSpeed': ([\d\.]+),", default=1.0)
     
     # make sure queue time is not in the past
     queueTime = 0 if queueTime - time.time() <= 0 else int(queueTime - time.time())
@@ -486,3 +494,20 @@ def getTransportLoadingAndTravelTime(html: str, totalResources = 0, useFreighter
     travelTime = uncappedDuration if uncappedDuration > minimumJourneyDuration else minimumJourneyDuration
 
     return  travelTime + loadingTime + queueTime, loadingTime, travelTime, queueTime
+
+
+def getInventory(session):
+    """Retrieve the player's inventory list."""
+    html = session.get(params={"view": "inventory"})
+    match = re.search(r'"inventory":\s*(\[\{.*?\}\])', html, re.DOTALL)
+    if not match:
+        return None
+    return json.loads(match.group(1))
+
+
+def getInventoryItem(session, itemId):
+    """Retrieve a specific item from the player's inventory by itemId, or None if not found."""
+    inventory = getInventory(session)
+    if not inventory:
+        return None
+    return next((i for i in inventory if i.get("itemId") == itemId), None)

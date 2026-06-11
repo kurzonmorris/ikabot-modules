@@ -1,0 +1,109 @@
+<div class="ikalogs_msg_report contentBox01h">
+    <h3 class="ikalogs_msg_report-title header"><%= data.report.rep_title %></h3>
+    <div class="ikalogs_msg_report-wrap">
+        <div class="ikalogs_msg_report-table">
+            <h3 class="ikalogs_msg_report-table-title mt-0"><%= lget('report.lost_by_resources') %></h3>
+            <div class="content">
+                <table class="overview ikaeasy-w-100">
+                    <tbody>
+                        <tr>
+                            <td class="col1 headline" colspan="2"></td>
+                            <% $.each(data.report.columns, function(k, v) { %>
+                                <td class="headline ikaeasy-fs-12 col1 ikaeasy-ta-c"><%= lget('report.' + k) %></td>
+                            <% }) %>
+                            <td class="col1 headline ikaeasy-fs-12 ikaeasy-ta-c"><%= lget('report.total') %></td>
+                        </tr>
+                        <% var diff = {attacker : 0, defender : 0}; %>
+                        <% $.each(data.users, function(id, user) { %>
+                            <% if (id == 'common') { %>
+                                <tr class="<%= user['color'] == 'textred' ? 'ikaeasy-c-r' : 'ikaeasy-c-g' %>">
+                                    <td class="headline-total firstCol col1 ikaeasy-fw-b"><%= lget('report.' + user.type) %></td>
+                                    <td class="headline-total firstCol col1"><%= lget('main.Sources_common') %></td>
+                                    <% $.each(report.columns, function(k, v) { %>
+                                        <td class="headline-total numbers"><%= num(user.lost[k], 0) %></td>
+                                    <% }) %>
+                                    <td class="headline-total numbers col1 ikaeasy-ta-c"><%= num(user.total.lost, 0) %></td>
+                                </tr>
+                            <% } else { %>
+                                <tr class="<%= user['color'] == 'textred' ? 'ikaeasy-c-r' : 'ikaeasy-c-g' %>">
+                                    <td class="firstCol col1 ikaeasy-fw-b" style="width:120px;"><%= lget('report.' + user.type) %></td>
+                                    <td class="firstCol" style="width:120px;"><%= user['title'] %></td>
+                                    <% $.each(data.report.columns, function(k, v) { %>
+                                        <td class="numbers"><%= num(user.lost[k], 0) %></td>
+                                    <% }) %>
+                                    <td class="numbers col1 ikaeasy-ta-c ikaeasy-fw-b"><%= num(user.total.lost, 0) %></td>
+                                </tr>
+
+                                <% diff[user.type] += parseInt(user.total.lost); %>
+                            <% } %>
+                        <% }) %>
+
+                        <tr>
+                            <td class="headline ikaeasy-fs-12 col1" colspan="4"><%= lget('report.difference_in_resources') %></td>
+                            <td class="headline ikaeasy-fs-12 col1 ikaeasy-ta-c ikaeasy-c-r"><%= num(Math.abs(diff.attacker - diff.defender)) %></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="ikalogs_msg_report-table">
+            <h3 class="ikalogs_msg_report-table-title"><%= lget('report.lost_by_score') %></h3>
+            <div class="content">
+                <table class="overview ikaeasy-w-100">
+                    <tbody>
+                        <tr>
+                            <td class="col1 headline" colspan="2"></td>
+                            <td class="headline ikaeasy-fs-12 col1 ikaeasy-ta-c"><%= lget('report.scores_before') %></td>
+                            <td class="headline ikaeasy-fs-12 col1 ikaeasy-ta-c"><%= lget('report.scores_after') %></td>
+                            <td class="headline ikaeasy-fs-12 col1 ikaeasy-ta-c"><%= lget('report.lost_scores') %></td>
+                        </tr>
+
+                        <% $.each(data.users, function(id, user) { %>
+                            <% if (id == 'common') { %>
+                                <tr class="<%= user['color'] == 'textred' ? 'ikaeasy-c-r' : 'ikaeasy-c-g' %>">
+                                    <td class="headline-total firstCol col1 ikaeasy-fw-b"><%= lget('report.' + user.type) %></td>
+                                    <td class="headline-total firstCol col1"><%= user['title'] %></td>
+                                    <td class="headline-total numbers"><%= num((parseInt(user.total.all) * 0.02).toFixed(2), 0) %></td>
+                                    <td class="headline-total numbers"><%= num(((parseInt(user.total.all) - parseInt(user.total.lost)) * 0.02).toFixed(2), 0) %></td>
+                                    <td class="headline-total numbers col1 ikaeasy-c-r ikaeasy-ta-c ikaeasy-fw-b"><%= num((parseInt(user.total.lost) * 0.02).toFixed(2), 0) %></td>
+                                </tr>
+                            <% } else { %>
+                                <tr class="<%= user['color'] == 'textred' ? 'ikaeasy-c-r' : 'ikaeasy-c-g' %>">
+                                    <td class="firstCol col1 ikaeasy-fw-b" style="width:120px;"><%= lget('report.' + user.type) %></td>
+                                    <td class="firstCol" style="width:120px;"><%= user['title'] %></td>
+                                    <td class="numbers"><%= num((parseInt(user.total.all) * 0.02).toFixed(2), 0) %></td>
+                                    <td class="numbers"><%= num(((parseInt(user.total.all) - parseInt(user.total.lost)) * 0.02).toFixed(2), 0) %></td>
+                                    <td class="numbers col1 ikaeasy-c-r ikaeasy-ta-c ikaeasy-fw-b"><%= num((parseInt(user.total.lost) * 0.02).toFixed(2), 0) %></td>
+                                </tr>
+                            <% } %>
+                        <% }) %>
+                        <tr>
+                            <td class="headline ikaeasy-fs-12 col1" colspan="2"><%= lget('report.total_scores') %></td>
+                            <td class="headline ikaeasy-fs-12 ikaeasy-ta-c">
+                                <%= num((parseInt(data.summary.all) * 0.02).toFixed(2), 0) %>
+                            </td>
+                            <td class="headline ikaeasy-fs-12 ikaeasy-ta-c">
+                                <%= num(((parseInt(data.summary.all) - parseInt(data.summary.lost)) * 0.02).toFixed(2), 0) %>
+                            </td>
+                            <td class="headline ikaeasy-fs-12 col1 ikaeasy-ta-c ikaeasy-c-r ikaeasy-fw-b">
+                                <%= num((parseInt(data.summary.lost) * 0.02).toFixed(2), 0) %>
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td class="headline ikaeasy-fs-12 col1" colspan="4"><%= lget('report.difference_in_scores') %></td>
+                            <td class="headline ikaeasy-fs-12 col1 ikaeasy-ta-c ikaeasy-c-r ikaeasy-fw-b"><%= num((Math.abs(diff.attacker - diff.defender) * 0.02).toFixed(2)) %></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="ikaeasy_ikalogs_msg_log" data-href="<%- data.url %>">
+            <a href="<%- data.url %>" target="_blank" class="button ikaeasy-ta-c">
+                <%- lget('ikalogs_open_report') %>
+            </a>
+        </div>
+    </div>
+    <div class="footer"></div>
+</div>
