@@ -200,7 +200,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v9.6.2                  \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v9.6.3                  \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -1440,10 +1440,15 @@ def choose_run_slot(session, event, rows, run_columns):
             if col == oldest_col:
                 run_columns[i] = new_col
                 break
+        old_issues = oldest_col.replace("Run_", "Issues_", 1)
+        new_issues = new_col.replace("Run_", "Issues_", 1)
         for row in rows:
             row[new_col] = ""
+            row[new_issues] = ""
             if oldest_col in row:
                 del row[oldest_col]
+            if old_issues in row:
+                del row[old_issues]
         return mode, new_col
 
     # Resume mode
