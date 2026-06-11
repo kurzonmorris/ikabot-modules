@@ -19,8 +19,8 @@ echo  Building ikabot-mod-install v%VER%
 echo ============================================================
 echo.
 
-rem Run PyInstaller
-pyinstaller --clean ikabot-mod-install.spec
+rem Run PyInstaller via python -m so it works regardless of PATH
+python -m PyInstaller --clean ikabot-mod-install.spec
 if errorlevel 1 (
     echo.
     echo BUILD FAILED
