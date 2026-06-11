@@ -1,0 +1,47 @@
+Version: 1.3.0
+==============
+
+  ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 1.3.0
+-----------------
+- Modules now downloaded directly from the GitHub repository (no release zip needed)
+- Fixed step numbering: Modules=Step 2, Instances=Step 3, Shortcuts=Step 4
+- Maintenance mode: "Use last folder?" prompt skips folder picker when install dir is known
+- Maintenance mode: new Status screen shows installed versions, instance count, module info
+- Maintenance mode: post-download prompt to apply ikabot update to instances immediately
+- Maintenance mode: post-download prompt to create installer shortcut immediately
+- Module download writes a timestamp file for display in Status screen
+- Installer shortcut created automatically in shortcuts folder when running as .exe
+- Consolidated installer files into 'ikabot installer' folder (removed separate 'update' folder)
+- Removed bundled ikabot Manager (AHK) — the installer covers all manager functions
+- Removed open/close/update tools download step — no longer needed
+- Added build.bat for one-command release builds (reads version, runs PyInstaller, zips output)
+
+Changes in 1.2.0
+-----------------
+- Added Install / Maintenance mode selection as first screen
+- Maintenance mode: open all instances, close all instances, update ikabot
+- Added optional ikabot modules download with automatic file renaming
+- Instance count prompt now has a Skip button to keep existing setup
+- Shortcut location prompt clarifies the folder is created automatically
+- Fixed self-update relaunch broken by onedir zip structure
+- Fixed IniWrite error in manager when installed to Program Files
+- Moved PowerShell update script to ikabot_update.ps1 (fixes AHK parse error)
+- Improved instance folder error message to mention closing ikabot
+- Install directory remembered between sessions for Maintenance mode
+
+Changes in 1.1.0
+-----------------
+- Bundled ikabot_manager.ahk with the installer (open, close, update all
+  instances from a single tool)
+- Added welcome screen explaining what the installer does
+- Install and shortcut locations now shown as step-by-step prompts
+- Shortcut location uses a folder picker instead of a text box
+- Instance count prompt explains what an instance is and shows existing count
+- Re-running the installer is now additive (existing instances are kept)
+- Download failures now show full error details in a dialog
+- Fixed temp zip file not being cleaned up on failed extraction
+- Fixed instance folder errors being swallowed silently
+- Fixed shortcut creation failures going unreported
+- Replaced urlretrieve (no timeout) with urlopen with 60s timeout
