@@ -338,7 +338,7 @@ def getUserResponse(session, fullResponse=False):
     """
     # returns messages that the user sends to the telegram bot
 
-    if checkTelegramData(session) is False:
+    if telegramDataIsValid(session) is False:
         return []
 
     sessionData = session.getSessionData()
