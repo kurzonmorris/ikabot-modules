@@ -475,7 +475,7 @@ def wait_for_round(session, city, island, travel_time, battle_start, round_numbe
         wait(wait_time + 5)
 
         if battle_start < time.time():
-            html = session.get(island_url + city["id"])
+            html = session.get(island_url + island["id"])
             island = getIsland(html)
             assert (
                 island["barbarians"]["underAttack"] == 1
