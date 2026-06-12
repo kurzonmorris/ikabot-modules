@@ -432,10 +432,14 @@ def maint_close_all() -> None:
         )
 
 
-def _ikabot_versions_from_url(url: str) -> tuple[str, str]:
-    """Extract (ikabot_ver, mod_ver) from a release asset download URL."""
-    m = ASSET_IKABOT_RE.match(url.rsplit("/", 1)[-1])
-    return (m.group(1), m.group(2)) if m else ("?", "?")
+def find_ikabot_asset(releases: list[dict]) -> tuple[str, str, str] | None:
+    """Return (download_url, ikabot_ver, mod_ver) by matching the asset name directly."""
+    for release in releases:
+        for asset in release.get("assets", []):
+            m = ASSET_IKABOT_RE.match(asset["name"])
+            if m:
+                return asset["browser_download_url"], m.group(1), m.group(2)
+    return None
 
 
 def maint_show_status(install_dir: Path) -> None:
@@ -484,7 +488,7 @@ def maint_download_ikabot(install_dir: Path, releases: list[dict]) -> None:
     template_dir = install_dir / "ikabot template"
     template_dir.mkdir(exist_ok=True)
 
-    ikabot_asset = find_asset(releases, ASSET_IKABOT_RE)
+    ikabot_asset = find_ikabot_asset(releases)
     if not ikabot_asset:
         show_error(
             "No ikabot release found on GitHub.\n\n"
@@ -493,8 +497,7 @@ def maint_download_ikabot(install_dir: Path, releases: list[dict]) -> None:
         )
         return
 
-    url, _, _ = ikabot_asset
-    ikabot_ver, mod_ver = _ikabot_versions_from_url(url)
+    url, ikabot_ver, mod_ver = ikabot_asset
     local_mod_ver = read_version(template_dir) or "not installed"
 
     if not ask_yes_no(
@@ -1020,7 +1023,7 @@ def main() -> None:
         print("Note: no ikabot-mod-install release asset found on GitHub — skipping self-update check.")
 
     # ── 5. Download ikabot ────────────────────────────────────────────────────
-    ikabot_asset = find_asset(releases, ASSET_IKABOT_RE)
+    ikabot_asset = find_ikabot_asset(releases)
     if not ikabot_asset:
         show_error(
             "The ikabot program files could not be found on GitHub.\n\n"
@@ -1029,10 +1032,7 @@ def main() -> None:
         )
         return
 
-    url, tag, remote_ver = ikabot_asset
-    _m = ASSET_IKABOT_RE.match(url.rsplit("/", 1)[-1])
-    remote_ikabot_ver = _m.group(1) if _m else tag.lstrip("vV")
-    remote_mod_ver    = _m.group(2) if _m else remote_ver
+    url, remote_ikabot_ver, remote_mod_ver = ikabot_asset
 
     local_ikabot_ver = read_version(template_dir)
     if local_ikabot_ver is None or is_newer(remote_mod_ver, local_ikabot_ver):
