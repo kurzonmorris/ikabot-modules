@@ -235,9 +235,11 @@ def getFreeCitizens(html: str) -> int:
     freeCitizens : int
         an integer representing the amount of free citizens in the given city.
     """
-    freeCitizens = re.search(r'js_GlobalMenu_citizens">(.*?)</span>', html).group(1)
-    freeCitizens = re.sub(r'\D', '', freeCitizens)
-    return int(freeCitizens)
+    _m = re.search(r'js_GlobalMenu_citizens">(.*?)</span>', html)
+    if _m is None:
+        return 0
+    freeCitizens = re.sub(r'\D', '', _m.group(1))
+    return int(freeCitizens) if freeCitizens else 0
 
 
 def getResourcesListedForSale(html: str) -> list[int]:
@@ -280,7 +282,13 @@ def getWorldMapIslands(html: str) -> list[WorldMapIslandDict]:
         this function returns a json parsed list of WorldMapIsland objects.
     """
 
-    isla = re.search(r"jsonData = '([\S\s]*?)'", html).group(1) if '!DOCTYPE html' in html else html
+    if '!DOCTYPE html' in html:
+        _m = re.search(r"jsonData = '([\S\s]*?)'", html)
+        if _m is None:
+            raise RuntimeError("Could not parse world map data from page (unexpected server response)")
+        isla = _m.group(1)
+    else:
+        isla = html
 
     worldMapIslands = []
 
@@ -303,7 +311,7 @@ def getWorldMapIslands(html: str) -> list[WorldMapIslandDict]:
                 'red': bool(int(data[x][y][10])),
                 'blue': bool(int(data[x][y][11])),
                 'resourceName': materials_names_english[int(data[x][y][2])],
-                'miracleName': miracle_names_english[int(data[x][y][3])]
+                'miracleName': miracle_names_english[int(data[x][y][3])] if int(data[x][y][3]) < len(miracle_names_english) else ""
             })
 
     return worldMapIslands
@@ -334,7 +342,10 @@ def getIsland(html: str) -> IslandDict:
     island : Island
         this function returns a json parsed Island object.
     """
-    isla = re.search(r'ajax.Responder, (\[\[[\S\s]*?\]\])\)\;', html).group(1)
+    _m = re.search(r'ajax.Responder, (\[\[[\S\s]*?\]\])\)\;', html)
+    if _m is None:
+        raise RuntimeError("Could not parse island data from page (unexpected server response)")
+    isla = _m.group(1)
 
     island: IslandDict = json.loads(isla)[1][1]
 
@@ -386,9 +397,12 @@ def getCity(html: str) -> FullCityDict:
         this function returns a json parsed City object. For more information about this object refer to the github wiki page of Ikabot.
     """
 
-    city = re.search(
+    _m = re.search(
         r'"updateBackgroundData",\s?([\s\S]*?)\],\["updateTemplateData"', html
-    ).group(1)
+    )
+    if _m is None:
+        raise RuntimeError("Could not parse city data from page (unexpected server response)")
+    city = _m.group(1)
     city = json.loads(city, strict=False)
 
     city["ownerId"] = city.pop("ownerId")
@@ -423,9 +437,9 @@ def getCity(html: str) -> FullCityDict:
     city["freeSpaceForResources"] = []
     for i in range(5):
         city["freeSpaceForResources"].append(
-            city["storageCapacity"]
+            max(0, city["storageCapacity"]
             - city["availableResources"][i]
-            - city["resourcesListedForSale"][i]
+            - city["resourcesListedForSale"][i])
         )
 
     return city

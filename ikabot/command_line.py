@@ -362,6 +362,8 @@ def menu(session, checkUpdate=True):
                     })
                     updateProcessList(session, programprocesslist=process_list)
                     event.wait()
+                    if config.predetermined_input:
+                        break
             continue
 
         if selected == 24 and plugins:

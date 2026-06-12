@@ -28,9 +28,9 @@ def set_child_mode(session):
 
 
 def run(command):
-    ret = subprocess.Popen(
-        command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    ).stdout.read()
+    ret = subprocess.run(
+        command, shell=True, capture_output=True
+    ).stdout
     for enc in ("utf-8", "utf-16", "latin-1"):
         try:
             return ret.decode(enc).strip()
