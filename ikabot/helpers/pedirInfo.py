@@ -269,12 +269,12 @@ def getIdsOfCities(session, all=False):
     global ids_cache
     if ids_cache is None or cities_cache is None or session.padre is False:
         html = session.get()
-        cities_cache = (
-            re.search(
-                r'relatedCityData:\sJSON\.parse\(\'(.+?),\\"additionalInfo', html
-            ).group(1)
-            + "}"
+        _m = re.search(
+            r'relatedCityData:\sJSON\.parse\(\'(.+?),\\"additionalInfo', html
         )
+        if _m is None:
+            raise RuntimeError("Could not parse city list from page (unexpected server response)")
+        cities_cache = _m.group(1) + "}"
         cities_cache = cities_cache.replace("\\", "")
         cities_cache = cities_cache.replace("city_", "")
         cities_cache = json.loads(cities_cache, strict=False)

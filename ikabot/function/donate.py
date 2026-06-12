@@ -104,7 +104,7 @@ def donate(session, event, stdin_fd, predetermined_input):
             "{} / {} ({}%)\n".format(
                 addThousandSeparator(wood_donated),
                 addThousandSeparator(wood_total_needed),
-                addThousandSeparator(int((100 * wood_donated) / wood_total_needed)),
+                addThousandSeparator(int((100 * wood_donated) / wood_total_needed) if wood_total_needed else 0),
             )
         )
 
@@ -137,7 +137,7 @@ def donate(session, event, stdin_fd, predetermined_input):
                 addThousandSeparator(tradegood_donated),
                 addThousandSeparator(tradegood_total_needed),
                 addThousandSeparator(
-                    int((100 * tradegood_donated) / tradegood_total_needed)
+                    int((100 * tradegood_donated) / tradegood_total_needed) if tradegood_total_needed else 0
                 ),
             )
         )

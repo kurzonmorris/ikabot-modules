@@ -278,7 +278,8 @@ def apply_tavern(session, body):
             pct = int(body.get("pct", 0))
             pct = max(0, min(100, pct))
             results = []
-            for city_id, city in zip(cities_ids, cities):
+            for city_id in cities_ids:
+                city = cities[city_id]
                 ok = mgr.set_tavern_pct(city, pct)
                 results.append({"city": city.get("name", str(city_id)), "ok": bool(ok)})
             return {"ok": True, "mode": "set_pct", "pct": pct, "results": results}

@@ -159,17 +159,6 @@ def do_it(session, hours, auto_transfer, transfer_amount):
 
             consumption_per_hour = getWineConsumptionPerHour(html)
 
-            # Determine Wine Press reduction
-            wine_press_level = 0
-            for building in city["position"]:
-                if building.get("building") == "vineyard":
-                    wine_press_level = building.get("level", 0)
-                    break
-
-            # Apply reduction to wine consumption
-            reduction_factor = Decimal(1 - (wine_press_level / 100))
-            consumption_per_hour *= reduction_factor
-
             wine_available = Decimal(city["availableResources"][1])
 
             consumption_net = Decimal(consumption_per_hour)

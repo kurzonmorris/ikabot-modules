@@ -65,7 +65,6 @@ def do_it(session, godids, mode, times):
         else:
             msg = "Shrine city or building position was not found."
             sendToBot(session, msg)
-            event.set()
             return
 
         if mode == 1 or mode == 3:
@@ -82,7 +81,6 @@ def do_it(session, godids, mode, times):
                     time.sleep(2)
 
             if mode == 1:
-                event.set()
                 return
             mode = 2  # If mode is both, set mode for loop
 
@@ -111,7 +109,6 @@ def do_it(session, godids, mode, times):
     except Exception as e:
         msg = f"Error in activateShrine:\n\n{e}"
         sendToBot(session, msg)
-        event.set()
         return
 
 
