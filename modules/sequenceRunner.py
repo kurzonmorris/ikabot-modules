@@ -94,7 +94,14 @@ def _create_sequence(sequences):
     print("\n  Enter inputs as comma-separated values.")
     print("  Use 'enter' for an empty/Enter keypress.")
     print("  Numbers are entered as digits, text as words.")
-    print("  Example: 16, enter, 5, 1, 0, 2, 6, 1, y, enter\n")
+    print("  Example: 16, enter, 5, 1, 0, 2, 6, 1, y, enter")
+    print()
+    print("  For External Modules (30): stay in submenu between modules.")
+    print("  Use a single 0 at the end to exit, NOT between each module.")
+    print("  Example: 30, 34, 0, 32, s, 3, 37, 2, 2, 2, 24, 0")
+    print("           ^^  ^^  ^  ^^           ^^                ^")
+    print("           |   RRS |  CM           TM                exit")
+    print("           enter   RRS exits its own menu\n")
 
     raw = read(msg="Inputs: ").strip()
     if not raw:
