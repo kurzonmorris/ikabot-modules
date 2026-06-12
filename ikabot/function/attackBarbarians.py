@@ -716,4 +716,4 @@ def do_it(session, island, city, babarians_info, plan, ship_capacity):
 
     last_round = plan[-1]
     if last_round["loot"]:
-        loot(session, city, island, units_data, last_round, ship_capacity)
+        loot(session, island, city, units_data, last_round, ship_capacity)
