@@ -246,18 +246,22 @@ def sendToBot(session, msg, Token=False, Photo=None):
             else:
                 # Clear headers for Telegram compatibility (original behavior)
                 headers = session.s.headers.copy()
-                session.s.headers.clear()
-                session.s.post(
-                    "https://api.telegram.org/bot{}/sendDocument".format(
-                        telegram_data["botToken"]
-                    ),
-                    files={"document": ("captcha.png", Photo)},
-                    data={
-                        "chat_id": telegram_data["chatId"],
-                        "caption": formatted_msg,
-                    },
-                )
-                session.s.headers = headers
+                try:
+                    session.s.headers.clear()
+                    session.s.post(
+                        "https://api.telegram.org/bot{}/sendDocument".format(
+                            telegram_data["botToken"]
+                        ),
+                        files={"document": ("captcha.png", Photo)},
+                        data={
+                            "chat_id": telegram_data["chatId"],
+                            "caption": formatted_msg,
+                        },
+                    )
+                finally:
+                    # restore game headers even if the Telegram POST fails,
+                    # otherwise all subsequent game requests go out header-less
+                    session.s.headers = headers
         except Exception:
             logger.error("Failed to send Telegram message", exc_info=True)
 
