@@ -760,8 +760,8 @@ def do_attack(session, island, city, schematic, ship_capacity, float_city=None, 
                 main_city_data[0]["attack_data"]["transporter"] = max(
                     babarians_info["ships"], ships_available
                 )
-            elif len(float_attack_data) > 0:
-                float_attack_data[0]["attack_data"]["transporter"] = max(
+            elif isinstance(float_city_data, list) and len(float_city_data) > 0:
+                float_city_data[0]["attack_data"]["transporter"] = max(
                     babarians_info["ships"], ships_available
                 )
 
@@ -831,7 +831,7 @@ def loot(session, island, city, schematic, ship_capacity, float_city=None, units
                     "countdown"
                 ]["enddate"]
 
-        time_left = barbarian_countdown - time.time()
+        time_left = (barbarian_countdown - time.time()) if barbarian_countdown is not None else None
         send_scatter = False
         if time_left is not None and travel_time > (
             time_left - (travel_time + FIVE_MINUTES)
@@ -841,8 +841,8 @@ def loot(session, island, city, schematic, ship_capacity, float_city=None, units
         session.post(params=attack_data)
 
         if send_scatter:
-            ram_attack_data, ram_travel_time, _ = get_send_attack_data(
-                session, island, destin_city, {"307": 1}, units_data, ship_capacity
+            ram_attack_data, _, ram_travel_time = get_send_attack_data(
+                session, island, destin_city, {"units": {"307": 1}}, units_data, ship_capacity
             )
             session.post(params=ram_attack_data)
             new_countdown = wait_next_scatter(session, ram_travel_time)
@@ -954,15 +954,14 @@ def wait_next_scatter(session, travel_time, city_id=None, old_scatter=None):
     if old_scatter is None:
         old_scatter = get_units_scattered(session, city_id)
 
-        wait_time = travel_time
-        wait_time -= time.time()
-        wait(wait_time + 5)
+        wait(travel_time + 5)
 
         new_scatter = get_units_scattered(session, city_id)
+        old_scatter_keys = {(e["arrival_time"], e["amount"]) for e in old_scatter}
         new_entries = [
             entry
             for entry in new_scatter
-            if (entry["arrival_time"], entry["amount"]) not in old_scatter
+            if (entry["arrival_time"], entry["amount"]) not in old_scatter_keys
         ]
         if len(new_entries) == 0:
             return None
