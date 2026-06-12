@@ -223,6 +223,8 @@ def getResourcesNeeded(session, city, building, current_level, final_level):
         + r'"\s*onmouseover="\$\(this\)\.addClass\(\'hover\'\);" onmouseout="\$\(this\)\.removeClass\(\'hover\'\);"\s*onclick="ajaxHandlerCall\(\'\?(.*?)\'\);'
     )
     match = re.search(regex_building_detail, building_html)
+    if match is None:
+        return [0] * len(materials_names)
     building_costs_url = match.group(1)
     building_costs_url += "backgroundView=city&currentCityId={}&templateView=buildingDetail&actionRequest={}&ajax=1".format(
         city["id"], actionRequest
@@ -285,8 +287,10 @@ def getResourcesNeeded(session, city, building, current_level, final_level):
     final_costs = [0] * len(materials_names)
     levels_to_upgrade = 0
     for match in matches:
-        lv = re.search(r'"level">(\d+)</td>', match).group(1)
-        lv = int(lv)
+        lv_m = re.search(r'"level">(\d+)</td>', match)
+        if lv_m is None:
+            continue
+        lv = int(lv_m.group(1))
 
         if lv <= current_level:
             continue

@@ -146,7 +146,10 @@ def distribute_evenly(session, resource_type, cities_ids, cities):
                 destinationCities[cityID] = freeStorage
                 resourceTotal -= storage
 
-        resourceAverage = resourceTotal // (len(allCities) - len(destinationCities))
+        remaining = len(allCities) - len(destinationCities)
+        if remaining == 0:
+            break
+        resourceAverage = resourceTotal // remaining
 
         if len_prev == len(destinationCities):
             for cityID in allCities:

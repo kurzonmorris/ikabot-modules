@@ -104,6 +104,7 @@ def modifyProduction(session, event, stdin_fd, predetermined_input):
         enter()
 
     except KeyboardInterrupt:
+        event.set()
         return
 
     event.set()
@@ -166,5 +167,6 @@ def modifyAcademyWorkers(session, event, stdin_fd, predetermined_input):
         enter()
 
     except KeyboardInterrupt:
+        event.set()
         return
     event.set()

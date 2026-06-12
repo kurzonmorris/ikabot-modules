@@ -415,7 +415,7 @@ def trainArmy(session, event, stdin_fd, predetermined_input):
             print("\nThe selected fleet will be trained.")
         enter()
 
-        if replicate == "y":
+        if replicate.lower() == "y":
             countRepeat = countRepeat + 1
             while countRepeat > 0:
                 for cityId in cityTrainings:
@@ -430,11 +430,8 @@ def trainArmy(session, event, stdin_fd, predetermined_input):
                                 tranings_copy = []
                                 units_copy = copy.deepcopy(units)
                                 tranings_copy.append(units_copy)
-                                loop = asyncio.get_event_loop()
-                                loop.run_until_complete(
-                                    planTrainings(
-                                        session, city, tranings_copy, trainTroops
-                                    )
+                                planTrainings(
+                                    session, city, tranings_copy, trainTroops
                                 )
                                 break
                     except Exception as e:

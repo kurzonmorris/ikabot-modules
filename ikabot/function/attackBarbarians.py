@@ -338,20 +338,20 @@ def get_unit_data(session, city_id, unit_id):
     resp = json.loads(resp, strict=False)
     html = resp[1][1][1]
 
-    weight = re.search(
+    _mw = re.search(
         r'<li class="weight fifthpos" title=".*?"><span\s*class="accesshint">\'.*?\': </span>(\d+)</li>',
         html,
-    ).group(1)
-    weight = int(weight)
+    )
+    weight = int(_mw.group(1)) if _mw else 1
 
-    speed = re.search(
+    _ms = re.search(
         r'<span class="textLabel">.*?</span>\s*(\d+)\s*<br/>',
         html,
-    ).group(1)
-    speed = int(speed)
+    )
+    speed = int(_ms.group(1)) if _ms else 1
 
-    name = re.search(r'<div class="contentBox01h">\s*<h3 class="header">([^<]+)</h3>', html).group(1)
-    name = str(name)
+    _mn = re.search(r'<div class="contentBox01h">\s*<h3 class="header">([^<]+)</h3>', html)
+    name = str(_mn.group(1)) if _mn else unit_id
 
     return {"speed": speed, "weight": weight, "name": name}
 
@@ -475,7 +475,7 @@ def wait_for_round(session, city, island, travel_time, battle_start, round_numbe
         wait(wait_time + 5)
 
         if battle_start < time.time():
-            html = session.get(island_url + city["id"])
+            html = session.get(island_url + island["id"])
             island = getIsland(html)
             assert (
                 island["barbarians"]["underAttack"] == 1
@@ -716,4 +716,4 @@ def do_it(session, island, city, babarians_info, plan, ship_capacity):
 
     last_round = plan[-1]
     if last_round["loot"]:
-        loot(session, city, island, units_data, last_round, ship_capacity)
+        loot(session, island, city, units_data, last_round, ship_capacity)
