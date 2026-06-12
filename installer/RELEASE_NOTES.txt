@@ -1,7 +1,22 @@
-Version: 1.2.0
+Version: 1.3.0
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 1.3.0
+-----------------
+- Modules now downloaded directly from the GitHub repository (no release zip needed)
+- Fixed step numbering: Modules=Step 2, Instances=Step 3, Shortcuts=Step 4
+- Maintenance mode: "Use last folder?" prompt skips folder picker when install dir is known
+- Maintenance mode: new Status screen shows installed versions, instance count, module info
+- Maintenance mode: post-download prompt to apply ikabot update to instances immediately
+- Maintenance mode: post-download prompt to create installer shortcut immediately
+- Module download writes a timestamp file for display in Status screen
+- Installer shortcut created automatically in shortcuts folder when running as .exe
+- Consolidated installer files into 'ikabot installer' folder (removed separate 'update' folder)
+- Removed bundled ikabot Manager (AHK) — the installer covers all manager functions
+- Removed open/close/update tools download step — no longer needed
+- Added build.bat for one-command release builds (reads version, runs PyInstaller, zips output)
 
 Changes in 1.2.0
 -----------------

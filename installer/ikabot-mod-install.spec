@@ -4,11 +4,11 @@
 # Build command (run from the ikabot-mod-install/ folder):
 #   pyinstaller ikabot-mod-install.spec
 #
+# Or use build.bat which reads the version automatically and zips the output.
+#
 # Output: dist/ikabot-mod-install/
 #           ikabot-mod-install.exe   <- the installer
 #           _internal/               <- dependencies + bundled files
-#               ikabot_manager.ahk
-#               ikabot_update.ps1
 #               RELEASE_NOTES.txt
 #               ... (Python runtime, dlls, etc.)
 #
@@ -19,9 +19,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('ikabot_manager.ahk', '.'),
-        ('ikabot_update.ps1',  '.'),
-        ('RELEASE_NOTES.txt',  '.'),
+        ('RELEASE_NOTES.txt', '.'),
     ],
     hiddenimports=[
         'tkinter',
