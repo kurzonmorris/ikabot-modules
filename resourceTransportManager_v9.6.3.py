@@ -569,7 +569,10 @@ def _lock_acquire(lock_path, timeout=30, stale_after=60):
             try:
                 with open(lock_path, "r") as f:
                     data = json.load(f)
-                if time.time() - data.get("timestamp", 0) > stale_after:
+                lock_pid = data.get("pid")
+                stale_by_time = time.time() - data.get("timestamp", 0) > stale_after
+                stale_by_pid = lock_pid and not _is_pid_alive(lock_pid)
+                if stale_by_time or stale_by_pid:
                     tmp = lock_path + f".{os.getpid()}.tmp"
                     try:
                         fd2 = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -4120,6 +4123,14 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
             pass
 
 
+def _is_pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def _is_transport_worker_running(session):
     wlock = transport_worker_lock_path(session)
     if not os.path.exists(wlock):
@@ -4128,6 +4139,13 @@ def _is_transport_worker_running(session):
         with open(wlock, "r") as f:
             data = json.load(f)
         if time.time() - data.get("timestamp", 0) > WORKER_LOCK_STALE_SECONDS:
+            return False
+        pid = data.get("pid")
+        if pid and not _is_pid_alive(pid):
+            try:
+                os.remove(wlock)
+            except OSError:
+                pass
             return False
         return True
     except Exception:
