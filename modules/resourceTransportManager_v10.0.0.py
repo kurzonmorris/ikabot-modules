@@ -25,6 +25,7 @@ from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.naval import getAvailableShips, getAvailableFreighters
 from ikabot.helpers.varios import addThousandSeparator, getDateTime
+from ikabot.helpers.getJson import getWorldMapIslands
 
 # ---------------------------------------------------------------------------
 #  Resource Reservation System — optional dependency
@@ -46,6 +47,214 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
+
+# ============================================================================
+#  ISLAND CACHE  — speeds up coordinate lookups for bulk distribution
+# ============================================================================
+
+ISLAND_CACHE_DEFAULT_RADIUS = 4
+
+def _rtm_storage_dir():
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    storage = os.path.join(module_dir, "rtm_storage")
+    os.makedirs(storage, exist_ok=True)
+    return storage
+
+
+def _island_cache_path(session):
+    suffix = f"{session.servidor.replace('/', '_').replace(chr(92), '_')}_{session.username}"
+    return os.path.join(_rtm_storage_dir(),
+                        f"island_cache_{suffix}.json")
+
+
+def _load_island_cache(session):
+    path = _island_cache_path(session)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def _save_island_cache(session, cache):
+    path = _island_cache_path(session)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _cache_key(x, y):
+    return f"{x}:{y}"
+
+
+def _fetch_and_cache_island(session, x, y, cache):
+    """Fetch a single island by coords, cache it, return (island_dict, cities_list)."""
+    html = session.get(f"view=island&xcoord={x}&ycoord={y}")
+    island = getIsland(html)
+    cities = [c for c in island.get("cities", []) if c.get("type") == "city"]
+    key = _cache_key(x, y)
+    cache[key] = {
+        "x": int(x),
+        "y": int(y),
+        "island_id": island.get("id", ""),
+        "island_name": island.get("name", ""),
+        "tradegood": island.get("tradegood", "0"),
+        "cities": [
+            {
+                "name": c.get("name", "?"),
+                "player": c.get("Name", "?"),
+                "position": c.get("position", ""),
+                "level": c.get("level", ""),
+                "ally_tag": c.get("AllyTag", ""),
+            }
+            for c in cities
+        ],
+        "last_updated": int(time.time()),
+    }
+    _save_island_cache(session, cache)
+    return island, cities
+
+
+def _cache_age_str(timestamp):
+    """Human-readable time since cache update."""
+    diff = int(time.time()) - timestamp
+    if diff < 60:
+        return "just now"
+    if diff < 3600:
+        return f"{diff // 60}m ago"
+    if diff < 86400:
+        return f"{diff // 3600}h ago"
+    return f"{diff // 86400}d ago"
+
+
+def _fetch_radius_islands(session, cx, cy, radius=ISLAND_CACHE_DEFAULT_RADIUS):
+    """Fetch all islands within radius of (cx,cy) using worldmap endpoint, cache them.
+    Returns count of islands found."""
+    cache = _load_island_cache(session)
+    url = (f"view=worldmap_iso&islandX={cx}&islandY={cy}"
+           f"&oldBackgroundView=island&islandWorldviewScale=1")
+    html = session.get(url)
+    try:
+        wm_islands = getWorldMapIslands(html)
+    except Exception:
+        return 0
+
+    nearby = [
+        isl for isl in wm_islands
+        if abs(isl["x"] - int(cx)) <= radius and abs(isl["y"] - int(cy)) <= radius
+    ]
+
+    fetched = 0
+    for isl in nearby:
+        try:
+            _fetch_and_cache_island(session, isl["x"], isl["y"], cache)
+            fetched += 1
+        except Exception:
+            pass
+    return fetched
+
+
+def _refresh_all_cached_islands(session):
+    """Re-fetch every island currently in the cache. Returns count refreshed."""
+    cache = _load_island_cache(session)
+    if not cache:
+        return 0
+    refreshed = 0
+    for key in list(cache.keys()):
+        entry = cache[key]
+        x, y = entry.get("x"), entry.get("y")
+        if x is None or y is None:
+            continue
+        try:
+            _fetch_and_cache_island(session, x, y, cache)
+            refreshed += 1
+        except Exception:
+            pass
+    return refreshed
+
+
+def _island_cache_menu(session):
+    """Settings menu for island cache management."""
+    while True:
+        cache = _load_island_cache(session)
+        print_module_banner("Island Cache")
+        print(f"  {C.BOLD}Cached islands:{C.RESET} {len(cache)}")
+        if cache:
+            oldest = min(e.get("last_updated", 0) for e in cache.values())
+            newest = max(e.get("last_updated", 0) for e in cache.values())
+            print(f"  {C.DIM}Oldest: {_cache_age_str(oldest)}  "
+                  f"Newest: {_cache_age_str(newest)}{C.RESET}")
+        print(f"  {C.DIM}Search radius: {ISLAND_CACHE_DEFAULT_RADIUS} islands{C.RESET}")
+        print(f"  {C.DIM}Storage: {_rtm_storage_dir()}{C.RESET}")
+
+        print(f"\n  {C.BOLD}(1){C.RESET} Search area — scan islands around coordinates")
+        print(f"  {C.BOLD}(2){C.RESET} Refresh all — re-fetch every cached island")
+        print(f"  {C.BOLD}(3){C.RESET} View cache — list all cached islands")
+        print(f"  {C.BOLD}(4){C.RESET} Clear cache")
+        print(f"  {C.BOLD}('){C.RESET} Back")
+
+        choice = read(min=1, max=4, digit=True, additionalValues=["'"])
+        if choice == "'":
+            return
+
+        if choice == 1:
+            print(f"\n  Enter center coordinates (e.g. 44 03):")
+            raw = read(msg="  Coords: ", additionalValues=["'"])
+            if raw == "'":
+                continue
+            parts = raw.strip().split()
+            if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                print(f"  {C.WARN}Invalid. Enter two numbers (e.g. 44 03){C.RESET}")
+                enter()
+                continue
+            cx, cy = int(parts[0]), int(parts[1])
+            print(f"  {C.DIM}Scanning islands within {ISLAND_CACHE_DEFAULT_RADIUS} "
+                  f"of [{cx}:{cy}]...{C.RESET}")
+            count = _fetch_radius_islands(session, cx, cy)
+            print(f"  {C.OK}Cached {count} island(s).{C.RESET}")
+            enter()
+
+        elif choice == 2:
+            if not cache:
+                print(f"  {C.DIM}Cache is empty. Nothing to refresh.{C.RESET}")
+                enter()
+                continue
+            print(f"  {C.DIM}Refreshing {len(cache)} island(s)... "
+                  f"this may take a moment.{C.RESET}")
+            count = _refresh_all_cached_islands(session)
+            print(f"  {C.OK}Refreshed {count} island(s).{C.RESET}")
+            enter()
+
+        elif choice == 3:
+            if not cache:
+                print(f"\n  {C.DIM}Cache is empty.{C.RESET}")
+                enter()
+                continue
+            print(f"\n  {'Coords':<10} {'Island':<20} {'Cities':<7} {'Updated'}")
+            print(f"  {'─'*10} {'─'*20} {'─'*7} {'─'*12}")
+            for key in sorted(cache.keys()):
+                e = cache[key]
+                coords = f"[{e['x']}:{e['y']}]"
+                name = (e.get("island_name", "?"))[:20]
+                ct = len(e.get("cities", []))
+                age = _cache_age_str(e.get("last_updated", 0))
+                print(f"  {coords:<10} {name:<20} {ct:<7} {age}")
+            enter()
+
+        elif choice == 4:
+            if not cache:
+                print(f"  {C.DIM}Cache is already empty.{C.RESET}")
+                enter()
+                continue
+            print(f"  {C.WARN}Delete all {len(cache)} cached island(s)?{C.RESET}")
+            print(f"  {C.BOLD}(1){C.RESET} Yes  {C.BOLD}(2){C.RESET} No")
+            if read(min=1, max=2, digit=True) == 1:
+                _save_island_cache(session, {})
+                print(f"  {C.OK}Cache cleared.{C.RESET}")
+            enter()
 
 
 # ============================================================================
@@ -1939,9 +2148,11 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
             print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
             print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
             print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
+            print(f"  {C.BOLD}(8){C.RESET} Island Cache")
+            print(f"  {C.DIM}    Browse, search, and cache island data for faster lookups.{C.RESET}")
             print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
 
-            shipping_mode = read(min=1, max=7, digit=True,
+            shipping_mode = read(min=1, max=8, digit=True,
                                  additionalValues=["'", "s", "S", "o", "O",
                                                     "x", "X", "n", "N"])
             if shipping_mode == "'":
@@ -1970,6 +2181,9 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
             if shipping_mode == 7:
                 manage_schedules_menu(session, event, telegram_enabled,
                                       log_path)
+                continue
+            if shipping_mode == 8:
+                _island_cache_menu(session)
                 continue
 
             if shipping_mode == 1:
@@ -3078,9 +3292,12 @@ def _bulk_editor_menu(session, csv_path, event):
 
 def _bulk_editor_add_cities(session, rows, fieldnames):
     print_module_banner("Add Cities — Fast Entry")
-    print("  Enter island coordinates (two numbers with space, e.g. 44 03)")
-    print("  Then select city positions from the island.")
+    print("  Enter island coordinates (e.g. 44 03)")
+    print("  Cached islands are used when available (faster).")
+    print("  Type 'r' to refresh the current island from the server.")
     print("  Type 'done' when finished adding cities.\n")
+
+    cache = _load_island_cache(session)
 
     while True:
         raw = read(msg="  Island coords (or 'done'): ",
@@ -3097,44 +3314,110 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
             continue
 
         x_coord, y_coord = parts[0], parts[1]
+        key = _cache_key(int(x_coord), int(y_coord))
+        from_cache = False
+
+        if key in cache:
+            cached = cache[key]
+            age = _cache_age_str(cached.get("last_updated", 0))
+            print(f"  {C.DIM}Using cached data (updated {age}){C.RESET}")
+            from_cache = True
+
         try:
-            html = session.get(
-                f"view=island&xcoord={x_coord}&ycoord={y_coord}"
-            )
-            island = getIsland(html)
+            if from_cache:
+                island, cities_on_island = None, None
+            else:
+                island, cities_on_island = _fetch_and_cache_island(
+                    session, x_coord, y_coord, cache)
+                cities_on_island = [
+                    c for c in island["cities"] if c.get("type") == "city"
+                ]
         except Exception as e:
             print(f"  Error fetching island: {e}")
             continue
 
-        cities_on_island = [
-            c for c in island["cities"] if c.get("type") == "city"
-        ]
-        if not cities_on_island:
-            print(f"  No cities found on island [{x_coord}:{y_coord}]")
-            continue
+        if from_cache:
+            cached_entry = cache[key]
+            isl_name = cached_entry.get("island_name", "?")
+            tg_idx = int(cached_entry.get("tradegood", 0))
+            tradegood = materials_names[tg_idx] if tg_idx < len(materials_names) else "?"
+            cached_cities = cached_entry.get("cities", [])
 
-        tradegood = materials_names[int(island.get("tradegood", 0))]
-        print(f"\n  Island [{x_coord}:{y_coord}] — {island.get('name', '?')}"
-              f" ({tradegood})")
-        print(f"  {'Pos':<4} {'City':<20} {'Player':<15} {'Loc'}")
-        print(f"  {'─'*4} {'─'*20} {'─'*15} {'─'*5}")
-        for i, c in enumerate(cities_on_island, 1):
-            cn = c.get("name", "?")[:20]
-            pn = c.get("Name", "?")[:15]
-            loc = get_city_location_token(c) or ""
-            print(f"  {i:<4} {cn:<20} {pn:<15} {loc}")
+            print(f"\n  Island [{x_coord}:{y_coord}] — {isl_name} ({tradegood})")
+            print(f"  {'Pos':<4} {'City':<20} {'Player':<15} {'Ally'}")
+            print(f"  {'─'*4} {'─'*20} {'─'*15} {'─'*8}")
+            for i, c in enumerate(cached_cities, 1):
+                cn = c.get("name", "?")[:20]
+                pn = c.get("player", "?")[:15]
+                ally = c.get("ally_tag", "")[:8]
+                print(f"  {i:<4} {cn:<20} {pn:<15} {ally}")
+
+            if not cached_cities:
+                print(f"  No cities in cache for [{x_coord}:{y_coord}]")
+                continue
+
+            display_cities = cached_cities
+        else:
+            if not cities_on_island:
+                print(f"  No cities found on island [{x_coord}:{y_coord}]")
+                continue
+
+            tradegood = materials_names[int(island.get("tradegood", 0))]
+            print(f"\n  Island [{x_coord}:{y_coord}] — {island.get('name', '?')}"
+                  f" ({tradegood})")
+            print(f"  {'Pos':<4} {'City':<20} {'Player':<15} {'Loc'}")
+            print(f"  {'─'*4} {'─'*20} {'─'*15} {'─'*5}")
+            for i, c in enumerate(cities_on_island, 1):
+                cn = c.get("name", "?")[:20]
+                pn = c.get("Name", "?")[:15]
+                loc = get_city_location_token(c) or ""
+                print(f"  {i:<4} {cn:<20} {pn:<15} {loc}")
+
+            display_cities = [
+                {
+                    "name": c.get("name", "?"),
+                    "player": c.get("Name", "?"),
+                    "position": get_city_location_token(c) or "",
+                }
+                for c in cities_on_island
+            ]
 
         selected_positions = set()
         print(f"\n  Type position numbers to add (e.g. 1,4,5)")
-        print(f"  Type d + number to deselect (e.g. d3 or d1,4)")
+        print(f"  Type d + number to deselect (e.g. d3)")
+        print(f"  Type r to refresh this island from server")
         print(f"  Press Enter when done with this island:")
 
         while True:
-            sel = read(msg="  > ", empty=True, additionalValues=["'"])
+            sel = read(msg="  > ", empty=True, additionalValues=["'", "r", "R"])
             if sel == "'":
                 break
             if sel == "":
                 break
+            if sel.lower() == "r":
+                print(f"  {C.DIM}Refreshing [{x_coord}:{y_coord}]...{C.RESET}")
+                try:
+                    island, _ = _fetch_and_cache_island(
+                        session, x_coord, y_coord, cache)
+                    cities_on_island = [
+                        c for c in island["cities"]
+                        if c.get("type") == "city"
+                    ]
+                    display_cities = [
+                        {
+                            "name": c.get("name", "?"),
+                            "player": c.get("Name", "?"),
+                            "position": get_city_location_token(c) or "",
+                        }
+                        for c in cities_on_island
+                    ]
+                    print(f"  {C.OK}Refreshed! {len(display_cities)} cities.{C.RESET}")
+                    for i, c in enumerate(display_cities, 1):
+                        print(f"  {i:<4} {c['name'][:20]:<20} "
+                              f"{c['player'][:15]:<15}")
+                except Exception as e:
+                    print(f"  {C.WARN}Refresh failed: {e}{C.RESET}")
+                continue
 
             if sel.lower().startswith("d"):
                 nums = sel[1:].strip()
@@ -3145,8 +3428,8 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
                         if p in selected_positions:
                             selected_positions.discard(p)
                             removed.append(
-                                cities_on_island[p - 1].get("name", "?")
-                                if 1 <= p <= len(cities_on_island) else "?"
+                                display_cities[p - 1].get("name", "?")
+                                if 1 <= p <= len(display_cities) else "?"
                             )
                     if removed:
                         print(f"  Removed: {', '.join(removed)}")
@@ -3160,15 +3443,13 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
                 positions = [int(x.strip()) for x in sel.split(",")]
                 added = []
                 for p in positions:
-                    if 1 <= p <= len(cities_on_island):
+                    if 1 <= p <= len(display_cities):
                         if p not in selected_positions:
                             selected_positions.add(p)
-                            added.append(
-                                cities_on_island[p - 1].get("name", "?")
-                            )
+                            added.append(display_cities[p - 1].get("name", "?"))
                     else:
                         print(f"  Position {p} out of range "
-                              f"(1-{len(cities_on_island)})")
+                              f"(1-{len(display_cities)})")
                 if added:
                     print(f"  Added: {', '.join(added)}")
             except ValueError:
@@ -3176,13 +3457,14 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
 
         if selected_positions:
             for p in sorted(selected_positions):
-                c = cities_on_island[p - 1]
+                c = display_cities[p - 1]
                 row = {col: "" for col in BULK_CSV_COLUMNS}
                 row["X"] = x_coord
                 row["Y"] = y_coord
-                row["Player"] = c.get("Name", "")
+                row["Player"] = c.get("player", c.get("Name", ""))
                 row["City"] = c.get("name", "")
-                row["City_Location"] = get_city_location_token(c) or ""
+                row["City_Location"] = c.get("position",
+                    get_city_location_token(c) if not from_cache else "")
                 row["Transport"] = "m"
                 row["From"] = "a"
                 row["Hours"] = "1"
