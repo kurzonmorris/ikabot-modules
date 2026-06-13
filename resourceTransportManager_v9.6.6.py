@@ -13,6 +13,7 @@ import csv
 import tempfile
 import threading
 import pathlib
+import sys
 
 from ikabot.config import *
 from ikabot.helpers.botComm import *
@@ -1946,6 +1947,9 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             print_module_banner("Consolidate — Pick Source City")
             print(f"  {C.DIM}Choose the city to send resources from:{C.RESET}")
             origin_city = rtm_chooseCity(session)
+            if origin_city is None:
+                event.set()
+                return
             origin_cities.append(origin_city)
         else:
             print_module_banner("Consolidate — Pick Source Cities")
@@ -2087,6 +2091,9 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             print_module_banner("Consolidate — Pick Destination")
             print(f"  {C.DIM}Choose which of your cities will receive the resources:{C.RESET}\n")
             destination_city = rtm_chooseCity(session)
+            if destination_city is None:
+                event.set()
+                return
             html = session.get(city_url + str(destination_city["id"]))
             destination_city = getCity(html)
             island_id = destination_city["islandId"]
@@ -2279,6 +2286,9 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         print_module_banner("Distribute — Source City")
         print(f"  {C.DIM}Choose the city that will send resources:{C.RESET}\n")
         origin_city = rtm_chooseCity(session)
+        if origin_city is None:
+            event.set()
+            return
 
         print_module_banner("Distribute — Destinations")
         print(f"  Source: {C.CYAN}{origin_city['name']}{C.RESET}")
@@ -2643,6 +2653,9 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
             print_module_banner("Auto Send — Destination")
             print(f"  {C.DIM}Choose the city that needs resources:{C.RESET}\n")
             destination_city = rtm_chooseCity(session)
+            if destination_city is None:
+                event.set()
+                return
 
             html = session.get(island_url + destination_city["islandId"])
             destination_island = getIsland(html)
@@ -5346,7 +5359,20 @@ def transport_scheduler_loop(session, stop_event):
                 continue
 
             sid = sched["schedule_id"]
-            cycle_sent = execute_schedule(session, sched, notif_config, log_path)
+            try:
+                cycle_sent = execute_schedule(session, sched, notif_config, log_path)
+            except Exception as exc:
+                try:
+                    msg = f"Schedule {sid} crashed: {exc}"
+                    sendToBot(session, msg)
+                except Exception:
+                    pass
+                transport_csv_update(
+                    session, sid,
+                    last_run=now, next_run=now + 3600,
+                    status="active",
+                )
+                continue
 
             total = sched.get("total_shipments", 0) + cycle_sent
             interval = sched.get("interval_hours", 0)
