@@ -31,7 +31,7 @@ def consolidateResources(session, event, stdin_fd, predetermined_input):
     try:
         banner()
 
-        citiesIds = getIdsOfCities(session)
+        citiesIds, _ = getIdsOfCities(session)
         if len(citiesIds) == 0:
             event.set()
             return

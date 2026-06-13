@@ -180,7 +180,7 @@ def getStatus(session, event, stdin_fd, predetermined_input):
                     )
                 )
             else:
-                if typeGood == 1 and (good * 3600) > consumption_per_hour:
+                if typeGood == 1 and good > consumption_per_hour:
                     elapsed_time_run_out = "∞"
                 else:
                     consumption_per_second = Decimal(consumption_per_hour) / Decimal(
