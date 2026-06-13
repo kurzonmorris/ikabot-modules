@@ -4072,11 +4072,20 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
     wlock = transport_worker_lock_path(session)
     if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
-        print("  Scheduler started by another process — "
-              "it will pick up the schedule.")
-        enter()
-        event.set()
-        return
+        if _try_recover_stale_lock(session, wlock):
+            if not _lock_acquire(wlock, timeout=5,
+                                 stale_after=WORKER_LOCK_STALE_SECONDS):
+                print("  Scheduler started by another process — "
+                      "it will pick up the schedule.")
+                enter()
+                event.set()
+                return
+        else:
+            print("  Scheduler started by another process — "
+                  "it will pick up the schedule.")
+            enter()
+            event.set()
+            return
 
     all_rows = transport_csv_load(session)
     extra_activated = 0
@@ -4131,7 +4140,52 @@ def _is_pid_alive(pid):
         return False
 
 
-def _is_transport_worker_running(session):
+def _try_recover_stale_lock(session, wlock):
+    """Attempt to recover from a stale scheduler lock.
+    Signals the old process to stop, waits for it to die, then clears the lock.
+    Returns True if the lock was recovered."""
+    if not os.path.exists(wlock):
+        return True
+    try:
+        with open(wlock, "r") as f:
+            data = json.load(f)
+    except Exception:
+        try:
+            os.remove(wlock)
+        except OSError:
+            pass
+        return True
+
+    lock_pid = data.get("pid")
+    if not lock_pid or not _is_pid_alive(lock_pid):
+        try:
+            os.remove(wlock)
+        except OSError:
+            pass
+        return True
+
+    # Process is alive — signal it to stop via the stop flag
+    stop_path = transport_stop_flag_path(session)
+    try:
+        with open(stop_path, "w") as f:
+            f.write(str(int(time.time())))
+    except OSError:
+        pass
+
+    for _ in range(15):
+        time.sleep(2)
+        if not _is_pid_alive(lock_pid):
+            try:
+                os.remove(wlock)
+            except OSError:
+                pass
+            return True
+        if not os.path.exists(wlock):
+            return True
+
+    return False
+
+
     wlock = transport_worker_lock_path(session)
     if not os.path.exists(wlock):
         return False
@@ -5367,13 +5421,22 @@ def _activate_transport_worker(session, event):
 
     wlock = transport_worker_lock_path(session)
     if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
-        print(f"  {C.WARN}A scheduler is already running for this account.{C.RESET}")
-        print(f"  {C.DIM}Press (o) on the main page to stop it first.{C.RESET}")
-        print(f"  {C.DIM}If you're sure nothing is running, delete:{C.RESET}")
-        print(f"    {wlock}")
-        enter()
-        event.set()
-        return
+        print(f"  {C.WARN}Lock detected — attempting to recover...{C.RESET}")
+        if _try_recover_stale_lock(session, wlock):
+            print(f"  {C.OK}Old scheduler stopped. Starting fresh.{C.RESET}")
+            if not _lock_acquire(wlock, timeout=5,
+                                 stale_after=WORKER_LOCK_STALE_SECONDS):
+                print(f"  {C.WARN}Could not acquire lock after recovery.{C.RESET}")
+                print(f"  {C.DIM}Try deleting: {wlock}{C.RESET}")
+                enter()
+                event.set()
+                return
+        else:
+            print(f"  {C.WARN}Could not stop the existing scheduler.{C.RESET}")
+            print(f"  {C.DIM}Try deleting: {wlock}{C.RESET}")
+            enter()
+            event.set()
+            return
 
     if not enforce_transport_schema_or_abort(session):
         _lock_release(wlock)
