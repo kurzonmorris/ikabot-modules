@@ -4186,6 +4186,7 @@ def _try_recover_stale_lock(session, wlock):
     return False
 
 
+def _is_transport_worker_running(session):
     wlock = transport_worker_lock_path(session)
     if not os.path.exists(wlock):
         return False
