@@ -13,6 +13,7 @@ import csv
 import tempfile
 import threading
 import pathlib
+import sys
 
 from ikabot.config import *
 from ikabot.helpers.botComm import *
@@ -24,6 +25,7 @@ from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.naval import getAvailableShips, getAvailableFreighters
 from ikabot.helpers.varios import addThousandSeparator, getDateTime
+from ikabot.helpers.getJson import getWorldMapIslands
 
 # ---------------------------------------------------------------------------
 #  Resource Reservation System — optional dependency
@@ -45,6 +47,290 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
+
+# ============================================================================
+#  ISLAND CACHE  — all modes use this; cache hit skips the server call
+# ============================================================================
+
+ISLAND_CACHE_DEFAULT_RADIUS = 4
+
+def _rtm_storage_dir():
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    storage = os.path.join(module_dir, "rtm_storage")
+    os.makedirs(storage, exist_ok=True)
+    return storage
+
+
+def _island_cache_path(session):
+    suffix = f"{session.servidor.replace('/', '_').replace(chr(92), '_')}_{session.username}"
+    return os.path.join(_rtm_storage_dir(),
+                        f"island_cache_{suffix}.json")
+
+
+def _load_island_cache(session):
+    path = _island_cache_path(session)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def _save_island_cache(session, cache):
+    path = _island_cache_path(session)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _cache_key(x, y):
+    return f"{x}:{y}"
+
+
+def _build_id_index(cache):
+    """Build reverse lookup: island_id (str) -> coord key "x:y"."""
+    idx = {}
+    for coord_key, entry in cache.items():
+        iid = str(entry.get("island_id", ""))
+        if iid:
+            idx[iid] = coord_key
+    return idx
+
+
+def _cache_island_entry(island, cities):
+    """Build a cache entry dict from a live island + filtered cities list."""
+    return {
+        "x": int(island.get("x", island.get("xCoord", 0))),
+        "y": int(island.get("y", island.get("yCoord", 0))),
+        "island_id": str(island.get("id", "")),
+        "island_name": island.get("name", ""),
+        "tradegood": str(island.get("tradegood", "0")),
+        "cities": [
+            {
+                "id": c.get("id", ""),
+                "name": c.get("name", "?"),
+                "player": c.get("Name", "?"),
+                "position": c.get("position", ""),
+                "level": c.get("level", ""),
+                "ally_tag": c.get("AllyTag", ""),
+                "state": c.get("state", ""),
+            }
+            for c in cities
+        ],
+        "last_updated": int(time.time()),
+    }
+
+
+def _island_from_cache(entry):
+    """Reconstruct a getIsland()-compatible dict from a cache entry."""
+    cities = []
+    for c in entry.get("cities", []):
+        cities.append({
+            "type": "city",
+            "id": c.get("id", ""),
+            "name": c.get("name", "?"),
+            "Name": c.get("player", "?"),
+            "level": c.get("level", ""),
+            "AllyTag": c.get("ally_tag", ""),
+            "state": c.get("state", ""),
+            "position": c.get("position", ""),
+        })
+    return {
+        "id": entry.get("island_id", ""),
+        "name": entry.get("island_name", ""),
+        "x": entry["x"],
+        "y": entry["y"],
+        "xCoord": str(entry["x"]),
+        "yCoord": str(entry["y"]),
+        "tradegood": int(entry.get("tradegood", 0)),
+        "cities": cities,
+    }
+
+
+def _fetch_and_cache_island(session, x, y, cache):
+    """Fetch a single island by coords, cache it, return (island_dict, cities_list)."""
+    html = session.get(f"view=island&xcoord={x}&ycoord={y}")
+    island = getIsland(html)
+    cities = [c for c in island.get("cities", []) if c.get("type") == "city"]
+    key = _cache_key(x, y)
+    cache[key] = _cache_island_entry(island, cities)
+    _save_island_cache(session, cache)
+    return island, cities
+
+
+def _get_island_cached(session, island_id=None, x=None, y=None):
+    """Unified island lookup — cache hit returns instantly, miss fetches & caches.
+
+    Call with either island_id (str) or x,y (int/str) coords.
+    Returns a getIsland()-compatible dict (id, name, x, y, tradegood, cities).
+    """
+    cache = _load_island_cache(session)
+
+    if x is not None and y is not None:
+        key = _cache_key(int(x), int(y))
+        if key in cache:
+            return _island_from_cache(cache[key])
+        island, _ = _fetch_and_cache_island(session, x, y, cache)
+        return island
+
+    if island_id is not None:
+        sid = str(island_id)
+        id_index = _build_id_index(cache)
+        if sid in id_index:
+            return _island_from_cache(cache[id_index[sid]])
+        html = session.get(island_url + str(island_id))
+        island = getIsland(html)
+        ix, iy = island.get("x"), island.get("y")
+        if ix is not None and iy is not None:
+            key = _cache_key(int(ix), int(iy))
+            cities = [c for c in island.get("cities", []) if c.get("type") == "city"]
+            cache[key] = _cache_island_entry(island, cities)
+            _save_island_cache(session, cache)
+        return island
+
+    raise ValueError("_get_island_cached requires island_id or (x, y)")
+
+
+def _cache_age_str(timestamp):
+    """Human-readable time since cache update."""
+    diff = int(time.time()) - timestamp
+    if diff < 60:
+        return "just now"
+    if diff < 3600:
+        return f"{diff // 60}m ago"
+    if diff < 86400:
+        return f"{diff // 3600}h ago"
+    return f"{diff // 86400}d ago"
+
+
+def _fetch_radius_islands(session, cx, cy, radius=ISLAND_CACHE_DEFAULT_RADIUS):
+    """Fetch all islands within radius of (cx,cy) using worldmap endpoint, cache them.
+    Returns count of islands found."""
+    cache = _load_island_cache(session)
+    url = (f"view=worldmap_iso&islandX={cx}&islandY={cy}"
+           f"&oldBackgroundView=island&islandWorldviewScale=1")
+    html = session.get(url)
+    try:
+        wm_islands = getWorldMapIslands(html)
+    except Exception:
+        return 0
+
+    nearby = [
+        isl for isl in wm_islands
+        if abs(isl["x"] - int(cx)) <= radius and abs(isl["y"] - int(cy)) <= radius
+    ]
+
+    fetched = 0
+    for isl in nearby:
+        try:
+            _fetch_and_cache_island(session, isl["x"], isl["y"], cache)
+            fetched += 1
+        except Exception:
+            pass
+    return fetched
+
+
+def _refresh_all_cached_islands(session):
+    """Re-fetch every island currently in the cache. Returns count refreshed."""
+    cache = _load_island_cache(session)
+    if not cache:
+        return 0
+    refreshed = 0
+    for key in list(cache.keys()):
+        entry = cache[key]
+        x, y = entry.get("x"), entry.get("y")
+        if x is None or y is None:
+            continue
+        try:
+            _fetch_and_cache_island(session, x, y, cache)
+            refreshed += 1
+        except Exception:
+            pass
+    return refreshed
+
+
+def _island_cache_menu(session):
+    """Settings menu for island cache management."""
+    while True:
+        cache = _load_island_cache(session)
+        print_module_banner("Island Cache")
+        print(f"  {C.BOLD}Cached islands:{C.RESET} {len(cache)}")
+        if cache:
+            oldest = min(e.get("last_updated", 0) for e in cache.values())
+            newest = max(e.get("last_updated", 0) for e in cache.values())
+            print(f"  {C.DIM}Oldest: {_cache_age_str(oldest)}  "
+                  f"Newest: {_cache_age_str(newest)}{C.RESET}")
+        print(f"  {C.DIM}Search radius: {ISLAND_CACHE_DEFAULT_RADIUS} islands{C.RESET}")
+        print(f"  {C.DIM}Storage: {_rtm_storage_dir()}{C.RESET}")
+
+        print(f"\n  {C.BOLD}(1){C.RESET} Search area — scan islands around coordinates")
+        print(f"  {C.BOLD}(2){C.RESET} Refresh all — re-fetch every cached island")
+        print(f"  {C.BOLD}(3){C.RESET} View cache — list all cached islands")
+        print(f"  {C.BOLD}(4){C.RESET} Clear cache")
+        print(f"  {C.BOLD}('){C.RESET} Back")
+
+        choice = read(min=1, max=4, digit=True, additionalValues=["'"])
+        if choice == "'":
+            return
+
+        if choice == 1:
+            print(f"\n  Enter center coordinates (e.g. 44 03):")
+            raw = read(msg="  Coords: ", additionalValues=["'"])
+            if raw == "'":
+                continue
+            parts = raw.strip().split()
+            if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                print(f"  {C.WARN}Invalid. Enter two numbers (e.g. 44 03){C.RESET}")
+                enter()
+                continue
+            cx, cy = int(parts[0]), int(parts[1])
+            print(f"  {C.DIM}Scanning islands within {ISLAND_CACHE_DEFAULT_RADIUS} "
+                  f"of [{cx}:{cy}]...{C.RESET}")
+            count = _fetch_radius_islands(session, cx, cy)
+            print(f"  {C.OK}Cached {count} island(s).{C.RESET}")
+            enter()
+
+        elif choice == 2:
+            if not cache:
+                print(f"  {C.DIM}Cache is empty. Nothing to refresh.{C.RESET}")
+                enter()
+                continue
+            print(f"  {C.DIM}Refreshing {len(cache)} island(s)... "
+                  f"this may take a moment.{C.RESET}")
+            count = _refresh_all_cached_islands(session)
+            print(f"  {C.OK}Refreshed {count} island(s).{C.RESET}")
+            enter()
+
+        elif choice == 3:
+            if not cache:
+                print(f"\n  {C.DIM}Cache is empty.{C.RESET}")
+                enter()
+                continue
+            print(f"\n  {'Coords':<10} {'Island':<20} {'Cities':<7} {'Updated'}")
+            print(f"  {'─'*10} {'─'*20} {'─'*7} {'─'*12}")
+            for key in sorted(cache.keys()):
+                e = cache[key]
+                coords = f"[{e['x']}:{e['y']}]"
+                name = (e.get("island_name", "?"))[:20]
+                ct = len(e.get("cities", []))
+                age = _cache_age_str(e.get("last_updated", 0))
+                print(f"  {coords:<10} {name:<20} {ct:<7} {age}")
+            enter()
+
+        elif choice == 4:
+            if not cache:
+                print(f"  {C.DIM}Cache is already empty.{C.RESET}")
+                enter()
+                continue
+            print(f"  {C.WARN}Delete all {len(cache)} cached island(s)?{C.RESET}")
+            print(f"  {C.BOLD}(1){C.RESET} Yes  {C.BOLD}(2){C.RESET} No")
+            if read(min=1, max=2, digit=True) == 1:
+                _save_island_cache(session, {})
+                print(f"  {C.OK}Cache cleared.{C.RESET}")
+            enter()
 
 
 # ============================================================================
@@ -200,7 +486,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v9.6.3                  \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.0.0                 \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -429,7 +715,7 @@ def release_shipping_lock(session, use_freighters=False):
 #  TRANSPORT SCHEDULE CSV  — persistent state for all shipping modes
 # ============================================================================
 
-SCHEDULE_SCHEMA_VERSION = 1
+SCHEDULE_SCHEMA_VERSION = 2
 
 SCHEDULE_COLUMNS = [
     "schedule_id",
@@ -447,6 +733,7 @@ SCHEDULE_COLUMNS = [
     "ap_max_wait_minutes",
     "min_shipment_threshold",
     "interval_hours",
+    "run_at_time",
     "notif_level",
     "status",
     "last_run",
@@ -569,7 +856,10 @@ def _lock_acquire(lock_path, timeout=30, stale_after=60):
             try:
                 with open(lock_path, "r") as f:
                     data = json.load(f)
-                if time.time() - data.get("timestamp", 0) > stale_after:
+                lock_pid = data.get("pid")
+                stale_by_time = time.time() - data.get("timestamp", 0) > stale_after
+                stale_by_pid = lock_pid and not _is_pid_alive(lock_pid)
+                if stale_by_time or stale_by_pid:
                     tmp = lock_path + f".{os.getpid()}.tmp"
                     try:
                         fd2 = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -648,15 +938,35 @@ def enforce_transport_schema_or_abort(session):
         print("Cannot read transport schema sidecar.")
         return False
     on_disk = int(data.get("version", -1))
-    if on_disk != SCHEDULE_SCHEMA_VERSION:
-        print(f"Schedule data format has changed (was v{on_disk}, now v{SCHEDULE_SCHEMA_VERSION}).")
-        print(f"  Your existing schedules can't be loaded with this version.")
-        print(f"  To start fresh, delete or rename these two files:")
-        print(f"    {transport_csv_path(session)}")
-        print(f"    {sidecar}")
-        print(f"  WARNING: This will erase all saved schedules.")
-        return False
-    return True
+    if on_disk == SCHEDULE_SCHEMA_VERSION:
+        return True
+    if on_disk == 1 and SCHEDULE_SCHEMA_VERSION == 2:
+        csv_file = transport_csv_path(session)
+        if os.path.exists(csv_file):
+            try:
+                rows = []
+                with open(csv_file, newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        row.setdefault("run_at_time", "")
+                        rows.append(row)
+                write_csv_atomic(csv_file, SCHEDULE_COLUMNS, rows)
+            except Exception as e:
+                print(f"  {C.WARN}Migration failed: {e}{C.RESET}")
+                return False
+        with open(sidecar, "w", encoding="utf-8") as f:
+            json.dump({
+                "version": SCHEDULE_SCHEMA_VERSION,
+                "columns": SCHEDULE_COLUMNS,
+            }, f)
+        return True
+    print(f"Schedule data format has changed (was v{on_disk}, now v{SCHEDULE_SCHEMA_VERSION}).")
+    print(f"  Your existing schedules can't be loaded with this version.")
+    print(f"  To start fresh, delete or rename these two files:")
+    print(f"    {transport_csv_path(session)}")
+    print(f"    {sidecar}")
+    print(f"  WARNING: This will erase all saved schedules.")
+    return False
 
 
 # --- Row coercion ---
@@ -804,9 +1114,14 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
                        dest_minimums=None, bulk_csv_path="",
                        bulk_run_column="", ap_max_wait_minutes=120,
                        min_shipment_threshold=0, interval_hours=0,
+                       run_at_time="",
                        notif_level="none", status="pending",
                        notes=""):
     now_ts = int(time.time())
+    if run_at_time:
+        first_run = _next_run_for_time(run_at_time)
+    else:
+        first_run = now_ts
     return {
         "schedule_id":     schedule_id,
         "mode":            mode,
@@ -823,15 +1138,73 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "ap_max_wait_minutes": ap_max_wait_minutes,
         "min_shipment_threshold": min_shipment_threshold,
         "interval_hours":  interval_hours,
+        "run_at_time":     run_at_time,
         "notif_level":     notif_level,
         "status":          status,
         "last_run":        "",
-        "next_run":        now_ts,
+        "next_run":        first_run,
         "total_shipments": 0,
         "created_at":      now_ts,
         "notes":           notes,
         "schema_version":  SCHEDULE_SCHEMA_VERSION,
     }
+
+
+def _next_run_for_time(time_str):
+    """Calculate the next Unix timestamp for a given HH:MM time string (server time).
+    If the time has already passed today, returns tomorrow's occurrence."""
+    try:
+        hour, minute = int(time_str.split(":")[0]), int(time_str.split(":")[1])
+    except (ValueError, IndexError):
+        return int(time.time())
+    now = datetime.datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    return int(target.timestamp())
+
+
+def _get_schedule_timing(event, mode_name):
+    """Shared timing setup for all modes. Returns (interval_hours, run_at_time)
+    or None if user cancels."""
+    print_module_banner(f"{mode_name} — Schedule Timing")
+    print(f"  {C.DIM}When should this run?{C.RESET}\n")
+    print(f"  {C.BOLD}(1){C.RESET} One-time (send once and done)")
+    print(f"  {C.BOLD}(2){C.RESET} Repeat every X hours")
+    print(f"  {C.BOLD}(3){C.RESET} Daily at a specific time (server time)")
+    print(f"  {C.BOLD}('){C.RESET} Back")
+    choice = read(min=1, max=3, digit=True, additionalValues=["'"])
+    if choice == "'":
+        event.set()
+        return None
+
+    if choice == 1:
+        return (0, "")
+
+    if choice == 2:
+        print(f"\n  Repeat every how many hours?")
+        hours = read(min=1, digit=True, additionalValues=["'"])
+        if hours == "'":
+            event.set()
+            return None
+        print(f"  {C.CYAN}Repeats every {hours} hour(s){C.RESET}")
+        return (int(hours), "")
+
+    print(f"\n  {C.DIM}All times use server time to avoid timezone issues.{C.RESET}")
+    print(f"  Enter time in HH:MM format (24h, e.g. 14:30):")
+    while True:
+        time_input = read(msg="  Time: ", additionalValues=["'"])
+        if time_input == "'":
+            event.set()
+            return None
+        match = re.match(r'^(\d{1,2}):(\d{2})$', time_input.strip())
+        if match:
+            h, m = int(match.group(1)), int(match.group(2))
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                time_str = f"{h:02d}:{m:02d}"
+                print(f"  {C.CYAN}Runs daily at {time_str} server time{C.RESET}")
+                return (24, time_str)
+        print(f"  {C.HINT}Invalid format. Use HH:MM (e.g. 06:00, 14:30, 23:00){C.RESET}")
 
 
 # ============================================================================
@@ -1359,16 +1732,44 @@ def issues_col_for_run(run_column):
     return run_column.replace("Run_", "Issues_", 1)
 
 
+def _parse_amount(s):
+    """Parse a number string with optional 'k' suffix and comma separators.
+    '500' -> 500, '10k' -> 10000, '1.5k' -> 1500, '10,000' -> 10000."""
+    s = s.strip().replace(",", "")
+    if not s:
+        return 0
+    if s.lower().endswith("k"):
+        num = s[:-1].strip()
+        try:
+            return int(float(num) * 1000)
+        except ValueError:
+            return 0
+    try:
+        return int(s)
+    except ValueError:
+        return 0
+
+
 def parse_resource_value(val):
-    """Parse a resource cell: '500' -> ('exact', 500), 'e10000' -> ('except', 10000).
-    Handles commas in numbers (e.g. '10,000' -> 10000)."""
+    """Parse a resource cell.
+    Exact amounts:  '500' -> ('exact', 500),  '10k' -> ('exact', 10000)
+    Send all:       'all' or 'a' -> ('except', 0)
+    All-except:     'all-10k' or 'a-5000' -> ('except', 10000) / ('except', 5000)
+    Legacy prefix:  'e10000' -> ('except', 10000)
+    """
     val = val.strip()
-    if val.lower().startswith("e"):
-        num_part = val[1:].replace(",", "").strip()
-        match = re.search(r"\d+", num_part)
-        return ("except", int(match.group()) if match else 0)
-    val_clean = val.replace(",", "")
-    return ("exact", int(val_clean) if val_clean.isdigit() else 0)
+    low = val.lower()
+    if low in ("all", "a"):
+        return ("except", 0)
+    if low.startswith("all-") or low.startswith("a-"):
+        rest = val.split("-", 1)[1]
+        return ("except", _parse_amount(rest))
+    if low.startswith("e") and not low[1:].strip().startswith("-"):
+        num_part = val[1:]
+        if num_part.strip():
+            return ("except", _parse_amount(num_part))
+        return ("except", 0)
+    return ("exact", _parse_amount(val))
 
 
 def resolve_resources(parsed, source_available, row, csv_resource_cols,
@@ -1475,7 +1876,7 @@ def readResourceAmount(resource_name):
     while True:
         user_input = read(
             msg=f"{resource_name}: ", empty=True,
-            additionalValues=["'", "=", "e", "E"]
+            additionalValues=["'", "="]
         )
         if user_input == "'":
             return "EXIT"
@@ -1483,20 +1884,30 @@ def readResourceAmount(resource_name):
             return "RESTART"
         if user_input == "":
             return None
-        if user_input.lower() == "e":
+        low = user_input.strip().lower()
+        if low in ("all", "a"):
             print(f"  -> Send ALL")
             return "SEND_ALL"
-        cleaned = user_input.replace(",", "").replace(" ", "")
-        if cleaned.isdigit():
-            amount = int(cleaned)
-            if amount == 0:
-                return None
+        if low.startswith("all-") or low.startswith("a-"):
+            reserve = _parse_amount(user_input.split("-", 1)[1])
+            print(f"  -> Send all, keep {addThousandSeparator(reserve)}")
+            return ("EXCEPT", reserve)
+        amount = _parse_amount(user_input)
+        if amount > 0:
             print(f"  -> Set to: {addThousandSeparator(amount)}")
             return amount
-        print(f"  {C.HINT}Enter a number, e = send all, blank = skip, ' = exit, = = restart{C.RESET}")
+        if amount == 0:
+            return None
+        print(f"  {C.HINT}Examples: 500, 10k, all, a, all-10k, a-5000{C.RESET}")
+        print(f"  {C.HINT}blank = skip, ' = exit, = = restart{C.RESET}")
 
 
 def get_resource_config(send_mode=2):
+    print(f"  {C.HINT}Resource input:  500 or 10k = exact amount{C.RESET}")
+    print(f"  {C.HINT}                 all or a   = send everything{C.RESET}")
+    print(f"  {C.HINT}                 all-10k    = send all, keep 10k{C.RESET}")
+    print(f"  {C.HINT}                 blank      = skip resource{C.RESET}")
+    print(f"  {C.HINT}                 '          = exit    =  = restart{C.RESET}\n")
     while True:
         config = []
         restart = False
@@ -1509,7 +1920,10 @@ def get_resource_config(send_mode=2):
                 restart = True
                 break
             if amount == "SEND_ALL":
-                amount = 0  # 0 = send everything (keep nothing)
+                amount = 0
+            elif isinstance(amount, tuple) and amount[0] == "EXCEPT":
+                config.append(("except", amount[1]))
+                continue
             elif send_mode == 2 and amount is None:
                 amount = 0
             config.append(amount)
@@ -1677,45 +2091,6 @@ def rtm_ignoreCities(session, msg=None, exclude_mode=False):
     return result_ids, result_cities
 
 
-# ============================================================================
-#  DRY RUN PREVIEW
-# ============================================================================
-
-def run_dry_preview(routes_info, mode_name):
-    print_module_banner(f"DRY RUN PREVIEW - {mode_name}")
-    print(f"  {'#':<4} {'From':<18} {'To':<18}", end="")
-    for res in materials_names:
-        print(f" {res:>9}", end="")
-    print("")
-    print(f"  {'--':<4} {'-'*18:<18} {'-'*18:<18}", end="")
-    for _ in materials_names:
-        print(f" {'-'*9:>9}", end="")
-    print("")
-
-    totals = [0] * len(materials_names)
-    for idx, info in enumerate(routes_info):
-        src = info["source"][:18] if len(info["source"]) <= 18 else info["source"][:15] + "..."
-        dst = info["dest"][:18] if len(info["dest"]) <= 18 else info["dest"][:15] + "..."
-        resources = info["resources"]
-        print(f"  {idx+1:<4} {src:<18} {dst:<18}", end="")
-        for i in range(len(materials_names)):
-            val = resources[i] if i < len(resources) else 0
-            totals[i] += val
-            if val > 0:
-                print(f" {addThousandSeparator(val):>9}", end="")
-            else:
-                print(f" {'0':>9}", end="")
-        print("")
-
-    print(f"  {'--':<4} {'-'*18:<18} {'-'*18:<18}", end="")
-    for _ in materials_names:
-        print(f" {'-'*9:>9}", end="")
-    print("")
-    print(f"  {'':4} {'':18} {'TOTAL':<18}", end="")
-    for i in range(len(materials_names)):
-        print(f" {addThousandSeparator(totals[i]):>9}", end="")
-    print("\n")
-    print("  --- DRY RUN: No resources were sent. ---\n")
 
 
 # ============================================================================
@@ -1849,9 +2224,11 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
             print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
             print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
             print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
+            print(f"  {C.BOLD}(8){C.RESET} Island Cache")
+            print(f"  {C.DIM}    Browse, search, and cache island data for faster lookups.{C.RESET}")
             print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
 
-            shipping_mode = read(min=1, max=7, digit=True,
+            shipping_mode = read(min=1, max=8, digit=True,
                                  additionalValues=["'", "s", "S", "o", "O",
                                                     "x", "X", "n", "N"])
             if shipping_mode == "'":
@@ -1880,6 +2257,9 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
             if shipping_mode == 7:
                 manage_schedules_menu(session, event, telegram_enabled,
                                       log_path)
+                continue
+            if shipping_mode == 8:
+                _island_cache_menu(session)
                 continue
 
             if shipping_mode == 1:
@@ -1943,6 +2323,9 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             print_module_banner("Consolidate — Pick Source City")
             print(f"  {C.DIM}Choose the city to send resources from:{C.RESET}")
             origin_city = rtm_chooseCity(session)
+            if origin_city is None:
+                event.set()
+                return
             origin_cities.append(origin_city)
         else:
             print_module_banner("Consolidate — Pick Source Cities")
@@ -2032,12 +2415,9 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 if y_coord == "=":
                     continue
 
-                html = session.get(
-                    f"view=island&xcoord={x_coord}&ycoord={y_coord}"
-                )
-                island = getIsland(html)
+                island = _get_island_cached(session, x=x_coord, y=y_coord)
                 cities_on_island = [
-                    c for c in island["cities"] if c["type"] == "city"
+                    c for c in island["cities"] if c.get("type") == "city"
                 ]
                 if not cities_on_island:
                     print(f"No cities on island [{x_coord}:{y_coord}]!")
@@ -2084,11 +2464,13 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             print_module_banner("Consolidate — Pick Destination")
             print(f"  {C.DIM}Choose which of your cities will receive the resources:{C.RESET}\n")
             destination_city = rtm_chooseCity(session)
+            if destination_city is None:
+                event.set()
+                return
             html = session.get(city_url + str(destination_city["id"]))
             destination_city = getCity(html)
             island_id = destination_city["islandId"]
-            html = session.get(island_url + island_id)
-            island = getIsland(html)
+            island = _get_island_cached(session, island_id=island_id)
             destination_city["isOwnCity"] = True
             dest_player = session.username
 
@@ -2115,35 +2497,16 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         if notif_config is None:
             return
 
-        # Schedule
-        print_module_banner("Consolidate — Repeat Interval")
-        print(f"  {C.DIM}How often should this shipment run?{C.RESET}\n")
-        interval_confirmed = False
-        while not interval_confirmed:
-            print(f"  {C.HINT}0 = one-time (send once and done){C.RESET}")
-            print(f"  {C.HINT}1+ = repeat every N hours{C.RESET}")
-            print(f"  {C.BOLD}('){C.RESET} Back")
-            interval_hours = read(min=0, digit=True, additionalValues=["'"])
-            if interval_hours == "'":
-                event.set()
-                return
-            print("")
-            if interval_hours == 0:
-                print(f"  {C.CYAN}One-time shipment{C.RESET}")
-            else:
-                print(f"  {C.CYAN}Repeats every {interval_hours} hour(s){C.RESET}")
-            print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter")
-            if read(min=1, max=2, digit=True) == 1:
-                interval_confirmed = True
+        timing = _get_schedule_timing(event, "Consolidate")
+        if timing is None:
+            return
+        interval_hours, run_at_time = timing
 
-        # --- Calculate preview ---
         total_send = [0] * len(materials_names)
         space_warnings = []
-        preview_routes = []
         for oc in origin_cities:
             html = session.get(city_url + str(oc["id"]))
             odata = getCity(html)
-            to_send = [0] * len(materials_names)
             for i in range(len(materials_names)):
                 if resource_config[i] is None:
                     continue
@@ -2166,14 +2529,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                         s, destination_city["availableResources"][i],
                         dest_minimums[i]
                     )
-                to_send[i] = s
                 total_send[i] += s
-            if sum(to_send) > 0:
-                preview_routes.append({
-                    "source": odata["name"],
-                    "dest": destination_city["name"],
-                    "resources": to_send,
-                })
 
         min_threshold = 0
 
@@ -2188,8 +2544,13 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             print(f"  {C.BOLD}Destination:{C.RESET} {destination_city['name']}")
             if dest_minimums:
                 print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
-            int_label = "One-time" if interval_hours == 0 else f"Every {interval_hours}h"
-            print(f"  {C.BOLD}Interval:{C.RESET}    {int_label}")
+            if run_at_time:
+                int_label = f"Daily at {run_at_time} (server time)"
+            elif interval_hours == 0:
+                int_label = "One-time"
+            else:
+                int_label = f"Every {interval_hours}h"
+            print(f"  {C.BOLD}Schedule:{C.RESET}    {int_label}")
             if min_threshold > 0:
                 print(f"  {C.BOLD}Min ship:{C.RESET}    {min_threshold:,} total resources")
             print(f"  {C.BOLD}Total:{C.RESET}       {C.OK}{addThousandSeparator(sum(total_send))}{C.RESET} resources")
@@ -2199,10 +2560,9 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                     print(w)
             print("")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
-                  f"{C.CYAN}(D){C.RESET} Dry run preview  "
                   f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
-            rta = read(values=["y", "Y", "n", "N", "d", "D", "t", "T", ""])
+            rta = read(values=["y", "Y", "n", "N", "t", "T", ""])
             if rta.lower() == "n":
                 event.set()
                 return
@@ -2219,11 +2579,6 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                           f"will be skipped{C.RESET}")
                 else:
                     print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
-                enter()
-                continue
-            if rta.lower() == "d":
-                run_dry_preview(preview_routes, "Consolidate")
-                print("Press Enter to continue...")
                 enter()
                 continue
             break
@@ -2246,6 +2601,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         dest_minimums=dest_minimums or [0, 0, 0, 0, 0],
         min_shipment_threshold=min_threshold,
         interval_hours=interval_hours,
+        run_at_time=run_at_time,
         notif_level=notif_config.get("level", "none"),
         notes=f"{src_names} -> {destination_city['name']}",
     )
@@ -2276,6 +2632,9 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         print_module_banner("Distribute — Source City")
         print(f"  {C.DIM}Choose the city that will send resources:{C.RESET}\n")
         origin_city = rtm_chooseCity(session)
+        if origin_city is None:
+            event.set()
+            return
 
         print_module_banner("Distribute — Destinations")
         print(f"  Source: {C.CYAN}{origin_city['name']}{C.RESET}")
@@ -2305,8 +2664,8 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         print(f"  Source: {C.CYAN}{origin_city['name']}{C.RESET}")
         print(f"  Destinations: {C.CYAN}{dest_summary}{C.RESET}\n")
         print(f"  {C.DIM}Enter how much of each resource to send to EACH destination.{C.RESET}\n")
-        print(f"  {C.HINT}  number = send that amount  |  e = send ALL{C.RESET}")
-        print(f"  {C.HINT}  blank = skip  |  = restart  |  ' exit{C.RESET}\n")
+        print(f"  {C.HINT}  500 or 10k = exact  |  all or a = send all{C.RESET}")
+        print(f"  {C.HINT}  all-10k = keep 10k  |  blank = skip  |  ' = exit{C.RESET}\n")
 
         resource_config = get_resource_config(send_mode=2)
         if resource_config is None:
@@ -2321,36 +2680,13 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         if notif_config is None:
             return
 
-        # Schedule
-        print_module_banner("Distribute — Repeat Interval")
-        print(f"  {C.DIM}How often should this distribution run?{C.RESET}\n")
-        interval_confirmed = False
-        while not interval_confirmed:
-            print(f"  {C.HINT}0 = one-time  |  1+ = repeat every N hours{C.RESET}")
-            print(f"  {C.BOLD}('){C.RESET} Back")
-            interval_hours = read(min=0, digit=True, additionalValues=["'"])
-            if interval_hours == "'":
-                event.set()
-                return
-            print("")
-            if interval_hours == 0:
-                print(f"  {C.CYAN}One-time distribution{C.RESET}")
-            else:
-                print(f"  {C.CYAN}Repeats every {interval_hours} hour(s){C.RESET}")
-            print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter")
-            if read(min=1, max=2, digit=True) == 1:
-                interval_confirmed = True
+        timing = _get_schedule_timing(event, "Distribute")
+        if timing is None:
+            return
+        interval_hours, run_at_time = timing
 
-        # Preview
         total_needed = [a * len(destination_cities) for a in resource_config]
         grand = sum(total_needed)
-        preview_routes = []
-        for dc in destination_cities:
-            preview_routes.append({
-                "source": origin_city["name"],
-                "dest": dc["name"],
-                "resources": resource_config,
-            })
 
         min_threshold = 0
 
@@ -2362,16 +2698,20 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
             print(f"  {C.BOLD}Destinations:{C.RESET}  {dest_summary} ({len(destination_cities)})")
             if dest_minimums:
                 print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
-            int_label = "One-time" if interval_hours == 0 else f"Every {interval_hours}h"
-            print(f"  {C.BOLD}Interval:{C.RESET}      {int_label}")
+            if run_at_time:
+                int_label = f"Daily at {run_at_time} (server time)"
+            elif interval_hours == 0:
+                int_label = "One-time"
+            else:
+                int_label = f"Every {interval_hours}h"
+            print(f"  {C.BOLD}Schedule:{C.RESET}      {int_label}")
             if min_threshold > 0:
                 print(f"  {C.BOLD}Min ship:{C.RESET}      {min_threshold:,} total resources")
             print(f"  {C.BOLD}Total:{C.RESET}         {C.OK}{addThousandSeparator(grand)}{C.RESET} resources\n")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
-                  f"{C.CYAN}(D){C.RESET} Dry run preview  "
                   f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
-            rta = read(values=["y", "Y", "n", "N", "d", "D", "t", "T", ""])
+            rta = read(values=["y", "Y", "n", "N", "t", "T", ""])
             if rta.lower() == "n":
                 event.set()
                 return
@@ -2388,11 +2728,6 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
                           f"will be skipped{C.RESET}")
                 else:
                     print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
-                enter()
-                continue
-            if rta.lower() == "d":
-                run_dry_preview(preview_routes, "Distribute")
-                print("Press Enter to continue...")
                 enter()
                 continue
             break
@@ -2414,6 +2749,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         dest_minimums=dest_minimums or [0, 0, 0, 0, 0],
         min_shipment_threshold=min_threshold,
         interval_hours=interval_hours,
+        run_at_time=run_at_time,
         notif_level=notif_config.get("level", "none"),
         notes=f"{origin_city['name']} -> {dest_names[:30]}",
     )
@@ -2553,16 +2889,14 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
 
         min_threshold = 0
 
-        # Confirmation with dry run
         while True:
             print(f"\n  {C.BOLD}{len(preview_routes)} shipment(s) planned.{C.RESET}")
             if min_threshold > 0:
                 print(f"  {C.BOLD}Min ship:{C.RESET} {min_threshold:,} total resources")
             print(f"  {C.OK}(Y){C.RESET} Confirm — start balancing")
-            print(f"  {C.CYAN}(D){C.RESET} Dry run — preview shipments")
             print(f"  {C.CYAN}(T){C.RESET} Min shipment")
             print(f"  {C.WARN}(N){C.RESET} Cancel")
-            choice = read(values=["y", "Y", "n", "N", "d", "D", "t", "T", ""])
+            choice = read(values=["y", "Y", "n", "N", "t", "T", ""])
             if choice.lower() == "n":
                 event.set()
                 return
@@ -2579,11 +2913,6 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
                           f"will be skipped{C.RESET}")
                 else:
                     print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
-                enter()
-                continue
-            if choice.lower() == "d":
-                run_dry_preview(preview_routes, "Even Distribution")
-                print("Press Enter to continue...")
                 enter()
                 continue
             break
@@ -2640,9 +2969,11 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
             print_module_banner("Auto Send — Destination")
             print(f"  {C.DIM}Choose the city that needs resources:{C.RESET}\n")
             destination_city = rtm_chooseCity(session)
+            if destination_city is None:
+                event.set()
+                return
 
-            html = session.get(island_url + destination_city["islandId"])
-            destination_island = getIsland(html)
+            destination_island = _get_island_cached(session, island_id=destination_city["islandId"])
 
             print_module_banner("Auto Send")
             print(f"  {C.DIM}Scanning your cities for available resources...{C.RESET}")
@@ -2737,18 +3068,6 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                     return
                 elif choice == "E":
                     break
-                elif choice == "D":
-                    preview = []
-                    for route in routes:
-                        preview.append({
-                            "source": route[0]["name"],
-                            "dest": route[1]["name"],
-                            "resources": list(route[3:]),
-                        })
-                    run_dry_preview(preview, "Auto Send")
-                    print("Press Enter to continue...")
-                    enter()
-                    continue
                 elif choice == "T":
                     print(f"\n  Current minimum: "
                           f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
@@ -2871,11 +3190,10 @@ def render_auto_send_review(destination_city, destination_island, routes,
     print(f" {total_ships:>7}\n")
 
     print(f"  {C.OK}(Y){C.RESET} Proceed")
-    print(f"  {C.CYAN}(D){C.RESET} Dry run preview")
     print(f"  {C.CYAN}(T){C.RESET} Min shipment")
     print(f"  {C.YELLOW}(E){C.RESET} Edit — re-enter amounts")
     print(f"  {C.WARN}(C){C.RESET} Cancel")
-    choice = read(values=["y", "Y", "e", "E", "c", "C", "d", "D",
+    choice = read(values=["y", "Y", "e", "E", "c", "C",
                           "t", "T", ""])
     if choice == "" or choice.upper() == "Y":
         return "Y"
@@ -2890,6 +3208,91 @@ BULK_CSV_COLUMNS = [
     "Transport", "X", "Y", "Player", "City", "City_Location",
     "Wood", "Wine", "Marble", "Crystal", "Sulphur", "From", "Hours",
 ]
+
+
+# ----------------------------------------------------------------------------
+#  CSV Template Creator
+# ----------------------------------------------------------------------------
+
+def _account_data_dir(session):
+    suffix = _account_suffix(session)
+    path = os.path.join(os.path.expanduser("~"), f".ikabot_data_{suffix}")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _create_csv_template(session):
+    print_module_banner("Bulk Distribution — Create CSV Template")
+    print(f"  {C.DIM}Creates a blank CSV template for bulk distribution.{C.RESET}\n")
+
+    print(f"  Template name (e.g. 'wine_run', 'alliance_supply'):")
+    print(f"  {C.HINT}This becomes the filename: <name>.csv{C.RESET}")
+    name = read(msg="  Name: ", empty=True, additionalValues=["'"])
+    if name == "'" or not name.strip():
+        return None
+    safe_name = re.sub(r'[^\w.-]', '_', name.strip())
+    if not safe_name.endswith(".csv"):
+        safe_name += ".csv"
+
+    print(f"\n  {C.BOLD}Where to save?{C.RESET}")
+    acct_dir = _account_data_dir(session)
+    generic_dir = os.path.join(os.path.expanduser("~"), ".ikabot_templates")
+    print(f"  {C.BOLD}(1){C.RESET} Account folder: {C.DIM}{acct_dir}{C.RESET}")
+    print(f"  {C.BOLD}(2){C.RESET} Shared folder:  {C.DIM}{generic_dir}{C.RESET}")
+    print(f"  {C.BOLD}(3){C.RESET} Custom location")
+    print(f"  {C.BOLD}('){C.RESET} Cancel")
+    loc = read(min=1, max=3, digit=True, additionalValues=["'"])
+    if loc == "'":
+        return None
+
+    if loc == 1:
+        save_dir = acct_dir
+    elif loc == 2:
+        os.makedirs(generic_dir, exist_ok=True)
+        save_dir = generic_dir
+    else:
+        print("  Enter full directory path:")
+        custom = read(msg="  Path: ", empty=True, additionalValues=["'"])
+        if custom == "'" or not custom.strip():
+            return None
+        save_dir = os.path.expanduser(custom.strip())
+        if not os.path.isdir(save_dir):
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+            except OSError as e:
+                print(f"  {C.WARN}Cannot create directory: {e}{C.RESET}")
+                enter()
+                return None
+
+    csv_path = os.path.join(save_dir, safe_name)
+    if os.path.exists(csv_path):
+        print(f"\n  {C.WARN}File already exists: {csv_path}{C.RESET}")
+        print(f"  {C.BOLD}(1){C.RESET} Overwrite  {C.BOLD}(2){C.RESET} Cancel")
+        if read(min=1, max=2, digit=True) == 2:
+            return None
+
+    example_rows = [
+        {"Transport": "m", "X": "99", "Y": "39", "Player": "player_name",
+         "City": "Example City", "City_Location": "1",
+         "Wood": "0", "Wine": "5000", "Marble": "0", "Crystal": "0",
+         "Sulphur": "0", "From": "", "Hours": "24"},
+    ]
+
+    try:
+        write_csv_atomic(csv_path, BULK_CSV_COLUMNS, example_rows)
+        print(f"\n  {C.OK}Template created: {csv_path}{C.RESET}")
+        print(f"  {C.DIM}Edit it with a spreadsheet or the built-in editor.{C.RESET}")
+        print(f"\n  {C.HINT}Resource values:  500 or 10k = exact amount{C.RESET}")
+        print(f"  {C.HINT}                  all or a   = send everything{C.RESET}")
+        print(f"  {C.HINT}                  all-10k    = send all, keep 10k{C.RESET}")
+        print(f"  {C.HINT}From column:      a = all cities, 1,3 = specific city indices{C.RESET}")
+        print(f"  {C.HINT}Transport:        m = merchant, f = freighters{C.RESET}")
+        enter()
+        return csv_path
+    except Exception as e:
+        print(f"  {C.WARN}Error creating template: {e}{C.RESET}")
+        enter()
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -2960,9 +3363,12 @@ def _bulk_editor_menu(session, csv_path, event):
 
 def _bulk_editor_add_cities(session, rows, fieldnames):
     print_module_banner("Add Cities — Fast Entry")
-    print("  Enter island coordinates (two numbers with space, e.g. 44 03)")
-    print("  Then select city positions from the island.")
+    print("  Enter island coordinates (e.g. 44 03)")
+    print("  Cached islands are used when available (faster).")
+    print("  Type 'r' to refresh the current island from the server.")
     print("  Type 'done' when finished adding cities.\n")
+
+    cache = _load_island_cache(session)
 
     while True:
         raw = read(msg="  Island coords (or 'done'): ",
@@ -2979,44 +3385,110 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
             continue
 
         x_coord, y_coord = parts[0], parts[1]
+        key = _cache_key(int(x_coord), int(y_coord))
+        from_cache = False
+
+        if key in cache:
+            cached = cache[key]
+            age = _cache_age_str(cached.get("last_updated", 0))
+            print(f"  {C.DIM}Using cached data (updated {age}){C.RESET}")
+            from_cache = True
+
         try:
-            html = session.get(
-                f"view=island&xcoord={x_coord}&ycoord={y_coord}"
-            )
-            island = getIsland(html)
+            if from_cache:
+                island, cities_on_island = None, None
+            else:
+                island, cities_on_island = _fetch_and_cache_island(
+                    session, x_coord, y_coord, cache)
+                cities_on_island = [
+                    c for c in island["cities"] if c.get("type") == "city"
+                ]
         except Exception as e:
             print(f"  Error fetching island: {e}")
             continue
 
-        cities_on_island = [
-            c for c in island["cities"] if c.get("type") == "city"
-        ]
-        if not cities_on_island:
-            print(f"  No cities found on island [{x_coord}:{y_coord}]")
-            continue
+        if from_cache:
+            cached_entry = cache[key]
+            isl_name = cached_entry.get("island_name", "?")
+            tg_idx = int(cached_entry.get("tradegood", 0))
+            tradegood = materials_names[tg_idx] if tg_idx < len(materials_names) else "?"
+            cached_cities = cached_entry.get("cities", [])
 
-        tradegood = materials_names[int(island.get("tradegood", 0))]
-        print(f"\n  Island [{x_coord}:{y_coord}] — {island.get('name', '?')}"
-              f" ({tradegood})")
-        print(f"  {'Pos':<4} {'City':<20} {'Player':<15} {'Loc'}")
-        print(f"  {'─'*4} {'─'*20} {'─'*15} {'─'*5}")
-        for i, c in enumerate(cities_on_island, 1):
-            cn = c.get("name", "?")[:20]
-            pn = c.get("Name", "?")[:15]
-            loc = get_city_location_token(c) or ""
-            print(f"  {i:<4} {cn:<20} {pn:<15} {loc}")
+            print(f"\n  Island [{x_coord}:{y_coord}] — {isl_name} ({tradegood})")
+            print(f"  {'Pos':<4} {'City':<20} {'Player':<15} {'Ally'}")
+            print(f"  {'─'*4} {'─'*20} {'─'*15} {'─'*8}")
+            for i, c in enumerate(cached_cities, 1):
+                cn = c.get("name", "?")[:20]
+                pn = c.get("player", "?")[:15]
+                ally = c.get("ally_tag", "")[:8]
+                print(f"  {i:<4} {cn:<20} {pn:<15} {ally}")
+
+            if not cached_cities:
+                print(f"  No cities in cache for [{x_coord}:{y_coord}]")
+                continue
+
+            display_cities = cached_cities
+        else:
+            if not cities_on_island:
+                print(f"  No cities found on island [{x_coord}:{y_coord}]")
+                continue
+
+            tradegood = materials_names[int(island.get("tradegood", 0))]
+            print(f"\n  Island [{x_coord}:{y_coord}] — {island.get('name', '?')}"
+                  f" ({tradegood})")
+            print(f"  {'Pos':<4} {'City':<20} {'Player':<15} {'Loc'}")
+            print(f"  {'─'*4} {'─'*20} {'─'*15} {'─'*5}")
+            for i, c in enumerate(cities_on_island, 1):
+                cn = c.get("name", "?")[:20]
+                pn = c.get("Name", "?")[:15]
+                loc = get_city_location_token(c) or ""
+                print(f"  {i:<4} {cn:<20} {pn:<15} {loc}")
+
+            display_cities = [
+                {
+                    "name": c.get("name", "?"),
+                    "player": c.get("Name", "?"),
+                    "position": get_city_location_token(c) or "",
+                }
+                for c in cities_on_island
+            ]
 
         selected_positions = set()
         print(f"\n  Type position numbers to add (e.g. 1,4,5)")
-        print(f"  Type d + number to deselect (e.g. d3 or d1,4)")
+        print(f"  Type d + number to deselect (e.g. d3)")
+        print(f"  Type r to refresh this island from server")
         print(f"  Press Enter when done with this island:")
 
         while True:
-            sel = read(msg="  > ", empty=True, additionalValues=["'"])
+            sel = read(msg="  > ", empty=True, additionalValues=["'", "r", "R"])
             if sel == "'":
                 break
             if sel == "":
                 break
+            if sel.lower() == "r":
+                print(f"  {C.DIM}Refreshing [{x_coord}:{y_coord}]...{C.RESET}")
+                try:
+                    island, _ = _fetch_and_cache_island(
+                        session, x_coord, y_coord, cache)
+                    cities_on_island = [
+                        c for c in island["cities"]
+                        if c.get("type") == "city"
+                    ]
+                    display_cities = [
+                        {
+                            "name": c.get("name", "?"),
+                            "player": c.get("Name", "?"),
+                            "position": get_city_location_token(c) or "",
+                        }
+                        for c in cities_on_island
+                    ]
+                    print(f"  {C.OK}Refreshed! {len(display_cities)} cities.{C.RESET}")
+                    for i, c in enumerate(display_cities, 1):
+                        print(f"  {i:<4} {c['name'][:20]:<20} "
+                              f"{c['player'][:15]:<15}")
+                except Exception as e:
+                    print(f"  {C.WARN}Refresh failed: {e}{C.RESET}")
+                continue
 
             if sel.lower().startswith("d"):
                 nums = sel[1:].strip()
@@ -3027,8 +3499,8 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
                         if p in selected_positions:
                             selected_positions.discard(p)
                             removed.append(
-                                cities_on_island[p - 1].get("name", "?")
-                                if 1 <= p <= len(cities_on_island) else "?"
+                                display_cities[p - 1].get("name", "?")
+                                if 1 <= p <= len(display_cities) else "?"
                             )
                     if removed:
                         print(f"  Removed: {', '.join(removed)}")
@@ -3042,15 +3514,13 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
                 positions = [int(x.strip()) for x in sel.split(",")]
                 added = []
                 for p in positions:
-                    if 1 <= p <= len(cities_on_island):
+                    if 1 <= p <= len(display_cities):
                         if p not in selected_positions:
                             selected_positions.add(p)
-                            added.append(
-                                cities_on_island[p - 1].get("name", "?")
-                            )
+                            added.append(display_cities[p - 1].get("name", "?"))
                     else:
                         print(f"  Position {p} out of range "
-                              f"(1-{len(cities_on_island)})")
+                              f"(1-{len(display_cities)})")
                 if added:
                     print(f"  Added: {', '.join(added)}")
             except ValueError:
@@ -3058,13 +3528,14 @@ def _bulk_editor_add_cities(session, rows, fieldnames):
 
         if selected_positions:
             for p in sorted(selected_positions):
-                c = cities_on_island[p - 1]
+                c = display_cities[p - 1]
                 row = {col: "" for col in BULK_CSV_COLUMNS}
                 row["X"] = x_coord
                 row["Y"] = y_coord
-                row["Player"] = c.get("Name", "")
+                row["Player"] = c.get("player", c.get("Name", ""))
                 row["City"] = c.get("name", "")
-                row["City_Location"] = get_city_location_token(c) or ""
+                row["City_Location"] = c.get("position",
+                    get_city_location_token(c) if not from_cache else "")
                 row["Transport"] = "m"
                 row["From"] = "a"
                 row["Hours"] = "1"
@@ -3353,25 +3824,34 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         saved_csv = prefs.get("csv_path", "")
         if saved_csv:
             print(f"  {C.CYAN}Last used:{C.RESET} {saved_csv}")
-            print(f"  {C.DIM}Press Enter to reuse, or type a new path:{C.RESET}")
+            print(f"  {C.DIM}Press Enter to reuse, or type a new path.{C.RESET}")
         else:
-            print(f"  Enter the full path to your CSV file:")
-        print(f"\n  {C.HINT}CSV columns: Transport, X, Y, Player, City, City_Location,{C.RESET}")
-        print(f"  {C.HINT}  Wood, Wine, Marble, Crystal, Sulphur, From, Hours{C.RESET}")
-        print(f"  {C.HINT}  Transport: m = merchant, f = freighter{C.RESET}")
-        print(f"  {C.HINT}  Resources: 500 = send 500, e0 = send all, e10000 = all except 10k{C.RESET}")
-        print(f"  {C.HINT}  From: a = all cities, or city numbers like 1,3,5{C.RESET}")
+            print(f"  Enter the full path to your CSV file, or create a template.")
+        print(f"\n  {C.HINT}Resource values:  500 or 10k = exact, all or a = send all{C.RESET}")
+        print(f"  {C.HINT}                  all-10k    = send all but keep 10k{C.RESET}")
+        print(f"  {C.HINT}From: a = all cities, or 1,3,5  |  Transport: m or f{C.RESET}")
+        print(f"\n  {C.BOLD}(N){C.RESET} Create new template")
         print(f"  {C.BOLD}('){C.RESET} Back\n")
-        csv_input = read(msg="CSV path: ", empty=True, additionalValues=["'"])
+        csv_input = read(msg="CSV path: ", empty=True,
+                         additionalValues=["'", "n", "N"])
         if csv_input == "'":
             event.set()
             return
-        csv_path = csv_input.strip() if csv_input.strip() else saved_csv
-        if not csv_path:
-            print("No CSV path provided.")
-            enter()
-            event.set()
-            return
+        if csv_input.lower() == "n":
+            template_path = _create_csv_template(session)
+            if template_path:
+                csv_path = template_path
+                prefs["csv_path"] = csv_path
+                save_prefs(prefs)
+            else:
+                return "restart"
+        else:
+            csv_path = csv_input.strip() if csv_input.strip() else saved_csv
+            if not csv_path:
+                print("No CSV path provided.")
+                enter()
+                event.set()
+                return
         # Save for next time
         prefs["csv_path"] = csv_path
         save_prefs(prefs)
@@ -3488,13 +3968,12 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                 print(f"  {C.BOLD}Min ship:{C.RESET}  {C.DIM}off{C.RESET}")
             print(f"  {C.BOLD}Run slot:{C.RESET}  {run_column[4:]}\n")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
-                  f"{C.CYAN}(D){C.RESET} Dry run preview  "
                   f"{C.YELLOW}(E){C.RESET} Edit CSV  "
                   f"{C.CYAN}(R){C.RESET} Reset progress")
             print(f"  {C.CYAN}(A){C.RESET} AP wait timer  "
                   f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
-            rta = read(values=["y", "Y", "n", "N", "d", "D", "e", "E",
+            rta = read(values=["y", "Y", "n", "N", "e", "E",
                                "a", "A", "t", "T", "r", "R", "", "'"],
                        additionalValues=["'"])
             if rta == "'" or rta.lower() == "n":
@@ -3588,15 +4067,6 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                     print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
                 enter()
                 continue
-            if rta.lower() == "d":
-                preview = _scan_csv_for_preview(session, rows, run_column)
-                if preview:
-                    run_dry_preview(preview, "Bulk Distribution")
-                else:
-                    print("  No valid routes found in scan.")
-                print("Press Enter to continue...")
-                enter()
-                continue
             break
 
         enter()
@@ -3631,41 +4101,6 @@ def bulkDistributionMode(session, event, stdin_fd, predetermined_input,
             return
 
 
-def _scan_csv_for_preview(session, rows, run_column):
-    """Quick scan for dry-run preview. Returns list of route info dicts."""
-    csv_res_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
-    ic = issues_col_for_run(run_column)
-    preview = []
-    for row in rows:
-        if normalize_text(row.get(run_column, "")) == "x":
-            continue
-        if row.get(ic, "").strip():
-            continue
-        parsed = [parse_resource_value(row.get(col, "0")) for col in csv_res_cols]
-        has_resources = any(amt > 0 or mode == "except" for mode, amt in parsed)
-        if not has_resources:
-            continue
-        has_except = any(m == "except" for m, _ in parsed)
-        resources = [amt for _, amt in parsed]
-        city_name = row.get("City", "?")
-        player = row.get("Player", "?")
-        from_val = parse_from_column(row.get("From", ""))
-        if from_val is None:
-            src_label = "From: (not set)"
-        elif from_val == "all":
-            src_label = "All cities"
-        else:
-            src_label = f"Cities {','.join(str(i) for i in from_val)}"
-        transport = "Freighters" if parse_transport_value(row.get("Transport", "m")) else "Merchant"
-        label = f"{src_label} ({transport})"
-        if has_except:
-            label += " [except mode — amounts resolved at send time]"
-        preview.append({
-            "source": label,
-            "dest": f"{city_name} ({player})",
-            "resources": resources,
-        })
-    return preview
 
 
 
@@ -3868,25 +4303,12 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                 if c == 1:
                     reserves_confirmed = True
 
-        # --- Step 6: Check interval ---
-        interval_confirmed = False
-        while not interval_confirmed:
-            print_module_banner("Keep Topped Up — Check Interval")
-            print(f"  {C.DIM}How often should the system check and top up?{C.RESET}")
-            print(f"  {C.HINT}Recommended: 1-4 hours{C.RESET}")
-            print(f"  {C.BOLD}('){C.RESET} Back")
-            interval_hours = read(min=1, digit=True, additionalValues=["'"])
-            if interval_hours == "'":
-                event.set()
-                return
-            print(f"\nInterval: Every {interval_hours} hour(s)")
-            print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-            c = read(min=1, max=2, digit=True, additionalValues=["'"])
-            if c == "'":
-                event.set()
-                return
-            if c == 1:
-                interval_confirmed = True
+        timing = _get_schedule_timing(event, "Keep Topped Up")
+        if timing is None:
+            return
+        interval_hours, run_at_time = timing
+        if interval_hours == 0:
+            interval_hours = 1
 
         # --- Step 7: Notifications ---
         notif_config = get_notification_config(telegram_enabled, event)
@@ -3920,15 +4342,17 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                         print(f"    {source_cities[cid]['name']}: {' | '.join(parts)}")
             else:
                 print(f"  {C.BOLD}Reserve protection:{C.RESET} none")
-            print(f"  {C.BOLD}Check interval:{C.RESET} every {interval_hours}h")
+            if run_at_time:
+                print(f"  {C.BOLD}Schedule:{C.RESET}        Daily at {run_at_time} (server time)")
+            else:
+                print(f"  {C.BOLD}Check interval:{C.RESET} every {interval_hours}h")
             if min_threshold > 0:
                 print(f"  {C.BOLD}Min ship:{C.RESET}       {min_threshold:,} total resources")
             print("")
             print(f"  {C.OK}(Y){C.RESET} Proceed  "
-                  f"{C.CYAN}(D){C.RESET} Dry run preview  "
                   f"{C.CYAN}(T){C.RESET} Min shipment  "
                   f"{C.WARN}(N){C.RESET} Cancel")
-            rta = read(values=["y", "Y", "n", "N", "d", "D", "t", "T", ""])
+            rta = read(values=["y", "Y", "n", "N", "t", "T", ""])
             if rta.lower() == "n":
                 event.set()
                 return
@@ -3945,17 +4369,6 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                           f"will be skipped{C.RESET}")
                 else:
                     print(f"  {C.OK}Min shipment filter disabled{C.RESET}")
-                enter()
-                continue
-            if rta.lower() == "d":
-                preview_routes = _top_up_dry_run(
-                    session, destinations, dest_configs,
-                    source_city_ids, source_reserves)
-                if preview_routes:
-                    run_dry_preview(preview_routes, "Keep Topped Up")
-                else:
-                    print("\n  All destinations are already at target levels.\n")
-                print("Press Enter to continue...")
                 enter()
                 continue
             break
@@ -3977,6 +4390,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         source_reserves=source_reserves,
         min_shipment_threshold=min_threshold,
         interval_hours=interval_hours,
+        run_at_time=run_at_time,
         notif_level=notif_config.get("level", "none"),
         notes=f"TopUp: {dest_names[:30]}",
     )
@@ -3984,42 +4398,6 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                              log_path)
 
 
-def _top_up_dry_run(session, destinations, dest_configs,
-                    source_city_ids, source_reserves):
-    preview_routes = []
-    for dest in destinations:
-        html = session.get(city_url + str(dest["id"]))
-        dest_fresh = getCity(html)
-        targets = dest_configs[str(dest["id"])]
-        needed = [0] * len(materials_names)
-        for i in range(len(materials_names)):
-            if targets[i] is None:
-                continue
-            gap = targets[i] - dest_fresh["availableResources"][i]
-            needed[i] = max(0, min(gap, dest_fresh["freeSpaceForResources"][i]))
-
-        for cid in source_city_ids:
-            if all(n <= 0 for n in needed):
-                break
-            html = session.get(city_url + cid)
-            src_fresh = getCity(html)
-            reserves = source_reserves.get(cid, [0] * len(materials_names))
-            to_send = [0] * len(materials_names)
-            for i in range(len(materials_names)):
-                if needed[i] <= 0:
-                    continue
-                avail = src_fresh["availableResources"][i]
-                reserve = reserves[i] if i < len(reserves) else 0
-                sendable = max(0, avail - reserve)
-                to_send[i] = min(needed[i], sendable)
-                needed[i] -= to_send[i]
-            if sum(to_send) > 0:
-                preview_routes.append({
-                    "source": src_fresh["name"],
-                    "dest": dest_fresh["name"],
-                    "resources": to_send,
-                })
-    return preview_routes
 
 
 
@@ -4069,11 +4447,20 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
     wlock = transport_worker_lock_path(session)
     if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
-        print("  Scheduler started by another process — "
-              "it will pick up the schedule.")
-        enter()
-        event.set()
-        return
+        if _try_recover_stale_lock(session, wlock):
+            if not _lock_acquire(wlock, timeout=5,
+                                 stale_after=WORKER_LOCK_STALE_SECONDS):
+                print("  Scheduler started by another process — "
+                      "it will pick up the schedule.")
+                enter()
+                event.set()
+                return
+        else:
+            print("  Scheduler started by another process — "
+                  "it will pick up the schedule.")
+            enter()
+            event.set()
+            return
 
     all_rows = transport_csv_load(session)
     extra_activated = 0
@@ -4120,6 +4507,60 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
             pass
 
 
+def _is_pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _try_recover_stale_lock(session, wlock):
+    """Attempt to recover from a stale scheduler lock.
+    Signals the old process to stop, waits for it to die, then clears the lock.
+    Returns True if the lock was recovered."""
+    if not os.path.exists(wlock):
+        return True
+    try:
+        with open(wlock, "r") as f:
+            data = json.load(f)
+    except Exception:
+        try:
+            os.remove(wlock)
+        except OSError:
+            pass
+        return True
+
+    lock_pid = data.get("pid")
+    if not lock_pid or not _is_pid_alive(lock_pid):
+        try:
+            os.remove(wlock)
+        except OSError:
+            pass
+        return True
+
+    # Process is alive — signal it to stop via the stop flag
+    stop_path = transport_stop_flag_path(session)
+    try:
+        with open(stop_path, "w") as f:
+            f.write(str(int(time.time())))
+    except OSError:
+        pass
+
+    for _ in range(15):
+        time.sleep(2)
+        if not _is_pid_alive(lock_pid):
+            try:
+                os.remove(wlock)
+            except OSError:
+                pass
+            return True
+        if not os.path.exists(wlock):
+            return True
+
+    return False
+
+
 def _is_transport_worker_running(session):
     wlock = transport_worker_lock_path(session)
     if not os.path.exists(wlock):
@@ -4128,6 +4569,13 @@ def _is_transport_worker_running(session):
         with open(wlock, "r") as f:
             data = json.load(f)
         if time.time() - data.get("timestamp", 0) > WORKER_LOCK_STALE_SECONDS:
+            return False
+        pid = data.get("pid")
+        if pid and not _is_pid_alive(pid):
+            try:
+                os.remove(wlock)
+            except OSError:
+                pass
             return False
         return True
     except Exception:
@@ -4206,9 +4654,7 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                       f"Could not load destination city (ID: {dest_city_id}).\n"
                       f"Session may have expired or city no longer exists.")
         return 0
-    dest_isl_id = destination_city["islandId"]
-    html_isl = session.get(island_url + str(dest_isl_id))
-    island = getIsland(html_isl)
+    island = _get_island_cached(session, island_id=destination_city["islandId"])
     coords = f"[{island['x']}:{island['y']}]"
 
     excluded = _rrs_excluded_set(session)
@@ -4304,9 +4750,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
             dest_city = getCity(html)
         except (AttributeError, TypeError, KeyError):
             continue
-        dest_isl_id = dest_city["islandId"]
-        html_isl = session.get(island_url + str(dest_isl_id))
-        dest_island = getIsland(html_isl)
+        dest_island = _get_island_cached(session, island_id=dest_city["islandId"])
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
 
         html = session.get(city_url + src_city_id)
@@ -4390,9 +4834,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
             dest_fresh = getCity(html)
         except (AttributeError, TypeError, KeyError):
             continue
-        dest_isl_id = dest_fresh["islandId"]
-        html_isl = session.get(island_url + str(dest_isl_id))
-        dest_island = getIsland(html_isl)
+        dest_island = _get_island_cached(session, island_id=dest_fresh["islandId"])
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
 
         exhausted_res = set()
@@ -4526,9 +4968,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
                 toSend = [0] * len(materials_names)
                 toSend[res_idx] = amount
 
-                dest_isl_id = receivers[ri]["to"]["islandId"]
-                html = session.get(island_url + str(dest_isl_id))
-                dest_island = getIsland(html)
+                dest_island = _get_island_cached(session, island_id=receivers[ri]["to"]["islandId"])
 
                 route = (senders[si]["from"], receivers[ri]["to"],
                          dest_island["id"], *toSend)
@@ -4591,8 +5031,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
         destination_city = getCity(html)
     except (AttributeError, TypeError, KeyError):
         return 0
-    html = session.get(island_url + destination_city["islandId"])
-    destination_island = getIsland(html)
+    destination_island = _get_island_cached(session, island_id=destination_city["islandId"])
 
     excluded = _rrs_excluded_set(session)
     summary = _rrs_load_summary(session)
@@ -4743,8 +5182,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                     mismatches.append(f"Row {row_num}: {issue}")
                     continue
 
-            html = session.get(f"view=island&xcoord={x}&ycoord={y}")
-            island = getIsland(html)
+            island = _get_island_cached(session, x=x, y=y)
             cities_on_island = [
                 c for c in island["cities"] if c.get("type") == "city"
             ]
@@ -5273,13 +5711,30 @@ def transport_scheduler_loop(session, stop_event):
                 continue
 
             sid = sched["schedule_id"]
-            cycle_sent = execute_schedule(session, sched, notif_config, log_path)
+            try:
+                cycle_sent = execute_schedule(session, sched, notif_config, log_path)
+            except Exception as exc:
+                try:
+                    msg = f"Schedule {sid} crashed: {exc}"
+                    sendToBot(session, msg)
+                except Exception:
+                    pass
+                transport_csv_update(
+                    session, sid,
+                    last_run=now, next_run=now + 3600,
+                    status="active",
+                )
+                continue
 
             total = sched.get("total_shipments", 0) + cycle_sent
             interval = sched.get("interval_hours", 0)
+            run_at = sched.get("run_at_time", "")
 
             if interval > 0:
-                next_ts = now + interval * 3600
+                if run_at:
+                    next_ts = _next_run_for_time(run_at)
+                else:
+                    next_ts = now + interval * 3600
                 transport_csv_update(
                     session, sid,
                     last_run=now, next_run=next_ts,
@@ -5349,13 +5804,22 @@ def _activate_transport_worker(session, event):
 
     wlock = transport_worker_lock_path(session)
     if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
-        print(f"  {C.WARN}A scheduler is already running for this account.{C.RESET}")
-        print(f"  {C.DIM}Press (o) on the main page to stop it first.{C.RESET}")
-        print(f"  {C.DIM}If you're sure nothing is running, delete:{C.RESET}")
-        print(f"    {wlock}")
-        enter()
-        event.set()
-        return
+        print(f"  {C.WARN}Lock detected — attempting to recover...{C.RESET}")
+        if _try_recover_stale_lock(session, wlock):
+            print(f"  {C.OK}Old scheduler stopped. Starting fresh.{C.RESET}")
+            if not _lock_acquire(wlock, timeout=5,
+                                 stale_after=WORKER_LOCK_STALE_SECONDS):
+                print(f"  {C.WARN}Could not acquire lock after recovery.{C.RESET}")
+                print(f"  {C.DIM}Try deleting: {wlock}{C.RESET}")
+                enter()
+                event.set()
+                return
+        else:
+            print(f"  {C.WARN}Could not stop the existing scheduler.{C.RESET}")
+            print(f"  {C.DIM}Try deleting: {wlock}{C.RESET}")
+            enter()
+            event.set()
+            return
 
     if not enforce_transport_schema_or_abort(session):
         _lock_release(wlock)
@@ -5579,7 +6043,11 @@ def _view_schedule_detail(sched):
     print(f"  Mode:          {mode.capitalize()}")
     print(f"  Status:        {_sd.get(status, status)}")
     print(f"  Ship type:     {ship}")
-    print(f"  Interval:      {'one-shot' if interval == 0 else f'{interval}h'}")
+    run_at = sched.get("run_at_time", "")
+    if run_at:
+        print(f"  Schedule:      Daily at {run_at} (server time)")
+    else:
+        print(f"  Interval:      {'one-shot' if interval == 0 else f'{interval}h'}")
     print(f"  Notifications: {notif}")
     print(f"  Total sent:    {total_sent}")
     print(f"  Notes:         {notes or '(none)'}")
@@ -5695,25 +6163,64 @@ def _modify_schedule(session):
         if is_consolidate:
             print(f"  {C.BOLD}(6){C.RESET} Send mode")
         print(f"  {C.BOLD}(7){C.RESET} Send-only-if-below thresholds")
+        mode = target.get("mode", "")
+        has_cities = mode not in ("bulk", "even")
+        if has_cities:
+            print(f"  {C.BOLD}(8){C.RESET} Source / destination cities")
+        print(f"  {C.BOLD}(9){C.RESET} AP wait & min shipment")
         print(f"  {C.BOLD}('){C.RESET} Back")
 
-        choice = read(min=1, max=7, digit=True, additionalValues=["'"])
+        choice = read(min=1, max=9, digit=True, additionalValues=["'"])
         if choice == "'":
             return
 
         if choice == 1:
-            print(f"\n  Current interval: {target.get('interval_hours', 0)}h")
-            print("  New interval (0 = one-shot, 1+ = recurring):")
-            val = read(min=0, digit=True, additionalValues=["'"])
-            if val == "'":
+            cur_rat = target.get("run_at_time", "")
+            cur_int = target.get("interval_hours", 0)
+            if cur_rat:
+                print(f"\n  Current: Daily at {cur_rat} (server time)")
+            else:
+                print(f"\n  Current interval: {cur_int}h")
+            print(f"\n  {C.BOLD}(1){C.RESET} Every X hours")
+            print(f"  {C.BOLD}(2){C.RESET} Daily at specific time (server time)")
+            print(f"  {C.BOLD}('){C.RESET} Cancel")
+            tc = read(min=1, max=2, digit=True, additionalValues=["'"])
+            if tc == "'":
                 continue
-            transport_csv_update(session, sid, interval_hours=val)
-            target["interval_hours"] = val
-            if val > 0 and target.get("next_run", "") in ("", 0):
-                next_ts = int(time.time()) + val * 3600
-                transport_csv_update(session, sid, next_run=next_ts)
-                target["next_run"] = next_ts
-            print(f"  Interval updated to {val}h.")
+            if tc == 1:
+                print("  New interval (0 = one-shot, 1+ = recurring):")
+                val = read(min=0, digit=True, additionalValues=["'"])
+                if val == "'":
+                    continue
+                transport_csv_update(session, sid, interval_hours=val,
+                                     run_at_time="")
+                target["interval_hours"] = val
+                target["run_at_time"] = ""
+                if val > 0 and target.get("next_run", "") in ("", 0):
+                    next_ts = int(time.time()) + val * 3600
+                    transport_csv_update(session, sid, next_run=next_ts)
+                    target["next_run"] = next_ts
+                print(f"  Interval updated to {val}h.")
+            else:
+                print(f"  {C.DIM}All times use server time.{C.RESET}")
+                print("  Enter time in HH:MM format (24h):")
+                while True:
+                    ti = read(msg="  Time: ", additionalValues=["'"])
+                    if ti == "'":
+                        break
+                    m = re.match(r'^(\d{1,2}):(\d{2})$', ti.strip())
+                    if m and 0 <= int(m.group(1)) <= 23 and 0 <= int(m.group(2)) <= 59:
+                        ts = f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
+                        transport_csv_update(session, sid, interval_hours=24,
+                                             run_at_time=ts)
+                        target["interval_hours"] = 24
+                        target["run_at_time"] = ts
+                        next_ts = _next_run_for_time(ts)
+                        transport_csv_update(session, sid, next_run=next_ts)
+                        target["next_run"] = next_ts
+                        print(f"  {C.OK}Schedule set to daily at {ts} (server time).{C.RESET}")
+                        break
+                    print(f"  {C.HINT}Invalid. Use HH:MM (e.g. 06:00, 14:30){C.RESET}")
 
         elif choice == 2:
             current = "Freighters" if target.get("ship_type") == "f" else "Merchant"
@@ -5834,6 +6341,86 @@ def _modify_schedule(session):
             transport_csv_update(session, sid, dest_minimums=vals)
             target["dest_minimums"] = vals
             print(f"  Destination minimums updated.")
+
+        elif choice == 8:
+            if not has_cities:
+                print("  City editing is not available for this mode.")
+                enter()
+                continue
+            src_ids = target.get("source_city_ids") or []
+            dst_ids = target.get("dest_city_ids") or []
+            print(f"\n  {C.BOLD}Current source cities:{C.RESET} "
+                  f"{len(src_ids)} (IDs: {', '.join(str(s) for s in src_ids) or 'none'})")
+            print(f"  {C.BOLD}Current destination cities:{C.RESET} "
+                  f"{len(dst_ids)} (IDs: {', '.join(str(d) for d in dst_ids) or 'none'})")
+            print(f"\n  {C.BOLD}(1){C.RESET} Change source cities")
+            print(f"  {C.BOLD}(2){C.RESET} Change destination cities")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+            city_choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+            if city_choice == "'":
+                continue
+            if city_choice == 1:
+                if mode == "autosend":
+                    print("  Auto Send selects sources automatically.")
+                    enter()
+                    continue
+                print(f"\n  {C.DIM}Select source cities:{C.RESET}")
+                src_msg = f"{C.DIM}Click cities to add as sources:{C.RESET}"
+                new_src_ids, _ = rtm_ignoreCities(session, msg=src_msg)
+                if not new_src_ids:
+                    print(f"  {C.WARN}No cities selected, keeping current.{C.RESET}")
+                    enter()
+                    continue
+                new_src = [str(sid_val) for sid_val in new_src_ids]
+                transport_csv_update(session, sid, source_city_ids=new_src)
+                target["source_city_ids"] = new_src
+                print(f"  {C.OK}Source cities updated ({len(new_src)} selected).{C.RESET}")
+            else:
+                print(f"\n  {C.DIM}Select destination cities:{C.RESET}")
+                dst_msg = f"{C.DIM}Click cities to add as destinations:{C.RESET}"
+                new_dst_ids, _ = rtm_ignoreCities(session, msg=dst_msg)
+                if not new_dst_ids:
+                    print(f"  {C.WARN}No cities selected, keeping current.{C.RESET}")
+                    enter()
+                    continue
+                new_dst = [str(did) for did in new_dst_ids]
+                transport_csv_update(session, sid, dest_city_ids=new_dst)
+                target["dest_city_ids"] = new_dst
+                print(f"  {C.OK}Destination cities updated ({len(new_dst)} selected).{C.RESET}")
+
+        elif choice == 9:
+            ap_cur = target.get("ap_max_wait_minutes", 120)
+            mt_cur = target.get("min_shipment_threshold", 0)
+            print(f"\n  {C.BOLD}AP wait:{C.RESET}       {ap_cur} minutes")
+            print(f"  {C.BOLD}Min shipment:{C.RESET}  "
+                  f"{'off' if mt_cur == 0 else f'{mt_cur:,}'}")
+            print(f"\n  {C.BOLD}(1){C.RESET} Change AP wait timer")
+            print(f"  {C.BOLD}(2){C.RESET} Change min shipment threshold")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+            adv_choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+            if adv_choice == "'":
+                continue
+            if adv_choice == 1:
+                print(f"  How long to retry AP-blocked cities (minutes, 0=no retry):")
+                ap_input = read(min=0, digit=True, additionalValues=["'"])
+                if ap_input == "'":
+                    continue
+                ap_val = int(ap_input)
+                transport_csv_update(session, sid, ap_max_wait_minutes=ap_val)
+                target["ap_max_wait_minutes"] = ap_val
+                print(f"  {C.OK}AP wait set to {ap_val} min.{C.RESET}")
+            else:
+                print(f"  Minimum total resources per shipment (0=off):")
+                mt_input = read(min=0, digit=True, additionalValues=["'"])
+                if mt_input == "'":
+                    continue
+                mt_val = int(mt_input)
+                transport_csv_update(session, sid, min_shipment_threshold=mt_val)
+                target["min_shipment_threshold"] = mt_val
+                if mt_val > 0:
+                    print(f"  {C.OK}Min shipment set to {mt_val:,}.{C.RESET}")
+                else:
+                    print(f"  {C.OK}Min shipment filter disabled.{C.RESET}")
 
         enter()
 
