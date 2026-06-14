@@ -324,7 +324,7 @@ def menu(session, checkUpdate=True):
         if selected == 100:
             continue
 
-        if selected != '' and 40 <= selected < 40 + len(modules):
+        if isinstance(selected, int) and 40 <= selected < 40 + len(modules):
             mod_name, mod_path = modules[selected - 40]
             event = multiprocessing.Event()
             config.has_params = len(config.predetermined_input) > 0
