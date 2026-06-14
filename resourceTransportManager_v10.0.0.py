@@ -49,7 +49,7 @@ except ImportError:
 MODULE_NAME = "resourceTransportManager"
 
 # ============================================================================
-#  ISLAND CACHE  — speeds up coordinate lookups for bulk distribution
+#  ISLAND CACHE  — all modes use this; cache hit skips the server call
 # ============================================================================
 
 ISLAND_CACHE_DEFAULT_RADIUS = 4
@@ -90,32 +90,108 @@ def _cache_key(x, y):
     return f"{x}:{y}"
 
 
+def _build_id_index(cache):
+    """Build reverse lookup: island_id (str) -> coord key "x:y"."""
+    idx = {}
+    for coord_key, entry in cache.items():
+        iid = str(entry.get("island_id", ""))
+        if iid:
+            idx[iid] = coord_key
+    return idx
+
+
+def _cache_island_entry(island, cities):
+    """Build a cache entry dict from a live island + filtered cities list."""
+    return {
+        "x": int(island.get("x", island.get("xCoord", 0))),
+        "y": int(island.get("y", island.get("yCoord", 0))),
+        "island_id": str(island.get("id", "")),
+        "island_name": island.get("name", ""),
+        "tradegood": str(island.get("tradegood", "0")),
+        "cities": [
+            {
+                "id": c.get("id", ""),
+                "name": c.get("name", "?"),
+                "player": c.get("Name", "?"),
+                "position": c.get("position", ""),
+                "level": c.get("level", ""),
+                "ally_tag": c.get("AllyTag", ""),
+                "state": c.get("state", ""),
+            }
+            for c in cities
+        ],
+        "last_updated": int(time.time()),
+    }
+
+
+def _island_from_cache(entry):
+    """Reconstruct a getIsland()-compatible dict from a cache entry."""
+    cities = []
+    for c in entry.get("cities", []):
+        cities.append({
+            "type": "city",
+            "id": c.get("id", ""),
+            "name": c.get("name", "?"),
+            "Name": c.get("player", "?"),
+            "level": c.get("level", ""),
+            "AllyTag": c.get("ally_tag", ""),
+            "state": c.get("state", ""),
+            "position": c.get("position", ""),
+        })
+    return {
+        "id": entry.get("island_id", ""),
+        "name": entry.get("island_name", ""),
+        "x": entry["x"],
+        "y": entry["y"],
+        "xCoord": str(entry["x"]),
+        "yCoord": str(entry["y"]),
+        "tradegood": int(entry.get("tradegood", 0)),
+        "cities": cities,
+    }
+
+
 def _fetch_and_cache_island(session, x, y, cache):
     """Fetch a single island by coords, cache it, return (island_dict, cities_list)."""
     html = session.get(f"view=island&xcoord={x}&ycoord={y}")
     island = getIsland(html)
     cities = [c for c in island.get("cities", []) if c.get("type") == "city"]
     key = _cache_key(x, y)
-    cache[key] = {
-        "x": int(x),
-        "y": int(y),
-        "island_id": island.get("id", ""),
-        "island_name": island.get("name", ""),
-        "tradegood": island.get("tradegood", "0"),
-        "cities": [
-            {
-                "name": c.get("name", "?"),
-                "player": c.get("Name", "?"),
-                "position": c.get("position", ""),
-                "level": c.get("level", ""),
-                "ally_tag": c.get("AllyTag", ""),
-            }
-            for c in cities
-        ],
-        "last_updated": int(time.time()),
-    }
+    cache[key] = _cache_island_entry(island, cities)
     _save_island_cache(session, cache)
     return island, cities
+
+
+def _get_island_cached(session, island_id=None, x=None, y=None):
+    """Unified island lookup — cache hit returns instantly, miss fetches & caches.
+
+    Call with either island_id (str) or x,y (int/str) coords.
+    Returns a getIsland()-compatible dict (id, name, x, y, tradegood, cities).
+    """
+    cache = _load_island_cache(session)
+
+    if x is not None and y is not None:
+        key = _cache_key(int(x), int(y))
+        if key in cache:
+            return _island_from_cache(cache[key])
+        island, _ = _fetch_and_cache_island(session, x, y, cache)
+        return island
+
+    if island_id is not None:
+        sid = str(island_id)
+        id_index = _build_id_index(cache)
+        if sid in id_index:
+            return _island_from_cache(cache[id_index[sid]])
+        html = session.get(island_url + str(island_id))
+        island = getIsland(html)
+        ix, iy = island.get("x"), island.get("y")
+        if ix is not None and iy is not None:
+            key = _cache_key(int(ix), int(iy))
+            cities = [c for c in island.get("cities", []) if c.get("type") == "city"]
+            cache[key] = _cache_island_entry(island, cities)
+            _save_island_cache(session, cache)
+        return island
+
+    raise ValueError("_get_island_cached requires island_id or (x, y)")
 
 
 def _cache_age_str(timestamp):
@@ -2339,12 +2415,9 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 if y_coord == "=":
                     continue
 
-                html = session.get(
-                    f"view=island&xcoord={x_coord}&ycoord={y_coord}"
-                )
-                island = getIsland(html)
+                island = _get_island_cached(session, x=x_coord, y=y_coord)
                 cities_on_island = [
-                    c for c in island["cities"] if c["type"] == "city"
+                    c for c in island["cities"] if c.get("type") == "city"
                 ]
                 if not cities_on_island:
                     print(f"No cities on island [{x_coord}:{y_coord}]!")
@@ -2397,8 +2470,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             html = session.get(city_url + str(destination_city["id"]))
             destination_city = getCity(html)
             island_id = destination_city["islandId"]
-            html = session.get(island_url + island_id)
-            island = getIsland(html)
+            island = _get_island_cached(session, island_id=island_id)
             destination_city["isOwnCity"] = True
             dest_player = session.username
 
@@ -2901,8 +2973,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                 event.set()
                 return
 
-            html = session.get(island_url + destination_city["islandId"])
-            destination_island = getIsland(html)
+            destination_island = _get_island_cached(session, island_id=destination_city["islandId"])
 
             print_module_banner("Auto Send")
             print(f"  {C.DIM}Scanning your cities for available resources...{C.RESET}")
@@ -4583,9 +4654,7 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                       f"Could not load destination city (ID: {dest_city_id}).\n"
                       f"Session may have expired or city no longer exists.")
         return 0
-    dest_isl_id = destination_city["islandId"]
-    html_isl = session.get(island_url + str(dest_isl_id))
-    island = getIsland(html_isl)
+    island = _get_island_cached(session, island_id=destination_city["islandId"])
     coords = f"[{island['x']}:{island['y']}]"
 
     excluded = _rrs_excluded_set(session)
@@ -4681,9 +4750,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
             dest_city = getCity(html)
         except (AttributeError, TypeError, KeyError):
             continue
-        dest_isl_id = dest_city["islandId"]
-        html_isl = session.get(island_url + str(dest_isl_id))
-        dest_island = getIsland(html_isl)
+        dest_island = _get_island_cached(session, island_id=dest_city["islandId"])
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
 
         html = session.get(city_url + src_city_id)
@@ -4767,9 +4834,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
             dest_fresh = getCity(html)
         except (AttributeError, TypeError, KeyError):
             continue
-        dest_isl_id = dest_fresh["islandId"]
-        html_isl = session.get(island_url + str(dest_isl_id))
-        dest_island = getIsland(html_isl)
+        dest_island = _get_island_cached(session, island_id=dest_fresh["islandId"])
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
 
         exhausted_res = set()
@@ -4903,9 +4968,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
                 toSend = [0] * len(materials_names)
                 toSend[res_idx] = amount
 
-                dest_isl_id = receivers[ri]["to"]["islandId"]
-                html = session.get(island_url + str(dest_isl_id))
-                dest_island = getIsland(html)
+                dest_island = _get_island_cached(session, island_id=receivers[ri]["to"]["islandId"])
 
                 route = (senders[si]["from"], receivers[ri]["to"],
                          dest_island["id"], *toSend)
@@ -4968,8 +5031,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
         destination_city = getCity(html)
     except (AttributeError, TypeError, KeyError):
         return 0
-    html = session.get(island_url + destination_city["islandId"])
-    destination_island = getIsland(html)
+    destination_island = _get_island_cached(session, island_id=destination_city["islandId"])
 
     excluded = _rrs_excluded_set(session)
     summary = _rrs_load_summary(session)
@@ -5120,8 +5182,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                     mismatches.append(f"Row {row_num}: {issue}")
                     continue
 
-            html = session.get(f"view=island&xcoord={x}&ycoord={y}")
-            island = getIsland(html)
+            island = _get_island_cached(session, x=x, y=y)
             cities_on_island = [
                 c for c in island["cities"] if c.get("type") == "city"
             ]
