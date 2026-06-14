@@ -152,7 +152,10 @@ class AESCipher:
                         lock_age = time.time() - float(parts[1]) if len(parts) > 1 else 31
                         # Clear if owner is dead OR lock is older than 30s (guards against PID reuse)
                         if not AESCipher._pid_alive(pid) or lock_age > 30:
-                            os.unlink(lock_path)
+                            try:
+                                os.unlink(lock_path)
+                            except (FileNotFoundError, PermissionError):
+                                pass
                             continue  # retry immediately
                 except (OSError, ValueError):
                     pass
@@ -161,10 +164,18 @@ class AESCipher:
 
     @staticmethod
     def _release_lock(lock_path):
-        try:
-            os.unlink(lock_path)
-        except FileNotFoundError:
-            pass
+        for _attempt in range(20):
+            try:
+                os.unlink(lock_path)
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                # Windows: another process briefly has the lock file open for
+                # reading (stale-lock check). It releases almost immediately.
+                if _attempt == 19:
+                    raise
+                time.sleep(0.05)
 
     # ------------------------------------------------------------------
     # Encryption helpers
