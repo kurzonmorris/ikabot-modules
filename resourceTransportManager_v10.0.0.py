@@ -1793,6 +1793,25 @@ def resolve_resources(parsed, source_available, row, csv_resource_cols,
     return resolved
 
 
+def _resolve_rc(rc_val, avail, send_mode):
+    """Resolve a single resource_config entry against available amount.
+    rc_val can be: None, 0, int, ("except", reserve) or ["except", reserve].
+    send_mode: 1 = keep-reserves, 2 = send-specific.
+    Returns the amount to send (int >= 0).
+    """
+    if rc_val is None:
+        return 0
+    if isinstance(rc_val, (tuple, list)) and len(rc_val) == 2 and rc_val[0] == "except":
+        return max(0, avail - int(rc_val[1]))
+    if not isinstance(rc_val, (int, float)):
+        return 0
+    rc_val = int(rc_val)
+    if send_mode == 1:
+        return avail if rc_val == 0 else max(0, avail - rc_val)
+    else:
+        return 0 if rc_val == 0 else min(rc_val, avail)
+
+
 def choose_run_slot(session, event, rows, run_columns):
     print_module_banner("Bulk Distribution — Run Slot")
     print(f"  {C.DIM}Each run tracks progress (which cities have been sent to).{C.RESET}\n")
@@ -1920,7 +1939,8 @@ def get_resource_config(send_mode=2):
                 restart = True
                 break
             if amount == "SEND_ALL":
-                amount = 0
+                config.append(("except", 0))
+                continue
             elif isinstance(amount, tuple) and amount[0] == "EXCEPT":
                 config.append(("except", amount[1]))
                 continue
@@ -1967,6 +1987,11 @@ def _format_resource_list(values, skip_zero=True):
     parts = []
     for i, res in enumerate(materials_names):
         v = values[i] if i < len(values) else 0
+        if isinstance(v, (tuple, list)) and len(v) == 2 and v[0] == "except":
+            reserve = int(v[1])
+            label = "all" if reserve == 0 else f"all-{addThousandSeparator(reserve)}"
+            parts.append(f"{res}: {label}")
+            continue
         if skip_zero and (v is None or v == 0):
             continue
         parts.append(f"{res}: {addThousandSeparator(v)}")
@@ -2511,10 +2536,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 if resource_config[i] is None:
                     continue
                 avail = odata["availableResources"][i]
-                if send_mode == 1:
-                    s = avail if resource_config[i] == 0 else max(0, avail - resource_config[i])
-                else:
-                    s = 0 if resource_config[i] == 0 else min(resource_config[i], avail)
+                s = _resolve_rc(resource_config[i], avail, send_mode)
                 if destination_city.get("isOwnCity", False):
                     free = destination_city["freeSpaceForResources"][i]
                     if s > free:
@@ -3021,23 +3043,34 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                     if result == "RESTART":
                         restart = True
                         break
-                    requested[i] = result if result and result > 0 else 0
+                    if result == "SEND_ALL":
+                        requested[i] = ("except", 0)
+                    elif isinstance(result, tuple) and result[0] == "EXCEPT":
+                        requested[i] = ("except", result[1])
+                    elif isinstance(result, int) and result > 0:
+                        requested[i] = result
+                    else:
+                        requested[i] = 0
 
                 if restart:
                     break
 
-                if sum(requested) == 0:
+                if all(r == 0 for r in requested):
                     print("\n  No resources requested.")
                     enter()
                     event.set()
                     return
 
+                resolved_req = [
+                    _resolve_rc(requested[i], totals[i], 2)
+                    for i in range(len(materials_names))
+                ]
                 over = [
                     f"    {materials_names[i]}: requested "
-                    f"{addThousandSeparator(requested[i])}, "
+                    f"{addThousandSeparator(resolved_req[i])}, "
                     f"available {addThousandSeparator(totals[i])}"
                     for i in range(len(materials_names))
-                    if requested[i] > totals[i]
+                    if resolved_req[i] > totals[i]
                 ]
                 if over:
                     print("\n  ERROR: Exceeds available:")
@@ -3046,8 +3079,12 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                     print("\n  Re-enter amounts.\n")
                     continue
 
+                alloc_amounts = [
+                    _resolve_rc(requested[i], totals[i], 2)
+                    for i in range(len(materials_names))
+                ]
                 routes = allocate_from_suppliers(
-                    requested, suppliers, destination_city, destination_island
+                    alloc_amounts, suppliers, destination_city, destination_island
                 )
                 if routes is None:
                     print("\n  ERROR: Could not allocate across suppliers.")
@@ -4680,12 +4717,7 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                 continue
             avail = oc_fresh["availableResources"][i]
             free = _rrs_free_from_summary(summary, cid, i, avail) if RRS_AVAILABLE else avail
-            if send_mode == 1:
-                s = (free if resource_config[i] == 0
-                     else max(0, free - resource_config[i]))
-            else:
-                s = (0 if resource_config[i] == 0
-                     else min(resource_config[i], free))
+            s = _resolve_rc(resource_config[i], free, send_mode)
             try:
                 s = min(s, destination_city["freeSpaceForResources"][i])
             except (KeyError, IndexError):
@@ -4767,8 +4799,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
             if i >= len(resource_config) or resource_config[i] is None:
                 continue
             avail = _rrs_free_amount(session, origin_city, i)
-            s = (0 if resource_config[i] == 0
-                 else min(resource_config[i], avail))
+            s = _resolve_rc(resource_config[i], avail, 2)
             try:
                 s = min(s, dest_city["freeSpaceForResources"][i])
             except (KeyError, IndexError):
@@ -5022,7 +5053,9 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
     ship_type = sched.get("ship_type", "m")
     useFreighters = (ship_type == "f")
 
-    if not dest_city_ids or sum(requested) == 0:
+    if not dest_city_ids:
+        return 0
+    if all(r == 0 for r in requested):
         return 0
 
     dest_city_id = str(dest_city_ids[0])
@@ -5039,6 +5072,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
     html = session.get()
     city_ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
     suppliers = []
+    sup_totals = [0] * len(materials_names)
     for cid in city_ids:
         if str(cid) == dest_city_id:
             continue
@@ -5046,15 +5080,22 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
             continue
         html_c = session.get(city_url + str(cid))
         try:
-            suppliers.append(getCity(html_c))
+            sup = getCity(html_c)
+            suppliers.append(sup)
+            for i in range(len(materials_names)):
+                sup_totals[i] += sup["availableResources"][i]
         except (AttributeError, TypeError, KeyError):
             continue
 
     if not suppliers:
         return 0
 
+    alloc_amounts = [
+        _resolve_rc(requested[i], sup_totals[i], 2)
+        for i in range(len(materials_names))
+    ]
     routes = allocate_from_suppliers(
-        list(requested), suppliers, destination_city, destination_island,
+        alloc_amounts, suppliers, destination_city, destination_island,
         rrs_summary=summary,
     )
     if routes is None:
