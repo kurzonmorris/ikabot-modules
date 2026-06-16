@@ -486,7 +486,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.0.0                 \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.0.1                 \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
