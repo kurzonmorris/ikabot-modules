@@ -1175,6 +1175,16 @@ def main() -> None:
         except Exception as exc:
             print(f"  Warning: could not create installer shortcut: {exc}")
 
+    # Copy open-all-instances.ps1 into shortcuts folder if bundled
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    ps1_src = bundle_root / "open-all-instances.ps1"
+    if ps1_src.exists():
+        try:
+            shutil.copy2(ps1_src, shortcuts_dir / "open-all-instances.ps1")
+            print("  open-all-instances.ps1")
+        except Exception as exc:
+            print(f"  Warning: could not copy open-all-instances.ps1: {exc}")
+
     # ── 9. User shortcut destination ──────────────────────────────────────────
     show_info(
         "Step 4 of 4 — Shortcut Location\n\n"

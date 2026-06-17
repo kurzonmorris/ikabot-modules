@@ -19,7 +19,8 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('RELEASE_NOTES.txt', '.'),
+        ('RELEASE_NOTES.txt',          '.'),
+        ('open-all-instances.ps1',     '.'),
     ],
     hiddenimports=[
         'tkinter',
