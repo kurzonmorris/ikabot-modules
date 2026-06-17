@@ -342,6 +342,8 @@ def menu(session, checkUpdate=True):
             })
             updateProcessList(session, programprocesslist=process_list)
             event.wait()
+            print(f"\n'{mod_name}' is now running in the background.")
+            time.sleep(0.6)
             continue
 
         if selected == 24 and plugins:
@@ -369,6 +371,8 @@ def menu(session, checkUpdate=True):
             })
             updateProcessList(session, programprocesslist=process_list)
             event.wait()
+            print(f"\n'{chosen_plugin.name}' is now running in the background.")
+            time.sleep(0.6)
             continue
 
         if selected == 0:
@@ -402,6 +406,8 @@ def menu(session, checkUpdate=True):
             )
             updateProcessList(session, programprocesslist=process_list)
             event.wait()
+            print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
+            time.sleep(0.6)
         except KeyboardInterrupt:
             pass
 
