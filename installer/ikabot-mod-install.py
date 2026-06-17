@@ -432,6 +432,57 @@ def maint_close_all() -> None:
         )
 
 
+def maint_open_all_ps(install_dir: Path) -> None:
+    sc_dir = install_dir / "shortcuts"
+
+    # Prefer ps1 already copied to the shortcuts folder; fall back to bundle
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    ps1 = next(
+        (p for p in (
+            sc_dir / "open-all-instances.ps1",
+            bundle_root / "open-all-instances.ps1",
+        ) if p.exists()),
+        None,
+    )
+
+    if ps1:
+        subprocess.Popen(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(ps1)])
+        return
+
+    # Inline fallback when ps1 is unavailable
+    lnks = sorted(
+        [f for f in sc_dir.glob("*.lnk") if f.name[0].isdigit()],
+        key=lambda p: _leading_num(p.name),
+    ) if sc_dir.exists() else []
+
+    if not lnks:
+        show_error("No numbered shortcuts found in:\n" + str(sc_dir))
+        return
+
+    cmds = "; ".join(
+        f'Start-Process "{lnk}"; Start-Sleep -Milliseconds 150' for lnk in lnks
+    )
+    subprocess.Popen(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-NoExit", "-Command", cmds]
+    )
+
+
+def maint_close_all_ps() -> None:
+    if not ask_yes_no("Close all running ikabot instances via PowerShell?", "Close All (PS)"):
+        return
+
+    res = subprocess.run(
+        ["powershell", "-WindowStyle", "Hidden", "-Command",
+         "$p = Get-Process -Name ikabot -ErrorAction SilentlyContinue; "
+         "if ($p) { $p | Stop-Process -Force; exit 0 } else { exit 1 }"],
+        capture_output=True, text=True,
+    )
+    if res.returncode == 0:
+        show_info("All ikabot instances have been closed.", "Close All (PS) — Done")
+    else:
+        show_info("No ikabot instances were running.", "Close All (PS)")
+
+
 def find_ikabot_asset(releases: list[dict]) -> tuple[str, str, str] | None:
     """Return (download_url, ikabot_ver, mod_ver) by matching the asset name directly."""
     for release in releases:
@@ -781,20 +832,75 @@ def maint_update_menu(install_dir: Path) -> None:
             maint_update_installer_shortcut(install_dir)
 
 
+def _maintenance_menu() -> str | None:
+    """Two-column maintenance menu: Standard (cmd) | PowerShell."""
+    result: list[str | None] = [None]
+
+    win = tk.Tk()
+    win.withdraw()
+
+    dlg = tk.Toplevel(win)
+    dlg.title("ikabot Manager")
+    dlg.resizable(False, False)
+    dlg.attributes("-topmost", True)
+
+    tk.Label(dlg, text="ikabot Manager\n\nSelect an action:",
+             justify="left", padx=24, pady=12, wraplength=420).pack(fill="x")
+
+    frm = tk.Frame(dlg, padx=24, pady=4)
+    frm.pack()
+
+    # Column headers
+    tk.Label(frm, text="Standard", font=("", 9, "bold"), width=22).grid(
+        row=0, column=0, padx=4, pady=(0, 2))
+    tk.Label(frm, text="PowerShell", font=("", 9, "bold"), width=22).grid(
+        row=0, column=1, padx=4, pady=(0, 2))
+
+    # Two-column open / close rows
+    pairs = [
+        ("Open all instances",  "Open all (PowerShell)"),
+        ("Close all instances", "Close all (PowerShell)"),
+    ]
+    for r, (left, right) in enumerate(pairs, start=1):
+        for c, label in enumerate((left, right)):
+            def _h(o=label):
+                result[0] = o
+                win.destroy()
+            tk.Button(frm, text=label, width=22, pady=4, command=_h).grid(
+                row=r, column=c, padx=4, pady=3)
+
+    # Separator
+    tk.Frame(frm, height=2, bg="#cccccc").grid(
+        row=len(pairs) + 1, column=0, columnspan=2, sticky="ew", pady=8)
+
+    # Full-width single buttons
+    for i, label in enumerate(("Download latest versions", "Update", "Status", "Exit")):
+        def _h(o=label):
+            result[0] = o
+            win.destroy()
+        tk.Button(frm, text=label, width=47, pady=4, command=_h).grid(
+            row=len(pairs) + 2 + i, column=0, columnspan=2, padx=4, pady=3)
+
+    dlg.protocol("WM_DELETE_WINDOW", win.destroy)
+    dlg.lift()
+    dlg.focus_force()
+    win.mainloop()
+    return result[0]
+
+
 def maintenance_mode(install_dir: Path) -> None:
     while True:
-        choice = ask_choice(
-            "ikabot Manager",
-            "ikabot Manager\n\nSelect an action:",
-            ["Open all instances", "Close all instances",
-             "Download latest versions", "Update", "Status", "Exit"],
-        )
+        choice = _maintenance_menu()
         if choice is None or choice == "Exit":
             return
         elif choice == "Open all instances":
             maint_open_all(install_dir)
+        elif choice == "Open all (PowerShell)":
+            maint_open_all_ps(install_dir)
         elif choice == "Close all instances":
             maint_close_all()
+        elif choice == "Close all (PowerShell)":
+            maint_close_all_ps()
         elif choice == "Download latest versions":
             maint_download_menu(install_dir)
         elif choice == "Update":
