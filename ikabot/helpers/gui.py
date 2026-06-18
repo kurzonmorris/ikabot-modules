@@ -7,6 +7,10 @@ import os
 from ikabot import config
 from ikabot.config import *
 
+# Set to True by set_child_mode() so background children never clear the
+# shared terminal (os.system("cls") bypasses sys.stdout redirection).
+_child_mode = False
+
 def enter():
     """Wait for the user to press Enter"""
     try:
@@ -22,6 +26,8 @@ def enter():
 
 def clear():
     """Clears all text on the console"""
+    if _child_mode:
+        return
     if isWindows:
         os.system("cls")
     else:
@@ -30,6 +36,8 @@ def clear():
 
 def banner():
     """Clears all text on the console and displays the Ikabot ASCII art banner"""
+    if _child_mode:
+        return
     clear()
     bner = f"""
     `7MMF'  `7MM                       `7MM\"\"\"Yp,                 mm

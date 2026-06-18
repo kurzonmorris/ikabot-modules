@@ -14,6 +14,34 @@ from ikabot.helpers.signals import deactivate_sigint
 from ikabot.helpers.varios import normalizeDicts
 
 
+def _silence_child_terminal():
+    """Redirect this process's stdout/stderr away from the shared terminal
+    and disable clear()/banner() so no background child can wipe the screen.
+
+    Safe to call multiple times.
+    """
+    import ikabot.helpers.gui as _gui
+    _gui._child_mode = True  # makes clear() and banner() no-ops in this process
+
+    try:
+        log_path = get_log_file_path()
+        if log_path:
+            _f = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
+        else:
+            _f = open(os.devnull, "w")
+        # Redirect Python-level stdout/stderr
+        sys.stdout = _f
+        sys.stderr = _f
+        # Also redirect the underlying OS file descriptors (fd 1 & 2) so that
+        # subprocesses spawned by this child (e.g. os.system calls on Unix)
+        # also lose access to the terminal.
+        if not isWindows:
+            os.dup2(_f.fileno(), 1)
+            os.dup2(_f.fileno(), 2)
+    except Exception:
+        pass
+
+
 def set_child_mode(session):
     """
     Parameters
@@ -26,20 +54,7 @@ def set_child_mode(session):
     # process starts with only the bootstrap stderr handler. Re-run
     # setup_file_logging so all child log output goes to the per-account file.
     setup_file_logging(session.username, session.servidor, session.mundo)
-    # Detach from the shared terminal: once a child goes to background its
-    # print() calls would race with the parent menu's clear()/banner() and
-    # produce a blank screen.  Redirect stdout (and stderr) to the log file
-    # so all background output is captured there instead.
-    try:
-        log_path = get_log_file_path()
-        if log_path:
-            _f = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
-        else:
-            _f = open(os.devnull, "w")
-        sys.stdout = _f
-        sys.stderr = _f
-    except Exception:
-        pass
+    _silence_child_terminal()
 
 
 def run(command):

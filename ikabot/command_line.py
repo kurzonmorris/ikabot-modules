@@ -341,9 +341,11 @@ def menu(session, checkUpdate=True):
                 "status": "started",
             })
             updateProcessList(session, programprocesslist=process_list)
-            event.wait()
+            while not event.wait(timeout=2):
+                if not process.is_alive():
+                    break
             print(f"\n'{mod_name}' is now running in the background.")
-            time.sleep(0.6)
+            time.sleep(0.8)
             continue
 
         if selected == 24 and plugins:
@@ -370,9 +372,11 @@ def menu(session, checkUpdate=True):
                 "status": "started",
             })
             updateProcessList(session, programprocesslist=process_list)
-            event.wait()
+            while not event.wait(timeout=2):
+                if not process.is_alive():
+                    break
             print(f"\n'{chosen_plugin.name}' is now running in the background.")
-            time.sleep(0.6)
+            time.sleep(0.8)
             continue
 
         if selected == 0:
@@ -405,9 +409,11 @@ def menu(session, checkUpdate=True):
                 }
             )
             updateProcessList(session, programprocesslist=process_list)
-            event.wait()
+            while not event.wait(timeout=2):
+                if not process.is_alive():
+                    break
             print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
-            time.sleep(0.6)
+            time.sleep(0.8)
         except KeyboardInterrupt:
             pass
 
