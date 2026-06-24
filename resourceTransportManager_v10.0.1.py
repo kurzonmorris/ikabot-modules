@@ -48,6 +48,22 @@ except ImportError:
 
 MODULE_NAME = "resourceTransportManager"
 
+
+def _safe_read(**kwargs):
+    """Wrapper around read() that ignores Enter presses.
+    Prevents blank-screen accidents — pressing Enter just re-prompts
+    instead of advancing the flow or consuming retry budget.
+    """
+    addl = list(kwargs.pop("additionalValues", None) or [])
+    if "" not in addl:
+        addl.append("")
+    kwargs["additionalValues"] = addl
+    while True:
+        result = read(**kwargs)
+        if result != "":
+            return result
+
+
 # ============================================================================
 #  ISLAND CACHE  — all modes use this; cache hit skips the server call
 # ============================================================================
@@ -272,13 +288,15 @@ def _island_cache_menu(session):
         print(f"  {C.BOLD}(4){C.RESET} Clear cache")
         print(f"  {C.BOLD}('){C.RESET} Back")
 
-        choice = read(min=1, max=4, digit=True, additionalValues=["'"])
+        choice = read(min=1, max=4, digit=True, additionalValues=["'", ""])
+        if choice == "":
+            continue
         if choice == "'":
             return
 
         if choice == 1:
             print(f"\n  Enter center coordinates (e.g. 44 03):")
-            raw = read(msg="  Coords: ", additionalValues=["'"])
+            raw = _safe_read(msg="  Coords: ", additionalValues=["'"])
             if raw == "'":
                 continue
             parts = raw.strip().split()
@@ -521,7 +539,7 @@ def get_notification_config(telegram_enabled, event, preset=None):
     print(f"  {C.BOLD}(3){C.RESET} Problems only — silent unless something goes wrong")
     print(f"  {C.BOLD}(4){C.RESET} None — no notifications at all")
     print(f"  {C.BOLD}('){C.RESET} Back")
-    choice = read(min=1, max=4, digit=True, additionalValues=["'"])
+    choice = _safe_read(min=1, max=4, digit=True, additionalValues=["'"])
     if choice == "'":
         event.set()
         return None
@@ -1173,7 +1191,7 @@ def _get_schedule_timing(event, mode_name):
     print(f"  {C.BOLD}(2){C.RESET} Repeat every X hours")
     print(f"  {C.BOLD}(3){C.RESET} Daily at a specific time (server time)")
     print(f"  {C.BOLD}('){C.RESET} Back")
-    choice = read(min=1, max=3, digit=True, additionalValues=["'"])
+    choice = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
     if choice == "'":
         event.set()
         return None
@@ -1183,7 +1201,7 @@ def _get_schedule_timing(event, mode_name):
 
     if choice == 2:
         print(f"\n  Repeat every how many hours?")
-        hours = read(min=1, digit=True, additionalValues=["'"])
+        hours = _safe_read(min=1, digit=True, additionalValues=["'"])
         if hours == "'":
             event.set()
             return None
@@ -1193,7 +1211,7 @@ def _get_schedule_timing(event, mode_name):
     print(f"\n  {C.DIM}All times use server time to avoid timezone issues.{C.RESET}")
     print(f"  Enter time in HH:MM format (24h, e.g. 14:30):")
     while True:
-        time_input = read(msg="  Time: ", additionalValues=["'"])
+        time_input = _safe_read(msg="  Time: ", additionalValues=["'"])
         if time_input == "'":
             event.set()
             return None
@@ -1820,7 +1838,7 @@ def choose_run_slot(session, event, rows, run_columns):
     print(f"  {C.BOLD}(2){C.RESET} Resume — continue a previous run")
     print(f"  {C.DIM}    Pick up where you left off (unsent cities still pending).{C.RESET}")
     print(f"  {C.BOLD}('){C.RESET} Back")
-    mode = read(min=1, max=2, digit=True, additionalValues=["'"])
+    mode = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
     if mode == "'":
         event.set()
         return None, None
@@ -1878,7 +1896,7 @@ def choose_run_slot(session, event, rows, run_columns):
         done = completion.get(col, 0)
         print(f"  {C.BOLD}({i + 1}){C.RESET} {col[4:]}  [{done}/{total_rows} sent]")
     print(f"  {C.BOLD}('){C.RESET} Back")
-    choice = read(
+    choice = _safe_read(
         min=1, max=len(run_columns), digit=True, additionalValues=["'"]
     )
     if choice == "'":
@@ -1957,7 +1975,7 @@ def get_dest_minimums():
     print(f"  {C.DIM}If set, resources only ship when the destination is below the target.{C.RESET}\n")
     print(f"  {C.BOLD}(1){C.RESET} Yes — set a target threshold per resource")
     print(f"  {C.BOLD}(2){C.RESET} No — always send regardless")
-    choice = read(min=1, max=2, digit=True)
+    choice = _safe_read(min=1, max=2, digit=True)
     if choice == 2:
         return None
     print("")
@@ -2024,7 +2042,7 @@ def rtm_chooseCity(session):
     print("")
     for i, city_id in enumerate(ids, 1):
         print(_format_city_line(i, cities[city_id], longest))
-    selected = read(min=1, max=len(ids))
+    selected = _safe_read(min=1, max=len(ids))
     html = session.get(city_url + ids[selected - 1])
     return getCity(html)
 
@@ -2070,8 +2088,10 @@ def rtm_ignoreCities(session, msg=None, exclude_mode=False):
             remaining = len(selected_ids)
             print(f"\n  (0) Done ({remaining} remaining)")
 
-        choice = read(min=0, max=len(all_ids),
-                      additionalValues=["a", "A"] if not exclude_mode else [])
+        _addl = ["a", "A", ""] if not exclude_mode else [""]
+        choice = read(min=0, max=len(all_ids), additionalValues=_addl)
+        if choice == "":
+            continue
 
         if choice == 0:
             break
@@ -2155,7 +2175,7 @@ def _clear_all_schedules(session):
         return
     print(f"\n  {C.WARN}This will delete ALL {len(rows)} schedule(s).{C.RESET}")
     print(f"  Type {C.BOLD}yes{C.RESET} to confirm:")
-    confirm = read(msg="  > ", additionalValues=["'", "yes", "Yes", "YES"])
+    confirm = _safe_read(msg="  > ", additionalValues=["'", "yes", "Yes", "YES"])
     if confirm.lower() != "yes":
         print("  Cancelled.")
         enter()
@@ -2188,7 +2208,7 @@ def _configure_notif_preset(telegram_enabled, event):
     print(f"  {C.BOLD}(4){C.RESET} None — no notifications at all")
     print(f"  {C.BOLD}(0){C.RESET} Off — ask each time (default)")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
-    choice = read(min=0, max=4, digit=True, additionalValues=["'"])
+    choice = _safe_read(min=0, max=4, digit=True, additionalValues=["'"])
     if choice == "'":
         return "CANCEL"
     if choice == 0:
@@ -2255,7 +2275,9 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
 
             shipping_mode = read(min=1, max=8, digit=True,
                                  additionalValues=["'", "s", "S", "o", "O",
-                                                    "x", "X", "n", "N"])
+                                                    "x", "X", "n", "N", ""])
+            if shipping_mode == "":
+                continue
             if shipping_mode == "'":
                 event.set()
                 return
@@ -2327,7 +2349,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
         print(f"  {C.BOLD}(2){C.RESET} Freighters")
         print(f"  {C.BOLD}('){C.RESET} Back")
-        shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+        shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
@@ -2338,7 +2360,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         print(f"  {C.BOLD}(1){C.RESET} Single city")
         print(f"  {C.BOLD}(2){C.RESET} Multiple cities")
         print(f"  {C.BOLD}('){C.RESET} Back")
-        source_option = read(min=1, max=2, digit=True, additionalValues=["'"])
+        source_option = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if source_option == "'":
             event.set()
             return
@@ -2376,7 +2398,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         print(f"  {C.BOLD}(2){C.RESET} Send specific — send an exact amount per resource")
         print(f"  {C.DIM}    You set exactly how much to send.{C.RESET}")
         print(f"  {C.BOLD}('){C.RESET} Back")
-        send_mode = read(min=1, max=2, digit=True, additionalValues=["'"])
+        send_mode = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if send_mode == "'":
             event.set()
             return
@@ -2413,7 +2435,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         print(f"  {C.BOLD}(1){C.RESET} Your own city")
         print(f"  {C.BOLD}(2){C.RESET} Another player's city (enter island coordinates)")
         print(f"  {C.BOLD}('){C.RESET} Back")
-        dest_type = read(min=1, max=2, digit=True, additionalValues=["'"])
+        dest_type = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if dest_type == "'":
             event.set()
             return
@@ -2425,14 +2447,14 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 print_module_banner("Consolidate — Island Coordinates")
                 print(f"  {C.DIM}Enter the island location of the target city.{C.RESET}")
                 print(f"  {C.HINT}' exit  |  = restart{C.RESET}\n")
-                x_coord = read(msg="X coordinate: ", digit=True,
+                x_coord = _safe_read(msg="X coordinate: ", digit=True,
                                additionalValues=["'", "="])
                 if x_coord == "'":
                     event.set()
                     return
                 if x_coord == "=":
                     continue
-                y_coord = read(msg="Y coordinate: ", digit=True,
+                y_coord = _safe_read(msg="Y coordinate: ", digit=True,
                                additionalValues=["'", "="])
                 if y_coord == "'":
                     event.set()
@@ -2459,7 +2481,9 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                     print(f"({i+1:>2}) {cn:<20} {pn:<15}")
                 print("(') Back | (=) Restart\n")
                 cc = read(min=0, max=len(cities_on_island),
-                          additionalValues=["'", "="])
+                          additionalValues=["'", "=", ""])
+                if cc == "":
+                    continue
                 if cc == "'" or cc == 0:
                     event.set()
                     return
@@ -2592,7 +2616,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -2645,7 +2669,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
         print(f"  {C.BOLD}(2){C.RESET} Freighters")
         print(f"  {C.BOLD}('){C.RESET} Back")
-        shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+        shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
@@ -2741,7 +2765,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -2794,7 +2818,7 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
             print(f"  {C.BOLD}({i+1}){C.RESET} {res}")
         print(f"\n  {C.HINT}Enter one or more numbers, comma-separated (e.g. 1,3,5){C.RESET}")
         print(f"  {C.BOLD}('){C.RESET} Back")
-        raw = read(msg="Resources: ", additionalValues=["'"])
+        raw = _safe_read(msg="Resources: ", additionalValues=["'"])
         if raw == "'":
             event.set()
             return
@@ -2823,7 +2847,7 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
         print(f"  {C.BOLD}(2){C.RESET} Freighters")
         print(f"  {C.BOLD}('){C.RESET} Back")
-        shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+        shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
@@ -2926,7 +2950,7 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -2980,7 +3004,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
         print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
         print(f"  {C.BOLD}(2){C.RESET} Freighters")
         print(f"  {C.BOLD}('){C.RESET} Back")
-        shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+        shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
@@ -3109,7 +3133,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                     print(f"\n  Current minimum: "
                           f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                     print("  Minimum total resources per shipment (0=off):")
-                    t_input = read(min=0, digit=True, additionalValues=["'"])
+                    t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                     if t_input != "'":
                         min_threshold = int(t_input)
                         if min_threshold > 0:
@@ -3278,7 +3302,7 @@ def _create_csv_template(session):
     print(f"  {C.BOLD}(2){C.RESET} Shared folder:  {C.DIM}{generic_dir}{C.RESET}")
     print(f"  {C.BOLD}(3){C.RESET} Custom location")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
-    loc = read(min=1, max=3, digit=True, additionalValues=["'"])
+    loc = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
     if loc == "'":
         return None
 
@@ -3368,7 +3392,9 @@ def _bulk_editor_menu(session, csv_path, event):
         print(f"  {C.OK}(7){C.RESET} Save and back")
         print(f"  {C.WARN}('){C.RESET} Cancel without saving")
 
-        choice = read(min=1, max=7, digit=True, additionalValues=["'"])
+        choice = read(min=1, max=7, digit=True, additionalValues=["'", ""])
+        if choice == "":
+            continue
         if choice == "'":
             print("  Discarded changes.")
             enter()
@@ -3595,7 +3621,7 @@ def _bulk_editor_set_resources(rows):
     print(f"  {C.BOLD}(2){C.RESET} Set per-row")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
 
-    choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+    choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
     if choice == "'":
         return
 
@@ -3620,7 +3646,7 @@ def _bulk_editor_set_resources(rows):
         res_names = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
         print("\n  Enter row numbers to edit (comma-sep or range, e.g. 1,3,5-8):")
         print("  (or 'a' for all)")
-        raw = read(additionalValues=["'", "a", "A"])
+        raw = _safe_read(additionalValues=["'", "a", "A"])
         if raw == "'":
             return
         if raw.lower() == "a":
@@ -3664,7 +3690,7 @@ def _bulk_editor_set_transport_from(rows):
     print(f"  {C.BOLD}(2){C.RESET} Freighters (f)")
     print(f"  {C.BOLD}(3){C.RESET} Keep current / set per-row later")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
-    st = read(min=1, max=3, digit=True, additionalValues=["'"])
+    st = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
     if st == "'":
         return
     if st == 1:
@@ -3680,7 +3706,7 @@ def _bulk_editor_set_transport_from(rows):
     print(f"  {C.BOLD}(1){C.RESET} All cities (a)")
     print(f"  {C.BOLD}(2){C.RESET} Specific indices (enter value)")
     print(f"  {C.BOLD}(3){C.RESET} Keep current / set per-row later")
-    fc = read(min=1, max=3, digit=True, additionalValues=["'"])
+    fc = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
     if fc == "'":
         return
     if fc == 1:
@@ -3689,7 +3715,7 @@ def _bulk_editor_set_transport_from(rows):
         print("  All rows set to 'a' (all cities).")
     elif fc == 2:
         print("  Enter From value (e.g. 1,3,5):")
-        val = read(msg="  > ", additionalValues=["'"])
+        val = _safe_read(msg="  > ", additionalValues=["'"])
         if val == "'":
             return
         for row in rows:
@@ -3745,7 +3771,7 @@ def _bulk_editor_edit_row(rows):
         return
 
     print("  Enter row number to edit (or ' to cancel):")
-    raw = read(additionalValues=["'"])
+    raw = _safe_read(additionalValues=["'"])
     if raw == "'":
         return
     try:
@@ -3770,7 +3796,7 @@ def _bulk_editor_edit_row(rows):
     print("  Enter field name to edit (or ' to go back):")
 
     while True:
-        field = read(msg="  Field: ", additionalValues=["'"])
+        field = _safe_read(msg="  Field: ", additionalValues=["'"])
         if field == "'":
             return
         matched = None
@@ -3802,7 +3828,7 @@ def _bulk_editor_delete_rows(rows):
 
     print(f"  {len(rows)} row(s). Enter row numbers to delete:")
     print("  (comma-separated or range, e.g. 1,3,5-8, or ' to cancel)")
-    raw = read(additionalValues=["'"])
+    raw = _safe_read(additionalValues=["'"])
     if raw == "'":
         return
 
@@ -3897,7 +3923,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             print(f"  {C.WARN}File not found:{C.RESET} {csv_path}")
             print(f"\n  {C.BOLD}(1){C.RESET} Create new CSV with the built-in editor")
             print(f"  {C.BOLD}('){C.RESET} Back\n")
-            choice = read(values=["1", "'"], additionalValues=["'"])
+            choice = _safe_read(values=["1", "'"], additionalValues=["'"])
             if choice == "'":
                 event.set()
                 return
@@ -4023,7 +4049,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                 print(f"  {C.BOLD}(2){C.RESET} Reset from row — clear from a specific row onwards")
                 print(f"  {C.BOLD}(3){C.RESET} Reset specific rows — pick rows by number/range")
                 print(f"  {C.BOLD}('){C.RESET} Cancel")
-                rc = read(min=1, max=3, digit=True, additionalValues=["'"])
+                rc = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
                 if rc == "'":
                     continue
                 if rc == 1:
@@ -4038,7 +4064,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                     continue
                 if rc == 2:
                     print(f"  Start from which row? (1-{len(rows)}):")
-                    start_row = read(min=1, max=len(rows), digit=True,
+                    start_row = _safe_read(min=1, max=len(rows), digit=True,
                                      additionalValues=["'"])
                     if start_row == "'":
                         continue
@@ -4056,7 +4082,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                     continue
                 if rc == 3:
                     print(f"  Enter row numbers (comma-sep, ranges, e.g. 1-5, 8, 12-20):")
-                    raw = read(additionalValues=["'"])
+                    raw = _safe_read(additionalValues=["'"])
                     if raw == "'":
                         continue
                     indices = _parse_row_selection(raw, len(rows))
@@ -4082,7 +4108,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             if rta.lower() == "a":
                 print(f"\n  Current AP wait: {ap_max_wait} minutes")
                 print("  How long to retry AP-blocked cities (minutes, 0=no retry):")
-                ap_input = read(min=0, digit=True, additionalValues=["'"])
+                ap_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if ap_input == "'":
                     continue
                 ap_max_wait = int(ap_input)
@@ -4093,7 +4119,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -4157,7 +4183,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
             print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
             print(f"  {C.BOLD}(2){C.RESET} Freighters")
             print(f"  {C.BOLD}('){C.RESET} Back")
-            shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+            shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if shiptype == "'":
                 event.set()
                 return
@@ -4165,7 +4191,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
             ship_label = "Freighters" if useFreighters else "Merchant ships"
             print(f"\nShip type: {ship_label}")
             print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-            c = read(min=1, max=2, digit=True, additionalValues=["'"])
+            c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if c == "'":
                 event.set()
                 return
@@ -4190,7 +4216,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                     return
                 print(f"\nSelected: {dest['name']}")
                 print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-                c = read(min=1, max=2, digit=True, additionalValues=["'"])
+                c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
                     return
@@ -4200,7 +4226,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
 
             print(f"\nDestinations so far: {', '.join(d['name'] for d in destinations)}")
             print(f"  {C.BOLD}(1){C.RESET} Add another destination  {C.BOLD}(2){C.RESET} Done adding")
-            c = read(min=1, max=2, digit=True)
+            c = _safe_read(min=1, max=2, digit=True)
             if c == 2:
                 adding_dests = False
 
@@ -4249,7 +4275,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                     else:
                         print(f"  {res}: {addThousandSeparator(targets[i])}")
                 print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-                c = read(min=1, max=2, digit=True, additionalValues=["'"])
+                c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
                     return
@@ -4273,7 +4299,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
             for cid in source_city_ids:
                 print(f"  {source_cities[cid]['name']}")
             print("\n(1) Confirm  (2) Re-select  (') Back to main menu")
-            c = read(min=1, max=2, digit=True, additionalValues=["'"])
+            c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if c == "'":
                 event.set()
                 return
@@ -4287,7 +4313,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         print(f"  {C.DIM}Set a minimum amount to keep in each source city.{C.RESET}\n")
         print(f"  {C.BOLD}(1){C.RESET} Set up reserve protection")
         print(f"  {C.BOLD}(2){C.RESET} No protection (send everything available)")
-        reserve_choice = read(min=1, max=2, digit=True)
+        reserve_choice = _safe_read(min=1, max=2, digit=True)
         if reserve_choice == 1:
             reserves_confirmed = False
             while not reserves_confirmed:
@@ -4333,7 +4359,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                                 parts.append(f"{res} none")
                         print(f"  {cname}: {' | '.join(parts)}")
                 print(f"\n  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-                c = read(min=1, max=2, digit=True, additionalValues=["'"])
+                c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
                     return
@@ -4397,7 +4423,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -4472,7 +4498,7 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
     print(f"  {C.DIM}    Launches a background process to run all schedules.{C.RESET}")
     print(f"  {C.BOLD}(2){C.RESET} Return to menu")
     print(f"  {C.DIM}    Start the scheduler later with (s) on the main page.{C.RESET}")
-    choice = read(min=1, max=2, digit=True)
+    choice = _safe_read(min=1, max=2, digit=True)
 
     if choice == 2:
         print(f"  {C.DIM}Schedule #{sid} saved as pending. Press (s) on the main page to start.{C.RESET}")
@@ -5904,7 +5930,7 @@ def _activate_transport_worker(session, event):
     print(f"  {C.DIM}    Reset all timers — first run happens after the interval.{C.RESET}")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
 
-    choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+    choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
     if choice == "'":
         _lock_release(wlock)
         event.set()
@@ -6007,7 +6033,9 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
         print(f"  {C.BOLD}(4){C.RESET} Delete schedule(s)")
         print(f"  {C.BOLD}('){C.RESET} Back")
 
-        choice = read(min=1, max=4, digit=True, additionalValues=["'"])
+        choice = read(min=1, max=4, digit=True, additionalValues=["'", ""])
+        if choice == "":
+            continue
         if choice == "'":
             return
 
@@ -6169,7 +6197,7 @@ def _modify_schedule(session):
 
     _view_schedules_compact(rows)
     print("  Enter schedule ID to modify (or ' to cancel):")
-    sid_input = read(additionalValues=["'"])
+    sid_input = _safe_read(additionalValues=["'"])
     if sid_input == "'":
         return
 
@@ -6211,7 +6239,9 @@ def _modify_schedule(session):
         print(f"  {C.BOLD}(9){C.RESET} AP wait & min shipment")
         print(f"  {C.BOLD}('){C.RESET} Back")
 
-        choice = read(min=1, max=9, digit=True, additionalValues=["'"])
+        choice = read(min=1, max=9, digit=True, additionalValues=["'", ""])
+        if choice == "":
+            continue
         if choice == "'":
             return
 
@@ -6225,12 +6255,12 @@ def _modify_schedule(session):
             print(f"\n  {C.BOLD}(1){C.RESET} Every X hours")
             print(f"  {C.BOLD}(2){C.RESET} Daily at specific time (server time)")
             print(f"  {C.BOLD}('){C.RESET} Cancel")
-            tc = read(min=1, max=2, digit=True, additionalValues=["'"])
+            tc = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if tc == "'":
                 continue
             if tc == 1:
                 print("  New interval (0 = one-shot, 1+ = recurring):")
-                val = read(min=0, digit=True, additionalValues=["'"])
+                val = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if val == "'":
                     continue
                 transport_csv_update(session, sid, interval_hours=val,
@@ -6246,7 +6276,7 @@ def _modify_schedule(session):
                 print(f"  {C.DIM}All times use server time.{C.RESET}")
                 print("  Enter time in HH:MM format (24h):")
                 while True:
-                    ti = read(msg="  Time: ", additionalValues=["'"])
+                    ti = _safe_read(msg="  Time: ", additionalValues=["'"])
                     if ti == "'":
                         break
                     m = re.match(r'^(\d{1,2}):(\d{2})$', ti.strip())
@@ -6267,7 +6297,7 @@ def _modify_schedule(session):
             current = "Freighters" if target.get("ship_type") == "f" else "Merchant"
             print(f"\n  Current: {current}")
             print(f"  {C.BOLD}(1){C.RESET} Merchant ships  {C.BOLD}(2){C.RESET} Freighters")
-            st = read(min=1, max=2, digit=True, additionalValues=["'"])
+            st = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if st == "'":
                 continue
             new_type = "f" if st == 2 else "m"
@@ -6291,7 +6321,7 @@ def _modify_schedule(session):
             current = target.get("notif_level", "none")
             print(f"\n  Current: {current}")
             print(f"  {C.BOLD}(1){C.RESET} Partial  {C.BOLD}(2){C.RESET} All  {C.BOLD}(3){C.RESET} Errors only")
-            nl = read(min=1, max=3, digit=True, additionalValues=["'"])
+            nl = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
             if nl == "'":
                 continue
             levels = {1: "partial", 2: "all", 3: "none"}
@@ -6309,7 +6339,7 @@ def _modify_schedule(session):
                 print(f"\n  Currently balancing: {', '.join(named) or '(none)'}")
                 print("  Enter resource numbers (comma-separated, e.g. 1,3,5):")
                 print("  1=Wood, 2=Wine, 3=Marble, 4=Crystal, 5=Sulphur")
-                raw = read(additionalValues=["'"])
+                raw = _safe_read(additionalValues=["'"])
                 if raw == "'":
                     continue
                 try:
@@ -6352,7 +6382,7 @@ def _modify_schedule(session):
             print(f"\n  Current: {current}")
             print(f"  {C.BOLD}(1){C.RESET} Keep reserves (send all except X)")
             print(f"  {C.BOLD}(2){C.RESET} Send specific amounts")
-            sm = read(min=1, max=2, digit=True, additionalValues=["'"])
+            sm = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if sm == "'":
                 continue
             new_sm = "keep" if sm == 1 else "send"
@@ -6397,7 +6427,7 @@ def _modify_schedule(session):
             print(f"\n  {C.BOLD}(1){C.RESET} Change source cities")
             print(f"  {C.BOLD}(2){C.RESET} Change destination cities")
             print(f"  {C.BOLD}('){C.RESET} Back")
-            city_choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+            city_choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if city_choice == "'":
                 continue
             if city_choice == 1:
@@ -6438,12 +6468,12 @@ def _modify_schedule(session):
             print(f"\n  {C.BOLD}(1){C.RESET} Change AP wait timer")
             print(f"  {C.BOLD}(2){C.RESET} Change min shipment threshold")
             print(f"  {C.BOLD}('){C.RESET} Back")
-            adv_choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+            adv_choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if adv_choice == "'":
                 continue
             if adv_choice == 1:
                 print(f"  How long to retry AP-blocked cities (minutes, 0=no retry):")
-                ap_input = read(min=0, digit=True, additionalValues=["'"])
+                ap_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if ap_input == "'":
                     continue
                 ap_val = int(ap_input)
@@ -6452,7 +6482,7 @@ def _modify_schedule(session):
                 print(f"  {C.OK}AP wait set to {ap_val} min.{C.RESET}")
             else:
                 print(f"  Minimum total resources per shipment (0=off):")
-                mt_input = read(min=0, digit=True, additionalValues=["'"])
+                mt_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if mt_input == "'":
                     continue
                 mt_val = int(mt_input)
@@ -6475,7 +6505,7 @@ def _toggle_schedule_pause(session):
 
     _view_schedules_compact(rows)
     print("  Enter schedule ID to pause/resume (or ' to cancel):")
-    sid_input = read(additionalValues=["'"])
+    sid_input = _safe_read(additionalValues=["'"])
     if sid_input == "'":
         return
 
@@ -6543,7 +6573,7 @@ def _delete_schedules(session):
 
     _view_schedules_compact(rows)
     print("  Enter ID(s) to delete (comma-sep, ranges with -, e.g. 1-20, 25-90):")
-    sid_input = read(additionalValues=["'"])
+    sid_input = _safe_read(additionalValues=["'"])
     if sid_input == "'":
         return
 
