@@ -63,11 +63,6 @@ def _set_redraw(draw_fn):
     if _HAS_REDRAW_HOOK:
         _set_redraw_hook_real(draw_fn)
 
-def _clear_redraw():
-    """Unregister the current redraw hook."""
-    if _HAS_REDRAW_HOOK:
-        _set_redraw_hook_real(None)
-
 
 def _safe_read(**kwargs):
     """Wrapper around read() that ignores Enter presses.
@@ -316,7 +311,7 @@ def _island_cache_menu(session):
         if choice == "":
             continue
         if choice == "'":
-            _clear_redraw()
+
             return
 
         if choice == 1:
@@ -2321,7 +2316,7 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
             if shipping_mode == "":
                 continue
             if shipping_mode == "'":
-                _clear_redraw()
+    
                 event.set()
                 return
 
@@ -2373,11 +2368,10 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                 topUpMode(session, event, stdin_fd,
                           predetermined_input, telegram_enabled,
                           log_path)
-            _clear_redraw()
+
             return
 
     except KeyboardInterrupt:
-        _clear_redraw()
         event.set()
         return
 
@@ -3484,7 +3478,7 @@ def _bulk_editor_menu(session, csv_path, event):
         if choice == "":
             continue
         if choice == "'":
-            _clear_redraw()
+
             print("  Discarded changes.")
             enter()
             return
@@ -6147,7 +6141,7 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
         if choice == "":
             continue
         if choice == "'":
-            _clear_redraw()
+
             return
 
         if choice == 1:
@@ -6357,7 +6351,7 @@ def _modify_schedule(session):
         if choice == "":
             continue
         if choice == "'":
-            _clear_redraw()
+
             return
 
         if choice == 1:
