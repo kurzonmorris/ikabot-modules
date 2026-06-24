@@ -124,10 +124,13 @@ def get_external_modules(session):
 # ---------------------------------------------------------------------------
 
 class _SilencingEvent:
-    """Wraps a multiprocessing.Event so that stdout/stderr are silenced
-    (via _silence_child_terminal) the moment the module calls event.set().
-    This guarantees the terminal is quiet before the parent wakes up,
-    even if the module never calls set_child_mode() itself.
+    """Wraps a multiprocessing.Event so that stdout/stderr are redirected to
+    the log file the moment the module calls event.set(), preventing print()
+    calls from racing with the parent's banner() redraw.
+
+    Intentionally does NOT set _child_mode (which disables clear/banner).
+    That is reserved for explicit set_child_mode() calls so the module can
+    still show its final UI state after event.set() if needed.
     """
     __slots__ = ("_ev",)
 
@@ -136,8 +139,8 @@ class _SilencingEvent:
 
     def set(self):
         try:
-            from ikabot.helpers.process import _silence_child_terminal
-            _silence_child_terminal()
+            from ikabot.helpers.process import _redirect_child_stdout
+            _redirect_child_stdout()
         except Exception:
             pass
         self._ev.set()

@@ -344,6 +344,7 @@ def menu(session, checkUpdate=True):
             while not event.wait(timeout=2):
                 if not process.is_alive():
                     break
+            set_redraw_hook(None)
             print(f"\n'{mod_name}' is now running in the background.")
             time.sleep(0.8)
             continue
@@ -375,6 +376,7 @@ def menu(session, checkUpdate=True):
             while not event.wait(timeout=2):
                 if not process.is_alive():
                     break
+            set_redraw_hook(None)
             print(f"\n'{chosen_plugin.name}' is now running in the background.")
             time.sleep(0.8)
             continue
@@ -412,6 +414,7 @@ def menu(session, checkUpdate=True):
             while not event.wait(timeout=2):
                 if not process.is_alive():
                     break
+            set_redraw_hook(None)
             print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
             time.sleep(0.8)
         except KeyboardInterrupt:

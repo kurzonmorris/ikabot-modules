@@ -14,32 +14,39 @@ from ikabot.helpers.signals import deactivate_sigint
 from ikabot.helpers.varios import normalizeDicts
 
 
-def _silence_child_terminal():
-    """Redirect this process's stdout/stderr away from the shared terminal
-    and disable clear()/banner() so no background child can wipe the screen.
+def _redirect_child_stdout():
+    """Redirect stdout/stderr to the log file (or /dev/null) so print() calls
+    from a background child go to the log instead of the shared terminal.
+
+    Does NOT disable clear() or banner() — use _silence_child_terminal() for
+    full silence, or call set_child_mode() from your module.
 
     Safe to call multiple times.
     """
-    import ikabot.helpers.gui as _gui
-    _gui._child_mode = True  # makes clear() and banner() no-ops in this process
-
     try:
         log_path = get_log_file_path()
         if log_path:
             _f = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
         else:
             _f = open(os.devnull, "w")
-        # Redirect Python-level stdout/stderr
         sys.stdout = _f
         sys.stderr = _f
-        # Also redirect the underlying OS file descriptors (fd 1 & 2) so that
-        # subprocesses spawned by this child (e.g. os.system calls on Unix)
-        # also lose access to the terminal.
         if not isWindows:
             os.dup2(_f.fileno(), 1)
             os.dup2(_f.fileno(), 2)
     except Exception:
         pass
+
+
+def _silence_child_terminal():
+    """Full silence: redirect stdout/stderr AND disable clear()/banner() in
+    this process so no background child can wipe the shared terminal screen.
+
+    Called by set_child_mode().  Safe to call multiple times.
+    """
+    import ikabot.helpers.gui as _gui
+    _gui._child_mode = True  # makes clear() and banner() no-ops in this process
+    _redirect_child_stdout()
 
 
 def set_child_mode(session):

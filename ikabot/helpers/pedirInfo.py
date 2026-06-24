@@ -87,10 +87,12 @@ def read(
         return _invalid()
 
     # Ctrl+' (0x1C) is a universal "refresh screen" shortcut.  When detected,
-    # redraw the banner and re-ask the same question — retry counter not
-    # incremented so it doesn't count against the recursion limit.
+    # call redraw() (which invokes the module's hook if set, otherwise falls
+    # back to the ikabot banner) then re-ask the same question.  Retry counter
+    # not incremented so this can't time out.
     if read_input.strip('\n').strip('\r') == _REFRESH_CHAR:
-        banner()
+        from ikabot.helpers.gui import redraw
+        redraw()
         return read(min=min, max=max, digit=digit, msg=msg, values=values,
                     empty=empty, additionalValues=additionalValues,
                     default=default, _retries=_retries, _max_retries=_max_retries)

@@ -11,6 +11,52 @@ from ikabot.config import *
 # shared terminal (os.system("cls") bypasses sys.stdout redirection).
 _child_mode = False
 
+# Optional redraw hook: modules can register a callable via set_redraw_hook()
+# that redraws their current UI.  Ctrl+' (and the refresh path in read())
+# calls redraw() which invokes the hook if set, otherwise falls back to banner().
+_redraw_hook = None
+
+
+def set_redraw_hook(fn):
+    """Register a function that redraws the current module's UI.
+
+    Call this from your module with a zero-argument callable.  When the user
+    presses Ctrl+' at any read() prompt, your function is called instead of
+    the generic ikabot banner, restoring whatever your module last showed.
+
+    Call set_redraw_hook(None) to deregister (the parent does this automatically
+    when it redraws the menu after a module goes to background).
+
+    Example::
+
+        def _my_screen():
+            banner()
+            print("My Module")
+            print("(1) Do thing")
+
+        set_redraw_hook(_my_screen)
+        choice = read(min=0, max=1)
+    """
+    global _redraw_hook
+    _redraw_hook = fn
+
+
+def redraw():
+    """Redraw the current screen.
+
+    Calls the registered redraw hook (set via set_redraw_hook) if one exists,
+    otherwise falls back to the standard ikabot banner.  No-op in child mode.
+    """
+    if _child_mode:
+        return
+    if _redraw_hook:
+        try:
+            _redraw_hook()
+            return
+        except Exception:
+            pass
+    banner()
+
 def enter():
     """Wait for the user to press Enter"""
     try:
