@@ -48,6 +48,38 @@ except ImportError:
 
 MODULE_NAME = "resourceTransportManager"
 
+# ---------------------------------------------------------------------------
+#  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
+# ---------------------------------------------------------------------------
+try:
+    from ikabot.helpers.gui import set_redraw_hook as _set_redraw_hook_real
+    _HAS_REDRAW_HOOK = True
+except ImportError:
+    _HAS_REDRAW_HOOK = False
+
+def _set_redraw(draw_fn):
+    """Register a screen-redraw function. Falls back to no-op if ikabot
+    doesn't support set_redraw_hook yet."""
+    if _HAS_REDRAW_HOOK:
+        _set_redraw_hook_real(draw_fn)
+
+
+def _safe_read(**kwargs):
+    """Wrapper around read() that ignores Enter presses.
+    Prevents blank-screen accidents — pressing Enter just re-prompts
+    instead of advancing the flow or consuming retry budget.
+    Used as fallback when no redraw hook is active.
+    """
+    addl = list(kwargs.pop("additionalValues", None) or [])
+    if "" not in addl:
+        addl.append("")
+    kwargs["additionalValues"] = addl
+    while True:
+        result = read(**kwargs)
+        if result != "":
+            return result
+
+
 # ============================================================================
 #  ISLAND CACHE  — all modes use this; cache hit skips the server call
 # ============================================================================
@@ -256,29 +288,35 @@ def _island_cache_menu(session):
     """Settings menu for island cache management."""
     while True:
         cache = _load_island_cache(session)
-        print_module_banner("Island Cache")
-        print(f"  {C.BOLD}Cached islands:{C.RESET} {len(cache)}")
-        if cache:
-            oldest = min(e.get("last_updated", 0) for e in cache.values())
-            newest = max(e.get("last_updated", 0) for e in cache.values())
-            print(f"  {C.DIM}Oldest: {_cache_age_str(oldest)}  "
-                  f"Newest: {_cache_age_str(newest)}{C.RESET}")
-        print(f"  {C.DIM}Search radius: {ISLAND_CACHE_DEFAULT_RADIUS} islands{C.RESET}")
-        print(f"  {C.DIM}Storage: {_rtm_storage_dir()}{C.RESET}")
 
-        print(f"\n  {C.BOLD}(1){C.RESET} Search area — scan islands around coordinates")
-        print(f"  {C.BOLD}(2){C.RESET} Refresh all — re-fetch every cached island")
-        print(f"  {C.BOLD}(3){C.RESET} View cache — list all cached islands")
-        print(f"  {C.BOLD}(4){C.RESET} Clear cache")
-        print(f"  {C.BOLD}('){C.RESET} Back")
+        def _draw_cache_menu(c=cache):
+            print_module_banner("Island Cache")
+            print(f"  {C.BOLD}Cached islands:{C.RESET} {len(c)}")
+            if c:
+                oldest = min(e.get("last_updated", 0) for e in c.values())
+                newest = max(e.get("last_updated", 0) for e in c.values())
+                print(f"  {C.DIM}Oldest: {_cache_age_str(oldest)}  "
+                      f"Newest: {_cache_age_str(newest)}{C.RESET}")
+            print(f"  {C.DIM}Search radius: {ISLAND_CACHE_DEFAULT_RADIUS} islands{C.RESET}")
+            print(f"  {C.DIM}Storage: {_rtm_storage_dir()}{C.RESET}")
+            print(f"\n  {C.BOLD}(1){C.RESET} Search area — scan islands around coordinates")
+            print(f"  {C.BOLD}(2){C.RESET} Refresh all — re-fetch every cached island")
+            print(f"  {C.BOLD}(3){C.RESET} View cache — list all cached islands")
+            print(f"  {C.BOLD}(4){C.RESET} Clear cache")
+            print(f"  {C.BOLD}('){C.RESET} Back")
 
-        choice = read(min=1, max=4, digit=True, additionalValues=["'"])
+        _draw_cache_menu()
+        _set_redraw(_draw_cache_menu)
+        choice = read(min=1, max=4, digit=True, additionalValues=["'", ""])
+        if choice == "":
+            continue
         if choice == "'":
+
             return
 
         if choice == 1:
             print(f"\n  Enter center coordinates (e.g. 44 03):")
-            raw = read(msg="  Coords: ", additionalValues=["'"])
+            raw = _safe_read(msg="  Coords: ", additionalValues=["'"])
             if raw == "'":
                 continue
             parts = raw.strip().split()
@@ -486,7 +524,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.0.1                 \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.1.0                 \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -505,23 +543,29 @@ def get_notification_config(telegram_enabled, event, preset=None):
         return active_preset
 
     if telegram_enabled is False:
-        print_module_banner()
-        print(f"  {C.WARN}Telegram is not set up.{C.RESET}")
-        print(f"  Continue without notifications? {C.BOLD}[Y/n]{C.RESET}")
+        def _draw_notif_off():
+            print_module_banner()
+            print(f"  {C.WARN}Telegram is not set up.{C.RESET}")
+            print(f"  Continue without notifications? {C.BOLD}[Y/n]{C.RESET}")
+        _draw_notif_off()
+        _set_redraw(_draw_notif_off)
         rta = read(values=["y", "Y", "n", "N", ""])
         if rta.lower() == "n":
             event.set()
             return None
         return {"level": "none", "telegram": False}
 
-    print_module_banner("Telegram Notifications")
-    print(f"  How much do you want to be notified?\n")
-    print(f"  {C.BOLD}(1){C.RESET} Partial — summary at start of each cycle + errors")
-    print(f"  {C.BOLD}(2){C.RESET} All — a message for every shipment sent")
-    print(f"  {C.BOLD}(3){C.RESET} Problems only — silent unless something goes wrong")
-    print(f"  {C.BOLD}(4){C.RESET} None — no notifications at all")
-    print(f"  {C.BOLD}('){C.RESET} Back")
-    choice = read(min=1, max=4, digit=True, additionalValues=["'"])
+    def _draw_notif_level():
+        print_module_banner("Telegram Notifications")
+        print(f"  How much do you want to be notified?\n")
+        print(f"  {C.BOLD}(1){C.RESET} Partial — summary at start of each cycle + errors")
+        print(f"  {C.BOLD}(2){C.RESET} All — a message for every shipment sent")
+        print(f"  {C.BOLD}(3){C.RESET} Problems only — silent unless something goes wrong")
+        print(f"  {C.BOLD}(4){C.RESET} None — no notifications at all")
+        print(f"  {C.BOLD}('){C.RESET} Back")
+    _draw_notif_level()
+    _set_redraw(_draw_notif_level)
+    choice = _safe_read(min=1, max=4, digit=True, additionalValues=["'"])
     if choice == "'":
         event.set()
         return None
@@ -1167,13 +1211,16 @@ def _next_run_for_time(time_str):
 def _get_schedule_timing(event, mode_name):
     """Shared timing setup for all modes. Returns (interval_hours, run_at_time)
     or None if user cancels."""
-    print_module_banner(f"{mode_name} — Schedule Timing")
-    print(f"  {C.DIM}When should this run?{C.RESET}\n")
-    print(f"  {C.BOLD}(1){C.RESET} One-time (send once and done)")
-    print(f"  {C.BOLD}(2){C.RESET} Repeat every X hours")
-    print(f"  {C.BOLD}(3){C.RESET} Daily at a specific time (server time)")
-    print(f"  {C.BOLD}('){C.RESET} Back")
-    choice = read(min=1, max=3, digit=True, additionalValues=["'"])
+    def _draw_timing():
+        print_module_banner(f"{mode_name} — Schedule Timing")
+        print(f"  {C.DIM}When should this run?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} One-time (send once and done)")
+        print(f"  {C.BOLD}(2){C.RESET} Repeat every X hours")
+        print(f"  {C.BOLD}(3){C.RESET} Daily at a specific time (server time)")
+        print(f"  {C.BOLD}('){C.RESET} Back")
+    _draw_timing()
+    _set_redraw(_draw_timing)
+    choice = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
     if choice == "'":
         event.set()
         return None
@@ -1183,7 +1230,7 @@ def _get_schedule_timing(event, mode_name):
 
     if choice == 2:
         print(f"\n  Repeat every how many hours?")
-        hours = read(min=1, digit=True, additionalValues=["'"])
+        hours = _safe_read(min=1, digit=True, additionalValues=["'"])
         if hours == "'":
             event.set()
             return None
@@ -1193,7 +1240,7 @@ def _get_schedule_timing(event, mode_name):
     print(f"\n  {C.DIM}All times use server time to avoid timezone issues.{C.RESET}")
     print(f"  Enter time in HH:MM format (24h, e.g. 14:30):")
     while True:
-        time_input = read(msg="  Time: ", additionalValues=["'"])
+        time_input = _safe_read(msg="  Time: ", additionalValues=["'"])
         if time_input == "'":
             event.set()
             return None
@@ -1813,14 +1860,17 @@ def _resolve_rc(rc_val, avail, send_mode):
 
 
 def choose_run_slot(session, event, rows, run_columns):
-    print_module_banner("Bulk Distribution — Run Slot")
-    print(f"  {C.DIM}Each run tracks progress (which cities have been sent to).{C.RESET}\n")
-    print(f"  {C.BOLD}(1){C.RESET} Start fresh — begin a new run")
-    print(f"  {C.DIM}    Replaces the oldest run slot with a clean starting point.{C.RESET}")
-    print(f"  {C.BOLD}(2){C.RESET} Resume — continue a previous run")
-    print(f"  {C.DIM}    Pick up where you left off (unsent cities still pending).{C.RESET}")
-    print(f"  {C.BOLD}('){C.RESET} Back")
-    mode = read(min=1, max=2, digit=True, additionalValues=["'"])
+    def _draw_run_slot():
+        print_module_banner("Bulk Distribution — Run Slot")
+        print(f"  {C.DIM}Each run tracks progress (which cities have been sent to).{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Start fresh — begin a new run")
+        print(f"  {C.DIM}    Replaces the oldest run slot with a clean starting point.{C.RESET}")
+        print(f"  {C.BOLD}(2){C.RESET} Resume — continue a previous run")
+        print(f"  {C.DIM}    Pick up where you left off (unsent cities still pending).{C.RESET}")
+        print(f"  {C.BOLD}('){C.RESET} Back")
+    _draw_run_slot()
+    _set_redraw(_draw_run_slot)
+    mode = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
     if mode == "'":
         event.set()
         return None, None
@@ -1878,7 +1928,7 @@ def choose_run_slot(session, event, rows, run_columns):
         done = completion.get(col, 0)
         print(f"  {C.BOLD}({i + 1}){C.RESET} {col[4:]}  [{done}/{total_rows} sent]")
     print(f"  {C.BOLD}('){C.RESET} Back")
-    choice = read(
+    choice = _safe_read(
         min=1, max=len(run_columns), digit=True, additionalValues=["'"]
     )
     if choice == "'":
@@ -1957,7 +2007,7 @@ def get_dest_minimums():
     print(f"  {C.DIM}If set, resources only ship when the destination is below the target.{C.RESET}\n")
     print(f"  {C.BOLD}(1){C.RESET} Yes — set a target threshold per resource")
     print(f"  {C.BOLD}(2){C.RESET} No — always send regardless")
-    choice = read(min=1, max=2, digit=True)
+    choice = _safe_read(min=1, max=2, digit=True)
     if choice == 2:
         return None
     print("")
@@ -2024,7 +2074,7 @@ def rtm_chooseCity(session):
     print("")
     for i, city_id in enumerate(ids, 1):
         print(_format_city_line(i, cities[city_id], longest))
-    selected = read(min=1, max=len(ids))
+    selected = _safe_read(min=1, max=len(ids))
     html = session.get(city_url + ids[selected - 1])
     return getCity(html)
 
@@ -2037,41 +2087,45 @@ def rtm_ignoreCities(session, msg=None, exclude_mode=False):
     selected_names = [] if not exclude_mode else []
 
     while True:
-        print_module_banner()
-        if msg is not None:
-            print(f"{msg}")
-        if not exclude_mode and selected_names:
-            print(f'  Selected: {", ".join(selected_names)}')
-        if exclude_mode and selected_names:
-            print(f'  Excluded: {", ".join(selected_names)}')
-        print("")
-
-        longest = max(
-            len(all_cities[cid]["name"]) for cid in all_ids
-        ) if all_ids else 0
-        for i, city_id in enumerate(all_ids, 1):
-            city = all_cities[city_id]
-            name = city["name"]
-            pad = " " * (longest - len(name) + 2)
-            resource = _TRADEGOOD_NAMES.get(
-                int(city.get("tradegood", 0)), "???")
-            coords = city.get("coords", "").strip()
-            cid_str = str(city["id"])
-            if not exclude_mode:
-                marker = " [+]" if cid_str in selected_ids else ""
+        def _draw_cities(m=msg, em=exclude_mode, sn=selected_names,
+                         si=selected_ids, ai=all_ids, ac=all_cities):
+            print_module_banner()
+            if m is not None:
+                print(f"{m}")
+            if not em and sn:
+                print(f'  Selected: {", ".join(sn)}')
+            if em and sn:
+                print(f'  Excluded: {", ".join(sn)}')
+            print("")
+            longest = max(
+                len(ac[cid]["name"]) for cid in ai
+            ) if ai else 0
+            for i, city_id in enumerate(ai, 1):
+                city = ac[city_id]
+                name = city["name"]
+                pad = " " * (longest - len(name) + 2)
+                resource = _TRADEGOOD_NAMES.get(
+                    int(city.get("tradegood", 0)), "???")
+                coords = city.get("coords", "").strip()
+                cid_str = str(city["id"])
+                if not em:
+                    marker = " [+]" if cid_str in si else ""
+                else:
+                    marker = " [-]" if cid_str not in si else ""
+                print(f"  {i}) {name}{pad}{resource:<9} {coords}{marker}")
+            if not em:
+                ct = len(si)
+                print(f"\n  (0) Done ({ct} selected)  |  (a) Select all")
             else:
-                marker = " [-]" if cid_str not in selected_ids else ""
-            print(f"  {i}) {name}{pad}{resource:<9} {coords}{marker}")
+                remaining = len(si)
+                print(f"\n  (0) Done ({remaining} remaining)")
 
-        if not exclude_mode:
-            ct = len(selected_ids)
-            print(f"\n  (0) Done ({ct} selected)  |  (a) Select all")
-        else:
-            remaining = len(selected_ids)
-            print(f"\n  (0) Done ({remaining} remaining)")
-
-        choice = read(min=0, max=len(all_ids),
-                      additionalValues=["a", "A"] if not exclude_mode else [])
+        _draw_cities()
+        _set_redraw(_draw_cities)
+        _addl = ["a", "A", ""] if not exclude_mode else [""]
+        choice = read(min=0, max=len(all_ids), additionalValues=_addl)
+        if choice == "":
+            continue
 
         if choice == 0:
             break
@@ -2155,7 +2209,7 @@ def _clear_all_schedules(session):
         return
     print(f"\n  {C.WARN}This will delete ALL {len(rows)} schedule(s).{C.RESET}")
     print(f"  Type {C.BOLD}yes{C.RESET} to confirm:")
-    confirm = read(msg="  > ", additionalValues=["'", "yes", "Yes", "YES"])
+    confirm = _safe_read(msg="  > ", additionalValues=["'", "yes", "Yes", "YES"])
     if confirm.lower() != "yes":
         print("  Cancelled.")
         enter()
@@ -2179,16 +2233,19 @@ def _configure_notif_preset(telegram_enabled, event):
         enter()
         return None
 
-    print_module_banner("Notification Preset")
-    print(f"  {C.DIM}This applies automatically to all new schedules.{C.RESET}\n")
-    print(f"  {C.BOLD}(1){C.RESET} Partial — cycle start/complete + problems")
-    print(f"  {C.BOLD}(2){C.RESET} All — a message for every shipment")
-    print(f"  {C.BOLD}(3){C.RESET} Problems only — silent unless something goes wrong")
-    print(f"  {C.DIM}    (skips, blockades, occupation, 0 ships, errors){C.RESET}")
-    print(f"  {C.BOLD}(4){C.RESET} None — no notifications at all")
-    print(f"  {C.BOLD}(0){C.RESET} Off — ask each time (default)")
-    print(f"  {C.BOLD}('){C.RESET} Cancel")
-    choice = read(min=0, max=4, digit=True, additionalValues=["'"])
+    def _draw_notif_preset():
+        print_module_banner("Notification Preset")
+        print(f"  {C.DIM}This applies automatically to all new schedules.{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Partial — cycle start/complete + problems")
+        print(f"  {C.BOLD}(2){C.RESET} All — a message for every shipment")
+        print(f"  {C.BOLD}(3){C.RESET} Problems only — silent unless something goes wrong")
+        print(f"  {C.DIM}    (skips, blockades, occupation, 0 ships, errors){C.RESET}")
+        print(f"  {C.BOLD}(4){C.RESET} None — no notifications at all")
+        print(f"  {C.BOLD}(0){C.RESET} Off — ask each time (default)")
+        print(f"  {C.BOLD}('){C.RESET} Cancel")
+    _draw_notif_preset()
+    _set_redraw(_draw_notif_preset)
+    choice = _safe_read(min=0, max=4, digit=True, additionalValues=["'"])
     if choice == "'":
         return "CANCEL"
     if choice == 0:
@@ -2209,54 +2266,57 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
         notif_preset = None
 
         while True:
-            print_module_banner()
-            print(f"  {_scheduler_status_line(session)}")
-            worker_running = _is_transport_worker_running(session)
-            if not worker_running:
-                counts = transport_csv_count_by_status(session)
-                if counts.get("active", 0) + counts.get("pending", 0) > 0:
-                    print(f"  {C.WARN}Schedules exist but the scheduler is stopped."
-                          f" Press (s) to start it.{C.RESET}")
+            def _draw_main_menu():
+                print_module_banner()
+                print(f"  {_scheduler_status_line(session)}")
+                worker_running = _is_transport_worker_running(session)
+                if not worker_running:
+                    counts = transport_csv_count_by_status(session)
+                    if counts.get("active", 0) + counts.get("pending", 0) > 0:
+                        print(f"  {C.WARN}Schedules exist but the scheduler is stopped."
+                              f" Press (s) to start it.{C.RESET}")
+                if notif_preset is not None:
+                    preset_label = _NOTIF_LABELS.get(
+                        notif_preset.get("level", ""), "?")
+                    nd = f"{C.OK}{preset_label}{C.RESET}"
+                else:
+                    nd = f"{C.DIM}ask each time{C.RESET}"
+                print(f"\n  {C.BOLD}(s){C.RESET} Start scheduler   "
+                      f"{C.BOLD}(o){C.RESET} Stop scheduler   "
+                      f"{C.BOLD}(x){C.RESET} Clear all schedules")
+                print(f"  {C.BOLD}(n){C.RESET} Notifications: {nd}")
+                print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
+                      f" to run it.{C.RESET}")
+                print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
+                print(f"  {C.BOLD}(1){C.RESET} Consolidate")
+                print(f"  {C.DIM}    Collect resources from multiple cities into one destination.{C.RESET}")
+                print(f"  {C.BOLD}(2){C.RESET} Distribute")
+                print(f"  {C.DIM}    Send resources from one city out to several destinations.{C.RESET}")
+                print(f"  {C.BOLD}(3){C.RESET} Even Distribution")
+                print(f"  {C.DIM}    Spread a resource evenly across selected cities so each has the same.{C.RESET}")
+                print(f"  {C.BOLD}(4){C.RESET} Auto Send")
+                print(f"  {C.DIM}    Request a total amount — the system gathers it from all your cities.{C.RESET}")
+                print(f"  {C.BOLD}(5){C.RESET} Bulk Distribution")
+                print(f"  {C.DIM}    Send to many cities at once using a CSV spreadsheet file.{C.RESET}")
+                print(f"  {C.BOLD}(6){C.RESET} Keep Topped Up")
+                print(f"  {C.DIM}    Automatically refill cities when resources drop below a target.{C.RESET}")
+                print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
+                print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
+                print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
+                print(f"  {C.BOLD}(8){C.RESET} Island Cache")
+                print(f"  {C.DIM}    Browse, search, and cache island data for faster lookups.{C.RESET}")
 
-            if notif_preset is not None:
-                preset_label = _NOTIF_LABELS.get(
-                    notif_preset.get("level", ""), "?")
-                notif_display = f"{C.OK}{preset_label}{C.RESET}"
-            else:
-                notif_display = f"{C.DIM}ask each time{C.RESET}"
-
-            print(f"\n  {C.BOLD}(s){C.RESET} Start scheduler   "
-                  f"{C.BOLD}(o){C.RESET} Stop scheduler   "
-                  f"{C.BOLD}(x){C.RESET} Clear all schedules")
-            print(f"  {C.BOLD}(n){C.RESET} Notifications: {notif_display}")
-            print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
-                  f" to run it.{C.RESET}")
-
-            print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
-            print(f"  {C.BOLD}(1){C.RESET} Consolidate")
-            print(f"  {C.DIM}    Collect resources from multiple cities into one destination.{C.RESET}")
-            print(f"  {C.BOLD}(2){C.RESET} Distribute")
-            print(f"  {C.DIM}    Send resources from one city out to several destinations.{C.RESET}")
-            print(f"  {C.BOLD}(3){C.RESET} Even Distribution")
-            print(f"  {C.DIM}    Spread a resource evenly across selected cities so each has the same.{C.RESET}")
-            print(f"  {C.BOLD}(4){C.RESET} Auto Send")
-            print(f"  {C.DIM}    Request a total amount — the system gathers it from all your cities.{C.RESET}")
-            print(f"  {C.BOLD}(5){C.RESET} Bulk Distribution")
-            print(f"  {C.DIM}    Send to many cities at once using a CSV spreadsheet file.{C.RESET}")
-            print(f"  {C.BOLD}(6){C.RESET} Keep Topped Up")
-            print(f"  {C.DIM}    Automatically refill cities when resources drop below a target.{C.RESET}")
-
-            print(f"\n  {C.HEADER}── Management ──{C.RESET}\n")
-            print(f"  {C.BOLD}(7){C.RESET} Manage Schedules")
-            print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
-            print(f"  {C.BOLD}(8){C.RESET} Island Cache")
-            print(f"  {C.DIM}    Browse, search, and cache island data for faster lookups.{C.RESET}")
+            _draw_main_menu()
+            _set_redraw(_draw_main_menu)
             print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
 
             shipping_mode = read(min=1, max=8, digit=True,
                                  additionalValues=["'", "s", "S", "o", "O",
-                                                    "x", "X", "n", "N"])
+                                                    "x", "X", "n", "N", ""])
+            if shipping_mode == "":
+                continue
             if shipping_mode == "'":
+    
                 event.set()
                 return
 
@@ -2308,6 +2368,7 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                 topUpMode(session, event, stdin_fd,
                           predetermined_input, telegram_enabled,
                           log_path)
+
             return
 
     except KeyboardInterrupt:
@@ -2322,23 +2383,29 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
 def consolidateMode(session, event, stdin_fd, predetermined_input,
                     telegram_enabled, log_path):
     try:
-        print_module_banner("Consolidate — Ship Type")
-        print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
-        print(f"  {C.BOLD}(2){C.RESET} Freighters")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-        shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+        def _draw_consol_ship():
+            print_module_banner("Consolidate — Ship Type")
+            print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+            print(f"  {C.BOLD}(2){C.RESET} Freighters")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+        _draw_consol_ship()
+        _set_redraw(_draw_consol_ship)
+        shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
         useFreighters = (shiptype == 2)
 
-        print_module_banner("Consolidate — Source Cities")
-        print(f"  {C.DIM}Where do the resources come from?{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Single city")
-        print(f"  {C.BOLD}(2){C.RESET} Multiple cities")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-        source_option = read(min=1, max=2, digit=True, additionalValues=["'"])
+        def _draw_consol_src():
+            print_module_banner("Consolidate — Source Cities")
+            print(f"  {C.DIM}Where do the resources come from?{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Single city")
+            print(f"  {C.BOLD}(2){C.RESET} Multiple cities")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+        _draw_consol_src()
+        _set_redraw(_draw_consol_src)
+        source_option = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if source_option == "'":
             event.set()
             return
@@ -2367,16 +2434,20 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 city = getCity(html)
                 origin_cities.append(city)
 
-        print_module_banner("Consolidate — Sending Mode")
         source_summary = ", ".join(c["name"] for c in origin_cities)
-        print(f"  Source: {C.CYAN}{source_summary}{C.RESET}\n")
-        print(f"  {C.DIM}How should resource amounts be calculated?{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Keep reserves — send everything except a reserve amount")
-        print(f"  {C.DIM}    You set how much to keep; the rest gets shipped.{C.RESET}")
-        print(f"  {C.BOLD}(2){C.RESET} Send specific — send an exact amount per resource")
-        print(f"  {C.DIM}    You set exactly how much to send.{C.RESET}")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-        send_mode = read(min=1, max=2, digit=True, additionalValues=["'"])
+
+        def _draw_consol_sendmode():
+            print_module_banner("Consolidate — Sending Mode")
+            print(f"  Source: {C.CYAN}{source_summary}{C.RESET}\n")
+            print(f"  {C.DIM}How should resource amounts be calculated?{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Keep reserves — send everything except a reserve amount")
+            print(f"  {C.DIM}    You set how much to keep; the rest gets shipped.{C.RESET}")
+            print(f"  {C.BOLD}(2){C.RESET} Send specific — send an exact amount per resource")
+            print(f"  {C.DIM}    You set exactly how much to send.{C.RESET}")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+        _draw_consol_sendmode()
+        _set_redraw(_draw_consol_sendmode)
+        send_mode = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if send_mode == "'":
             event.set()
             return
@@ -2407,13 +2478,16 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             return
 
         # --- Destination ---
-        print_module_banner("Consolidate — Destination")
-        print(f"  Source: {C.CYAN}{source_summary}{C.RESET}\n")
-        print(f"  {C.DIM}Where should the resources be delivered?{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Your own city")
-        print(f"  {C.BOLD}(2){C.RESET} Another player's city (enter island coordinates)")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-        dest_type = read(min=1, max=2, digit=True, additionalValues=["'"])
+        def _draw_consol_dest():
+            print_module_banner("Consolidate — Destination")
+            print(f"  Source: {C.CYAN}{source_summary}{C.RESET}\n")
+            print(f"  {C.DIM}Where should the resources be delivered?{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Your own city")
+            print(f"  {C.BOLD}(2){C.RESET} Another player's city (enter island coordinates)")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+        _draw_consol_dest()
+        _set_redraw(_draw_consol_dest)
+        dest_type = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if dest_type == "'":
             event.set()
             return
@@ -2425,14 +2499,14 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 print_module_banner("Consolidate — Island Coordinates")
                 print(f"  {C.DIM}Enter the island location of the target city.{C.RESET}")
                 print(f"  {C.HINT}' exit  |  = restart{C.RESET}\n")
-                x_coord = read(msg="X coordinate: ", digit=True,
+                x_coord = _safe_read(msg="X coordinate: ", digit=True,
                                additionalValues=["'", "="])
                 if x_coord == "'":
                     event.set()
                     return
                 if x_coord == "=":
                     continue
-                y_coord = read(msg="Y coordinate: ", digit=True,
+                y_coord = _safe_read(msg="Y coordinate: ", digit=True,
                                additionalValues=["'", "="])
                 if y_coord == "'":
                     event.set()
@@ -2448,18 +2522,23 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                     print(f"No cities on island [{x_coord}:{y_coord}]!")
                     continue
 
-                print(f"\nIsland: {island['name']} [{island['x']}:{island['y']}]")
-                print(f"Resource: {materials_names[int(island['tradegood'])]}\n")
-                print("Select destination city:")
-                print(f"    {'City Name':<20} {'Player':<15}")
-                print(f"    {'-'*20} {'-'*15}")
-                for i, c in enumerate(cities_on_island):
-                    cn = c.get("name", "?")[:20]
-                    pn = c.get("Name", "?")[:15]
-                    print(f"({i+1:>2}) {cn:<20} {pn:<15}")
-                print("(') Back | (=) Restart\n")
+                def _draw_island_cities(isl=island, coi=cities_on_island):
+                    print(f"\nIsland: {isl['name']} [{isl['x']}:{isl['y']}]")
+                    print(f"Resource: {materials_names[int(isl['tradegood'])]}\n")
+                    print("Select destination city:")
+                    print(f"    {'City Name':<20} {'Player':<15}")
+                    print(f"    {'-'*20} {'-'*15}")
+                    for i, c in enumerate(coi):
+                        cn = c.get("name", "?")[:20]
+                        pn = c.get("Name", "?")[:15]
+                        print(f"({i+1:>2}) {cn:<20} {pn:<15}")
+                    print("(') Back | (=) Restart\n")
+                _draw_island_cities()
+                _set_redraw(_draw_island_cities)
                 cc = read(min=0, max=len(cities_on_island),
-                          additionalValues=["'", "="])
+                          additionalValues=["'", "=", ""])
+                if cc == "":
+                    continue
                 if cc == "'" or cc == 0:
                     event.set()
                     return
@@ -2592,7 +2671,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -2640,12 +2719,15 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
 def distributeMode(session, event, stdin_fd, predetermined_input,
                    telegram_enabled, log_path):
     try:
-        print_module_banner("Distribute — Ship Type")
-        print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
-        print(f"  {C.BOLD}(2){C.RESET} Freighters")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-        shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+        def _draw_dist_ship():
+            print_module_banner("Distribute — Ship Type")
+            print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+            print(f"  {C.BOLD}(2){C.RESET} Freighters")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+        _draw_dist_ship()
+        _set_redraw(_draw_dist_ship)
+        shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
@@ -2713,26 +2795,30 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         min_threshold = 0
 
         while True:
-            print_module_banner("Distribute — Summary")
-            ship_label = "Freighters" if useFreighters else "Merchant ships"
-            print(f"  {C.BOLD}Ship type:{C.RESET}     {ship_label}")
-            print(f"  {C.BOLD}Source:{C.RESET}        {origin_city['name']}")
-            print(f"  {C.BOLD}Destinations:{C.RESET}  {dest_summary} ({len(destination_cities)})")
-            if dest_minimums:
-                print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
-            if run_at_time:
-                int_label = f"Daily at {run_at_time} (server time)"
-            elif interval_hours == 0:
-                int_label = "One-time"
-            else:
-                int_label = f"Every {interval_hours}h"
-            print(f"  {C.BOLD}Schedule:{C.RESET}      {int_label}")
-            if min_threshold > 0:
-                print(f"  {C.BOLD}Min ship:{C.RESET}      {min_threshold:,} total resources")
-            print(f"  {C.BOLD}Total:{C.RESET}         {C.OK}{addThousandSeparator(grand)}{C.RESET} resources\n")
-            print(f"  {C.OK}(Y){C.RESET} Proceed  "
-                  f"{C.CYAN}(T){C.RESET} Min shipment  "
-                  f"{C.WARN}(N){C.RESET} Cancel")
+            def _draw_dist_summary():
+                print_module_banner("Distribute — Summary")
+                ship_label = "Freighters" if useFreighters else "Merchant ships"
+                print(f"  {C.BOLD}Ship type:{C.RESET}     {ship_label}")
+                print(f"  {C.BOLD}Source:{C.RESET}        {origin_city['name']}")
+                print(f"  {C.BOLD}Destinations:{C.RESET}  {dest_summary} ({len(destination_cities)})")
+                if dest_minimums:
+                    print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
+                if run_at_time:
+                    il = f"Daily at {run_at_time} (server time)"
+                elif interval_hours == 0:
+                    il = "One-time"
+                else:
+                    il = f"Every {interval_hours}h"
+                print(f"  {C.BOLD}Schedule:{C.RESET}      {il}")
+                if min_threshold > 0:
+                    print(f"  {C.BOLD}Min ship:{C.RESET}      {min_threshold:,} total resources")
+                print(f"  {C.BOLD}Total:{C.RESET}         {C.OK}{addThousandSeparator(grand)}{C.RESET} resources\n")
+                print(f"  {C.OK}(Y){C.RESET} Proceed  "
+                      f"{C.CYAN}(T){C.RESET} Min shipment  "
+                      f"{C.WARN}(N){C.RESET} Cancel")
+
+            _draw_dist_summary()
+            _set_redraw(_draw_dist_summary)
             rta = read(values=["y", "Y", "n", "N", "t", "T", ""])
             if rta.lower() == "n":
                 event.set()
@@ -2741,7 +2827,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -2788,13 +2874,16 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
                          telegram_enabled, log_path):
     try:
         # Select resources (multi-select)
-        print_module_banner("Even Distribution — Pick Resources")
-        print(f"  {C.DIM}Choose which resource(s) to split evenly across cities.{C.RESET}\n")
-        for i, res in enumerate(materials_names):
-            print(f"  {C.BOLD}({i+1}){C.RESET} {res}")
-        print(f"\n  {C.HINT}Enter one or more numbers, comma-separated (e.g. 1,3,5){C.RESET}")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-        raw = read(msg="Resources: ", additionalValues=["'"])
+        def _draw_even_res():
+            print_module_banner("Even Distribution — Pick Resources")
+            print(f"  {C.DIM}Choose which resource(s) to split evenly across cities.{C.RESET}\n")
+            for i, res in enumerate(materials_names):
+                print(f"  {C.BOLD}({i+1}){C.RESET} {res}")
+            print(f"\n  {C.HINT}Enter one or more numbers, comma-separated (e.g. 1,3,5){C.RESET}")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+        _draw_even_res()
+        _set_redraw(_draw_even_res)
+        raw = _safe_read(msg="Resources: ", additionalValues=["'"])
         if raw == "'":
             event.set()
             return
@@ -2817,13 +2906,16 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         print(f"\nBalancing: {selected_names}")
 
         # Ship type
-        print_module_banner("Even Distribution — Ship Type")
-        print(f"  Balancing: {C.CYAN}{selected_names}{C.RESET}\n")
-        print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
-        print(f"  {C.BOLD}(2){C.RESET} Freighters")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-        shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+        def _draw_even_ship():
+            print_module_banner("Even Distribution — Ship Type")
+            print(f"  Balancing: {C.CYAN}{selected_names}{C.RESET}\n")
+            print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+            print(f"  {C.BOLD}(2){C.RESET} Freighters")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+        _draw_even_ship()
+        _set_redraw(_draw_even_ship)
+        shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
@@ -2912,12 +3004,16 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         min_threshold = 0
 
         while True:
-            print(f"\n  {C.BOLD}{len(preview_routes)} shipment(s) planned.{C.RESET}")
-            if min_threshold > 0:
-                print(f"  {C.BOLD}Min ship:{C.RESET} {min_threshold:,} total resources")
-            print(f"  {C.OK}(Y){C.RESET} Confirm — start balancing")
-            print(f"  {C.CYAN}(T){C.RESET} Min shipment")
-            print(f"  {C.WARN}(N){C.RESET} Cancel")
+            def _draw_even_confirm():
+                print(f"\n  {C.BOLD}{len(preview_routes)} shipment(s) planned.{C.RESET}")
+                if min_threshold > 0:
+                    print(f"  {C.BOLD}Min ship:{C.RESET} {min_threshold:,} total resources")
+                print(f"  {C.OK}(Y){C.RESET} Confirm — start balancing")
+                print(f"  {C.CYAN}(T){C.RESET} Min shipment")
+                print(f"  {C.WARN}(N){C.RESET} Cancel")
+
+            _draw_even_confirm()
+            _set_redraw(_draw_even_confirm)
             choice = read(values=["y", "Y", "n", "N", "t", "T", ""])
             if choice.lower() == "n":
                 event.set()
@@ -2926,7 +3022,7 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -2975,12 +3071,15 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
 def autoSendMode(session, event, stdin_fd, predetermined_input,
                  telegram_enabled, log_path):
     try:
-        print_module_banner("Auto Send — Ship Type")
-        print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
-        print(f"  {C.BOLD}(2){C.RESET} Freighters")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-        shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+        def _draw_auto_ship():
+            print_module_banner("Auto Send — Ship Type")
+            print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+            print(f"  {C.BOLD}(2){C.RESET} Freighters")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+        _draw_auto_ship()
+        _set_redraw(_draw_auto_ship)
+        shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
         if shiptype == "'":
             event.set()
             return
@@ -3109,7 +3208,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                     print(f"\n  Current minimum: "
                           f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                     print("  Minimum total resources per shipment (0=off):")
-                    t_input = read(min=0, digit=True, additionalValues=["'"])
+                    t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                     if t_input != "'":
                         min_threshold = int(t_input)
                         if min_threshold > 0:
@@ -3183,53 +3282,58 @@ def allocate_from_suppliers(requested, suppliers, destination_city,
 def render_auto_send_review(destination_city, destination_island, routes,
                             useFreighters, capacity):
     ship_type_name = "Freighters" if useFreighters else "Merchant ships"
-    print_module_banner("Auto Send - Review")
-    print(f"  Destination: {destination_city['name']} "
-          f"[{destination_island['x']}:{destination_island['y']}]")
-    print(f"  Ship type:   {ship_type_name} "
-          f"(capacity: {addThousandSeparator(capacity)})\n")
-    print("  Planned Shipments:")
-    print(f"  {'#':<4} {'From':<18}", end="")
-    for res in materials_names:
-        print(f" {res:>9}", end="")
-    print(f" {'Ships':>7}")
-    print(f"  {'--':<4} {'-'*18:<18}", end="")
-    for _ in materials_names:
-        print(f" {'-'*9:>9}", end="")
-    print(f" {'-'*7:>7}")
 
-    grand = [0] * len(materials_names)
-    total_ships = 0
-    for idx, route in enumerate(routes):
-        origin = route[0]
-        amounts = route[3:]
-        cargo = sum(amounts)
-        ships = math.ceil(cargo / capacity) if capacity > 0 else 0
-        name = origin["name"][:18] if len(origin["name"]) <= 18 else origin["name"][:15] + "..."
-        print(f"  {idx+1:<4} {name:<18}", end="")
+    def _draw_auto_review():
+        print_module_banner("Auto Send - Review")
+        print(f"  Destination: {destination_city['name']} "
+              f"[{destination_island['x']}:{destination_island['y']}]")
+        print(f"  Ship type:   {ship_type_name} "
+              f"(capacity: {addThousandSeparator(capacity)})\n")
+        print("  Planned Shipments:")
+        print(f"  {'#':<4} {'From':<18}", end="")
+        for res in materials_names:
+            print(f" {res:>9}", end="")
+        print(f" {'Ships':>7}")
+        print(f"  {'--':<4} {'-'*18:<18}", end="")
+        for _ in materials_names:
+            print(f" {'-'*9:>9}", end="")
+        print(f" {'-'*7:>7}")
+
+        grand = [0] * len(materials_names)
+        total_ships = 0
+        for idx, route in enumerate(routes):
+            origin = route[0]
+            amounts = route[3:]
+            cargo = sum(amounts)
+            ships = math.ceil(cargo / capacity) if capacity > 0 else 0
+            name = origin["name"][:18] if len(origin["name"]) <= 18 else origin["name"][:15] + "..."
+            print(f"  {idx+1:<4} {name:<18}", end="")
+            for i in range(len(materials_names)):
+                val = amounts[i] if i < len(amounts) else 0
+                grand[i] += val
+                if val > 0:
+                    print(f" {addThousandSeparator(val):>9}", end="")
+                else:
+                    print(f" {'0':>9}", end="")
+            print(f" {ships:>7}")
+            total_ships += ships
+
+        print(f"  {'--':<4} {'-'*18:<18}", end="")
+        for _ in materials_names:
+            print(f" {'-'*9:>9}", end="")
+        print(f" {'-'*7:>7}")
+        print(f"  {'':4} {'TOTAL':<18}", end="")
         for i in range(len(materials_names)):
-            val = amounts[i] if i < len(amounts) else 0
-            grand[i] += val
-            if val > 0:
-                print(f" {addThousandSeparator(val):>9}", end="")
-            else:
-                print(f" {'0':>9}", end="")
-        print(f" {ships:>7}")
-        total_ships += ships
+            print(f" {addThousandSeparator(grand[i]):>9}", end="")
+        print(f" {total_ships:>7}\n")
 
-    print(f"  {'--':<4} {'-'*18:<18}", end="")
-    for _ in materials_names:
-        print(f" {'-'*9:>9}", end="")
-    print(f" {'-'*7:>7}")
-    print(f"  {'':4} {'TOTAL':<18}", end="")
-    for i in range(len(materials_names)):
-        print(f" {addThousandSeparator(grand[i]):>9}", end="")
-    print(f" {total_ships:>7}\n")
+        print(f"  {C.OK}(Y){C.RESET} Proceed")
+        print(f"  {C.CYAN}(T){C.RESET} Min shipment")
+        print(f"  {C.YELLOW}(E){C.RESET} Edit — re-enter amounts")
+        print(f"  {C.WARN}(C){C.RESET} Cancel")
 
-    print(f"  {C.OK}(Y){C.RESET} Proceed")
-    print(f"  {C.CYAN}(T){C.RESET} Min shipment")
-    print(f"  {C.YELLOW}(E){C.RESET} Edit — re-enter amounts")
-    print(f"  {C.WARN}(C){C.RESET} Cancel")
+    _draw_auto_review()
+    _set_redraw(_draw_auto_review)
     choice = read(values=["y", "Y", "e", "E", "c", "C",
                           "t", "T", ""])
     if choice == "" or choice.upper() == "Y":
@@ -3278,7 +3382,7 @@ def _create_csv_template(session):
     print(f"  {C.BOLD}(2){C.RESET} Shared folder:  {C.DIM}{generic_dir}{C.RESET}")
     print(f"  {C.BOLD}(3){C.RESET} Custom location")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
-    loc = read(min=1, max=3, digit=True, additionalValues=["'"])
+    loc = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
     if loc == "'":
         return None
 
@@ -3352,24 +3456,29 @@ def _bulk_editor_menu(session, csv_path, event):
         return
 
     while True:
-        print_module_banner("Bulk CSV Editor")
-        print(f"  {C.DIM}CSV:{C.RESET} {csv_path}")
-        print(f"  {C.DIM}Rows:{C.RESET} {len(rows)}\n")
+        def _draw_editor(r=rows, p=csv_path):
+            print_module_banner("Bulk CSV Editor")
+            print(f"  {C.DIM}CSV:{C.RESET} {p}")
+            print(f"  {C.DIM}Rows:{C.RESET} {len(r)}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Add cities")
+            print(f"  {C.DIM}    Browse islands and pick cities to add as rows.{C.RESET}")
+            print(f"  {C.BOLD}(2){C.RESET} View all rows")
+            print(f"  {C.BOLD}(3){C.RESET} Edit row(s)")
+            print(f"  {C.BOLD}(4){C.RESET} Delete row(s)")
+            print(f"  {C.BOLD}(5){C.RESET} Set resources")
+            print(f"  {C.DIM}    Set resource amounts for all rows or specific rows.{C.RESET}")
+            print(f"  {C.BOLD}(6){C.RESET} Set transport & source")
+            print(f"  {C.DIM}    Choose ship type and which cities send resources.{C.RESET}")
+            print(f"  {C.OK}(7){C.RESET} Save and back")
+            print(f"  {C.WARN}('){C.RESET} Cancel without saving")
 
-        print(f"  {C.BOLD}(1){C.RESET} Add cities")
-        print(f"  {C.DIM}    Browse islands and pick cities to add as rows.{C.RESET}")
-        print(f"  {C.BOLD}(2){C.RESET} View all rows")
-        print(f"  {C.BOLD}(3){C.RESET} Edit row(s)")
-        print(f"  {C.BOLD}(4){C.RESET} Delete row(s)")
-        print(f"  {C.BOLD}(5){C.RESET} Set resources")
-        print(f"  {C.DIM}    Set resource amounts for all rows or specific rows.{C.RESET}")
-        print(f"  {C.BOLD}(6){C.RESET} Set transport & source")
-        print(f"  {C.DIM}    Choose ship type and which cities send resources.{C.RESET}")
-        print(f"  {C.OK}(7){C.RESET} Save and back")
-        print(f"  {C.WARN}('){C.RESET} Cancel without saving")
-
-        choice = read(min=1, max=7, digit=True, additionalValues=["'"])
+        _draw_editor()
+        _set_redraw(_draw_editor)
+        choice = read(min=1, max=7, digit=True, additionalValues=["'", ""])
+        if choice == "":
+            continue
         if choice == "'":
+
             print("  Discarded changes.")
             enter()
             return
@@ -3589,13 +3698,15 @@ def _bulk_editor_set_resources(rows):
         enter()
         return
 
-    print_module_banner("Set Resources")
-    print(f"  {len(rows)} row(s) in CSV.\n")
-    print(f"  {C.BOLD}(1){C.RESET} Same resources for all rows")
-    print(f"  {C.BOLD}(2){C.RESET} Set per-row")
-    print(f"  {C.BOLD}('){C.RESET} Cancel")
-
-    choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+    def _draw_set_res():
+        print_module_banner("Set Resources")
+        print(f"  {len(rows)} row(s) in CSV.\n")
+        print(f"  {C.BOLD}(1){C.RESET} Same resources for all rows")
+        print(f"  {C.BOLD}(2){C.RESET} Set per-row")
+        print(f"  {C.BOLD}('){C.RESET} Cancel")
+    _draw_set_res()
+    _set_redraw(_draw_set_res)
+    choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
     if choice == "'":
         return
 
@@ -3620,7 +3731,7 @@ def _bulk_editor_set_resources(rows):
         res_names = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
         print("\n  Enter row numbers to edit (comma-sep or range, e.g. 1,3,5-8):")
         print("  (or 'a' for all)")
-        raw = read(additionalValues=["'", "a", "A"])
+        raw = _safe_read(additionalValues=["'", "a", "A"])
         if raw == "'":
             return
         if raw.lower() == "a":
@@ -3656,15 +3767,17 @@ def _bulk_editor_set_transport_from(rows):
         enter()
         return
 
-    print_module_banner("Set Transport & From")
-    print(f"  {len(rows)} row(s) in CSV.\n")
-
-    print("  Ship type for all rows:")
+    def _draw_set_transport():
+        print_module_banner("Set Transport & From")
+        print(f"  {len(rows)} row(s) in CSV.\n")
+        print("  Ship type for all rows:")
+    _draw_set_transport()
+    _set_redraw(_draw_set_transport)
     print(f"  {C.BOLD}(1){C.RESET} Merchant ships (m)")
     print(f"  {C.BOLD}(2){C.RESET} Freighters (f)")
     print(f"  {C.BOLD}(3){C.RESET} Keep current / set per-row later")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
-    st = read(min=1, max=3, digit=True, additionalValues=["'"])
+    st = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
     if st == "'":
         return
     if st == 1:
@@ -3680,7 +3793,7 @@ def _bulk_editor_set_transport_from(rows):
     print(f"  {C.BOLD}(1){C.RESET} All cities (a)")
     print(f"  {C.BOLD}(2){C.RESET} Specific indices (enter value)")
     print(f"  {C.BOLD}(3){C.RESET} Keep current / set per-row later")
-    fc = read(min=1, max=3, digit=True, additionalValues=["'"])
+    fc = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
     if fc == "'":
         return
     if fc == 1:
@@ -3689,7 +3802,7 @@ def _bulk_editor_set_transport_from(rows):
         print("  All rows set to 'a' (all cities).")
     elif fc == 2:
         print("  Enter From value (e.g. 1,3,5):")
-        val = read(msg="  > ", additionalValues=["'"])
+        val = _safe_read(msg="  > ", additionalValues=["'"])
         if val == "'":
             return
         for row in rows:
@@ -3745,7 +3858,7 @@ def _bulk_editor_edit_row(rows):
         return
 
     print("  Enter row number to edit (or ' to cancel):")
-    raw = read(additionalValues=["'"])
+    raw = _safe_read(additionalValues=["'"])
     if raw == "'":
         return
     try:
@@ -3770,7 +3883,7 @@ def _bulk_editor_edit_row(rows):
     print("  Enter field name to edit (or ' to go back):")
 
     while True:
-        field = read(msg="  Field: ", additionalValues=["'"])
+        field = _safe_read(msg="  Field: ", additionalValues=["'"])
         if field == "'":
             return
         matched = None
@@ -3802,7 +3915,7 @@ def _bulk_editor_delete_rows(rows):
 
     print(f"  {len(rows)} row(s). Enter row numbers to delete:")
     print("  (comma-separated or range, e.g. 1,3,5-8, or ' to cancel)")
-    raw = read(additionalValues=["'"])
+    raw = _safe_read(additionalValues=["'"])
     if raw == "'":
         return
 
@@ -3897,7 +4010,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             print(f"  {C.WARN}File not found:{C.RESET} {csv_path}")
             print(f"\n  {C.BOLD}(1){C.RESET} Create new CSV with the built-in editor")
             print(f"  {C.BOLD}('){C.RESET} Back\n")
-            choice = read(values=["1", "'"], additionalValues=["'"])
+            choice = _safe_read(values=["1", "'"], additionalValues=["'"])
             if choice == "'":
                 event.set()
                 return
@@ -3994,22 +4107,27 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                 if normalize_text(r.get(run_column, "")) == "x"
             )
             pending_count = len(rows) - done_count
-            print_module_banner("Bulk Distribution — Summary")
-            print(f"  {C.BOLD}CSV rows:{C.RESET}  {len(rows)}")
-            print(f"  {C.BOLD}Progress:{C.RESET}  {done_count} done, {pending_count} pending")
-            print(f"  {C.BOLD}Interval:{C.RESET}  every {interval_hours}h")
-            print(f"  {C.BOLD}AP wait:{C.RESET}   {ap_max_wait} min")
-            if min_threshold > 0:
-                print(f"  {C.BOLD}Min ship:{C.RESET}  {min_threshold:,} total resources")
-            else:
-                print(f"  {C.BOLD}Min ship:{C.RESET}  {C.DIM}off{C.RESET}")
-            print(f"  {C.BOLD}Run slot:{C.RESET}  {run_column[4:]}\n")
-            print(f"  {C.OK}(Y){C.RESET} Proceed  "
-                  f"{C.YELLOW}(E){C.RESET} Edit CSV  "
-                  f"{C.CYAN}(R){C.RESET} Reset progress")
-            print(f"  {C.CYAN}(A){C.RESET} AP wait timer  "
-                  f"{C.CYAN}(T){C.RESET} Min shipment  "
-                  f"{C.WARN}(N){C.RESET} Cancel")
+
+            def _draw_bulk_summary():
+                print_module_banner("Bulk Distribution — Summary")
+                print(f"  {C.BOLD}CSV rows:{C.RESET}  {len(rows)}")
+                print(f"  {C.BOLD}Progress:{C.RESET}  {done_count} done, {pending_count} pending")
+                print(f"  {C.BOLD}Interval:{C.RESET}  every {interval_hours}h")
+                print(f"  {C.BOLD}AP wait:{C.RESET}   {ap_max_wait} min")
+                if min_threshold > 0:
+                    print(f"  {C.BOLD}Min ship:{C.RESET}  {min_threshold:,} total resources")
+                else:
+                    print(f"  {C.BOLD}Min ship:{C.RESET}  {C.DIM}off{C.RESET}")
+                print(f"  {C.BOLD}Run slot:{C.RESET}  {run_column[4:]}\n")
+                print(f"  {C.OK}(Y){C.RESET} Proceed  "
+                      f"{C.YELLOW}(E){C.RESET} Edit CSV  "
+                      f"{C.CYAN}(R){C.RESET} Reset progress")
+                print(f"  {C.CYAN}(A){C.RESET} AP wait timer  "
+                      f"{C.CYAN}(T){C.RESET} Min shipment  "
+                      f"{C.WARN}(N){C.RESET} Cancel")
+
+            _draw_bulk_summary()
+            _set_redraw(_draw_bulk_summary)
             rta = read(values=["y", "Y", "n", "N", "e", "E",
                                "a", "A", "t", "T", "r", "R", "", "'"],
                        additionalValues=["'"])
@@ -4023,7 +4141,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                 print(f"  {C.BOLD}(2){C.RESET} Reset from row — clear from a specific row onwards")
                 print(f"  {C.BOLD}(3){C.RESET} Reset specific rows — pick rows by number/range")
                 print(f"  {C.BOLD}('){C.RESET} Cancel")
-                rc = read(min=1, max=3, digit=True, additionalValues=["'"])
+                rc = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
                 if rc == "'":
                     continue
                 if rc == 1:
@@ -4038,7 +4156,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                     continue
                 if rc == 2:
                     print(f"  Start from which row? (1-{len(rows)}):")
-                    start_row = read(min=1, max=len(rows), digit=True,
+                    start_row = _safe_read(min=1, max=len(rows), digit=True,
                                      additionalValues=["'"])
                     if start_row == "'":
                         continue
@@ -4056,7 +4174,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                     continue
                 if rc == 3:
                     print(f"  Enter row numbers (comma-sep, ranges, e.g. 1-5, 8, 12-20):")
-                    raw = read(additionalValues=["'"])
+                    raw = _safe_read(additionalValues=["'"])
                     if raw == "'":
                         continue
                     indices = _parse_row_selection(raw, len(rows))
@@ -4082,7 +4200,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             if rta.lower() == "a":
                 print(f"\n  Current AP wait: {ap_max_wait} minutes")
                 print("  How long to retry AP-blocked cities (minutes, 0=no retry):")
-                ap_input = read(min=0, digit=True, additionalValues=["'"])
+                ap_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if ap_input == "'":
                     continue
                 ap_max_wait = int(ap_input)
@@ -4093,7 +4211,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -4152,12 +4270,15 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         # --- Step 1: Ship type ---
         ship_confirmed = False
         while not ship_confirmed:
-            print_module_banner("Keep Topped Up — Ship Type")
-            print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
-            print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
-            print(f"  {C.BOLD}(2){C.RESET} Freighters")
-            print(f"  {C.BOLD}('){C.RESET} Back")
-            shiptype = read(min=1, max=2, digit=True, additionalValues=["'"])
+            def _draw_topup_ship():
+                print_module_banner("Keep Topped Up — Ship Type")
+                print(f"  {C.DIM}Which ships carry the resources?{C.RESET}\n")
+                print(f"  {C.BOLD}(1){C.RESET} Merchant ships")
+                print(f"  {C.BOLD}(2){C.RESET} Freighters")
+                print(f"  {C.BOLD}('){C.RESET} Back")
+            _draw_topup_ship()
+            _set_redraw(_draw_topup_ship)
+            shiptype = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if shiptype == "'":
                 event.set()
                 return
@@ -4165,7 +4286,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
             ship_label = "Freighters" if useFreighters else "Merchant ships"
             print(f"\nShip type: {ship_label}")
             print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-            c = read(min=1, max=2, digit=True, additionalValues=["'"])
+            c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if c == "'":
                 event.set()
                 return
@@ -4190,7 +4311,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                     return
                 print(f"\nSelected: {dest['name']}")
                 print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-                c = read(min=1, max=2, digit=True, additionalValues=["'"])
+                c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
                     return
@@ -4200,7 +4321,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
 
             print(f"\nDestinations so far: {', '.join(d['name'] for d in destinations)}")
             print(f"  {C.BOLD}(1){C.RESET} Add another destination  {C.BOLD}(2){C.RESET} Done adding")
-            c = read(min=1, max=2, digit=True)
+            c = _safe_read(min=1, max=2, digit=True)
             if c == 2:
                 adding_dests = False
 
@@ -4249,7 +4370,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                     else:
                         print(f"  {res}: {addThousandSeparator(targets[i])}")
                 print(f"  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-                c = read(min=1, max=2, digit=True, additionalValues=["'"])
+                c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
                     return
@@ -4273,7 +4394,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
             for cid in source_city_ids:
                 print(f"  {source_cities[cid]['name']}")
             print("\n(1) Confirm  (2) Re-select  (') Back to main menu")
-            c = read(min=1, max=2, digit=True, additionalValues=["'"])
+            c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if c == "'":
                 event.set()
                 return
@@ -4282,12 +4403,15 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
 
         # --- Step 5: Reserve protection (optional, per source city) ---
         source_reserves = {}
-        print_module_banner("Keep Topped Up — Reserve Protection")
-        print(f"  {C.DIM}Optionally prevent source cities from being emptied.{C.RESET}")
-        print(f"  {C.DIM}Set a minimum amount to keep in each source city.{C.RESET}\n")
-        print(f"  {C.BOLD}(1){C.RESET} Set up reserve protection")
-        print(f"  {C.BOLD}(2){C.RESET} No protection (send everything available)")
-        reserve_choice = read(min=1, max=2, digit=True)
+        def _draw_reserve_prot():
+            print_module_banner("Keep Topped Up — Reserve Protection")
+            print(f"  {C.DIM}Optionally prevent source cities from being emptied.{C.RESET}")
+            print(f"  {C.DIM}Set a minimum amount to keep in each source city.{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} Set up reserve protection")
+            print(f"  {C.BOLD}(2){C.RESET} No protection (send everything available)")
+        _draw_reserve_prot()
+        _set_redraw(_draw_reserve_prot)
+        reserve_choice = _safe_read(min=1, max=2, digit=True)
         if reserve_choice == 1:
             reserves_confirmed = False
             while not reserves_confirmed:
@@ -4333,7 +4457,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                                 parts.append(f"{res} none")
                         print(f"  {cname}: {' | '.join(parts)}")
                 print(f"\n  {C.BOLD}(1){C.RESET} Confirm  {C.BOLD}(2){C.RESET} Re-enter  {C.BOLD}('){C.RESET} Back")
-                c = read(min=1, max=2, digit=True, additionalValues=["'"])
+                c = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
                 if c == "'":
                     event.set()
                     return
@@ -4356,39 +4480,43 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
 
         # --- Step 8: Final summary + dry run ---
         while True:
-            print_module_banner("Keep Topped Up — Summary")
-            print(f"  {C.BOLD}Ship type:{C.RESET}  {ship_label}")
-            print(f"  {C.BOLD}Destinations ({len(destinations)}):{C.RESET}")
-            for dest in destinations:
-                parts = []
-                tgts = dest_configs[str(dest["id"])]
-                for i, res in enumerate(materials_names):
-                    if tgts[i] is None:
-                        continue
-                    parts.append(f"{res}: {addThousandSeparator(tgts[i])}")
-                print(f"    {C.CYAN}{dest['name']}{C.RESET} — {' | '.join(parts) if parts else 'none'}")
-            src_names = ", ".join(source_cities[cid]["name"] for cid in source_city_ids)
-            print(f"  {C.BOLD}Sources ({len(source_city_ids)}):{C.RESET} {src_names}")
-            if source_reserves:
-                print(f"  {C.BOLD}Reserve protection:{C.RESET} {C.OK}enabled{C.RESET}")
-                for cid in source_city_ids:
-                    res_list = source_reserves.get(cid, [0] * len(materials_names))
-                    if any(r > 0 for r in res_list):
-                        parts = [f"{materials_names[i]} {addThousandSeparator(res_list[i])}"
-                                 for i in range(len(materials_names)) if res_list[i] > 0]
-                        print(f"    {source_cities[cid]['name']}: {' | '.join(parts)}")
-            else:
-                print(f"  {C.BOLD}Reserve protection:{C.RESET} none")
-            if run_at_time:
-                print(f"  {C.BOLD}Schedule:{C.RESET}        Daily at {run_at_time} (server time)")
-            else:
-                print(f"  {C.BOLD}Check interval:{C.RESET} every {interval_hours}h")
-            if min_threshold > 0:
-                print(f"  {C.BOLD}Min ship:{C.RESET}       {min_threshold:,} total resources")
-            print("")
-            print(f"  {C.OK}(Y){C.RESET} Proceed  "
-                  f"{C.CYAN}(T){C.RESET} Min shipment  "
-                  f"{C.WARN}(N){C.RESET} Cancel")
+            def _draw_topup_summary():
+                print_module_banner("Keep Topped Up — Summary")
+                print(f"  {C.BOLD}Ship type:{C.RESET}  {ship_label}")
+                print(f"  {C.BOLD}Destinations ({len(destinations)}):{C.RESET}")
+                for dest in destinations:
+                    parts = []
+                    tgts = dest_configs[str(dest["id"])]
+                    for i, res in enumerate(materials_names):
+                        if tgts[i] is None:
+                            continue
+                        parts.append(f"{res}: {addThousandSeparator(tgts[i])}")
+                    print(f"    {C.CYAN}{dest['name']}{C.RESET} — {' | '.join(parts) if parts else 'none'}")
+                sn = ", ".join(source_cities[cid]["name"] for cid in source_city_ids)
+                print(f"  {C.BOLD}Sources ({len(source_city_ids)}):{C.RESET} {sn}")
+                if source_reserves:
+                    print(f"  {C.BOLD}Reserve protection:{C.RESET} {C.OK}enabled{C.RESET}")
+                    for cid in source_city_ids:
+                        res_list = source_reserves.get(cid, [0] * len(materials_names))
+                        if any(r > 0 for r in res_list):
+                            pts = [f"{materials_names[i]} {addThousandSeparator(res_list[i])}"
+                                     for i in range(len(materials_names)) if res_list[i] > 0]
+                            print(f"    {source_cities[cid]['name']}: {' | '.join(pts)}")
+                else:
+                    print(f"  {C.BOLD}Reserve protection:{C.RESET} none")
+                if run_at_time:
+                    print(f"  {C.BOLD}Schedule:{C.RESET}        Daily at {run_at_time} (server time)")
+                else:
+                    print(f"  {C.BOLD}Check interval:{C.RESET} every {interval_hours}h")
+                if min_threshold > 0:
+                    print(f"  {C.BOLD}Min ship:{C.RESET}       {min_threshold:,} total resources")
+                print("")
+                print(f"  {C.OK}(Y){C.RESET} Proceed  "
+                      f"{C.CYAN}(T){C.RESET} Min shipment  "
+                      f"{C.WARN}(N){C.RESET} Cancel")
+
+            _draw_topup_summary()
+            _set_redraw(_draw_topup_summary)
             rta = read(values=["y", "Y", "n", "N", "t", "T", ""])
             if rta.lower() == "n":
                 event.set()
@@ -4397,7 +4525,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
                 print(f"\n  Current minimum: "
                       f"{'off' if min_threshold == 0 else f'{min_threshold:,}'}")
                 print("  Minimum total resources per shipment (0=off):")
-                t_input = read(min=0, digit=True, additionalValues=["'"])
+                t_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if t_input == "'":
                     continue
                 min_threshold = int(t_input)
@@ -4472,7 +4600,7 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
     print(f"  {C.DIM}    Launches a background process to run all schedules.{C.RESET}")
     print(f"  {C.BOLD}(2){C.RESET} Return to menu")
     print(f"  {C.DIM}    Start the scheduler later with (s) on the main page.{C.RESET}")
-    choice = read(min=1, max=2, digit=True)
+    choice = _safe_read(min=1, max=2, digit=True)
 
     if choice == 2:
         print(f"  {C.DIM}Schedule #{sid} saved as pending. Press (s) on the main page to start.{C.RESET}")
@@ -5904,7 +6032,7 @@ def _activate_transport_worker(session, event):
     print(f"  {C.DIM}    Reset all timers — first run happens after the interval.{C.RESET}")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
 
-    choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+    choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
     if choice == "'":
         _lock_release(wlock)
         event.set()
@@ -5995,20 +6123,25 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
         counts = transport_csv_count_by_status(session)
         total = sum(counts.values())
 
-        print_module_banner("Manage Schedules")
-        print(f"  {_scheduler_status_line(session)}\n")
-        print(f"  {C.DIM}Use (s)/(o) on the main page to start/stop the scheduler.{C.RESET}\n")
+        def _draw_sched_menu():
+            print_module_banner("Manage Schedules")
+            print(f"  {_scheduler_status_line(session)}\n")
+            print(f"  {C.DIM}Use (s)/(o) on the main page to start/stop the scheduler.{C.RESET}\n")
+            print(f"  {C.BOLD}(1){C.RESET} View schedules")
+            print(f"  {C.DIM}    See all saved schedules and their current status.{C.RESET}")
+            print(f"  {C.BOLD}(2){C.RESET} Modify schedule")
+            print(f"  {C.DIM}    Change interval, resources, ship type, notes, etc.{C.RESET}")
+            print(f"  {C.BOLD}(3){C.RESET} Pause / resume a schedule")
+            print(f"  {C.BOLD}(4){C.RESET} Delete schedule(s)")
+            print(f"  {C.BOLD}('){C.RESET} Back")
 
-        print(f"  {C.BOLD}(1){C.RESET} View schedules")
-        print(f"  {C.DIM}    See all saved schedules and their current status.{C.RESET}")
-        print(f"  {C.BOLD}(2){C.RESET} Modify schedule")
-        print(f"  {C.DIM}    Change interval, resources, ship type, notes, etc.{C.RESET}")
-        print(f"  {C.BOLD}(3){C.RESET} Pause / resume a schedule")
-        print(f"  {C.BOLD}(4){C.RESET} Delete schedule(s)")
-        print(f"  {C.BOLD}('){C.RESET} Back")
-
-        choice = read(min=1, max=4, digit=True, additionalValues=["'"])
+        _draw_sched_menu()
+        _set_redraw(_draw_sched_menu)
+        choice = read(min=1, max=4, digit=True, additionalValues=["'", ""])
+        if choice == "":
+            continue
         if choice == "'":
+
             return
 
         if choice == 1:
@@ -6169,7 +6302,7 @@ def _modify_schedule(session):
 
     _view_schedules_compact(rows)
     print("  Enter schedule ID to modify (or ' to cancel):")
-    sid_input = read(additionalValues=["'"])
+    sid_input = _safe_read(additionalValues=["'"])
     if sid_input == "'":
         return
 
@@ -6192,27 +6325,33 @@ def _modify_schedule(session):
         return
 
     while True:
-        _view_schedule_detail(target)
-
-        print(f"\n  {C.BOLD}What to modify?{C.RESET}")
-        print(f"  {C.BOLD}(1){C.RESET} Interval (hours)")
-        print(f"  {C.BOLD}(2){C.RESET} Ship type")
-        print(f"  {C.BOLD}(3){C.RESET} Notes")
-        print(f"  {C.BOLD}(4){C.RESET} Notification level")
-        print(f"  {C.BOLD}(5){C.RESET} Resources")
         is_consolidate = target.get("mode") == "consolidate"
-        if is_consolidate:
-            print(f"  {C.BOLD}(6){C.RESET} Send mode")
-        print(f"  {C.BOLD}(7){C.RESET} Send-only-if-below thresholds")
         mode = target.get("mode", "")
         has_cities = mode not in ("bulk", "even")
-        if has_cities:
-            print(f"  {C.BOLD}(8){C.RESET} Source / destination cities")
-        print(f"  {C.BOLD}(9){C.RESET} AP wait & min shipment")
-        print(f"  {C.BOLD}('){C.RESET} Back")
 
-        choice = read(min=1, max=9, digit=True, additionalValues=["'"])
+        def _draw_modify(t=target, ic=is_consolidate, hc=has_cities):
+            _view_schedule_detail(t)
+            print(f"\n  {C.BOLD}What to modify?{C.RESET}")
+            print(f"  {C.BOLD}(1){C.RESET} Interval (hours)")
+            print(f"  {C.BOLD}(2){C.RESET} Ship type")
+            print(f"  {C.BOLD}(3){C.RESET} Notes")
+            print(f"  {C.BOLD}(4){C.RESET} Notification level")
+            print(f"  {C.BOLD}(5){C.RESET} Resources")
+            if ic:
+                print(f"  {C.BOLD}(6){C.RESET} Send mode")
+            print(f"  {C.BOLD}(7){C.RESET} Send-only-if-below thresholds")
+            if hc:
+                print(f"  {C.BOLD}(8){C.RESET} Source / destination cities")
+            print(f"  {C.BOLD}(9){C.RESET} AP wait & min shipment")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+
+        _draw_modify()
+        _set_redraw(_draw_modify)
+        choice = read(min=1, max=9, digit=True, additionalValues=["'", ""])
+        if choice == "":
+            continue
         if choice == "'":
+
             return
 
         if choice == 1:
@@ -6225,12 +6364,12 @@ def _modify_schedule(session):
             print(f"\n  {C.BOLD}(1){C.RESET} Every X hours")
             print(f"  {C.BOLD}(2){C.RESET} Daily at specific time (server time)")
             print(f"  {C.BOLD}('){C.RESET} Cancel")
-            tc = read(min=1, max=2, digit=True, additionalValues=["'"])
+            tc = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if tc == "'":
                 continue
             if tc == 1:
                 print("  New interval (0 = one-shot, 1+ = recurring):")
-                val = read(min=0, digit=True, additionalValues=["'"])
+                val = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if val == "'":
                     continue
                 transport_csv_update(session, sid, interval_hours=val,
@@ -6246,7 +6385,7 @@ def _modify_schedule(session):
                 print(f"  {C.DIM}All times use server time.{C.RESET}")
                 print("  Enter time in HH:MM format (24h):")
                 while True:
-                    ti = read(msg="  Time: ", additionalValues=["'"])
+                    ti = _safe_read(msg="  Time: ", additionalValues=["'"])
                     if ti == "'":
                         break
                     m = re.match(r'^(\d{1,2}):(\d{2})$', ti.strip())
@@ -6267,7 +6406,7 @@ def _modify_schedule(session):
             current = "Freighters" if target.get("ship_type") == "f" else "Merchant"
             print(f"\n  Current: {current}")
             print(f"  {C.BOLD}(1){C.RESET} Merchant ships  {C.BOLD}(2){C.RESET} Freighters")
-            st = read(min=1, max=2, digit=True, additionalValues=["'"])
+            st = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if st == "'":
                 continue
             new_type = "f" if st == 2 else "m"
@@ -6291,7 +6430,7 @@ def _modify_schedule(session):
             current = target.get("notif_level", "none")
             print(f"\n  Current: {current}")
             print(f"  {C.BOLD}(1){C.RESET} Partial  {C.BOLD}(2){C.RESET} All  {C.BOLD}(3){C.RESET} Errors only")
-            nl = read(min=1, max=3, digit=True, additionalValues=["'"])
+            nl = _safe_read(min=1, max=3, digit=True, additionalValues=["'"])
             if nl == "'":
                 continue
             levels = {1: "partial", 2: "all", 3: "none"}
@@ -6309,7 +6448,7 @@ def _modify_schedule(session):
                 print(f"\n  Currently balancing: {', '.join(named) or '(none)'}")
                 print("  Enter resource numbers (comma-separated, e.g. 1,3,5):")
                 print("  1=Wood, 2=Wine, 3=Marble, 4=Crystal, 5=Sulphur")
-                raw = read(additionalValues=["'"])
+                raw = _safe_read(additionalValues=["'"])
                 if raw == "'":
                     continue
                 try:
@@ -6352,7 +6491,7 @@ def _modify_schedule(session):
             print(f"\n  Current: {current}")
             print(f"  {C.BOLD}(1){C.RESET} Keep reserves (send all except X)")
             print(f"  {C.BOLD}(2){C.RESET} Send specific amounts")
-            sm = read(min=1, max=2, digit=True, additionalValues=["'"])
+            sm = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if sm == "'":
                 continue
             new_sm = "keep" if sm == 1 else "send"
@@ -6397,7 +6536,7 @@ def _modify_schedule(session):
             print(f"\n  {C.BOLD}(1){C.RESET} Change source cities")
             print(f"  {C.BOLD}(2){C.RESET} Change destination cities")
             print(f"  {C.BOLD}('){C.RESET} Back")
-            city_choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+            city_choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if city_choice == "'":
                 continue
             if city_choice == 1:
@@ -6438,12 +6577,12 @@ def _modify_schedule(session):
             print(f"\n  {C.BOLD}(1){C.RESET} Change AP wait timer")
             print(f"  {C.BOLD}(2){C.RESET} Change min shipment threshold")
             print(f"  {C.BOLD}('){C.RESET} Back")
-            adv_choice = read(min=1, max=2, digit=True, additionalValues=["'"])
+            adv_choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
             if adv_choice == "'":
                 continue
             if adv_choice == 1:
                 print(f"  How long to retry AP-blocked cities (minutes, 0=no retry):")
-                ap_input = read(min=0, digit=True, additionalValues=["'"])
+                ap_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if ap_input == "'":
                     continue
                 ap_val = int(ap_input)
@@ -6452,7 +6591,7 @@ def _modify_schedule(session):
                 print(f"  {C.OK}AP wait set to {ap_val} min.{C.RESET}")
             else:
                 print(f"  Minimum total resources per shipment (0=off):")
-                mt_input = read(min=0, digit=True, additionalValues=["'"])
+                mt_input = _safe_read(min=0, digit=True, additionalValues=["'"])
                 if mt_input == "'":
                     continue
                 mt_val = int(mt_input)
@@ -6475,7 +6614,7 @@ def _toggle_schedule_pause(session):
 
     _view_schedules_compact(rows)
     print("  Enter schedule ID to pause/resume (or ' to cancel):")
-    sid_input = read(additionalValues=["'"])
+    sid_input = _safe_read(additionalValues=["'"])
     if sid_input == "'":
         return
 
@@ -6543,7 +6682,7 @@ def _delete_schedules(session):
 
     _view_schedules_compact(rows)
     print("  Enter ID(s) to delete (comma-sep, ranges with -, e.g. 1-20, 25-90):")
-    sid_input = read(additionalValues=["'"])
+    sid_input = _safe_read(additionalValues=["'"])
     if sid_input == "'":
         return
 
