@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.1.3"
+__version__ = "2.1.5"
 
 import csv
 import glob
@@ -1683,6 +1683,53 @@ def _edit_queue(session):
 
 
 # ---------------------------------------------------------------------------
+# Construction-module banner + notification config
+# (mirrors RTM's get_notification_config so the user sees the right header)
+# ---------------------------------------------------------------------------
+
+def _print_module_banner(page_title=None):
+    title = f"        CONSTRUCTION MANAGER v{__version__}"
+    print("\n")
+    print("╔" + "═" * 58 + "╗")
+    print("║" + title.ljust(58) + "║")
+    print("╚" + "═" * 58 + "╝")
+    if page_title:
+        print(f"\n{page_title}")
+        print("─" * 58)
+    print("")
+
+
+def _get_notification_config(telegram_enabled, event):
+    """Construction-module-branded notification prompt.
+
+    Same return shape as RTM's get_notification_config:
+      {"level": "partial"|"all"|"none", "telegram": bool} or None on back-out.
+    """
+    if telegram_enabled is False:
+        _print_module_banner()
+        print("Telegram notifications are not configured.")
+        print("Do you want to continue without notifications? [Y/n]")
+        rta = read(values=["y", "Y", "n", "N", ""])
+        if rta.lower() == "n":
+            event.set()
+            return None
+        return {"level": "none", "telegram": False}
+
+    _print_module_banner("Notification Preferences")
+    print("When do you want to receive Telegram notifications?")
+    print("(1) Partial - Summary when each cycle starts + errors")
+    print("(2) All - Every individual shipment")
+    print("(3) None - No notifications")
+    print("(') Back to main menu")
+    choice = read(min=1, max=3, digit=True, additionalValues=["'"])
+    if choice == "'":
+        event.set()
+        return None
+    levels = {1: "partial", 2: "all", 3: "none"}
+    return {"level": levels[choice], "telegram": True}
+
+
+# ---------------------------------------------------------------------------
 # Worker status helpers
 # ---------------------------------------------------------------------------
 
@@ -2550,7 +2597,7 @@ def _activate_worker(session, event):
     except Exception:
         telegram_enabled = False
 
-    notif_config = rtm.get_notification_config(telegram_enabled, event)
+    notif_config = _get_notification_config(telegram_enabled, event)
     if notif_config is None:
         # User backed out; get_notification_config has already set the event.
         return

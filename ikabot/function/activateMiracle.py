@@ -15,6 +15,126 @@ from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import *
 
 
+MIRACLE_CACHE_KEY = "miracleCache"
+
+
+def _query_temple(session, city_id, position):
+    """Sends the temple view request for a single city and returns the live
+    wonder data (level, whether it can be activated now, and the remaining
+    cooldown in seconds).
+
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    city_id : int | str
+    position : str
+        the building position of the temple within the city
+
+    Returns
+    -------
+    (level, available, available_in) : tuple[int, bool, int | None]
+        ``available_in`` is ``None`` when the miracle can be activated now.
+    """
+    params = {
+        "view": "temple",
+        "cityId": city_id,
+        "position": position,
+        "backgroundView": "city",
+        "currentCityId": city_id,
+        "actionRequest": actionRequest,
+        "ajax": "1",
+    }
+    data = session.post(params=params)
+    data = json.loads(data, strict=False)
+    html = data[1][1][1]
+    match = re.search(r'<div id="wonderLevelDisplay"[^>]*>\s*(\d+)\s*</div>', html)
+    level = int(match.group(1)) if match else 0
+
+    data = data[2][1]
+    available = data["js_WonderViewButton"]["buttonState"] == "enabled"
+    available_in = None
+    if available is False:
+        for elem in data:
+            if "countdown" in data[elem]:
+                enddate = data[elem]["countdown"]["enddate"]
+                currentdate = data[elem]["countdown"]["currentdate"]
+                available_in = int(float(enddate)) - int(float(currentdate))
+                break
+    return level, available, available_in
+
+
+def _load_miracle_cache(session):
+    """Return the saved list of activable wonders for this account, or None."""
+    try:
+        data = session.getSessionData()
+        cache = data.get(MIRACLE_CACHE_KEY)
+        if cache:
+            return cache
+    except Exception:
+        pass
+    return None
+
+
+def _save_miracle_cache(session, islands):
+    """Persist the static structure (which city/temple holds each wonder) so a
+    future run can skip the city/island discovery entirely.  Only the parts
+    that don't change run-to-run are stored — live data (level, availability,
+    cooldown) is always re-queried from the temple.
+    """
+    cache = [
+        {
+            "id": island["id"],
+            "wonder": island["wonder"],
+            "wonderName": island["wonderName"],
+            "ciudad": {
+                "id": island["ciudad"]["id"],
+                "pos": island["ciudad"]["pos"],
+            },
+        }
+        for island in islands
+    ]
+    try:
+        data = session.getSessionData()
+        data[MIRACLE_CACHE_KEY] = cache
+        session.setSessionData(data)
+    except Exception:
+        pass  # caching is best-effort; never block the activation flow
+
+
+def obtainMiraclesFromCache(session, cache):
+    """Rebuild the activable-islands list from the saved structure, refreshing
+    only the live wonder data with one temple request per cached wonder.
+
+    Returns
+    -------
+    islands : list[dict] | None
+        ``None`` if any cached entry is no longer valid (city/temple changed),
+        signalling the caller to fall back to a full re-scan.
+    """
+    islands = []
+    for entry in cache:
+        try:
+            city_id = entry["ciudad"]["id"]
+            position = entry["ciudad"]["pos"]
+            level, available, available_in = _query_temple(session, city_id, position)
+        except Exception:
+            return None  # stale cache — force a full re-scan
+
+        island = {
+            "id": entry["id"],
+            "wonder": entry["wonder"],
+            "wonderName": entry["wonderName"],
+            "ciudad": {"id": city_id, "pos": position},
+            "activable": True,
+            "wonderActivationLevel": level,
+            "available": available,
+        }
+        if available is False:
+            island["available_in"] = available_in
+        islands.append(island)
+    return islands
+
+
 def obtainMiraclesAvailable(session):
     """
     Parameters
@@ -25,29 +145,37 @@ def obtainMiraclesAvailable(session):
     -------
     islands: list[dict]
     """
-    idsIslands = getIslandsIds(session)
+    ids, cities = getIdsOfCities(session)
+
+    # Fetch each city once (the previous implementation fetched every city
+    # twice — once to find island ids, once to find temples).  The full city
+    # object already carries its islandId, so a single pass is enough.
+    city_objs = {}
+    island_ids = set()
+    for city_id in ids:
+        html = session.get(city_url + str(city_id))
+        city = getCity(html)
+        city_objs[city_id] = city
+        island_ids.add(city["islandId"])
+
+    # Fetch each island once.
     islands = []
-    for idIsland in idsIslands:
-        html = session.get(island_url + idIsland)
+    for island_id in island_ids:
+        html = session.get(island_url + island_id)
         island = getIsland(html)
         island["activable"] = False
         islands.append(island)
 
-    ids, cities = getIdsOfCities(session)
-    for city_id in cities:
-        city = cities[city_id]
-        # get the wonder for this city
-        wonder = [
-            island["wonder"]
-            for island in islands
-            if city["coords"] == "[{}:{}] ".format(island["x"], island["y"])
-        ][0]
-        # if the wonder is not new, continue
-        if wonder in [island["wonder"] for island in islands if island["activable"]]:
+    islands_by_id = {island["id"]: island for island in islands}
+    activable_wonders = set()
+    for city_id in ids:
+        city = city_objs[city_id]
+        island = islands_by_id.get(city["islandId"])
+        if island is None:
             continue
-
-        html = session.get(city_url + str(city["id"]))
-        city = getCity(html)
+        # Each wonder type is listed once (miracle cooldowns are per-wonder).
+        if island["wonder"] in activable_wonders:
+            continue
 
         # make sure that the city has a temple
         for i in range(len(city["position"])):
@@ -57,43 +185,15 @@ def obtainMiraclesAvailable(session):
         else:
             continue
 
-        # get wonder information
-        params = {
-            "view": "temple",
-            "cityId": city["id"],
-            "position": city["pos"],
-            "backgroundView": "city",
-            "currentCityId": city["id"],
-            "actionRequest": actionRequest,
-            "ajax": "1",
-        }
-        data = session.post(params=params)
-        data = json.loads(data, strict=False)
-        html = data[1][1][1]
-        match = re.search(r'<div id="wonderLevelDisplay"[^>]*>\s*(\d+)\s*</div>', html)
-        level = 0
-        if match:
-            level = int(match.group(1))
+        level, available, available_in = _query_temple(session, city["id"], city["pos"])
 
-        data = data[2][1]
-        available = data["js_WonderViewButton"]["buttonState"] == "enabled"
+        island["activable"] = True
+        island["ciudad"] = city
+        island["wonderActivationLevel"] = level
+        island["available"] = available
         if available is False:
-            for elem in data:
-                if "countdown" in data[elem]:
-                    enddate = data[elem]["countdown"]["enddate"]
-                    currentdate = data[elem]["countdown"]["currentdate"]
-                    break
-
-        # set the information on the island which wonder we can activate
-        for island in islands:
-            if island["id"] == city["islandId"]:
-                island["activable"] = True
-                island["ciudad"] = city
-                island["wonderActivationLevel"] = level
-                island["available"] = available
-                if available is False:
-                    island["available_in"] = int(float(enddate)) - int(float(currentdate))
-                break
+            island["available_in"] = available_in
+        activable_wonders.add(island["wonder"])
 
     # only return island which wonder we can activate
     return [island for island in islands if island["activable"]]
@@ -172,7 +272,25 @@ def activateMiracle(session, event, stdin_fd, predetermined_input):
     try:
         banner()
 
-        islands = obtainMiraclesAvailable(session)
+        cache = _load_miracle_cache(session)
+        use_cache = bool(cache)
+        # Only offer the re-scan choice when a human is at the keyboard.  Under
+        # sequenceRunner (predetermined_input populated) we silently use the
+        # saved list so the recorded keystrokes stay aligned.
+        if cache and not config.predetermined_input:
+            print("A saved temple list exists for this account.")
+            print("(1) Use saved list (fast)")
+            print("(2) Full re-scan (slower; picks up new or changed temples)")
+            use_cache = read(min=1, max=2) == 1
+
+        islands = None
+        if use_cache and cache:
+            islands = obtainMiraclesFromCache(session, cache)
+
+        if islands is None:
+            islands = obtainMiraclesAvailable(session)
+            _save_miracle_cache(session, islands)
+
         if islands == []:
             print("There are no miracles available.")
             enter()

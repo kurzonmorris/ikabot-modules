@@ -17,6 +17,17 @@ from ikabot.helpers.varios import decodeUnicodeEscape
 
 getcontext().prec = 30
 
+# Ctrl+' sends ASCII 28 (file separator, 0x1C) on most terminals.
+_REFRESH_CHAR = '\x1c'
+
+# On Unix, bind Ctrl+' in readline so it inserts the FS character followed
+# by a newline — this causes input() to return '\x1c' which read() catches.
+try:
+    import readline as _rl
+    _rl.parse_and_bind(r'"\x1c": "\x1c\n"')
+except Exception:
+    pass
+
 
 def read(
     min=None,
@@ -74,7 +85,18 @@ def read(
         read_input = input(msg)
     except EOFError:
         return _invalid()
-    
+
+    # Ctrl+' (0x1C) is a universal "refresh screen" shortcut.  When detected,
+    # call redraw() (which invokes the module's hook if set, otherwise falls
+    # back to the ikabot banner) then re-ask the same question.  Retry counter
+    # not incremented so this can't time out.
+    if read_input.strip('\n').strip('\r') == _REFRESH_CHAR:
+        from ikabot.helpers.gui import redraw
+        redraw()
+        return read(min=min, max=max, digit=digit, msg=msg, values=values,
+                    empty=empty, additionalValues=additionalValues,
+                    default=default, _retries=_retries, _max_retries=_max_retries)
+
     if additionalValues is not None and read_input in additionalValues:
         return read_input
     if read_input == "" and default is not None:

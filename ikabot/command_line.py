@@ -133,6 +133,7 @@ def menu(session, checkUpdate=True):
         show_proxy(session)
         banner()
 
+        modules = get_external_modules(session)
         process_list = updateProcessList(session)
         if len(process_list) > 0:
             table = process_list.copy()
@@ -206,9 +207,14 @@ def menu(session, checkUpdate=True):
         if plugins:
             print("(24) Plugins")
 
-        print("(30) External Modules")
+        if modules:
+            print("")
+            for i, (name, _path) in enumerate(modules):
+                print(f"({i + 40}) {name}")
+        print("(99) Configure external modules")
+        print("(100) Refresh")
 
-        top_max = 30
+        top_max = 100
         selected = read(min=0, max=top_max, digit=True, empty=True)
 
         if selected == '':
@@ -311,59 +317,36 @@ def menu(session, checkUpdate=True):
                 continue
             selected += 2300
 
-        if selected == 30:
-            while True:
-                banner()
-                global_dir, account_dir = get_dirs(session)
-                modules = get_external_modules(session)
+        if selected == 99:
+            configure_directories(session)
+            continue
 
-                print("  External Modules")
-                print("  ================\n")
-                if global_dir:
-                    print(f"  Global:  {global_dir}")
-                if account_dir:
-                    print(f"  Account: {account_dir}")
-                if global_dir or account_dir:
-                    print()
+        if selected == 100:
+            continue
 
-                print("  (0) Back")
-                for i, (name, _path) in enumerate(modules):
-                    print(f"  ({i + 31}) {name}")
-                print("  (99) Configure directories")
-                print("  (100) Refresh")
-
-                valid_choices = {0, 99, 100} | set(range(31, 31 + len(modules)))
-                while True:
-                    sub = read(min=0, max=100, digit=True)
-                    if sub in valid_choices:
-                        break
-
-                if sub == 0:
+        if isinstance(selected, int) and 40 <= selected < 40 + len(modules):
+            mod_name, mod_path = modules[selected - 40]
+            event = multiprocessing.Event()
+            config.has_params = len(config.predetermined_input) > 0
+            process = multiprocessing.Process(
+                target=_run_external_module_child,
+                args=(mod_path, session, event, sys.stdin.fileno(), config.predetermined_input),
+                name=mod_name,
+            )
+            process.start()
+            process_list.append({
+                "pid": process.pid,
+                "action": mod_name,
+                "date": time.time(),
+                "status": "started",
+            })
+            updateProcessList(session, programprocesslist=process_list)
+            while not event.wait(timeout=2):
+                if not process.is_alive():
                     break
-                elif sub == 99:
-                    configure_directories(session)
-                elif sub == 100:
-                    continue
-                else:
-                    mod_name, mod_path = modules[sub - 31]
-                    event = multiprocessing.Event()
-                    config.has_params = len(config.predetermined_input) > 0
-                    process = multiprocessing.Process(
-                        target=_run_external_module_child,
-                        args=(mod_path, session, event, sys.stdin.fileno(), config.predetermined_input),
-                        name=mod_name,
-                    )
-                    process.start()
-                    process_list.append({
-                        "pid": process.pid,
-                        "action": mod_name,
-                        "date": time.time(),
-                        "status": "started",
-                    })
-                    updateProcessList(session, programprocesslist=process_list)
-                    event.wait()
-                    if config.predetermined_input:
-                        break
+            set_redraw_hook(None)
+            print(f"\n'{mod_name}' is now running in the background.")
+            time.sleep(0.8)
             continue
 
         if selected == 24 and plugins:
@@ -390,7 +373,12 @@ def menu(session, checkUpdate=True):
                 "status": "started",
             })
             updateProcessList(session, programprocesslist=process_list)
-            event.wait()
+            while not event.wait(timeout=2):
+                if not process.is_alive():
+                    break
+            set_redraw_hook(None)
+            print(f"\n'{chosen_plugin.name}' is now running in the background.")
+            time.sleep(0.8)
             continue
 
         if selected == 0:
@@ -423,7 +411,12 @@ def menu(session, checkUpdate=True):
                 }
             )
             updateProcessList(session, programprocesslist=process_list)
-            event.wait()
+            while not event.wait(timeout=2):
+                if not process.is_alive():
+                    break
+            set_redraw_hook(None)
+            print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
+            time.sleep(0.8)
         except KeyboardInterrupt:
             pass
 

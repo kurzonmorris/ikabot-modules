@@ -123,6 +123,38 @@ def get_external_modules(session):
 # Child-process entry point (module-level so it is picklable on Windows)
 # ---------------------------------------------------------------------------
 
+class _SilencingEvent:
+    """Wraps a multiprocessing.Event so that stdout/stderr are redirected to
+    the log file the moment the module calls event.set(), preventing print()
+    calls from racing with the parent's banner() redraw.
+
+    Intentionally does NOT set _child_mode (which disables clear/banner).
+    That is reserved for explicit set_child_mode() calls so the module can
+    still show its final UI state after event.set() if needed.
+    """
+    __slots__ = ("_ev",)
+
+    def __init__(self, ev):
+        self._ev = ev
+
+    def set(self):
+        try:
+            from ikabot.helpers.process import _redirect_child_stdout
+            _redirect_child_stdout()
+        except Exception:
+            pass
+        self._ev.set()
+
+    def wait(self, timeout=None):
+        return self._ev.wait(timeout)
+
+    def is_set(self):
+        return self._ev.is_set()
+
+    def clear(self):
+        self._ev.clear()
+
+
 def _run_external_module_child(path, session, event, stdin_fd, predetermined_input):
     """Spawned child: load and execute an external module from disk."""
     if sys.platform != "win32":
@@ -143,7 +175,8 @@ def _run_external_module_child(path, session, event, stdin_fd, predetermined_inp
     # Prefer an explicit MODULE_ENTRY attribute, fall back to filename stem
     fn_name = getattr(module, "MODULE_ENTRY", None) or name
     fn = getattr(module, fn_name)
-    fn(session, event, stdin_fd, predetermined_input)
+    # Wrap the event so terminal is silenced the instant the module signals ready
+    fn(session, _SilencingEvent(event), stdin_fd, predetermined_input)
 
 
 # ---------------------------------------------------------------------------
