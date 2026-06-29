@@ -124,13 +124,11 @@ def get_external_modules(session):
 # ---------------------------------------------------------------------------
 
 class _SilencingEvent:
-    """Wraps a multiprocessing.Event so that stdout/stderr are redirected to
-    the log file the moment the module calls event.set(), preventing print()
-    calls from racing with the parent's banner() redraw.
-
-    Intentionally does NOT set _child_mode (which disables clear/banner).
-    That is reserved for explicit set_child_mode() calls so the module can
-    still show its final UI state after event.set() if needed.
+    """Wraps a multiprocessing.Event so that the moment the module signals it
+    is going to background (event.set()), the process detaches from the shared
+    console.  This is the universal chokepoint — it works whether or not the
+    module remembers to call set_child_mode(), so a backgrounded task can never
+    reach the parent's terminal again (the root-cause fix for black screens).
     """
     __slots__ = ("_ev",)
 
@@ -139,8 +137,8 @@ class _SilencingEvent:
 
     def set(self):
         try:
-            from ikabot.helpers.process import _redirect_child_stdout
-            _redirect_child_stdout()
+            from ikabot.helpers.process import detach_console
+            detach_console()
         except Exception:
             pass
         self._ev.set()

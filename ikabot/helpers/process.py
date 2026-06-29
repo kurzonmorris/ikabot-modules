@@ -14,12 +14,12 @@ from ikabot.helpers.signals import deactivate_sigint
 from ikabot.helpers.varios import normalizeDicts
 
 
+_console_detached = False
+
+
 def _redirect_child_stdout():
     """Redirect stdout/stderr to the log file (or /dev/null) so print() calls
     from a background child go to the log instead of the shared terminal.
-
-    Does NOT disable clear() or banner() — use _silence_child_terminal() for
-    full silence, or call set_child_mode() from your module.
 
     Safe to call multiple times.
     """
@@ -32,21 +32,72 @@ def _redirect_child_stdout():
         sys.stdout = _f
         sys.stderr = _f
         if not isWindows:
-            os.dup2(_f.fileno(), 1)
-            os.dup2(_f.fileno(), 2)
+            try:
+                os.dup2(_f.fileno(), 1)
+                os.dup2(_f.fileno(), 2)
+            except (OSError, ValueError):
+                pass
     except Exception:
         pass
 
 
-def _silence_child_terminal():
-    """Full silence: redirect stdout/stderr AND disable clear()/banner() in
-    this process so no background child can wipe the shared terminal screen.
+def detach_console():
+    """Permanently detach this process from the shared terminal/console.
 
-    Called by set_child_mode().  Safe to call multiple times.
+    This is the root-cause fix for the 'black screen' problem.  Every ikabot
+    task runs in its own process but they all share ONE console.  On Windows,
+    os.system("cls") (and anything touching the console API) clears the SHARED
+    console directly, bypassing sys.stdout redirection — so a background task
+    could wipe the foreground menu.
+
+    After this call the process has no console:
+      * Windows : kernel32.FreeConsole() removes the console attachment, so
+                  cls / console writes from this process (or anything it
+                  spawns) can no longer reach the parent's console.
+      * POSIX   : os.setsid() detaches from the controlling terminal and
+                  stdout/stderr are redirected to the log file.
+
+    Once detached, the process can ONLY report status via session.setStatus()
+    (rendered by the parent's process table).  This is the intended channel
+    for background tasks.  Safe to call multiple times.
     """
-    import ikabot.helpers.gui as _gui
-    _gui._child_mode = True  # makes clear() and banner() no-ops in this process
+    global _console_detached
+    if _console_detached:
+        return
+
+    # Stop Python-level output reaching the terminal first.
     _redirect_child_stdout()
+
+    try:
+        if isWindows:
+            import ctypes
+            # Detach from the shared console.  After FreeConsole the process
+            # has no console, so cls/console output can't touch the parent's.
+            ctypes.windll.kernel32.FreeConsole()
+        else:
+            # Detach from the controlling terminal so a stray clear()/tput
+            # can't reach it.  Ignored if already a session leader.
+            try:
+                os.setsid()
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+    # From now on clear()/banner() are no-ops in this process too (belt and
+    # braces in case the module keeps a reference to the old stdout).
+    try:
+        import ikabot.helpers.gui as _gui
+        _gui._child_mode = True
+    except Exception:
+        pass
+
+    _console_detached = True
+
+
+def _silence_child_terminal():
+    """Backwards-compatible alias — full detach from the shared console."""
+    detach_console()
 
 
 def set_child_mode(session):
@@ -61,7 +112,7 @@ def set_child_mode(session):
     # process starts with only the bootstrap stderr handler. Re-run
     # setup_file_logging so all child log output goes to the per-account file.
     setup_file_logging(session.username, session.servidor, session.mundo)
-    _silence_child_terminal()
+    detach_console()
 
 
 def run(command):
