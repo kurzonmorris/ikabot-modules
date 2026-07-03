@@ -6161,20 +6161,31 @@ def _view_schedules(session):
         enter()
         return
 
-    print(f"\n  {C.BOLD}{'ID':>4} {'Mode':<13} {'Status':<10} {'Repeat':<10} "
-          f"{'Ships':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}{C.RESET}")
-    print(f"  {'---':>4} {'---':<13} {'---':<10} {'---':<10} "
-          f"{'---':<5} {'---':>6} {'---':<12} {'---'}")
-
     _status_colours = {"pending": C.YELLOW, "active": C.GREEN,
                        "paused": C.DIM, "completed": C.CYAN,
                        "error": C.RED}
     _status_display = {"pending": "waiting", "active": "active",
                         "paused": "paused", "completed": "done",
                         "error": "error"}
+
+    mode_labels = {}
+    for r in rows:
+        mode = r.get("mode", "?").capitalize()
+        if r.get("mode", "") == "bulk":
+            csv_name = os.path.basename(r.get("bulk_csv_path", "") or "")
+            if csv_name:
+                mode = f"Bulk ({csv_name})"
+        mode_labels[id(r)] = mode
+    mode_width = max([13] + [len(m) for m in mode_labels.values()])
+
+    print(f"\n  {C.BOLD}{'ID':>4} {'Mode':<{mode_width}} {'Status':<10} {'Repeat':<10} "
+          f"{'Ships':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}{C.RESET}")
+    print(f"  {'---':>4} {'---':<{mode_width}} {'---':<10} {'---':<10} "
+          f"{'---':<5} {'---':>6} {'---':<12} {'---'}")
+
     for r in rows:
         sid = r.get("schedule_id", "?")
-        mode = r.get("mode", "?").capitalize()
+        mode = mode_labels[id(r)]
         raw_status = r.get("status", "?")
         status = _status_display.get(raw_status, raw_status)
         sc = _status_colours.get(raw_status, "")
@@ -6193,7 +6204,7 @@ def _view_schedules(session):
         else:
             last_str = "never"
 
-        print(f"  {sid:>4} {mode:<13} {sc}{status:<10}{C.RESET} {interval_str:<10} "
+        print(f"  {sid:>4} {mode:<{mode_width}} {sc}{status:<10}{C.RESET} {interval_str:<10} "
               f"{ship:<5} {total_sent:>6} {last_str:<12} {notes}")
 
     print(f"\n  {C.DIM}Total: {len(rows)} schedule(s){C.RESET}\n")
@@ -6718,6 +6729,10 @@ def _view_schedules_compact(rows):
     for r in rows:
         sid = r.get("schedule_id", "?")
         mode = r.get("mode", "?").capitalize()
+        if r.get("mode", "") == "bulk":
+            csv_name = os.path.basename(r.get("bulk_csv_path", "") or "")
+            if csv_name:
+                mode = f"Bulk ({csv_name})"
         status = r.get("status", "?")
         interval = r.get("interval_hours", 0)
         interval_str = f"every {interval}h" if interval > 0 else "once"
