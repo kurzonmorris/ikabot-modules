@@ -999,14 +999,170 @@ def _show_queue_status(session, is_units):
               f"{r['city_name']:<16}  {r['unit_name']:<22}  {remaining_str:>12}  {r['status']}")
 
 
+def _add_to_queue_distributed(session, is_units, cities_ids, cities):
+    """
+    Auto-distribute new units across ALL barracks/shipyards by build speed.
+    User enters totals per unit type; calculate_distribution splits the work.
+    """
+    building_type = "barracks" if is_units else "shipyard"
+
+    print(f"\nScanning all {building_type}s...")
+    all_buildings = find_all_buildings(session, cities_ids, cities, building_type)
+    if not all_buildings:
+        print(f"  {bcolors.RED}No {building_type} found.{bcolors.ENDC}")
+        return False
+
+    # Fetch unit data for every building (show progress per building)
+    buildings_data = []
+    for b in all_buildings:
+        busy_str = " [BUSY]" if b['is_busy'] else ""
+        print(f"  Fetching {b['city_name']} L{b['building_level']}{busy_str}...")
+        data = fetch_building_data(session, b, is_units)
+        if data:
+            buildings_data.append(data)
+        else:
+            print(f"    {bcolors.WARNING}Could not fetch data — skipping.{bcolors.ENDC}")
+
+    if not buildings_data:
+        print(f"  {bcolors.RED}No building data retrieved.{bcolors.ENDC}")
+        return False
+
+    # Union of unit types across all buildings (first capable building provides cost display)
+    unit_list = UNITS_ORDER if is_units else SHIPS_ORDER
+    available_units = {}
+    for unit in unit_list:
+        uid = unit['game_index']
+        for b in buildings_data:
+            if uid in b.get('unit_data', {}):
+                available_units[uid] = {'name': unit['name'], 'ud': b['unit_data'][uid]}
+                break
+
+    if not available_units:
+        print(f"  {bcolors.RED}No trainable units found across any building.{bcolors.ENDC}")
+        return False
+
+    # Ask total quantities per unit type
+    print(f"\nEnter TOTAL quantity for each unit type (0 or Enter to skip):")
+    print(f"  Units will be split across {len(buildings_data)} {building_type}(s) by build speed.\n")
+    order = {}
+    for uid, info in available_units.items():
+        ud = info['ud']
+        costs = []
+        if ud.get('citizens', 0): costs.append(f"{ud['citizens']} cit")
+        if ud.get('wood',     0): costs.append(f"{ud['wood']} wood")
+        if ud.get('wine',     0): costs.append(f"{ud['wine']} wine")
+        if ud.get('marble',   0): costs.append(f"{ud['marble']} marble")
+        if ud.get('crystal',  0): costs.append(f"{ud['crystal']} crystal")
+        if ud.get('sulfur',   0): costs.append(f"{ud['sulfur']} sulfur")
+        cost_str = f" [{', '.join(costs)}]" if costs else ""
+        qty = read(msg=f"  {info['name']}{cost_str}: ",
+                   min=0, digit=True, additionalValues=["'", ""])
+        if qty == "'":
+            return False
+        if qty == "" or qty == 0:
+            continue
+        order[uid] = {'name': info['name'], 'quantity': qty}
+
+    if not order:
+        print("  No units entered.")
+        return False
+
+    # Distribute across buildings by speed
+    distribution = calculate_distribution(buildings_data, order)
+    if not distribution:
+        print(f"  {bcolors.RED}Distribution failed.{bcolors.ENDC}")
+        return False
+
+    # Show the plan and ask for confirmation
+    print()
+    display_distribution_plan(distribution, order)
+    print()
+    confirm = read(msg="Proceed with this distribution? [Y/n]: ",
+                   values=["y", "Y", "n", "N", "", "'"])
+    if confirm == "'" or (isinstance(confirm, str) and confirm.lower() == "n"):
+        print("Cancelled.")
+        return False
+
+    # Priority
+    existing = csv_load_orders(session, is_units)
+    existing_priorities = sorted({r["priority"] for r in existing
+                                   if r["status"] not in ("ordered", "cancelled")})
+    if existing_priorities:
+        print(f"\n  Existing priority levels: {existing_priorities}")
+    pri_raw = read(msg="  Priority for this batch (1=highest, default 1): ",
+                   min=1, digit=True, additionalValues=["'", ""])
+    if pri_raw == "'":
+        return False
+    priority = pri_raw if isinstance(pri_raw, int) else 1
+
+    # Append new rows to existing queue
+    now        = int(time.time())
+    session_id = str(now)
+    rows       = existing[:]
+    next_id    = csv_next_recruit_id(rows)
+    batch_id   = csv_next_batch_id(rows)
+
+    total_added   = 0
+    active_bldgs  = 0
+    for b in distribution:
+        if not b.get('assignments'):
+            continue
+        active_bldgs += 1
+        for uid, qty in b['assignments'].items():
+            unit_name = (b.get('unit_data', {}).get(uid, {}).get('name')
+                         or order.get(uid, {}).get('name', str(uid)))
+            rows.append({
+                "recruit_id":        next_id,
+                "batch_id":          batch_id,
+                "session_id":        session_id,
+                "city_id":           b["city_id"],
+                "city_name":         b["city_name"],
+                "building_position": b["building_position"],
+                "building_level":    b["building_level"],
+                "is_units":          is_units,
+                "unit_type_id":      uid,
+                "unit_name":         unit_name,
+                "qty_total":         qty,
+                "qty_remaining":     qty,
+                "priority":          priority,
+                "status":            "pending",
+                "created_at":        now,
+                "last_updated":      now,
+            })
+            next_id    += 1
+            total_added += qty
+
+    csv_save_orders(session, is_units, rows)
+    print(f"\n  {bcolors.GREEN}Added {total_added:,} units across "
+          f"{active_bldgs} {building_type}(s) "
+          f"(batch {batch_id}, priority {priority}){bcolors.ENDC}")
+    return True
+
+
 def _add_to_queue_ui(session, is_units, cities_ids, cities):
     """
-    Interactive: pick a building, choose units and quantities,
-    pick a priority, append to the CSV.
+    Interactive: add units to the queue.
+    Mode 1 — specific building (original behaviour).
+    Mode 2 — auto-distribute totals across all buildings by build speed.
     Returns True if rows were added, False if user backed out.
     """
     building_type = "barracks" if is_units else "shipyard"
-    print(f"\nScanning for available {building_type}(s)...")
+
+    print(f"\nHow do you want to add units?")
+    print(f"  1. Add to a specific {building_type}  (you choose the building)")
+    print(f"  2. Auto-distribute across all {building_type}s  (enter totals, split by speed)")
+    print()
+    mode = read(msg="Select or ' to cancel: ", min=1, max=2, digit=True,
+                additionalValues=["'"])
+    if mode == "'":
+        return False
+
+    if mode == 2:
+        return _add_to_queue_distributed(session, is_units, cities_ids, cities)
+
+    # ------------------------------------------------------------------ #
+    # Mode 1: original per-building flow
+    # ------------------------------------------------------------------ #
     all_buildings = find_all_buildings(session, cities_ids, cities, building_type)
     if not all_buildings:
         print(f"  {bcolors.RED}No {building_type} found.{bcolors.ENDC}")
