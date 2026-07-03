@@ -243,10 +243,11 @@ def csv_has_active_orders(session, is_units):
 # =============================================================================
 
 _DEFAULT_CONFIG = {
-    "report_enabled":         False,
-    "report_interval_hours":  4,
-    "resource_import_enabled": False,
-    "last_report_time":       0,
+    "report_enabled":           False,
+    "report_interval_hours":    4,
+    "report_group_completed":   False,
+    "resource_import_enabled":  False,
+    "last_report_time":         0,
 }
 
 
@@ -291,16 +292,161 @@ def _pct(current, total):
     return f"{100 * current / total:.1f}"
 
 
-def _build_progress_report(all_rows):
+def _fetch_citizen_growth(session, city_id):
+    """
+    Return (free_citizens, growth_per_hour) for a city.
+    growth_per_hour is None if the game does not expose it in a known field.
+    """
+    try:
+        html = session.get(city_url + str(city_id))
+
+        # Free citizens from the city page (same pattern as the main loop)
+        free = 0
+        for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)', r'"citizens"\s*:\s*(\d+)'):
+            m = re.search(pat, html)
+            if m:
+                free = int(m.group(1).replace(',', ''))
+                break
+
+        # Citizen growth rate — try several field names from the raw city JSON
+        growth = None
+        for pat in (
+            r'"citizensGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"citizenGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"citizensGrowthPerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"citizenIncreasePerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"populationGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+            r'"citizenIncrement"\s*:\s*(-?\d+(?:\.\d+)?)',
+        ):
+            m = re.search(pat, html)
+            if m:
+                growth = float(m.group(1))
+                break
+
+        # Also try the updateGlobalData AJAX endpoint
+        if growth is None:
+            try:
+                data = session.get("view=updateGlobalData&ajax=1", noIndex=True)
+                hd = json.loads(data, strict=False)[0][1]["headerData"]
+                for field in ("citizensGrowth", "citizenGrowth",
+                              "citizensGrowthPerHour", "citizenIncreasePerHour",
+                              "citizenIncrement", "populationGrowth"):
+                    if field in hd:
+                        growth = float(hd[field])
+                        break
+                    if field in hd.get("currentResources", {}):
+                        growth = float(hd["currentResources"][field])
+                        break
+            except Exception:
+                pass
+
+        return free, growth
+    except Exception:
+        return 0, None
+
+
+def _calculate_recruitment_eta(session, all_rows):
+    """
+    Estimate when the full recruitment run will be done, based on:
+      - Citizens needed for remaining units (requires a building-data fetch)
+      - Current free citizens across all relevant cities
+      - Current citizen growth rate per hour (if game exposes it)
+
+    Returns a dict, or None if there are no pending rows.
+    """
+    pending = [r for r in all_rows if r["status"] in ("pending", "partial")]
+    if not pending:
+        return None
+
+    # Fetch building data once per unique (city_id, building_position) to get
+    # per-unit citizen costs.  Reports are infrequent so extra HTTP calls are fine.
+    building_stubs = {}
+    for r in pending:
+        key = (r["city_id"], r["building_position"])
+        if key not in building_stubs:
+            building_stubs[key] = {
+                "city_id":           r["city_id"],
+                "city_name":         r["city_name"],
+                "building_position": r["building_position"],
+                "building_level":    r["building_level"],
+                "is_busy":           False,
+                "is_units":          r["is_units"],
+            }
+
+    unit_citizen_cost = {}   # unit_type_id -> citizens per unit
+    for stub in building_stubs.values():
+        try:
+            data = fetch_building_data(session, stub, stub["is_units"])
+            if data:
+                for uid, ud in data.get("unit_data", {}).items():
+                    if uid not in unit_citizen_cost:
+                        unit_citizen_cost[uid] = ud.get("citizens", 0)
+        except Exception:
+            pass
+
+    # Total citizens still needed for all remaining units
+    citizens_needed = 0
+    for r in pending:
+        cost = unit_citizen_cost.get(r["unit_type_id"], 0)
+        citizens_needed += cost * r["qty_remaining"]
+
+    # Current free citizens + growth rate, summed across all involved cities
+    city_ids = list({r["city_id"] for r in pending})
+    total_free      = 0
+    total_growth_ph = 0.0
+    growth_unknown  = False
+
+    for cid in city_ids:
+        free, growth = _fetch_citizen_growth(session, cid)
+        total_free += free
+        if growth is not None:
+            total_growth_ph += growth
+        else:
+            growth_unknown = True
+
+    deficit = max(0, citizens_needed - total_free)
+
+    citizen_wait_h = None
+    if deficit == 0:
+        citizen_wait_h = 0.0
+    elif not growth_unknown and total_growth_ph > 0:
+        citizen_wait_h = deficit / total_growth_ph
+
+    return {
+        "citizens_needed":    citizens_needed,
+        "citizens_available": total_free,
+        "citizen_deficit":    deficit,
+        "growth_per_hour":    total_growth_ph if not growth_unknown else None,
+        "citizen_wait_hours": citizen_wait_h,
+        "growth_unknown":     growth_unknown,
+    }
+
+
+def _format_hours(h):
+    """Format a float number of hours as e.g. '2d 14h' or '3h 30m'."""
+    h = max(0.0, h)
+    days  = int(h // 24)
+    hrs   = int(h % 24)
+    mins  = int((h * 60) % 60)
+    if days > 0:
+        return f"{days}d {hrs}h"
+    if hrs > 0:
+        return f"{hrs}h {mins}m"
+    return f"{mins}m"
+
+
+def _build_progress_report(all_rows, group_completed=False, eta=None):
     """
     Build a progress report string from all CSV rows (both units and ships).
 
+    group_completed: collapse fully-done cities to a single summary line.
+    eta: dict returned by _calculate_recruitment_eta(), appended as an ETA block.
     Returns a plain-text string suitable for Telegram.
+    Uses only ASCII characters to avoid encoding issues on Windows.
     """
     now_str = time.strftime("%d %b %Y %H:%M", time.localtime())
-    lines = [f"AUTO RECRUITMENT MANAGER — {now_str}", ""]
+    lines = [f"AUTO RECRUITMENT MANAGER - {now_str}", ""]
 
-    # Separate units and ships
     unit_rows = [r for r in all_rows if r["is_units"]]
     ship_rows = [r for r in all_rows if not r["is_units"]]
 
@@ -308,10 +454,9 @@ def _build_progress_report(all_rows):
         return [r for r in rows if r["status"] != "cancelled"]
 
     def _totals(rows):
-        total = sum(r["qty_total"] for r in rows)
+        total     = sum(r["qty_total"]     for r in rows)
         remaining = sum(r["qty_remaining"] for r in rows)
-        ordered = total - remaining
-        return ordered, total
+        return total - remaining, total
 
     all_active = _active(all_rows)
     g_ordered, g_total = _totals(all_active)
@@ -334,31 +479,36 @@ def _build_progress_report(all_rows):
     lines.append("")
     lines.append("=" * 36)
 
-    # Per-city, per-type breakdown
+    # Per-city breakdown
     cities_seen = []
-    city_order = {}
+    city_order  = {}
     for r in all_active:
         cname = r["city_name"]
         if cname not in city_order:
             city_order[cname] = len(city_order)
             cities_seen.append(cname)
 
-    for city_name in cities_seen:
-        city_unit_rows = [r for r in u_active if r["city_name"] == city_name]
-        city_ship_rows = [r for r in s_active if r["city_name"] == city_name]
+    completed_summaries = []
 
-        if not city_unit_rows and not city_ship_rows:
+    for city_name in cities_seen:
+        c_units = [r for r in u_active if r["city_name"] == city_name]
+        c_ships = [r for r in s_active if r["city_name"] == city_name]
+        c_all   = c_units + c_ships
+        if not c_all:
+            continue
+
+        co, ct = _totals(c_all)
+        if group_completed and co >= ct:
+            completed_summaries.append(f"  {city_name}: {co:,}/{ct:,} DONE")
             continue
 
         lines.append(f"\n{city_name}")
-
-        for label, rows in [("Troops", city_unit_rows), ("Ships", city_ship_rows)]:
+        for label, rows in [("Troops", c_units), ("Ships", c_ships)]:
             if not rows:
                 continue
-            co, ct = _totals(rows)
-            done_mark = " DONE" if co >= ct else ""
-            lines.append(f"  {label} {_ascii_bar(co, ct, 12)} {co:,}/{ct:,}{done_mark}")
-            # Per-unit breakdown
+            co2, ct2 = _totals(rows)
+            done_mark = " DONE" if co2 >= ct2 else ""
+            lines.append(f"  {label} {_ascii_bar(co2, ct2, 12)} {co2:,}/{ct2:,}{done_mark}")
             unit_totals = {}
             for r in rows:
                 name = r["unit_name"] or f"Unit {r['unit_type_id']}"
@@ -370,20 +520,55 @@ def _build_progress_report(all_rows):
                 done2 = " *" if uo2 >= ut2 else ""
                 lines.append(f"    {uname:<20} {uo2:>5,}/{ut2:,}{done2}")
 
+    if completed_summaries:
+        lines.append(f"\nCOMPLETED ({len(completed_summaries)})")
+        lines.extend(completed_summaries)
+
     lines.append("\n" + "=" * 36)
+
+    # ETA block
+    if eta and eta.get("citizens_needed", 0) > 0:
+        lines.append("\nESTIMATED COMPLETION (citizens)")
+        lines.append(f"  Needed   : {eta['citizens_needed']:,} citizens total")
+        lines.append(f"  Available: {eta['citizens_available']:,} citizens")
+        deficit = eta["citizen_deficit"]
+        if deficit > 0:
+            lines.append(f"  Deficit  : {deficit:,} citizens still needed")
+            if eta.get("growth_unknown"):
+                lines.append("  Growth rate: unavailable from game data")
+                lines.append("  ETA: cannot estimate (growth rate unknown)")
+            elif eta.get("growth_per_hour", 0) > 0:
+                gph = eta["growth_per_hour"]
+                wait_h = eta["citizen_wait_hours"]
+                lines.append(f"  Growth   : ~{gph:,.0f}/hr across all cities")
+                lines.append(f"  Wait     : ~{_format_hours(wait_h)} for citizens")
+                lines.append(f"  * ESTIMATED delivery: ~{_format_hours(wait_h)} from now")
+            else:
+                lines.append("  Growth rate: 0 (population at capacity?)")
+        else:
+            lines.append("  Citizens : sufficient - no wait needed")
+            lines.append("  * Delivery limited by training time only")
+        lines.append("  (Growth rate changes over time - estimate only)")
+
     return "\n".join(lines)
 
 
-def send_progress_report(session, is_units):
+def send_progress_report(session, is_units, group_completed=False):
     """Send a combined units+ships progress report to the bot."""
     unit_rows = csv_load_orders(session, True)
     ship_rows = csv_load_orders(session, False)
-    all_rows = unit_rows + ship_rows
+    all_rows  = unit_rows + ship_rows
 
     if not all_rows:
         return
 
-    report = _build_progress_report(all_rows)
+    eta = None
+    try:
+        eta = _calculate_recruitment_eta(session, all_rows)
+    except Exception:
+        pass
+
+    report = _build_progress_report(all_rows, group_completed=group_completed, eta=eta)
     sendToBot(session, report)
 
 
@@ -395,7 +580,10 @@ def _maybe_send_report(session, is_units, cfg):
     now = time.time()
     if now - cfg.get("last_report_time", 0) >= interval_secs:
         try:
-            send_progress_report(session, is_units)
+            send_progress_report(
+                session, is_units,
+                group_completed=cfg.get("report_group_completed", False),
+            )
         except Exception:
             pass
         cfg["last_report_time"] = int(now)
@@ -540,7 +728,7 @@ def _request_resource_import(session, dest_city_id, needed_res, all_city_ids, ci
                 f"{RESOURCE_NAMES[i]} {to_req[i]:,}"
                 for i in range(5) if to_req[i] > 0
             )
-            requests.append(f"{sup['city_name']} → {res_desc}")
+            requests.append(f"{sup['city_name']} -> {res_desc}")
         except AttributeError as e:
             print(f"  RTM interface mismatch (function not found): {e}")
         except Exception as e:
@@ -2164,7 +2352,8 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
         report_raw = read(msg="Send periodic progress reports to Telegram? [Y/n]: ",
                           values=["y", "Y", "n", "N", ""])
         report_enabled = report_raw.lower() != "n"
-        report_interval = 4
+        report_interval        = 4
+        report_group_completed = False
 
         if report_enabled:
             interval_raw = read(
@@ -2175,6 +2364,14 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 event.set()
                 return
             report_interval = interval_raw if isinstance(interval_raw, int) else 4
+
+            group_raw = read(
+                msg="Collapse completed cities to one line in reports? [y/N]: ",
+                values=["y", "Y", "n", "N", ""]
+            )
+            report_group_completed = group_raw.lower() == "y"
+            if report_group_completed:
+                print(f"  {bcolors.GREEN}Completed cities will be grouped into a summary line.{bcolors.ENDC}")
             print()
 
         # Resource import option
@@ -2232,10 +2429,11 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
 
         # Build and save config
         cfg = {
-            "report_enabled":         report_enabled,
-            "report_interval_hours":  report_interval,
+            "report_enabled":          report_enabled,
+            "report_interval_hours":   report_interval,
+            "report_group_completed":  report_group_completed,
             "resource_import_enabled": resource_import_enabled,
-            "last_report_time":       0,
+            "last_report_time":        0,
         }
         save_config(session, cfg)
 
@@ -2253,7 +2451,9 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
             if resource_check['missing_resources']:
                 print("  • Will recruit in batches as resources allow (20% threshold)")
             if report_enabled:
-                print(f"  • Progress reports every {report_interval}h via Telegram")
+                print(f"  • Progress reports every {report_interval}h via Telegram (includes citizen ETA)")
+                if report_group_completed:
+                    print(f"  • Completed cities collapsed to summary line in reports")
             if resource_import_enabled:
                 print("  • Will request resource imports when cities run short")
             print()
