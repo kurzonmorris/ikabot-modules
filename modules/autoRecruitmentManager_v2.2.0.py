@@ -308,20 +308,32 @@ def _fetch_citizen_growth(session, city_id):
                 free = int(m.group(1).replace(',', ''))
                 break
 
-        # Citizen growth rate — try several field names from the raw city JSON
+        # Citizen growth rate — primary source: Town Hall population widget
+        # <li id="js_TownHallPopulationGrowth" class="growth_positive">
+        #   <span id="js_TownHallPopulationGrowthValue" class="green">59.49 </span>
+        # The li class tells us the sign; the span holds the magnitude.
         growth = None
-        for pat in (
-            r'"citizensGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-            r'"citizenGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-            r'"citizensGrowthPerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
-            r'"citizenIncreasePerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
-            r'"populationGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-            r'"citizenIncrement"\s*:\s*(-?\d+(?:\.\d+)?)',
-        ):
-            m = re.search(pat, html)
-            if m:
-                growth = float(m.group(1))
-                break
+        val_m  = re.search(r'id="js_TownHallPopulationGrowthValue"[^>]*>\s*([\d.]+)', html)
+        if val_m:
+            magnitude = float(val_m.group(1))
+            sign_m = re.search(r'id="js_TownHallPopulationGrowth"[^>]*class="([^"]*)"', html)
+            negative = sign_m and "growth_negative" in sign_m.group(1)
+            growth = -magnitude if negative else magnitude
+
+        # Fallback: generic JSON field names from the raw city data
+        if growth is None:
+            for pat in (
+                r'"citizensGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"citizenGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"citizensGrowthPerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"citizenIncreasePerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"populationGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"citizenIncrement"\s*:\s*(-?\d+(?:\.\d+)?)',
+            ):
+                m = re.search(pat, html)
+                if m:
+                    growth = float(m.group(1))
+                    break
 
         # Also try the updateGlobalData AJAX endpoint
         if growth is None:
