@@ -20,7 +20,7 @@ from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import *
-from ikabot.helpers.planRoutes import executeRoutes
+from ikabot.helpers.planRoutes import executeRoutes, sendGoods
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.naval import getAvailableShips, getAvailableFreighters
@@ -524,7 +524,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.1.0                 \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.2.0                 \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -1354,6 +1354,106 @@ def wait_for_action_points(session, origin_city_id, status_prefix="",
 
 
 # ============================================================================
+#  CYCLE DEADLINE  (stop delivering when the next run is due)
+# ============================================================================
+
+def _cycle_deadline(sched):
+    """Absolute timestamp when this cycle must stop sending — the moment
+    the next run becomes due. None for one-time schedules (deliver in full)."""
+    run_at = sched.get("run_at_time", "")
+    if run_at:
+        try:
+            return _next_run_for_time(run_at)
+        except Exception:
+            return None
+    interval = sched.get("interval_hours", 0) or 0
+    if interval > 0:
+        return int(time.time()) + interval * 3600
+    return None
+
+
+def _deadline_passed(deadline_ts):
+    return deadline_ts is not None and time.time() >= deadline_ts
+
+
+def _notify_deadline_cut(session, notif_config, mode_label, remaining_desc):
+    if should_notify(notif_config, "error"):
+        try:
+            sendToBot(session,
+                      f"{mode_label}: cycle time limit reached — "
+                      f"{remaining_desc} not attempted. The next cycle "
+                      f"recalculates from current stock and starts fresh.")
+        except Exception:
+            pass
+
+
+def _execute_routes_bounded(session, route, useFreighters, deadline_ts,
+                            status_prefix=""):
+    """Deliver one route like ikabot's executeRoutes, but stop scheduling
+    further ship trips once deadline_ts passes. Returns the list of amounts
+    actually dispatched (may be less than planned). The undelivered
+    remainder is abandoned — the next cycle recalculates from live stock."""
+    ship_capacity, freighter_capacity = getShipCapacity(session)
+    capacity = freighter_capacity if useFreighters else ship_capacity
+    (origin_city, destination_city, island_id, *toSend) = route
+    toSend = list(toSend)
+    planned = list(toSend)
+    destination_city_id = destination_city["id"]
+
+    while sum(toSend) > 0:
+        remaining_time = deadline_ts - time.time()
+        if remaining_time <= 0:
+            break
+        session.setStatus(
+            f"{status_prefix}Sending {toSend[0]}W {toSend[1]}V "
+            f"{toSend[2]}M {toSend[3]}C {toSend[4]}S "
+            f"(cycle deadline in {int(remaining_time / 60)}min)"
+        )
+        ships_available = wait_for_ships(
+            session, useFreighters, status_prefix,
+            max_wait=min(3600, int(remaining_time)),
+        )
+        if ships_available == 0:
+            break
+        storage_in_ships = ships_available * capacity
+
+        html = session.get(city_url + str(origin_city["id"]))
+        origin_city = getCity(html)
+        html = session.get(city_url + str(destination_city_id))
+        destination_city = getCity(html)
+        foreign = str(destination_city["id"]) != str(destination_city_id)
+
+        send = []
+        for i in range(len(toSend)):
+            limits = [origin_city["availableResources"][i], toSend[i],
+                      storage_in_ships]
+            if not foreign:
+                limits.append(destination_city["freeSpaceForResources"][i])
+            amount = max(0, min(limits))
+            send.append(amount)
+            storage_in_ships -= amount
+
+        if sum(send) == 0:
+            # No space at destination (or source emptied) — wait up to an
+            # hour like executeRoutes does, but never past the deadline.
+            remaining_time = deadline_ts - time.time()
+            if remaining_time <= 0:
+                break
+            time.sleep(min(3600, max(1, remaining_time)))
+            continue
+
+        ships_needed = (
+            int(math.ceil(sum(send) / capacity)) if capacity > 0 else 0
+        )
+        sendGoods(session, origin_city["id"], destination_city_id, island_id,
+                  ships_needed, send, useFreighters)
+        for i in range(len(toSend)):
+            toSend[i] -= send[i]
+
+    return [planned[i] - toSend[i] for i in range(len(planned))]
+
+
+# ============================================================================
 #  CITY STATUS CHECKS  (occupation, port blockade)
 # ============================================================================
 
@@ -1395,7 +1495,7 @@ def _check_city_status(session, city_id):
 def send_shipment(session, route, useFreighters, notif_config, log_path,
                   mode_name, dest_island_coords="", dest_player="",
                   max_lock_retries=3, next_shipment_str=None,
-                  min_threshold=0):
+                  min_threshold=0, deadline_ts=None):
     origin_city = route[0]
     dest_city = route[1]
     resources = list(route[3:])
@@ -1405,7 +1505,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
 
     result = {"success": False, "error": None, "ships_used": 0,
               "no_ap": False, "below_threshold": False,
-              "city_unavailable": False, "shortfalls": {}}
+              "city_unavailable": False, "shortfalls": {},
+              "partial": False}
 
     if min_threshold > 0 and total_cargo < min_threshold:
         result["below_threshold"] = True
@@ -1468,8 +1569,12 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      next_shipment_str)
         return result
 
-    # 1. Wait for ships (with timeout)
-    available = wait_for_ships(session, useFreighters, prefix)
+    # 1. Wait for ships (with timeout, never past the cycle deadline)
+    ship_wait = 3600
+    if deadline_ts is not None:
+        ship_wait = max(1, min(3600, int(deadline_ts - time.time())))
+    available = wait_for_ships(session, useFreighters, prefix,
+                               max_wait=ship_wait)
     if available == 0:
         result["error"] = f"No {ship_type_name} available (timed out)"
         if should_notify(notif_config, "error"):
@@ -1574,9 +1679,26 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
             pass
 
         session.setStatus(f"{prefix}Sending resources...")
-        executeRoutes(session, [route], useFreighters)
+        if deadline_ts is not None:
+            sent = _execute_routes_bounded(session, route, useFreighters,
+                                           deadline_ts, prefix)
+            if sum(sent) == 0:
+                result["error"] = ("Cycle time limit reached before cargo "
+                                   "could be sent")
+                log_shipment(log_path, session, mode_name,
+                             origin_city["name"], "", dest_city["name"],
+                             dest_island_coords, dest_player, resources,
+                             0, ship_type_name, "SKIPPED", result["error"],
+                             next_shipment_str)
+                return result
+            if sum(sent) < sum(resources):
+                result["partial"] = True
+            resources = sent
+            total_cargo = sum(sent)
+        else:
+            executeRoutes(session, [route], useFreighters)
 
-        # If executeRoutes completes without error, the shipment was sent.
+        # If the send loop completes without error, the shipment was sent.
         # We do NOT verify by comparing ship counts before/after because
         # ships from earlier shipments can return during sending, making
         # the count unreliable and causing false "failure" reports.
@@ -1592,18 +1714,25 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
             for i in range(len(materials_names))
             if i < len(resources) and resources[i] > 0
         )
+        status_str = "PARTIAL" if result["partial"] else "SENT"
+        partial_note = (
+            "Cycle time limit reached — remainder abandoned; "
+            "next cycle recalculates" if result["partial"] else None
+        )
         if should_notify(notif_config, "all"):
+            extra = "\n(partial — cycle time limit reached)" if result["partial"] else ""
             sendToBot(session,
                       f"SHIPMENT SENT\nAccount: {session.username}\n"
                       f"From: {origin_city['name']}\n"
                       f"To: {dest_island_coords} {dest_city['name']}\n"
                       f"Ships: {ships_needed} {ship_type_name}\n"
-                      f"Sent: {res_desc}")
+                      f"Sent: {res_desc}{extra}")
 
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
-                     ships_needed, ship_type_name, "SENT",
+                     ships_needed, ship_type_name, status_str,
+                     error_msg=partial_note,
                      next_shipment=next_shipment_str)
 
     except Exception as e:
@@ -4825,11 +4954,17 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
     excluded = _rrs_excluded_set(session)
     summary = _rrs_load_summary(session)
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    deadline_ts = _cycle_deadline(sched)
     small_shipments = []
     exhaustion_log = []
 
     cycle_sent = 0
-    for cid in source_city_ids:
+    for idx_c, cid in enumerate(source_city_ids):
+        if _deadline_passed(deadline_ts):
+            _notify_deadline_cut(
+                session, notif_config, "CONSOLIDATE",
+                f"{len(source_city_ids) - idx_c} source city(ies)")
+            break
         if int(cid) in excluded:
             continue
         html = session.get(city_url + str(cid))
@@ -4863,6 +4998,7 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
             result = send_shipment(
                 session, route, useFreighters, notif_config, log_path,
                 "Consolidate", coords, min_threshold=min_threshold,
+                deadline_ts=deadline_ts,
             )
             if result.get("below_threshold"):
                 small_shipments.append(
@@ -4899,12 +5035,18 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
         return 0
 
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    deadline_ts = _cycle_deadline(sched)
     small_shipments = []
     exhaustion_log = []
     exhausted_res = set()
     cycle_sent = 0
 
-    for dcid in dest_city_ids:
+    for idx_d, dcid in enumerate(dest_city_ids):
+        if _deadline_passed(deadline_ts):
+            _notify_deadline_cut(
+                session, notif_config, "DISTRIBUTE",
+                f"{len(dest_city_ids) - idx_d} destination(s)")
+            break
         html = session.get(city_url + str(dcid))
         try:
             dest_city = getCity(html)
@@ -4945,6 +5087,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
             result = send_shipment(
                 session, route, useFreighters, notif_config, log_path,
                 "Distribute", coords, min_threshold=min_threshold,
+                deadline_ts=deadline_ts,
             )
             if result.get("below_threshold"):
                 small_shipments.append(
@@ -4978,11 +5121,17 @@ def run_topup_cycle(session, sched, notif_config, log_path):
     excluded = _rrs_excluded_set(session)
     summary = _rrs_load_summary(session)
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    deadline_ts = _cycle_deadline(sched)
     small_shipments = []
     exhaustion_log = []
 
     cycle_sent = 0
-    for dcid in dest_city_ids:
+    for idx_d, dcid in enumerate(dest_city_ids):
+        if _deadline_passed(deadline_ts):
+            _notify_deadline_cut(
+                session, notif_config, "TOPUP",
+                f"{len(dest_city_ids) - idx_d} destination(s)")
+            break
         dcid_str = str(dcid)
         targets = dest_targets.get(dcid_str)
         if not targets:
@@ -4998,6 +5147,8 @@ def run_topup_cycle(session, sched, notif_config, log_path):
 
         exhausted_res = set()
         for cid in source_city_ids:
+            if _deadline_passed(deadline_ts):
+                break
             cid_str = str(cid)
             if int(cid) in excluded:
                 continue
@@ -5036,6 +5187,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                 result = send_shipment(
                     session, route, useFreighters, notif_config, log_path,
                     "TopUp", coords, min_threshold=min_threshold,
+                    deadline_ts=deadline_ts,
                 )
                 if result.get("below_threshold"):
                     small_shipments.append(
@@ -5072,6 +5224,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
     excluded = _rrs_excluded_set(session)
     summary = _rrs_load_summary(session)
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    deadline_ts = _cycle_deadline(sched)
     small_shipments = []
     exhaustion_log = []
 
@@ -5091,6 +5244,11 @@ def run_even_cycle(session, sched, notif_config, log_path):
     cycle_sent = 0
 
     for res_idx in resource_indices:
+        if _deadline_passed(deadline_ts):
+            _notify_deadline_cut(
+                session, notif_config, "EVEN DIST",
+                "remaining balancing shipments")
+            break
         if not isinstance(res_idx, int) or res_idx < 0 or res_idx >= len(materials_names):
             continue
         res_name = materials_names[res_idx]
@@ -5121,6 +5279,8 @@ def run_even_cycle(session, sched, notif_config, log_path):
         r_rem = receivers[0]["amount"]
 
         while si < len(senders) and ri < len(receivers):
+            if _deadline_passed(deadline_ts):
+                break
             amount = min(s_rem, r_rem)
 
             if amount > 0:
@@ -5136,6 +5296,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
                 result = send_shipment(
                     session, route, useFreighters, notif_config, log_path,
                     "Even Distribution", coords, min_threshold=min_threshold,
+                    deadline_ts=deadline_ts,
                 )
                 if result.get("below_threshold"):
                     small_shipments.append(
@@ -5234,13 +5395,20 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
         return 0
 
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    deadline_ts = _cycle_deadline(sched)
     small_shipments = []
     exhaustion_log = []
     cycle_sent = 0
-    for route in routes:
+    for idx_r, route in enumerate(routes):
+        if _deadline_passed(deadline_ts):
+            _notify_deadline_cut(
+                session, notif_config, "AUTO SEND",
+                f"{len(routes) - idx_r} shipment(s)")
+            break
         result = send_shipment(
             session, route, useFreighters, notif_config, log_path,
             "Auto Send", min_threshold=min_threshold,
+            deadline_ts=deadline_ts,
         )
         if result.get("below_threshold"):
             small_shipments.append(
@@ -5526,6 +5694,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     ap_wait_mins = int(sched.get("ap_max_wait_minutes", 120) or 120)
     max_ap_retries = max(0, ap_wait_mins // 5)  # e.g. 120min / 5 = 24 retries
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
+    deadline_ts = _cycle_deadline(sched)
     small_shipments = []     # (src_name, dest_name, resources) below threshold
     exhaustion_log = []
     exhausted_by_src = {}    # {src_city_id: set(resource_indices)}
@@ -5586,7 +5755,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         result = send_shipment(
             session, route, row_freighters, notif_config,
             log_path, "Bulk Distribution", coords, player,
-            min_threshold=min_threshold,
+            min_threshold=min_threshold, deadline_ts=deadline_ts,
         )
 
         if result.get("shortfalls"):
@@ -5670,6 +5839,15 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     # --- First pass: send all routes, deferring AP-blocked ones ---
     for idx, route_info in enumerate(routes):
+        if _deadline_passed(deadline_ts):
+            # Unsent rows stay pending in the run column and are picked
+            # up by the next cycle.
+            skipped += total - idx
+            if should_notify(notif_config, "error"):
+                sendToBot(session,
+                          f"BULK DIST: cycle time limit reached — "
+                          f"{total - idx} route(s) deferred to next cycle")
+            break
         src_name = route_info[7]
         dest_name = route_info[3]
         session.setStatus(
@@ -5689,7 +5867,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     # --- Retry loop: re-check AP-blocked cities every 5 min ---
     retry_round = 0
-    while deferred_routes and retry_round < max_ap_retries:
+    while (deferred_routes and retry_round < max_ap_retries
+           and not _deadline_passed(deadline_ts)):
         retry_round += 1
         session.setStatus(
             f"[AP WAIT] {len(deferred_routes)} shipment(s) deferred, "
@@ -6161,20 +6340,31 @@ def _view_schedules(session):
         enter()
         return
 
-    print(f"\n  {C.BOLD}{'ID':>4} {'Mode':<13} {'Status':<10} {'Repeat':<10} "
-          f"{'Ships':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}{C.RESET}")
-    print(f"  {'---':>4} {'---':<13} {'---':<10} {'---':<10} "
-          f"{'---':<5} {'---':>6} {'---':<12} {'---'}")
-
     _status_colours = {"pending": C.YELLOW, "active": C.GREEN,
                        "paused": C.DIM, "completed": C.CYAN,
                        "error": C.RED}
     _status_display = {"pending": "waiting", "active": "active",
                         "paused": "paused", "completed": "done",
                         "error": "error"}
+
+    mode_labels = {}
+    for r in rows:
+        mode = r.get("mode", "?").capitalize()
+        if r.get("mode", "") == "bulk":
+            csv_name = os.path.basename(r.get("bulk_csv_path", "") or "")
+            if csv_name:
+                mode = f"Bulk ({csv_name})"
+        mode_labels[id(r)] = mode
+    mode_width = max([13] + [len(m) for m in mode_labels.values()])
+
+    print(f"\n  {C.BOLD}{'ID':>4} {'Mode':<{mode_width}} {'Status':<10} {'Repeat':<10} "
+          f"{'Ships':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}{C.RESET}")
+    print(f"  {'---':>4} {'---':<{mode_width}} {'---':<10} {'---':<10} "
+          f"{'---':<5} {'---':>6} {'---':<12} {'---'}")
+
     for r in rows:
         sid = r.get("schedule_id", "?")
-        mode = r.get("mode", "?").capitalize()
+        mode = mode_labels[id(r)]
         raw_status = r.get("status", "?")
         status = _status_display.get(raw_status, raw_status)
         sc = _status_colours.get(raw_status, "")
@@ -6193,7 +6383,7 @@ def _view_schedules(session):
         else:
             last_str = "never"
 
-        print(f"  {sid:>4} {mode:<13} {sc}{status:<10}{C.RESET} {interval_str:<10} "
+        print(f"  {sid:>4} {mode:<{mode_width}} {sc}{status:<10}{C.RESET} {interval_str:<10} "
               f"{ship:<5} {total_sent:>6} {last_str:<12} {notes}")
 
     print(f"\n  {C.DIM}Total: {len(rows)} schedule(s){C.RESET}\n")
@@ -6718,6 +6908,10 @@ def _view_schedules_compact(rows):
     for r in rows:
         sid = r.get("schedule_id", "?")
         mode = r.get("mode", "?").capitalize()
+        if r.get("mode", "") == "bulk":
+            csv_name = os.path.basename(r.get("bulk_csv_path", "") or "")
+            if csv_name:
+                mode = f"Bulk ({csv_name})"
         status = r.get("status", "?")
         interval = r.get("interval_hours", 0)
         interval_str = f"every {interval}h" if interval > 0 else "once"
