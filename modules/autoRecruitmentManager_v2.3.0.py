@@ -18,8 +18,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.2.0
+Version: 2.3.0
 """
+
+MODULE_VERSION = "2.3.0"
 
 import csv
 import glob
@@ -243,10 +245,11 @@ def csv_has_active_orders(session, is_units):
 # =============================================================================
 
 _DEFAULT_CONFIG = {
-    "report_enabled":         False,
-    "report_interval_hours":  4,
-    "resource_import_enabled": False,
-    "last_report_time":       0,
+    "report_enabled":           False,
+    "report_interval_hours":    4,
+    "report_group_completed":   False,
+    "resource_import_enabled":  False,
+    "last_report_time":         0,
 }
 
 
@@ -291,16 +294,173 @@ def _pct(current, total):
     return f"{100 * current / total:.1f}"
 
 
-def _build_progress_report(all_rows):
+def _fetch_citizen_growth(session, city_id):
+    """
+    Return (free_citizens, growth_per_hour) for a city.
+    growth_per_hour is None if the game does not expose it in a known field.
+    """
+    try:
+        html = session.get(city_url + str(city_id))
+
+        # Free citizens from the city page (same pattern as the main loop)
+        free = 0
+        for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)', r'"citizens"\s*:\s*(\d+)'):
+            m = re.search(pat, html)
+            if m:
+                free = int(m.group(1).replace(',', ''))
+                break
+
+        # Citizen growth rate — primary source: Town Hall population widget
+        # <li id="js_TownHallPopulationGrowth" class="growth_positive">
+        #   <span id="js_TownHallPopulationGrowthValue" class="green">59.49 </span>
+        # The li class tells us the sign; the span holds the magnitude.
+        growth = None
+        val_m  = re.search(r'id="js_TownHallPopulationGrowthValue"[^>]*>\s*([\d.]+)', html)
+        if val_m:
+            magnitude = float(val_m.group(1))
+            sign_m = re.search(r'id="js_TownHallPopulationGrowth"[^>]*class="([^"]*)"', html)
+            negative = sign_m and "growth_negative" in sign_m.group(1)
+            growth = -magnitude if negative else magnitude
+
+        # Fallback: generic JSON field names from the raw city data
+        if growth is None:
+            for pat in (
+                r'"citizensGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"citizenGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"citizensGrowthPerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"citizenIncreasePerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"populationGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
+                r'"citizenIncrement"\s*:\s*(-?\d+(?:\.\d+)?)',
+            ):
+                m = re.search(pat, html)
+                if m:
+                    growth = float(m.group(1))
+                    break
+
+        # Also try the updateGlobalData AJAX endpoint
+        if growth is None:
+            try:
+                data = session.get("view=updateGlobalData&ajax=1", noIndex=True)
+                hd = json.loads(data, strict=False)[0][1]["headerData"]
+                for field in ("citizensGrowth", "citizenGrowth",
+                              "citizensGrowthPerHour", "citizenIncreasePerHour",
+                              "citizenIncrement", "populationGrowth"):
+                    if field in hd:
+                        growth = float(hd[field])
+                        break
+                    if field in hd.get("currentResources", {}):
+                        growth = float(hd["currentResources"][field])
+                        break
+            except Exception:
+                pass
+
+        return free, growth
+    except Exception:
+        return 0, None
+
+
+def _calculate_recruitment_eta(session, all_rows):
+    """
+    Estimate when the full recruitment run will be done, based on:
+      - Citizens needed for remaining units (requires a building-data fetch)
+      - Current free citizens across all relevant cities
+      - Current citizen growth rate per hour (if game exposes it)
+
+    Returns a dict, or None if there are no pending rows.
+    """
+    pending = [r for r in all_rows if r["status"] in ("pending", "partial")]
+    if not pending:
+        return None
+
+    # Fetch building data once per unique (city_id, building_position) to get
+    # per-unit citizen costs.  Reports are infrequent so extra HTTP calls are fine.
+    building_stubs = {}
+    for r in pending:
+        key = (r["city_id"], r["building_position"])
+        if key not in building_stubs:
+            building_stubs[key] = {
+                "city_id":           r["city_id"],
+                "city_name":         r["city_name"],
+                "building_position": r["building_position"],
+                "building_level":    r["building_level"],
+                "is_busy":           False,
+                "is_units":          r["is_units"],
+            }
+
+    unit_citizen_cost = {}   # unit_type_id -> citizens per unit
+    for stub in building_stubs.values():
+        try:
+            data = fetch_building_data(session, stub, stub["is_units"])
+            if data:
+                for uid, ud in data.get("unit_data", {}).items():
+                    if uid not in unit_citizen_cost:
+                        unit_citizen_cost[uid] = ud.get("citizens", 0)
+        except Exception:
+            pass
+
+    # Total citizens still needed for all remaining units
+    citizens_needed = 0
+    for r in pending:
+        cost = unit_citizen_cost.get(r["unit_type_id"], 0)
+        citizens_needed += cost * r["qty_remaining"]
+
+    # Current free citizens + growth rate, summed across all involved cities
+    city_ids = list({r["city_id"] for r in pending})
+    total_free      = 0
+    total_growth_ph = 0.0
+    growth_unknown  = False
+
+    for cid in city_ids:
+        free, growth = _fetch_citizen_growth(session, cid)
+        total_free += free
+        if growth is not None:
+            total_growth_ph += growth
+        else:
+            growth_unknown = True
+
+    deficit = max(0, citizens_needed - total_free)
+
+    citizen_wait_h = None
+    if deficit == 0:
+        citizen_wait_h = 0.0
+    elif not growth_unknown and total_growth_ph > 0:
+        citizen_wait_h = deficit / total_growth_ph
+
+    return {
+        "citizens_needed":    citizens_needed,
+        "citizens_available": total_free,
+        "citizen_deficit":    deficit,
+        "growth_per_hour":    total_growth_ph if not growth_unknown else None,
+        "citizen_wait_hours": citizen_wait_h,
+        "growth_unknown":     growth_unknown,
+    }
+
+
+def _format_hours(h):
+    """Format a float number of hours as e.g. '2d 14h' or '3h 30m'."""
+    h = max(0.0, h)
+    days  = int(h // 24)
+    hrs   = int(h % 24)
+    mins  = int((h * 60) % 60)
+    if days > 0:
+        return f"{days}d {hrs}h"
+    if hrs > 0:
+        return f"{hrs}h {mins}m"
+    return f"{mins}m"
+
+
+def _build_progress_report(all_rows, group_completed=False, eta=None):
     """
     Build a progress report string from all CSV rows (both units and ships).
 
+    group_completed: collapse fully-done cities to a single summary line.
+    eta: dict returned by _calculate_recruitment_eta(), appended as an ETA block.
     Returns a plain-text string suitable for Telegram.
+    Uses only ASCII characters to avoid encoding issues on Windows.
     """
     now_str = time.strftime("%d %b %Y %H:%M", time.localtime())
-    lines = [f"AUTO RECRUITMENT MANAGER — {now_str}", ""]
+    lines = [f"AUTO RECRUITMENT MANAGER - {now_str}", ""]
 
-    # Separate units and ships
     unit_rows = [r for r in all_rows if r["is_units"]]
     ship_rows = [r for r in all_rows if not r["is_units"]]
 
@@ -308,10 +468,9 @@ def _build_progress_report(all_rows):
         return [r for r in rows if r["status"] != "cancelled"]
 
     def _totals(rows):
-        total = sum(r["qty_total"] for r in rows)
+        total     = sum(r["qty_total"]     for r in rows)
         remaining = sum(r["qty_remaining"] for r in rows)
-        ordered = total - remaining
-        return ordered, total
+        return total - remaining, total
 
     all_active = _active(all_rows)
     g_ordered, g_total = _totals(all_active)
@@ -334,31 +493,36 @@ def _build_progress_report(all_rows):
     lines.append("")
     lines.append("=" * 36)
 
-    # Per-city, per-type breakdown
+    # Per-city breakdown
     cities_seen = []
-    city_order = {}
+    city_order  = {}
     for r in all_active:
         cname = r["city_name"]
         if cname not in city_order:
             city_order[cname] = len(city_order)
             cities_seen.append(cname)
 
-    for city_name in cities_seen:
-        city_unit_rows = [r for r in u_active if r["city_name"] == city_name]
-        city_ship_rows = [r for r in s_active if r["city_name"] == city_name]
+    completed_summaries = []
 
-        if not city_unit_rows and not city_ship_rows:
+    for city_name in cities_seen:
+        c_units = [r for r in u_active if r["city_name"] == city_name]
+        c_ships = [r for r in s_active if r["city_name"] == city_name]
+        c_all   = c_units + c_ships
+        if not c_all:
+            continue
+
+        co, ct = _totals(c_all)
+        if group_completed and co >= ct:
+            completed_summaries.append(f"  {city_name}: {co:,}/{ct:,} DONE")
             continue
 
         lines.append(f"\n{city_name}")
-
-        for label, rows in [("Troops", city_unit_rows), ("Ships", city_ship_rows)]:
+        for label, rows in [("Troops", c_units), ("Ships", c_ships)]:
             if not rows:
                 continue
-            co, ct = _totals(rows)
-            done_mark = " DONE" if co >= ct else ""
-            lines.append(f"  {label} {_ascii_bar(co, ct, 12)} {co:,}/{ct:,}{done_mark}")
-            # Per-unit breakdown
+            co2, ct2 = _totals(rows)
+            done_mark = " DONE" if co2 >= ct2 else ""
+            lines.append(f"  {label} {_ascii_bar(co2, ct2, 12)} {co2:,}/{ct2:,}{done_mark}")
             unit_totals = {}
             for r in rows:
                 name = r["unit_name"] or f"Unit {r['unit_type_id']}"
@@ -370,20 +534,55 @@ def _build_progress_report(all_rows):
                 done2 = " *" if uo2 >= ut2 else ""
                 lines.append(f"    {uname:<20} {uo2:>5,}/{ut2:,}{done2}")
 
+    if completed_summaries:
+        lines.append(f"\nCOMPLETED ({len(completed_summaries)})")
+        lines.extend(completed_summaries)
+
     lines.append("\n" + "=" * 36)
+
+    # ETA block
+    if eta and eta.get("citizens_needed", 0) > 0:
+        lines.append("\nESTIMATED COMPLETION (citizens)")
+        lines.append(f"  Needed   : {eta['citizens_needed']:,} citizens total")
+        lines.append(f"  Available: {eta['citizens_available']:,} citizens")
+        deficit = eta["citizen_deficit"]
+        if deficit > 0:
+            lines.append(f"  Deficit  : {deficit:,} citizens still needed")
+            if eta.get("growth_unknown"):
+                lines.append("  Growth rate: unavailable from game data")
+                lines.append("  ETA: cannot estimate (growth rate unknown)")
+            elif eta.get("growth_per_hour", 0) > 0:
+                gph = eta["growth_per_hour"]
+                wait_h = eta["citizen_wait_hours"]
+                lines.append(f"  Growth   : ~{gph:,.0f}/hr across all cities")
+                lines.append(f"  Wait     : ~{_format_hours(wait_h)} for citizens")
+                lines.append(f"  * ESTIMATED delivery: ~{_format_hours(wait_h)} from now")
+            else:
+                lines.append("  Growth rate: 0 (population at capacity?)")
+        else:
+            lines.append("  Citizens : sufficient - no wait needed")
+            lines.append("  * Delivery limited by training time only")
+        lines.append("  (Growth rate changes over time - estimate only)")
+
     return "\n".join(lines)
 
 
-def send_progress_report(session, is_units):
+def send_progress_report(session, is_units, group_completed=False):
     """Send a combined units+ships progress report to the bot."""
     unit_rows = csv_load_orders(session, True)
     ship_rows = csv_load_orders(session, False)
-    all_rows = unit_rows + ship_rows
+    all_rows  = unit_rows + ship_rows
 
     if not all_rows:
         return
 
-    report = _build_progress_report(all_rows)
+    eta = None
+    try:
+        eta = _calculate_recruitment_eta(session, all_rows)
+    except Exception:
+        pass
+
+    report = _build_progress_report(all_rows, group_completed=group_completed, eta=eta)
     sendToBot(session, report)
 
 
@@ -395,7 +594,10 @@ def _maybe_send_report(session, is_units, cfg):
     now = time.time()
     if now - cfg.get("last_report_time", 0) >= interval_secs:
         try:
-            send_progress_report(session, is_units)
+            send_progress_report(
+                session, is_units,
+                group_completed=cfg.get("report_group_completed", False),
+            )
         except Exception:
             pass
         cfg["last_report_time"] = int(now)
@@ -540,7 +742,7 @@ def _request_resource_import(session, dest_city_id, needed_res, all_city_ids, ci
                 f"{RESOURCE_NAMES[i]} {to_req[i]:,}"
                 for i in range(5) if to_req[i] > 0
             )
-            requests.append(f"{sup['city_name']} → {res_desc}")
+            requests.append(f"{sup['city_name']} -> {res_desc}")
         except AttributeError as e:
             print(f"  RTM interface mismatch (function not found): {e}")
         except Exception as e:
@@ -999,14 +1201,170 @@ def _show_queue_status(session, is_units):
               f"{r['city_name']:<16}  {r['unit_name']:<22}  {remaining_str:>12}  {r['status']}")
 
 
+def _add_to_queue_distributed(session, is_units, cities_ids, cities):
+    """
+    Auto-distribute new units across ALL barracks/shipyards by build speed.
+    User enters totals per unit type; calculate_distribution splits the work.
+    """
+    building_type = "barracks" if is_units else "shipyard"
+
+    print(f"\nScanning all {building_type}s...")
+    all_buildings = find_all_buildings(session, cities_ids, cities, building_type)
+    if not all_buildings:
+        print(f"  {bcolors.RED}No {building_type} found.{bcolors.ENDC}")
+        return False
+
+    # Fetch unit data for every building (show progress per building)
+    buildings_data = []
+    for b in all_buildings:
+        busy_str = " [BUSY]" if b['is_busy'] else ""
+        print(f"  Fetching {b['city_name']} L{b['building_level']}{busy_str}...")
+        data = fetch_building_data(session, b, is_units)
+        if data:
+            buildings_data.append(data)
+        else:
+            print(f"    {bcolors.WARNING}Could not fetch data — skipping.{bcolors.ENDC}")
+
+    if not buildings_data:
+        print(f"  {bcolors.RED}No building data retrieved.{bcolors.ENDC}")
+        return False
+
+    # Union of unit types across all buildings (first capable building provides cost display)
+    unit_list = UNITS_ORDER if is_units else SHIPS_ORDER
+    available_units = {}
+    for unit in unit_list:
+        uid = unit['game_index']
+        for b in buildings_data:
+            if uid in b.get('unit_data', {}):
+                available_units[uid] = {'name': unit['name'], 'ud': b['unit_data'][uid]}
+                break
+
+    if not available_units:
+        print(f"  {bcolors.RED}No trainable units found across any building.{bcolors.ENDC}")
+        return False
+
+    # Ask total quantities per unit type
+    print(f"\nEnter TOTAL quantity for each unit type (0 or Enter to skip):")
+    print(f"  Units will be split across {len(buildings_data)} {building_type}(s) by build speed.\n")
+    order = {}
+    for uid, info in available_units.items():
+        ud = info['ud']
+        costs = []
+        if ud.get('citizens', 0): costs.append(f"{ud['citizens']} cit")
+        if ud.get('wood',     0): costs.append(f"{ud['wood']} wood")
+        if ud.get('wine',     0): costs.append(f"{ud['wine']} wine")
+        if ud.get('marble',   0): costs.append(f"{ud['marble']} marble")
+        if ud.get('crystal',  0): costs.append(f"{ud['crystal']} crystal")
+        if ud.get('sulfur',   0): costs.append(f"{ud['sulfur']} sulfur")
+        cost_str = f" [{', '.join(costs)}]" if costs else ""
+        qty = read(msg=f"  {info['name']}{cost_str}: ",
+                   min=0, digit=True, additionalValues=["'", ""])
+        if qty == "'":
+            return False
+        if qty == "" or qty == 0:
+            continue
+        order[uid] = {'name': info['name'], 'quantity': qty}
+
+    if not order:
+        print("  No units entered.")
+        return False
+
+    # Distribute across buildings by speed
+    distribution = calculate_distribution(buildings_data, order)
+    if not distribution:
+        print(f"  {bcolors.RED}Distribution failed.{bcolors.ENDC}")
+        return False
+
+    # Show the plan and ask for confirmation
+    print()
+    display_distribution_plan(distribution, order)
+    print()
+    confirm = read(msg="Proceed with this distribution? [Y/n]: ",
+                   values=["y", "Y", "n", "N", "", "'"])
+    if confirm == "'" or (isinstance(confirm, str) and confirm.lower() == "n"):
+        print("Cancelled.")
+        return False
+
+    # Priority
+    existing = csv_load_orders(session, is_units)
+    existing_priorities = sorted({r["priority"] for r in existing
+                                   if r["status"] not in ("ordered", "cancelled")})
+    if existing_priorities:
+        print(f"\n  Existing priority levels: {existing_priorities}")
+    pri_raw = read(msg="  Priority for this batch (1=highest, default 1): ",
+                   min=1, digit=True, additionalValues=["'", ""])
+    if pri_raw == "'":
+        return False
+    priority = pri_raw if isinstance(pri_raw, int) else 1
+
+    # Append new rows to existing queue
+    now        = int(time.time())
+    session_id = str(now)
+    rows       = existing[:]
+    next_id    = csv_next_recruit_id(rows)
+    batch_id   = csv_next_batch_id(rows)
+
+    total_added   = 0
+    active_bldgs  = 0
+    for b in distribution:
+        if not b.get('assignments'):
+            continue
+        active_bldgs += 1
+        for uid, qty in b['assignments'].items():
+            unit_name = (b.get('unit_data', {}).get(uid, {}).get('name')
+                         or order.get(uid, {}).get('name', str(uid)))
+            rows.append({
+                "recruit_id":        next_id,
+                "batch_id":          batch_id,
+                "session_id":        session_id,
+                "city_id":           b["city_id"],
+                "city_name":         b["city_name"],
+                "building_position": b["building_position"],
+                "building_level":    b["building_level"],
+                "is_units":          is_units,
+                "unit_type_id":      uid,
+                "unit_name":         unit_name,
+                "qty_total":         qty,
+                "qty_remaining":     qty,
+                "priority":          priority,
+                "status":            "pending",
+                "created_at":        now,
+                "last_updated":      now,
+            })
+            next_id    += 1
+            total_added += qty
+
+    csv_save_orders(session, is_units, rows)
+    print(f"\n  {bcolors.GREEN}Added {total_added:,} units across "
+          f"{active_bldgs} {building_type}(s) "
+          f"(batch {batch_id}, priority {priority}){bcolors.ENDC}")
+    return True
+
+
 def _add_to_queue_ui(session, is_units, cities_ids, cities):
     """
-    Interactive: pick a building, choose units and quantities,
-    pick a priority, append to the CSV.
+    Interactive: add units to the queue.
+    Mode 1 — specific building (original behaviour).
+    Mode 2 — auto-distribute totals across all buildings by build speed.
     Returns True if rows were added, False if user backed out.
     """
     building_type = "barracks" if is_units else "shipyard"
-    print(f"\nScanning for available {building_type}(s)...")
+
+    print(f"\nHow do you want to add units?")
+    print(f"  1. Add to a specific {building_type}  (you choose the building)")
+    print(f"  2. Auto-distribute across all {building_type}s  (enter totals, split by speed)")
+    print()
+    mode = read(msg="Select or ' to cancel: ", min=1, max=2, digit=True,
+                additionalValues=["'"])
+    if mode == "'":
+        return False
+
+    if mode == 2:
+        return _add_to_queue_distributed(session, is_units, cities_ids, cities)
+
+    # ------------------------------------------------------------------ #
+    # Mode 1: original per-building flow
+    # ------------------------------------------------------------------ #
     all_buildings = find_all_buildings(session, cities_ids, cities, building_type)
     if not all_buildings:
         print(f"  {bcolors.RED}No {building_type} found.{bcolors.ENDC}")
@@ -1712,6 +2070,7 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
         banner()
         print("=" * 60)
         print("         AUTO RECRUITMENT MANAGER")
+        print(f"                  v{MODULE_VERSION}")
         print("=" * 60)
         print()
 
@@ -2008,7 +2367,8 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
         report_raw = read(msg="Send periodic progress reports to Telegram? [Y/n]: ",
                           values=["y", "Y", "n", "N", ""])
         report_enabled = report_raw.lower() != "n"
-        report_interval = 4
+        report_interval        = 4
+        report_group_completed = False
 
         if report_enabled:
             interval_raw = read(
@@ -2019,6 +2379,14 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 event.set()
                 return
             report_interval = interval_raw if isinstance(interval_raw, int) else 4
+
+            group_raw = read(
+                msg="Collapse completed cities to one line in reports? [y/N]: ",
+                values=["y", "Y", "n", "N", ""]
+            )
+            report_group_completed = group_raw.lower() == "y"
+            if report_group_completed:
+                print(f"  {bcolors.GREEN}Completed cities will be grouped into a summary line.{bcolors.ENDC}")
             print()
 
         # Resource import option
@@ -2076,10 +2444,11 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
 
         # Build and save config
         cfg = {
-            "report_enabled":         report_enabled,
-            "report_interval_hours":  report_interval,
+            "report_enabled":          report_enabled,
+            "report_interval_hours":   report_interval,
+            "report_group_completed":  report_group_completed,
             "resource_import_enabled": resource_import_enabled,
-            "last_report_time":       0,
+            "last_report_time":        0,
         }
         save_config(session, cfg)
 
@@ -2097,7 +2466,9 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
             if resource_check['missing_resources']:
                 print("  • Will recruit in batches as resources allow (20% threshold)")
             if report_enabled:
-                print(f"  • Progress reports every {report_interval}h via Telegram")
+                print(f"  • Progress reports every {report_interval}h via Telegram (includes citizen ETA)")
+                if report_group_completed:
+                    print(f"  • Completed cities collapsed to summary line in reports")
             if resource_import_enabled:
                 print("  • Will request resource imports when cities run short")
             print()
