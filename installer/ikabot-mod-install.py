@@ -295,13 +295,21 @@ def fetch_repo_folder(folder_path: str) -> list[dict]:
         return json.loads(resp.read())
 
 
-def download_repo_files(folder_path: str, dest_dir: Path) -> int:
-    """Download every file in a repo folder to dest_dir. Returns count."""
+def download_repo_files(folder_path: str, dest_dir: Path,
+                        skip_names: set[str] | None = None) -> int:
+    """Download every file in a repo folder to dest_dir. Returns count.
+
+    Files whose name (case-insensitive) is in skip_names are not downloaded.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     items = fetch_repo_folder(folder_path)
+    skip = {n.lower() for n in (skip_names or set())}
     count = 0
     for item in items:
         if item["type"] != "file":
+            continue
+        if item["name"].lower() in skip:
+            print(f"  {item['name']}  (skipped — keeping your existing file)")
             continue
         print(f"  {item['name']}")
         req = urllib.request.Request(
@@ -314,10 +322,32 @@ def download_repo_files(folder_path: str, dest_dir: Path) -> int:
     return count
 
 
+def ask_csv_overwrite(modules_dir: Path) -> set[str]:
+    """If bulkdistribution.csv exists locally, ask before overwriting it.
+
+    Returns the set of filenames to skip during download.
+    """
+    csv_file = modules_dir / "bulkdistribution.csv"
+    if not csv_file.exists():
+        return set()
+    if ask_yes_no(
+        "You already have a bulkdistribution.csv file:\n"
+        f"  {csv_file}\n\n"
+        "Downloading a new copy will OVERWRITE it and any\n"
+        "distribution settings you have saved in it will be LOST.\n\n"
+        "Do you want to download the new copy and overwrite yours?\n\n"
+        "  Yes = overwrite with the latest version from GitHub\n"
+        "  No  = keep your existing file",
+        "Overwrite bulkdistribution.csv?",
+    ):
+        return set()
+    return {"bulkdistribution.csv"}
+
+
 def strip_version_suffixes(directory: Path) -> None:
-    """Remove _vXXX suffix from every file in directory."""
+    """Remove _vXXX suffix from every file in directory (CSV files left untouched)."""
     for f in list(directory.iterdir()):
-        if not f.is_file():
+        if not f.is_file() or f.suffix.lower() == ".csv":
             continue
         new_stem = re.sub(r"_v.+$", "", f.stem)
         new_name = new_stem + f.suffix
@@ -611,12 +641,14 @@ def maint_download_modules(install_dir: Path) -> None:
     ):
         return
 
+    skip_names = ask_csv_overwrite(modules_dir)
+
     try:
         modules_dir.mkdir(exist_ok=True)
         print("Downloading modules ...")
-        count = download_repo_files("modules", modules_dir)
+        count = download_repo_files("modules", modules_dir, skip_names)
         print("Downloading config examples ...")
-        count += download_repo_files("config-examples", modules_dir)
+        count += download_repo_files("config-examples", modules_dir, skip_names)
         print("Removing version suffixes from filenames ...")
         strip_version_suffixes(modules_dir)
         write_modules_timestamp(modules_dir)
@@ -1174,11 +1206,12 @@ def main() -> None:
         "Would you like to download and install them now?",
         "Step 2 of 4 — ikabot Modules",
     ):
+        skip_names = ask_csv_overwrite(modules_dir)
         try:
             print("Downloading modules from repository ...")
-            count = download_repo_files("modules", modules_dir)
+            count = download_repo_files("modules", modules_dir, skip_names)
             print("Downloading config examples ...")
-            count += download_repo_files("config-examples", modules_dir)
+            count += download_repo_files("config-examples", modules_dir, skip_names)
             print("Removing version suffixes from filenames ...")
             strip_version_suffixes(modules_dir)
             write_modules_timestamp(modules_dir)
