@@ -21,6 +21,8 @@ Features:
 Version: 2.3.0
 """
 
+MODULE_VERSION = "2.3.0"
+
 import csv
 import glob
 import importlib.util
@@ -2068,6 +2070,7 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
         banner()
         print("=" * 60)
         print("         AUTO RECRUITMENT MANAGER")
+        print(f"                  v{MODULE_VERSION}")
         print("=" * 60)
         print()
 
