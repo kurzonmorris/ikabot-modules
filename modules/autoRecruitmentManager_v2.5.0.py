@@ -186,6 +186,80 @@ def _wake_flag_path(session, is_units):
     )
 
 
+# =============================================================================
+# BUILDING CACHE  — static list of barracks/shipyards, refreshed on demand
+# =============================================================================
+
+_BUILDINGS_CACHE_VERSION = 1
+
+
+def _buildings_cache_path(session, is_units):
+    kind = "units" if is_units else "ships"
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_recruit_bldcache_{kind}_{_account_suffix(session)}.json",
+    )
+
+
+def _load_buildings_cache(session, is_units):
+    """Returns cached static building list, or None if missing/invalid."""
+    try:
+        with open(_buildings_cache_path(session, is_units)) as f:
+            data = json.load(f)
+        if data.get("version") == _BUILDINGS_CACHE_VERSION and data.get("buildings"):
+            return data["buildings"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _save_buildings_cache(session, is_units, buildings):
+    path = _buildings_cache_path(session, is_units)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"version": _BUILDINGS_CACHE_VERSION,
+                       "scanned_at": int(time.time()),
+                       "buildings": buildings}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _clear_buildings_cache(session, is_units):
+    try:
+        os.remove(_buildings_cache_path(session, is_units))
+    except OSError:
+        pass
+
+
+def _scan_buildings(session, is_units, all_city_ids, cities):
+    """Scan every city for barracks/shipyards; returns static building list.
+
+    Only needs to run once (or after a level-up / new barracks).  The loop
+    then calls this result for city data each cycle to get resources and
+    live busy state without re-enumerating all position slots.
+    """
+    building_type = "barracks" if is_units else "shipyard"
+    buildings = []
+    for cid in all_city_ids:
+        city = cities.get(cid, {})
+        try:
+            html = session.get(city_url + str(cid))
+            city_data = getCity(html)
+            for slot in city_data.get('position', []):
+                if slot.get('building') == building_type:
+                    buildings.append({
+                        'city_id':           cid,
+                        'city_name':         city.get('name', str(cid)),
+                        'building_position': slot.get('position'),
+                        'building_level':    slot.get('level', 0),
+                    })
+        except Exception:
+            continue
+    return buildings
+
+
 def _is_worker_running(session, is_units):
     """True if a fresh (non-stale) worker lock exists for this account/type."""
     wlock = _worker_lock_path(session, is_units)
@@ -1667,6 +1741,17 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     cities_ids, cities = getIdsOfCities(session)
     all_city_ids = list(cities_ids)
 
+    # Load cached building list; scan once if missing
+    cached_buildings = _load_buildings_cache(session, is_units)
+    if not cached_buildings:
+        session.setStatus(f"Scanning {building_type}s across all cities (one-time)...")
+        cached_buildings = _scan_buildings(session, is_units, all_city_ids, cities)
+        if cached_buildings:
+            _save_buildings_cache(session, is_units, cached_buildings)
+        else:
+            sendToBot(session, f"Auto Recruitment: no {building_type}s found — aborting.")
+            return
+
     # (city_id, building_position) -> unit_data dict; cleared on busy→idle transition
     bld_unit_data_cache = {}
     bld_was_busy = {}
@@ -1701,13 +1786,14 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             sendToBot(session, "Auto Recruitment: all goals completed.")
             break
 
-        # --- Per-city pass: resources + building list (one HTTP call per city) ---
-        all_buildings = []
+        # --- Per-city pass: resources + live slot data (one HTTP call per city) ---
+        # Building positions come from the cache; we only need the slot map for
+        # resources and busy/queue state — no re-enumeration needed.
         city_resources = {}
+        city_pos_map = {}   # cid -> {position -> slot dict}
         fetch_error = False
 
         for cid in all_city_ids:
-            city = cities.get(cid, {})
             try:
                 html = session.get(city_url + str(cid))
                 city_data = getCity(html)
@@ -1739,24 +1825,11 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                     'sulfur':  res_avail[4],
                 }
 
-                # Enumerate building slots in this city
-                for slot in city_data.get('position', []):
-                    if slot.get('building') != building_type:
-                        continue
-                    is_b = bool(slot.get('isBusy', False))
-                    eta = slot.get('completed')
-                    try:
-                        queue_time = max(0, int(eta) - int(time.time())) if eta else 0
-                    except (TypeError, ValueError):
-                        queue_time = 0
-                    all_buildings.append({
-                        'city_id':              cid,
-                        'city_name':            city.get('name', str(cid)),
-                        'building_position':    slot.get('position'),
-                        'building_level':       slot.get('level', 0),
-                        'is_busy':              is_b,
-                        'queue_remaining_time': queue_time,
-                    })
+                city_pos_map[cid] = {
+                    slot.get('position'): slot
+                    for slot in city_data.get('position', [])
+                    if slot.get('position') is not None
+                }
 
                 consecutive_errors = 0
             except Exception as e:
@@ -1775,6 +1848,25 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             _wait_or_wake(session, is_units, stop_event, 60)
             _renew_worker_lock(session, is_units)
             continue
+
+        # Assemble all_buildings from the static cache + live busy/queue state
+        all_buildings = []
+        for b_static in cached_buildings:
+            cid = b_static['city_id']
+            if cid not in city_pos_map:
+                continue  # city fetch failed this cycle
+            slot = city_pos_map[cid].get(b_static['building_position'], {})
+            is_b = bool(slot.get('isBusy', False))
+            eta = slot.get('completed')
+            try:
+                queue_time = max(0, int(eta) - int(time.time())) if eta else 0
+            except (TypeError, ValueError):
+                queue_time = 0
+            all_buildings.append({
+                **b_static,
+                'is_busy':              is_b,
+                'queue_remaining_time': queue_time,
+            })
 
         # Detect busy→idle transitions; evict stale unit_data cache entries
         for b in all_buildings:
@@ -2235,11 +2327,12 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print("  (3) Building status  (what each building is doing)")
                 print("  (4) Edit goals  (remove / adjust priority)")
                 print("  (5) Send progress report now")
+                print("  (6) Refresh building list  (rescan after upgrades)")
                 print()
                 print("  (') Back to type selection")
                 print()
 
-                choice = read(msg="Select: ", min=1, max=5, digit=True,
+                choice = read(msg="Select: ", min=1, max=6, digit=True,
                               additionalValues=["'", "s", "S", "o", "O", "r", "R"])
 
                 if isinstance(choice, str):
@@ -2302,6 +2395,19 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                         print(f"\n  {bcolors.GREEN}Progress report sent.{bcolors.ENDC}")
                     except Exception as e:
                         print(f"\n  {bcolors.RED}Failed to send report: {e}{bcolors.ENDC}")
+                    enter()
+                elif choice == 6:
+                    btype = "barracks" if is_units else "shipyards"
+                    print(f"\n  Scanning all {btype} across all cities...")
+                    _clear_buildings_cache(session, is_units)
+                    cids, cits = getIdsOfCities(session)
+                    fresh = _scan_buildings(session, is_units, list(cids), cits)
+                    if fresh:
+                        _save_buildings_cache(session, is_units, fresh)
+                        print(f"  {bcolors.GREEN}Found {len(fresh)} {btype}. "
+                              f"Cache updated.{bcolors.ENDC}")
+                    else:
+                        print(f"  {bcolors.WARNING}No {btype} found.{bcolors.ENDC}")
                     enter()
 
     except KeyboardInterrupt:
