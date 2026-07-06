@@ -646,9 +646,17 @@ def _calculate_recruitment_eta(session, all_rows):
     """
     Estimate when the full recruitment run will be done.
 
-    With the goals CSV the rows have no city/building info, so we scan all
-    buildings that can produce the requested unit types to collect citizen
-    costs and city IDs.
+    Two-component model:
+      ETA = citizen_wait_hours + build_time_hours
+
+    citizen_wait: time until enough citizens accumulate to cover remaining units
+                  (0 if citizens are already sufficient)
+    build_time:   total unit-seconds across all goals, divided by the number of
+                  parallel buildings (avg spu per unit type, weighted by qty)
+
+    Both components come from the same barracks AJAX response already used by
+    fetch_building_data: costs.citizens and costs.completiontime (stored as
+    time_seconds).
 
     Returns a dict, or None if there are no active goals.
     """
@@ -660,14 +668,16 @@ def _calculate_recruitment_eta(session, all_rows):
     building_type = "barracks" if is_units else "shipyard"
     needed_uids = {r["unit_type_id"] for r in active}
 
-    # Scan all buildings to find citizen costs per unit type and all city IDs
     try:
         cities_ids, cities = getIdsOfCities(session)
     except Exception:
         return None
 
-    unit_citizen_cost = {}
+    # Scan buildings: collect citizens + spu per unit type, count buildings
+    # unit_stats[uid] = {'citizens': N, 'spu_sum': X, 'spu_count': N}
+    unit_stats = {}
     all_city_ids = set()
+    num_buildings = 0
 
     for cid in cities_ids:
         try:
@@ -679,32 +689,46 @@ def _calculate_recruitment_eta(session, all_rows):
             if slot.get('building') != building_type:
                 continue
             stub = {
-                "city_id": cid, "city_name": cities[cid]['name'],
+                "city_id":           cid,
+                "city_name":         cities[cid].get('name', str(cid)),
                 "building_position": slot.get('position'),
-                "building_level": slot.get('level', 0),
-                "is_busy": bool(slot.get('isBusy', False)),
+                "building_level":    slot.get('level', 0),
+                "is_busy":           bool(slot.get('isBusy', False)),
             }
             try:
                 data = fetch_building_data(session, stub, is_units)
-                if data:
-                    all_city_ids.add(cid)
-                    for uid, ud in data.get("unit_data", {}).items():
-                        if uid in needed_uids and uid not in unit_citizen_cost:
-                            unit_citizen_cost[uid] = ud.get("citizens", 0)
+                if not data:
+                    continue
+                all_city_ids.add(cid)
+                num_buildings += 1
+                for uid, ud in data.get("unit_data", {}).items():
+                    if uid not in needed_uids:
+                        continue
+                    if uid not in unit_stats:
+                        unit_stats[uid] = {
+                            "citizens":  ud.get("citizens", 0),
+                            "spu_sum":   0.0,
+                            "spu_count": 0,
+                        }
+                    spu = ud.get("time_seconds", 0)
+                    if spu > 0:
+                        unit_stats[uid]["spu_sum"]   += spu
+                        unit_stats[uid]["spu_count"] += 1
             except Exception:
                 pass
-        if needed_uids <= set(unit_citizen_cost.keys()):
-            break  # found costs for every unit type we need
+        if needed_uids <= set(unit_stats.keys()):
+            break  # have data for every unit type we need
 
+    # --- Citizen bottleneck ---
     citizens_needed = sum(
-        unit_citizen_cost.get(r["unit_type_id"], 0) * r["qty_remaining"]
+        unit_stats.get(r["unit_type_id"], {}).get("citizens", 0) * r["qty_remaining"]
         for r in active
     )
 
-    total_free = 0
+    total_free     = 0
     total_growth_ph = 0.0
-    growth_unknown = False
-    city_ids_to_check = list(all_city_ids) or cities_ids
+    growth_unknown  = False
+    city_ids_to_check = list(all_city_ids) or list(cities_ids)
 
     for cid in city_ids_to_check:
         free, growth = _fetch_citizen_growth(session, cid)
@@ -721,13 +745,51 @@ def _calculate_recruitment_eta(session, all_rows):
     elif not growth_unknown and total_growth_ph > 0:
         citizen_wait_h = deficit / total_growth_ph
 
+    # --- Build-time component ---
+    # Total unit-seconds = sum(qty * avg_spu), parallelised across num_buildings.
+    # avg_spu is averaged across all buildings that can train that unit type,
+    # so buildings at different levels contribute naturally.
+    total_build_s = 0.0
+    build_unknown = False
+    avg_spus = {}
+
+    for r in active:
+        uid   = r["unit_type_id"]
+        stats = unit_stats.get(uid, {})
+        count = stats.get("spu_count", 0)
+        if count > 0:
+            avg_spu = stats["spu_sum"] / count
+        else:
+            build_unknown = True
+            avg_spu = 0.0
+        avg_spus[uid] = avg_spu
+        total_build_s += r["qty_remaining"] * avg_spu
+
+    build_time_h = None
+    if not build_unknown and num_buildings > 0:
+        build_time_h = total_build_s / (3600.0 * num_buildings)
+
+    # --- Combined ETA ---
+    # citizen_wait (time before building can start) + build_time (parallel build)
+    combined_eta_h = None
+    if build_time_h is not None:
+        cw = citizen_wait_h if citizen_wait_h is not None else 0.0
+        if citizen_wait_h is None and growth_unknown:
+            combined_eta_h = None  # can't estimate citizen component
+        else:
+            combined_eta_h = cw + build_time_h
+
     return {
         "citizens_needed":    citizens_needed,
         "citizens_available": total_free,
         "citizen_deficit":    deficit,
         "growth_per_hour":    total_growth_ph if not growth_unknown else None,
         "citizen_wait_hours": citizen_wait_h,
+        "build_time_hours":   build_time_h,
+        "num_buildings":      num_buildings,
+        "combined_eta_hours": combined_eta_h,
         "growth_unknown":     growth_unknown,
+        "build_unknown":      build_unknown,
     }
 
 
@@ -804,28 +866,50 @@ def _build_progress_report(all_rows, group_completed=False, eta=None):
     lines.append("\n" + "=" * 44)
 
     # ETA block
-    if eta and eta.get("citizens_needed", 0) > 0:
-        lines.append("\nESTIMATED COMPLETION (citizens)")
-        lines.append(f"  Needed   : {eta['citizens_needed']:,} citizens total")
-        lines.append(f"  Available: {eta['citizens_available']:,} citizens")
-        deficit = eta["citizen_deficit"]
-        if deficit > 0:
-            lines.append(f"  Deficit  : {deficit:,} citizens still needed")
-            if eta.get("growth_unknown"):
-                lines.append("  Growth rate: unavailable from game data")
-                lines.append("  ETA: cannot estimate (growth rate unknown)")
-            elif eta.get("growth_per_hour", 0) > 0:
-                gph = eta["growth_per_hour"]
-                wait_h = eta["citizen_wait_hours"]
-                lines.append(f"  Growth   : ~{gph:,.0f}/hr across all cities")
-                lines.append(f"  Wait     : ~{_format_hours(wait_h)} for citizens")
-                lines.append(f"  * ESTIMATED delivery: ~{_format_hours(wait_h)} from now")
+    if eta:
+        lines.append("\nESTIMATED COMPLETION")
+
+        # Citizen component
+        cn  = eta.get("citizens_needed", 0)
+        ca  = eta.get("citizens_available", 0)
+        def_ = eta.get("citizen_deficit", 0)
+        cw_h = eta.get("citizen_wait_hours")
+        gph  = eta.get("growth_per_hour")
+
+        if cn > 0:
+            lines.append(f"  Citizens : {ca:,} available / {cn:,} needed"
+                         + (f"  ({def_:,} short)" if def_ > 0 else "  [sufficient]"))
+            if def_ > 0:
+                if eta.get("growth_unknown"):
+                    lines.append("  Cit. wait: unknown (growth rate unavailable)")
+                elif gph and gph > 0:
+                    lines.append(f"  Cit. wait: ~{_format_hours(cw_h)}"
+                                 f"  (growth ~{gph:,.0f}/hr)")
+                else:
+                    lines.append("  Cit. wait: unknown (growth rate is 0)")
             else:
-                lines.append("  Growth rate: 0 (population at capacity?)")
+                lines.append("  Cit. wait: none")
+
+        # Build-time component
+        bt_h  = eta.get("build_time_hours")
+        n_bld = eta.get("num_buildings", 0)
+        if eta.get("build_unknown"):
+            lines.append("  Build time: unknown (spu data unavailable)")
+        elif bt_h is not None:
+            lines.append(f"  Build time: ~{_format_hours(bt_h)}"
+                         f"  ({n_bld} building{'s' if n_bld != 1 else ''} in parallel)")
+
+        # Combined
+        eta_h = eta.get("combined_eta_hours")
+        if eta_h is not None:
+            lines.append(f"  >> Total ETA: ~{_format_hours(eta_h)} from now")
+        elif bt_h is not None and cw_h is None:
+            lines.append("  >> Total ETA: ~" + _format_hours(bt_h)
+                         + " + citizen wait (unknown)")
         else:
-            lines.append("  Citizens : sufficient - no wait needed")
-            lines.append("  * Delivery limited by training time only")
-        lines.append("  (Growth rate changes over time - estimate only)")
+            lines.append("  >> Total ETA: cannot estimate")
+
+        lines.append("  (estimate only - growth rate and load change over time)")
 
     return "\n".join(lines)
 
