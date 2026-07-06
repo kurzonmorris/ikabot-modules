@@ -18,10 +18,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.7.0
+Version: 2.7.1
 """
 
-MODULE_VERSION = "2.7.0"
+MODULE_VERSION = "2.7.1"
 
 import csv
 import glob
@@ -138,6 +138,22 @@ _OLD_CSV_SENTINEL = "batch_id"
 
 def _safe(value):
     return re.sub(r'[^\w.-]', '_', str(value))
+
+
+def _to_num(value):
+    """Coerce a game-supplied value to int/float. The Ikariam JSON sometimes
+    returns numeric fields as strings (e.g. '1000', '71.0'). Returns 0 on
+    anything unparseable so downstream arithmetic never crashes."""
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        s = str(value).replace(',', '').strip()
+        if s == "":
+            return 0
+        f = float(s)
+        return int(f) if f.is_integer() else f
+    except (ValueError, TypeError):
+        return 0
 
 
 def _account_suffix(session):
@@ -1187,18 +1203,20 @@ def fetch_building_data(session, building_info, is_units=True):
             if not uid:
                 continue
             costs = cd.get('costs', {})
+            # The game returns some numeric fields as strings (e.g. max_value,
+            # and occasionally costs). Coerce everything used in arithmetic.
             result['unit_data'][uid] = {
                 'name':          cd.get('local_name', ''),
                 'identifier':    cd.get('identifier', ''),
-                'citizens':      costs.get('citizens', 0),
-                'wood':          costs.get('wood', 0),
-                'wine':          costs.get('wine', 0),
-                'marble':        costs.get('marble', 0),
-                'crystal':       costs.get('crystal', 0),
-                'sulfur':        costs.get('sulfur', 0),
-                'upkeep':        costs.get('upkeep', 0),
-                'time_seconds':  costs.get('completiontime', 0),
-                'max_buildable': slider_info.get('max_value', 0),
+                'citizens':      _to_num(costs.get('citizens', 0)),
+                'wood':          _to_num(costs.get('wood', 0)),
+                'wine':          _to_num(costs.get('wine', 0)),
+                'marble':        _to_num(costs.get('marble', 0)),
+                'crystal':       _to_num(costs.get('crystal', 0)),
+                'sulfur':        _to_num(costs.get('sulfur', 0)),
+                'upkeep':        _to_num(costs.get('upkeep', 0)),
+                'time_seconds':  _to_num(costs.get('completiontime', 0)),
+                'max_buildable': _to_num(slider_info.get('max_value', 0)),
             }
         except (json.JSONDecodeError, KeyError, TypeError):
             continue
