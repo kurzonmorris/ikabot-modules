@@ -18,10 +18,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.4.0
+Version: 2.5.0
 """
 
-MODULE_VERSION = "2.4.0"
+MODULE_VERSION = "2.5.0"
 
 import csv
 import glob
@@ -108,31 +108,32 @@ RESOURCE_NAMES = ['Wood', 'Wine', 'Marble', 'Crystal', 'Sulfur']
 # CSV PERSISTENCE
 # =============================================================================
 
+# Goals CSV: one row per unit-type target.
+# qty_remaining is decremented as build orders are POSTed to the game.
+# When qty_remaining reaches 0 the row is marked "completed".
 RECRUIT_COLUMNS = [
-    "recruit_id",
-    "batch_id",         # integer grouping all rows from the same "add" call
-    "session_id",
-    "city_id",
-    "city_name",
-    "building_position",
-    "building_level",
-    "is_units",         # "True" = barracks, "False" = shipyard
+    "request_id",
     "unit_type_id",
     "unit_name",
-    "qty_total",
-    "qty_remaining",    # units still to be placed with the game (not yet POSTed)
-    "priority",         # 1 = highest; lower number = more urgent
-    "status",           # pending | partial | ordered | cancelled
+    "is_units",         # "True" = barracks, "False" = shipyard
+    "qty_total",        # original amount requested
+    "qty_remaining",    # still to be POSTed to the game
+    "priority",         # 1 = highest
+    "status",           # active | completed | cancelled
     "created_at",
     "last_updated",
+    "notes",
 ]
 
 RECRUIT_INT_COLS = {
-    "recruit_id", "batch_id", "city_id", "building_position", "building_level",
-    "unit_type_id", "qty_total", "qty_remaining", "priority",
+    "request_id", "unit_type_id",
+    "qty_total", "qty_remaining", "priority",
     "created_at", "last_updated",
 }
-RECRUIT_VALID_STATUSES = ("pending", "partial", "ordered", "cancelled")
+RECRUIT_VALID_STATUSES = ("active", "completed", "cancelled")
+
+# Old column name used to detect v1 CSV format during migration
+_OLD_CSV_SENTINEL = "batch_id"
 
 
 def _safe(value):
@@ -183,6 +184,80 @@ def _wake_flag_path(session, is_units):
         os.path.expanduser("~"),
         f".ikabot_recruitment_wake_{kind}_{_account_suffix(session)}",
     )
+
+
+# =============================================================================
+# BUILDING CACHE  — static list of barracks/shipyards, refreshed on demand
+# =============================================================================
+
+_BUILDINGS_CACHE_VERSION = 1
+
+
+def _buildings_cache_path(session, is_units):
+    kind = "units" if is_units else "ships"
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_recruit_bldcache_{kind}_{_account_suffix(session)}.json",
+    )
+
+
+def _load_buildings_cache(session, is_units):
+    """Returns cached static building list, or None if missing/invalid."""
+    try:
+        with open(_buildings_cache_path(session, is_units)) as f:
+            data = json.load(f)
+        if data.get("version") == _BUILDINGS_CACHE_VERSION and data.get("buildings"):
+            return data["buildings"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _save_buildings_cache(session, is_units, buildings):
+    path = _buildings_cache_path(session, is_units)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"version": _BUILDINGS_CACHE_VERSION,
+                       "scanned_at": int(time.time()),
+                       "buildings": buildings}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _clear_buildings_cache(session, is_units):
+    try:
+        os.remove(_buildings_cache_path(session, is_units))
+    except OSError:
+        pass
+
+
+def _scan_buildings(session, is_units, all_city_ids, cities):
+    """Scan every city for barracks/shipyards; returns static building list.
+
+    Only needs to run once (or after a level-up / new barracks).  The loop
+    then calls this result for city data each cycle to get resources and
+    live busy state without re-enumerating all position slots.
+    """
+    building_type = "barracks" if is_units else "shipyard"
+    buildings = []
+    for cid in all_city_ids:
+        city = cities.get(cid, {})
+        try:
+            html = session.get(city_url + str(cid))
+            city_data = getCity(html)
+            for slot in city_data.get('position', []):
+                if slot.get('building') == building_type:
+                    buildings.append({
+                        'city_id':           cid,
+                        'city_name':         city.get('name', str(cid)),
+                        'building_position': slot.get('position'),
+                        'building_level':    slot.get('level', 0),
+                    })
+        except Exception:
+            continue
+    return buildings
 
 
 def _is_worker_running(session, is_units):
@@ -270,7 +345,7 @@ def _coerce_recruit_row(raw):
             row[col] = 0
     row["is_units"] = str(row.get("is_units", "True")).lower() in ("true", "1", "yes")
     if row.get("status", "") not in RECRUIT_VALID_STATUSES:
-        row["status"] = "pending"
+        row["status"] = "active"
     return row
 
 
@@ -282,17 +357,23 @@ def _coerce_recruit_row_out(row):
     return out
 
 
-def csv_load_orders(session, is_units):
+def recruit_csv_load(session, is_units):
+    """Load and return all rows from the goals CSV for this account/type."""
     path = _csv_path(session, is_units)
     try:
         with open(path, "r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            return [_coerce_recruit_row(r) for r in reader]
+            fieldnames = reader.fieldnames or []
+            rows = list(reader)
+        if _OLD_CSV_SENTINEL in fieldnames:
+            return _migrate_old_csv(session, is_units, rows)
+        return [_coerce_recruit_row(r) for r in rows]
     except FileNotFoundError:
         return []
 
 
-def csv_save_orders(session, is_units, rows):
+def recruit_csv_save(session, is_units, rows):
+    """Atomically write all rows to the goals CSV."""
     path = _csv_path(session, is_units)
     tmp = path + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8") as f:
@@ -303,16 +384,71 @@ def csv_save_orders(session, is_units, rows):
     os.replace(tmp, path)
 
 
-def csv_update_order(session, is_units, recruit_id, **fields):
-    rows = csv_load_orders(session, is_units)
+def recruit_csv_has_active(session, is_units):
+    return any(r["status"] == "active" for r in recruit_csv_load(session, is_units))
+
+
+def recruit_csv_next_id(rows):
+    if not rows:
+        return 1
+    return max(r["request_id"] for r in rows) + 1
+
+
+def recruit_csv_add(session, is_units, unit_type_id, unit_name, qty, priority, notes=""):
+    """Append a new goal row; merge with existing active row for same unit type."""
+    rows = recruit_csv_load(session, is_units)
+    now = int(time.time())
     for r in rows:
-        if r["recruit_id"] == recruit_id:
-            r.update(fields)
+        if r["unit_type_id"] == unit_type_id and r["status"] == "active":
+            r["qty_total"] += qty
+            r["qty_remaining"] += qty
+            r["priority"] = min(r["priority"], priority)
+            r["last_updated"] = now
+            recruit_csv_save(session, is_units, rows)
+            return r["request_id"]
+    new_id = recruit_csv_next_id(rows)
+    rows.append({
+        "request_id":   new_id,
+        "unit_type_id": unit_type_id,
+        "unit_name":    unit_name,
+        "is_units":     is_units,
+        "qty_total":    qty,
+        "qty_remaining": qty,
+        "priority":     priority,
+        "status":       "active",
+        "created_at":   now,
+        "last_updated": now,
+        "notes":        notes,
+    })
+    recruit_csv_save(session, is_units, rows)
+    return new_id
+
+
+def recruit_csv_deduct(session, is_units, request_id, qty_placed):
+    """Subtract qty_placed from qty_remaining; mark completed when zero."""
+    rows = recruit_csv_load(session, is_units)
+    now = int(time.time())
+    for r in rows:
+        if r["request_id"] == request_id:
+            r["qty_remaining"] = max(0, r["qty_remaining"] - qty_placed)
+            r["last_updated"]  = now
+            if r["qty_remaining"] == 0:
+                r["status"] = "completed"
             break
-    csv_save_orders(session, is_units, rows)
+    recruit_csv_save(session, is_units, rows)
 
 
-def csv_delete_orders(session, is_units):
+def recruit_csv_update(session, is_units, request_id, **kwargs):
+    rows = recruit_csv_load(session, is_units)
+    for r in rows:
+        if r["request_id"] == request_id:
+            r.update(kwargs)
+            r["last_updated"] = int(time.time())
+            break
+    recruit_csv_save(session, is_units, rows)
+
+
+def recruit_csv_clear(session, is_units):
     path = _csv_path(session, is_units)
     try:
         os.remove(path)
@@ -320,21 +456,71 @@ def csv_delete_orders(session, is_units):
         pass
 
 
-def csv_next_recruit_id(rows):
-    if not rows:
-        return 1
-    return max(r["recruit_id"] for r in rows) + 1
+def _migrate_old_csv(session, is_units, raw_rows):
+    """
+    Convert v1 per-building rows (with batch_id, city_id, etc.) to v2 goals rows.
+    Groups pending/partial rows by unit_type_id, summing qty_remaining.
+    Called automatically the first time an old CSV is opened.
+    """
+    from collections import defaultdict
+    groups = defaultdict(lambda: {"qty_total": 0, "qty_remaining": 0, "priority": 9999, "unit_name": ""})
+    now = int(time.time())
+
+    for r in raw_rows:
+        status = r.get("status", "pending")
+        if status in ("ordered", "cancelled"):
+            continue
+        uid = r.get("unit_type_id", "")
+        try:
+            uid = int(uid)
+        except (ValueError, TypeError):
+            continue
+        try:
+            qty_rem = int(r.get("qty_remaining", 0))
+            qty_tot = int(r.get("qty_total", 0))
+            pri = int(r.get("priority", 1))
+        except (ValueError, TypeError):
+            continue
+        g = groups[uid]
+        g["qty_total"]     += qty_tot
+        g["qty_remaining"] += qty_rem
+        g["priority"]       = min(g["priority"], pri)
+        if not g["unit_name"]:
+            g["unit_name"] = r.get("unit_name", str(uid))
+
+    new_rows = []
+    for idx, (uid, g) in enumerate(groups.items(), start=1):
+        if g["qty_remaining"] <= 0:
+            continue
+        new_rows.append({
+            "request_id":    idx,
+            "unit_type_id":  uid,
+            "unit_name":     g["unit_name"],
+            "is_units":      is_units,
+            "qty_total":     g["qty_total"],
+            "qty_remaining": g["qty_remaining"],
+            "priority":      g["priority"],
+            "status":        "active",
+            "created_at":    now,
+            "last_updated":  now,
+            "notes":         "migrated from v1",
+        })
+
+    recruit_csv_save(session, is_units, new_rows)
+    print(f"  {bcolors.GREEN}Migrated old CSV format -> {len(new_rows)} goal(s){bcolors.ENDC}")
+    return [_coerce_recruit_row(r) for r in new_rows]
 
 
-def csv_next_batch_id(rows):
-    if not rows:
-        return 1
-    return max(r["batch_id"] for r in rows) + 1
+# ---------------------------------------------------------------------------
+# Compatibility shims — used by progress report functions
+# ---------------------------------------------------------------------------
+def csv_load_orders(session, is_units):
+    """Legacy alias for recruit_csv_load."""
+    return recruit_csv_load(session, is_units)
 
 
 def csv_has_active_orders(session, is_units):
-    rows = csv_load_orders(session, is_units)
-    return any(r["status"] in ("pending", "partial") for r in rows)
+    return recruit_csv_has_active(session, is_units)
 
 
 # =============================================================================
@@ -458,56 +644,69 @@ def _fetch_citizen_growth(session, city_id):
 
 def _calculate_recruitment_eta(session, all_rows):
     """
-    Estimate when the full recruitment run will be done, based on:
-      - Citizens needed for remaining units (requires a building-data fetch)
-      - Current free citizens across all relevant cities
-      - Current citizen growth rate per hour (if game exposes it)
+    Estimate when the full recruitment run will be done.
 
-    Returns a dict, or None if there are no pending rows.
+    With the goals CSV the rows have no city/building info, so we scan all
+    buildings that can produce the requested unit types to collect citizen
+    costs and city IDs.
+
+    Returns a dict, or None if there are no active goals.
     """
-    pending = [r for r in all_rows if r["status"] in ("pending", "partial")]
-    if not pending:
+    active = [r for r in all_rows if r["status"] == "active" and r["qty_remaining"] > 0]
+    if not active:
         return None
 
-    # Fetch building data once per unique (city_id, building_position) to get
-    # per-unit citizen costs.  Reports are infrequent so extra HTTP calls are fine.
-    building_stubs = {}
-    for r in pending:
-        key = (r["city_id"], r["building_position"])
-        if key not in building_stubs:
-            building_stubs[key] = {
-                "city_id":           r["city_id"],
-                "city_name":         r["city_name"],
-                "building_position": r["building_position"],
-                "building_level":    r["building_level"],
-                "is_busy":           False,
-                "is_units":          r["is_units"],
-            }
+    is_units = active[0]["is_units"]
+    building_type = "barracks" if is_units else "shipyard"
+    needed_uids = {r["unit_type_id"] for r in active}
 
-    unit_citizen_cost = {}   # unit_type_id -> citizens per unit
-    for stub in building_stubs.values():
+    # Scan all buildings to find citizen costs per unit type and all city IDs
+    try:
+        cities_ids, cities = getIdsOfCities(session)
+    except Exception:
+        return None
+
+    unit_citizen_cost = {}
+    all_city_ids = set()
+
+    for cid in cities_ids:
         try:
-            data = fetch_building_data(session, stub, stub["is_units"])
-            if data:
-                for uid, ud in data.get("unit_data", {}).items():
-                    if uid not in unit_citizen_cost:
-                        unit_citizen_cost[uid] = ud.get("citizens", 0)
+            html = session.get(city_url + str(cid))
+            city_data = getCity(html)
         except Exception:
-            pass
+            continue
+        for slot in city_data.get('position', []):
+            if slot.get('building') != building_type:
+                continue
+            stub = {
+                "city_id": cid, "city_name": cities[cid]['name'],
+                "building_position": slot.get('position'),
+                "building_level": slot.get('level', 0),
+                "is_busy": bool(slot.get('isBusy', False)),
+            }
+            try:
+                data = fetch_building_data(session, stub, is_units)
+                if data:
+                    all_city_ids.add(cid)
+                    for uid, ud in data.get("unit_data", {}).items():
+                        if uid in needed_uids and uid not in unit_citizen_cost:
+                            unit_citizen_cost[uid] = ud.get("citizens", 0)
+            except Exception:
+                pass
+        if needed_uids <= set(unit_citizen_cost.keys()):
+            break  # found costs for every unit type we need
 
-    # Total citizens still needed for all remaining units
-    citizens_needed = 0
-    for r in pending:
-        cost = unit_citizen_cost.get(r["unit_type_id"], 0)
-        citizens_needed += cost * r["qty_remaining"]
+    citizens_needed = sum(
+        unit_citizen_cost.get(r["unit_type_id"], 0) * r["qty_remaining"]
+        for r in active
+    )
 
-    # Current free citizens + growth rate, summed across all involved cities
-    city_ids = list({r["city_id"] for r in pending})
-    total_free      = 0
+    total_free = 0
     total_growth_ph = 0.0
-    growth_unknown  = False
+    growth_unknown = False
+    city_ids_to_check = list(all_city_ids) or cities_ids
 
-    for cid in city_ids:
+    for cid in city_ids_to_check:
         free, growth = _fetch_citizen_growth(session, cid)
         total_free += free
         if growth is not None:
@@ -516,7 +715,6 @@ def _calculate_recruitment_eta(session, all_rows):
             growth_unknown = True
 
     deficit = max(0, citizens_needed - total_free)
-
     citizen_wait_h = None
     if deficit == 0:
         citizen_wait_h = 0.0
@@ -548,94 +746,62 @@ def _format_hours(h):
 
 def _build_progress_report(all_rows, group_completed=False, eta=None):
     """
-    Build a progress report string from all CSV rows (both units and ships).
-
-    group_completed: collapse fully-done cities to a single summary line.
-    eta: dict returned by _calculate_recruitment_eta(), appended as an ETA block.
-    Returns a plain-text string suitable for Telegram.
-    Uses only ASCII characters to avoid encoding issues on Windows.
+    Build a progress report string from goals CSV rows (units and/or ships).
+    Uses ASCII only to avoid encoding issues on Windows cp1252.
     """
     now_str = time.strftime("%d %b %Y %H:%M", time.localtime())
-    lines = [f"AUTO RECRUITMENT MANAGER - {now_str}", ""]
+    lines = [f"AUTO RECRUITMENT MANAGER v{MODULE_VERSION} - {now_str}", ""]
 
-    unit_rows = [r for r in all_rows if r["is_units"]]
-    ship_rows = [r for r in all_rows if not r["is_units"]]
+    unit_rows = [r for r in all_rows if r["is_units"]  and r["status"] != "cancelled"]
+    ship_rows = [r for r in all_rows if not r["is_units"] and r["status"] != "cancelled"]
 
-    def _active(rows):
-        return [r for r in rows if r["status"] != "cancelled"]
-
-    def _totals(rows):
-        total     = sum(r["qty_total"]     for r in rows)
-        remaining = sum(r["qty_remaining"] for r in rows)
-        return total - remaining, total
-
-    all_active = _active(all_rows)
-    g_ordered, g_total = _totals(all_active)
+    g_total = sum(r["qty_total"]     for r in unit_rows + ship_rows)
+    g_rem   = sum(r["qty_remaining"] for r in unit_rows + ship_rows)
+    g_ord   = g_total - g_rem
 
     if g_total == 0:
-        lines.append("No active orders.")
+        lines.append("No active goals.")
         return "\n".join(lines)
 
-    lines.append(f"OVERALL {_ascii_bar(g_ordered, g_total)} {g_ordered:,}/{g_total:,} ({_pct(g_ordered, g_total)}%)")
+    lines.append(
+        f"OVERALL {_ascii_bar(g_ord, g_total)} {g_ord:,}/{g_total:,} "
+        f"({_pct(g_ord, g_total)}%)"
+    )
+    lines.append("=" * 44)
 
-    u_active = _active(unit_rows)
-    s_active = _active(ship_rows)
-    if u_active:
-        uo, ut = _totals(u_active)
-        lines.append(f"  Troops : {_ascii_bar(uo, ut, 10)} {uo:,}/{ut:,}")
-    if s_active:
-        so, st = _totals(s_active)
-        lines.append(f"  Ships  : {_ascii_bar(so, st, 10)} {so:,}/{st:,}")
-
-    lines.append("")
-    lines.append("=" * 36)
-
-    # Per-city breakdown
-    cities_seen = []
-    city_order  = {}
-    for r in all_active:
-        cname = r["city_name"]
-        if cname not in city_order:
-            city_order[cname] = len(city_order)
-            cities_seen.append(cname)
-
-    completed_summaries = []
-
-    for city_name in cities_seen:
-        c_units = [r for r in u_active if r["city_name"] == city_name]
-        c_ships = [r for r in s_active if r["city_name"] == city_name]
-        c_all   = c_units + c_ships
-        if not c_all:
+    for label, rows in [("TROOPS", unit_rows), ("SHIPS", ship_rows)]:
+        if not rows:
             continue
+        sec_tot = sum(r["qty_total"]     for r in rows)
+        sec_rem = sum(r["qty_remaining"] for r in rows)
+        sec_ord = sec_tot - sec_rem
+        lines.append(f"\n{label}  {_ascii_bar(sec_ord, sec_tot, 12)} {sec_ord:,}/{sec_tot:,}")
 
-        co, ct = _totals(c_all)
-        if group_completed and co >= ct:
-            completed_summaries.append(f"  {city_name}: {co:,}/{ct:,} DONE")
-            continue
+        completed = []
+        active    = []
+        for r in sorted(rows, key=lambda x: (x["priority"], x["unit_name"])):
+            if r["status"] == "completed" or r["qty_remaining"] == 0:
+                completed.append(r)
+            else:
+                active.append(r)
 
-        lines.append(f"\n{city_name}")
-        for label, rows in [("Troops", c_units), ("Ships", c_ships)]:
-            if not rows:
-                continue
-            co2, ct2 = _totals(rows)
-            done_mark = " DONE" if co2 >= ct2 else ""
-            lines.append(f"  {label} {_ascii_bar(co2, ct2, 12)} {co2:,}/{ct2:,}{done_mark}")
-            unit_totals = {}
-            for r in rows:
-                name = r["unit_name"] or f"Unit {r['unit_type_id']}"
-                if name not in unit_totals:
-                    unit_totals[name] = [0, 0]
-                unit_totals[name][0] += r["qty_total"] - r["qty_remaining"]
-                unit_totals[name][1] += r["qty_total"]
-            for uname, (uo2, ut2) in unit_totals.items():
-                done2 = " *" if uo2 >= ut2 else ""
-                lines.append(f"    {uname:<20} {uo2:>5,}/{ut2:,}{done2}")
+        for r in active:
+            placed = r["qty_total"] - r["qty_remaining"]
+            bar = _ascii_bar(placed, r["qty_total"], 10)
+            pct = _pct(placed, r["qty_total"])
+            lines.append(
+                f"  {r['unit_name']:<22} {bar} "
+                f"{placed:,}/{r['qty_total']:,} ({pct}%)  P{r['priority']}"
+            )
 
-    if completed_summaries:
-        lines.append(f"\nCOMPLETED ({len(completed_summaries)})")
-        lines.extend(completed_summaries)
+        if group_completed and completed:
+            names = ", ".join(r["unit_name"] for r in completed)
+            lines.append(f"  COMPLETED: {names}")
+        elif completed:
+            for r in completed:
+                lines.append(f"  {r['unit_name']:<22} DONE  {r['qty_total']:,}/{r['qty_total']:,}")
 
-    lines.append("\n" + "=" * 36)
+    lines.append("\n" + "=" * 44)
 
     # ETA block
     if eta and eta.get("citizens_needed", 0) > 0:
@@ -665,9 +831,9 @@ def _build_progress_report(all_rows, group_completed=False, eta=None):
 
 
 def send_progress_report(session, is_units, group_completed=False):
-    """Send a combined units+ships progress report to the bot."""
-    unit_rows = csv_load_orders(session, True)
-    ship_rows = csv_load_orders(session, False)
+    """Send a combined units+ships progress report to Telegram."""
+    unit_rows = recruit_csv_load(session, True)
+    ship_rows = recruit_csv_load(session, False)
     all_rows  = unit_rows + ship_rows
 
     if not all_rows:
@@ -1273,533 +1439,332 @@ def _load_distribution_from_csv(session, is_units, rows):
 
 
 # =============================================================================
-# QUEUE MANAGEMENT UI  (available while session is running)
+# QUEUE / GOALS MANAGEMENT UI
 # =============================================================================
 
 def _show_queue_status(session, is_units):
-    """Print the current queue, grouped by batch and city."""
-    rows = csv_load_orders(session, is_units)
-    active = [r for r in rows if r["status"] not in ("ordered", "cancelled")]
+    """Print goals progress table."""
+    kind = "Units" if is_units else "Ships"
+    rows = recruit_csv_load(session, is_units)
+    active = [r for r in rows if r["status"] in ("active", "completed")]
     if not active:
-        print("  (no active orders)")
+        print(f"  No {kind.lower()} goals set.")
         return
 
-    print(f"{'ID':>4}  {'Bat':>3}  {'Pri':>3}  {'City':<16}  {'Unit':<22}  {'Remaining':>12}  Status")
-    print("  " + "-" * 80)
-    last_batch = None
-    for r in sorted(active, key=lambda x: (x["priority"], x["batch_id"], x["city_name"], x["unit_name"])):
-        if r["batch_id"] != last_batch:
-            if last_batch is not None:
-                print()
-            last_batch = r["batch_id"]
-        ordered = r["qty_total"] - r["qty_remaining"]
-        remaining_str = f"{r['qty_remaining']:,} / {r['qty_total']:,}"
-        print(f"  {r['recruit_id']:>4}  {r['batch_id']:>3}  {r['priority']:>3}  "
-              f"{r['city_name']:<16}  {r['unit_name']:<22}  {remaining_str:>12}  {r['status']}")
+    print(f"  {'ID':>4}  {'Pri':>3}  {'Unit':<22}  {'Placed':>8}  {'Goal':>8}  {'%':>6}  Status")
+    print("  " + "-" * 68)
+    for r in sorted(active, key=lambda x: (x["priority"], x["unit_name"])):
+        placed = r["qty_total"] - r["qty_remaining"]
+        pct = _pct(placed, r["qty_total"])
+        bar   = _ascii_bar(placed, r["qty_total"], 8)
+        done  = " DONE" if r["status"] == "completed" else ""
+        print(f"  {r['request_id']:>4}  {r['priority']:>3}  {r['unit_name']:<22}  "
+              f"{placed:>8,}  {r['qty_total']:>8,}  {pct:>5}%  {bar}{done}")
 
 
-def _add_to_queue_distributed(session, is_units, cities_ids, cities):
+def _view_building_status(session, is_units):
     """
-    Auto-distribute new units across ALL barracks/shipyards by build speed.
-    User enters totals per unit type; calculate_distribution splits the work.
+    Fetch live game queue status for every building of this type and show:
+    - whether it's busy (and time remaining)
+    - what the loop would assign next from the goals CSV
     """
     building_type = "barracks" if is_units else "shipyard"
+    kind = "Units" if is_units else "Ships"
 
-    print(f"\nScanning all {building_type}s...")
+    print(f"\n  Fetching building status for {kind.lower()}...")
+    try:
+        cities_ids, cities = getIdsOfCities(session)
+    except Exception as e:
+        print(f"  {bcolors.RED}Could not fetch cities: {e}{bcolors.ENDC}")
+        return
+
+    # Load active goals sorted by priority for "next to build" prediction
+    goals = sorted(
+        [r for r in recruit_csv_load(session, is_units) if r["status"] == "active" and r["qty_remaining"] > 0],
+        key=lambda r: (r["priority"], r["request_id"]),
+    )
+
+    print()
+    total_buildings = 0
+    total_idle = 0
+    total_busy = 0
+
+    for cid in cities_ids:
+        city_name = cities[cid]['name']
+        city_buildings = []
+        try:
+            html = session.get(city_url + str(cid))
+            city_data = getCity(html)
+        except Exception:
+            continue
+        for slot in city_data.get('position', []):
+            if slot.get('building') != building_type:
+                continue
+            city_buildings.append({
+                'city_id':           cid,
+                'city_name':         city_name,
+                'building_position': slot.get('position'),
+                'building_level':    slot.get('level', 0),
+                'is_busy':           bool(slot.get('isBusy', False)),
+            })
+
+        if not city_buildings:
+            continue
+
+        print(f"  {bcolors.BOLD}{city_name}{bcolors.ENDC} "
+              f"({len(city_buildings)} {building_type})")
+
+        for b in sorted(city_buildings, key=lambda x: -x['building_level']):
+            total_buildings += 1
+            if b['is_busy']:
+                total_busy += 1
+                # Fetch full data for queue time
+                data = fetch_building_data(session, b, is_units)
+                qt = data.get('queue_remaining_time', 0) if data else 0
+                qt_str = f"  queue ~{format_time(qt)}" if qt else "  (queue time unknown)"
+                print(f"    L{b['building_level']:>2}  {bcolors.WARNING}BUILDING{bcolors.ENDC}{qt_str}")
+            else:
+                total_idle += 1
+                # Fetch unit_data to find what we'd build next
+                data = fetch_building_data(session, b, is_units)
+                next_unit = "(no goals match this building)"
+                if data and goals:
+                    for g in goals:
+                        if g['unit_type_id'] in data.get('unit_data', {}):
+                            next_unit = (f"{g['unit_name']}  "
+                                         f"{g['qty_remaining']:,} remaining  P{g['priority']}")
+                            break
+                elif not goals:
+                    next_unit = "(no active goals)"
+                print(f"    L{b['building_level']:>2}  {bcolors.GREEN}IDLE{bcolors.ENDC}"
+                      f"  -> {next_unit}")
+
+        print()
+
+    print(f"  Summary: {total_buildings} buildings total  |  "
+          f"{bcolors.GREEN}{total_idle} idle{bcolors.ENDC}  |  "
+          f"{bcolors.WARNING}{total_busy} building{bcolors.ENDC}")
+    if goals:
+        total_rem = sum(g["qty_remaining"] for g in goals)
+        print(f"  Goals remaining: {total_rem:,} units across {len(goals)} goal(s)")
+    else:
+        print(f"  No active goals — add some with (1) Add to queue")
+
+
+def _add_to_goals_ui(session, is_units):
+    """
+    Add one or more unit-type goals to the goals CSV.
+    Scans buildings once to find available unit types, then asks quantities.
+    """
+    building_type = "barracks" if is_units else "shipyard"
+    unit_list = UNITS_ORDER if is_units else SHIPS_ORDER
+
+    print(f"\n  Scanning for available {building_type}s...")
+    try:
+        cities_ids, cities = getIdsOfCities(session)
+    except Exception as e:
+        print(f"  {bcolors.RED}Could not fetch cities: {e}{bcolors.ENDC}")
+        return False
+
     all_buildings = find_all_buildings(session, cities_ids, cities, building_type)
     if not all_buildings:
         print(f"  {bcolors.RED}No {building_type} found.{bcolors.ENDC}")
         return False
 
-    # Fetch unit data for every building (show progress per building)
-    buildings_data = []
-    for b in all_buildings:
-        busy_str = " [BUSY]" if b['is_busy'] else ""
-        print(f"  Fetching {b['city_name']} L{b['building_level']}{busy_str}...")
+    # Collect available unit types from a sampling of buildings
+    unit_info_map = {}  # uid → {name, time_seconds, citizens, ...}
+    for b in all_buildings[:3]:  # sample first 3 to find unit types quickly
         data = fetch_building_data(session, b, is_units)
         if data:
-            buildings_data.append(data)
-        else:
-            print(f"    {bcolors.WARNING}Could not fetch data — skipping.{bcolors.ENDC}")
+            for uid, ud in data.get('unit_data', {}).items():
+                if uid not in unit_info_map:
+                    unit_info_map[uid] = ud
 
-    if not buildings_data:
-        print(f"  {bcolors.RED}No building data retrieved.{bcolors.ENDC}")
+    if not unit_info_map:
+        print(f"  {bcolors.RED}Could not fetch unit data.{bcolors.ENDC}")
         return False
 
-    # Union of unit types across all buildings (first capable building provides cost display)
-    unit_list = UNITS_ORDER if is_units else SHIPS_ORDER
-    available_units = {}
+    print()
+    print("  Enter quantity for each unit type (0 or Enter to skip):")
+    print("  (') Cancel at any prompt")
+    print()
+
+    added = 0
     for unit in unit_list:
         uid = unit['game_index']
-        for b in buildings_data:
-            if uid in b.get('unit_data', {}):
-                available_units[uid] = {'name': unit['name'], 'ud': b['unit_data'][uid]}
-                break
-
-    if not available_units:
-        print(f"  {bcolors.RED}No trainable units found across any building.{bcolors.ENDC}")
-        return False
-
-    # Ask total quantities per unit type
-    print(f"\nEnter TOTAL quantity for each unit type (0 or Enter to skip):")
-    print(f"  Units will be split across {len(buildings_data)} {building_type}(s) by build speed.\n")
-    order = {}
-    for uid, info in available_units.items():
-        ud = info['ud']
+        if uid not in unit_info_map:
+            continue
+        ud = unit_info_map[uid]
         costs = []
-        if ud.get('citizens', 0): costs.append(f"{ud['citizens']} cit")
-        if ud.get('wood',     0): costs.append(f"{ud['wood']} wood")
-        if ud.get('wine',     0): costs.append(f"{ud['wine']} wine")
-        if ud.get('marble',   0): costs.append(f"{ud['marble']} marble")
-        if ud.get('crystal',  0): costs.append(f"{ud['crystal']} crystal")
-        if ud.get('sulfur',   0): costs.append(f"{ud['sulfur']} sulfur")
-        cost_str = f" [{', '.join(costs)}]" if costs else ""
-        qty = read(msg=f"  {info['name']}{cost_str}: ",
+        for res in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
+            if ud.get(res, 0):
+                costs.append(f"{ud[res]} {res}")
+        t = format_time(int(ud.get('time_seconds', 0)))
+        cost_str = f" [{', '.join(costs)}, {t}/unit]" if costs else f" [{t}/unit]"
+
+        qty = read(msg=f"  {unit['name']}{cost_str}: ",
                    min=0, digit=True, additionalValues=["'", ""])
         if qty == "'":
             return False
         if qty == "" or qty == 0:
             continue
-        order[uid] = {'name': info['name'], 'quantity': qty}
 
-    if not order:
-        print("  No units entered.")
-        return False
+        existing = [r for r in recruit_csv_load(session, is_units)
+                    if r["status"] == "active"]
+        existing_pris = sorted({r["priority"] for r in existing})
+        if existing_pris:
+            print(f"    Existing priorities: {existing_pris}")
 
-    # Distribute across buildings by speed
-    distribution = calculate_distribution(buildings_data, order)
-    if not distribution:
-        print(f"  {bcolors.RED}Distribution failed.{bcolors.ENDC}")
-        return False
-
-    # Show the plan and ask for confirmation
-    print()
-    display_distribution_plan(distribution, order)
-    print()
-    confirm = read(msg="Proceed with this distribution? [Y/n]: ",
-                   values=["y", "Y", "n", "N", "", "'"])
-    if confirm == "'" or (isinstance(confirm, str) and confirm.lower() == "n"):
-        print("Cancelled.")
-        return False
-
-    # Priority
-    existing = csv_load_orders(session, is_units)
-    existing_priorities = sorted({r["priority"] for r in existing
-                                   if r["status"] not in ("ordered", "cancelled")})
-    if existing_priorities:
-        print(f"\n  Existing priority levels: {existing_priorities}")
-    pri_raw = read(msg="  Priority for this batch (1=highest, default 1): ",
-                   min=1, digit=True, additionalValues=["'", ""])
-    if pri_raw == "'":
-        return False
-    priority = pri_raw if isinstance(pri_raw, int) else 1
-
-    # Append new rows to existing queue
-    now        = int(time.time())
-    session_id = str(now)
-    rows       = existing[:]
-    next_id    = csv_next_recruit_id(rows)
-    batch_id   = csv_next_batch_id(rows)
-
-    total_added   = 0
-    active_bldgs  = 0
-    for b in distribution:
-        if not b.get('assignments'):
-            continue
-        active_bldgs += 1
-        for uid, qty in b['assignments'].items():
-            unit_name = (b.get('unit_data', {}).get(uid, {}).get('name')
-                         or order.get(uid, {}).get('name', str(uid)))
-            rows.append({
-                "recruit_id":        next_id,
-                "batch_id":          batch_id,
-                "session_id":        session_id,
-                "city_id":           b["city_id"],
-                "city_name":         b["city_name"],
-                "building_position": b["building_position"],
-                "building_level":    b["building_level"],
-                "is_units":          is_units,
-                "unit_type_id":      uid,
-                "unit_name":         unit_name,
-                "qty_total":         qty,
-                "qty_remaining":     qty,
-                "priority":          priority,
-                "status":            "pending",
-                "created_at":        now,
-                "last_updated":      now,
-            })
-            next_id    += 1
-            total_added += qty
-
-    csv_save_orders(session, is_units, rows)
-    print(f"\n  {bcolors.GREEN}Added {total_added:,} units across "
-          f"{active_bldgs} {building_type}(s) "
-          f"(batch {batch_id}, priority {priority}){bcolors.ENDC}")
-    return True
-
-
-def _add_to_queue_ui(session, is_units, cities_ids, cities):
-    """
-    Interactive: add units to the queue.
-    Mode 1 — specific building (original behaviour).
-    Mode 2 — auto-distribute totals across all buildings by build speed.
-    Returns True if rows were added, False if user backed out.
-    """
-    building_type = "barracks" if is_units else "shipyard"
-
-    print(f"\nHow do you want to add units?")
-    print(f"  1. Add to a specific {building_type}  (you choose the building)")
-    print(f"  2. Auto-distribute across all {building_type}s  (enter totals, split by speed)")
-    print()
-    mode = read(msg="Select or ' to cancel: ", min=1, max=2, digit=True,
-                additionalValues=["'"])
-    if mode == "'":
-        return False
-
-    if mode == 2:
-        return _add_to_queue_distributed(session, is_units, cities_ids, cities)
-
-    # ------------------------------------------------------------------ #
-    # Mode 1: original per-building flow
-    # ------------------------------------------------------------------ #
-    all_buildings = find_all_buildings(session, cities_ids, cities, building_type)
-    if not all_buildings:
-        print(f"  {bcolors.RED}No {building_type} found.{bcolors.ENDC}")
-        return False
-
-    print(f"\nAvailable {building_type}(s):\n")
-    building_list = []
-    for b in all_buildings:
-        busy_str = " [BUSY]" if b['is_busy'] else ""
-        print(f"  {len(building_list) + 1:>2}. {b['city_name']} - L{b['building_level']}{busy_str}")
-        building_list.append(b)
-
-    print()
-    sel = read(msg="Select building (number) or ' to cancel: ",
-               min=1, max=len(building_list), digit=True, additionalValues=["'"])
-    if sel == "'":
-        return False
-
-    chosen_building = building_list[sel - 1]
-    print(f"\nFetching data for {chosen_building['city_name']} {building_type}...")
-    data = fetch_building_data(session, chosen_building, is_units)
-    if data is None:
-        print(f"  {bcolors.RED}Failed to fetch building data.{bcolors.ENDC}")
-        return False
-
-    unit_list = UNITS_ORDER if is_units else SHIPS_ORDER
-    order = {}
-    print("\nEnter quantity for each unit (0 or Enter to skip):\n")
-    for unit in unit_list:
-        uid = unit['game_index']
-        if uid not in data.get('unit_data', {}):
-            continue
-        ud = data['unit_data'][uid]
-        costs = []
-        if ud.get('citizens', 0): costs.append(f"{ud['citizens']} cit")
-        if ud.get('wood', 0):     costs.append(f"{ud['wood']} wood")
-        if ud.get('wine', 0):     costs.append(f"{ud['wine']} wine")
-        if ud.get('marble', 0):   costs.append(f"{ud['marble']} marble")
-        if ud.get('crystal', 0):  costs.append(f"{ud['crystal']} crystal")
-        if ud.get('sulfur', 0):   costs.append(f"{ud['sulfur']} sulfur")
-        cost_str = f" [{', '.join(costs)}]" if costs else ""
-        qty = read(msg=f"  {unit['name']}{cost_str}: ", min=0, digit=True, additionalValues=["'", ""])
-        if qty == "'":
+        pri_raw = read(msg="  Priority (1=highest, default 1): ",
+                       min=1, digit=True, additionalValues=["'", ""])
+        if pri_raw == "'":
             return False
-        if qty == "":
-            qty = 0
-        if qty > 0:
-            order[uid] = {'name': unit['name'], 'quantity': qty}
+        priority = pri_raw if isinstance(pri_raw, int) else 1
 
-    if not order:
+        request_id = recruit_csv_add(session, is_units, uid, unit['name'], qty, priority)
+        print(f"  {bcolors.GREEN}Added {qty:,} {unit['name']} (goal #{request_id}).{bcolors.ENDC}")
+        added += 1
+
+    if added == 0:
         print("  No units entered.")
-        return False
-
-    # Ask for priority
-    existing = csv_load_orders(session, is_units)
-    existing_priorities = sorted({r["priority"] for r in existing if r["status"] not in ("ordered","cancelled")})
-    if existing_priorities:
-        print(f"\n  Existing priority levels: {existing_priorities}")
-    pri_raw = read(msg="  Priority for this batch (1=highest, default 1): ",
-                   min=1, digit=True, additionalValues=["'", ""])
-    if pri_raw == "'":
-        return False
-    priority = pri_raw if isinstance(pri_raw, int) else 1
-
-    # Build temp distribution for CSV rows
-    temp_buildings = [data]
-    calculate_distribution(temp_buildings, order)
-
-    now = int(time.time())
-    session_id = str(now)
-    rows = existing[:]
-    next_id = csv_next_recruit_id(rows)
-    batch_id = csv_next_batch_id(rows)
-
-    for uid, qty in data.get('assignments', {}).items():
-        rows.append({
-            "recruit_id":       next_id,
-            "batch_id":         batch_id,
-            "session_id":       session_id,
-            "city_id":          data["city_id"],
-            "city_name":        data["city_name"],
-            "building_position": data["building_position"],
-            "building_level":   data["building_level"],
-            "is_units":         is_units,
-            "unit_type_id":     uid,
-            "unit_name":        order.get(uid, {}).get('name', data['unit_data'].get(uid, {}).get('name', str(uid))),
-            "qty_total":        qty,
-            "qty_remaining":    qty,
-            "priority":         priority,
-            "status":           "pending",
-            "created_at":       now,
-            "last_updated":     now,
-        })
-        next_id += 1
-
-    csv_save_orders(session, is_units, rows)
-    total_added = sum(data.get('assignments', {}).values())
-    print(f"\n  {bcolors.GREEN}Added {total_added} units (batch {batch_id}, priority {priority}){bcolors.ENDC}")
-    return True
+    return added > 0
 
 
-def _remove_from_queue_ui(session, is_units):
-    """Interactive: reduce or cancel units in the queue."""
-    rows = csv_load_orders(session, is_units)
-    active = [r for r in rows if r["status"] in ("pending", "partial")]
+def _remove_goal_ui(session, is_units):
+    """Remove or reduce an active goal."""
+    rows = recruit_csv_load(session, is_units)
+    active = [r for r in rows if r["status"] == "active"]
     if not active:
-        print("  No pending orders to remove.")
+        print(f"\n  {bcolors.WARNING}No active goals to remove.{bcolors.ENDC}")
         return
 
+    print()
     _show_queue_status(session, is_units)
     print()
-
-    raw = read(msg="Enter recruit ID to modify (or ' to cancel): ", additionalValues=["'"])
-    if raw == "'":
+    goal_ids = [r["request_id"] for r in active]
+    sel = read(msg="  Enter goal ID to remove/reduce (or ' to cancel): ",
+               min=1, digit=True, additionalValues=["'"])
+    if sel == "'":
+        return
+    if sel not in goal_ids:
+        print(f"  {bcolors.RED}ID {sel} not found.{bcolors.ENDC}")
         return
 
-    try:
-        rid = int(str(raw).strip())
-    except ValueError:
-        print("  Invalid ID.")
+    goal = next(r for r in active if r["request_id"] == sel)
+    print(f"\n  Goal: {goal['unit_name']}  {goal['qty_remaining']:,} remaining")
+    print(f"  (1) Cancel completely")
+    print(f"  (2) Reduce quantity")
+    print(f"  (') Back")
+    action = read(msg="  Select: ", min=1, max=2, digit=True, additionalValues=["'"])
+    if action == "'":
         return
 
-    target = next((r for r in active if r["recruit_id"] == rid), None)
-    if target is None:
-        print(f"  ID {rid} not found or already ordered.")
-        return
-
-    print(f"\n  {target['unit_name']}: {target['qty_remaining']:,} remaining of {target['qty_total']:,} total")
-    print(f"  Enter new remaining quantity (0 to cancel), or ' to abort:")
-
-    new_qty_raw = read(msg="  New quantity: ", min=0, digit=True, additionalValues=["'"])
-    if new_qty_raw == "'":
-        return
-    new_qty = int(new_qty_raw)
-
-    if new_qty == 0:
-        csv_update_order(session, is_units, rid,
-                         qty_remaining=0, status="cancelled",
-                         last_updated=int(time.time()))
-        print(f"  {bcolors.WARNING}Cancelled order #{rid}.{bcolors.ENDC}")
-    elif new_qty < target["qty_remaining"]:
-        csv_update_order(session, is_units, rid,
-                         qty_remaining=new_qty,
-                         qty_total=target["qty_total"] - (target["qty_remaining"] - new_qty),
-                         status="partial" if target["status"] == "pending" else target["status"],
-                         last_updated=int(time.time()))
-        print(f"  Updated order #{rid}: {new_qty:,} remaining.")
-    else:
-        print(f"  No change (entered quantity >= current remaining).")
+    if action == 1:
+        recruit_csv_update(session, is_units, sel, status="cancelled")
+        print(f"  {bcolors.WARNING}Goal cancelled.{bcolors.ENDC}")
+    elif action == 2:
+        reduce_raw = read(
+            msg=f"  Reduce by how many (max {goal['qty_remaining']:,})? ",
+            min=1, max=goal['qty_remaining'], digit=True, additionalValues=["'"]
+        )
+        if reduce_raw == "'":
+            return
+        new_rem = max(0, goal['qty_remaining'] - reduce_raw)
+        new_tot = max(0, goal['qty_total'] - reduce_raw)
+        if new_rem == 0:
+            recruit_csv_update(session, is_units, sel, qty_remaining=0,
+                               qty_total=new_tot, status="completed")
+            print(f"  {bcolors.GREEN}Goal marked complete.{bcolors.ENDC}")
+        else:
+            recruit_csv_update(session, is_units, sel, qty_remaining=new_rem,
+                               qty_total=new_tot)
+            print(f"  {bcolors.GREEN}Reduced to {new_rem:,} remaining.{bcolors.ENDC}")
 
 
 def _adjust_priority_ui(session, is_units):
-    """Interactive: change the priority of an entire batch."""
-    rows = csv_load_orders(session, is_units)
-    active = [r for r in rows if r["status"] in ("pending", "partial")]
+    """Adjust the priority of a goal."""
+    rows = recruit_csv_load(session, is_units)
+    active = [r for r in rows if r["status"] == "active"]
     if not active:
-        print("  No pending orders.")
+        print(f"\n  {bcolors.WARNING}No active goals.{bcolors.ENDC}")
         return
-
-    batch_ids = sorted({r["batch_id"] for r in active})
-    print("\n  Active batches:")
-    for bid in batch_ids:
-        batch_rows = [r for r in active if r["batch_id"] == bid]
-        pri = batch_rows[0]["priority"] if batch_rows else "?"
-        total = sum(r["qty_remaining"] for r in batch_rows)
-        cities = ", ".join({r["city_name"] for r in batch_rows})
-        print(f"    Batch {bid:>3}  Priority {pri}  {total:,} units  [{cities}]")
 
     print()
-    bid_raw = read(msg="Enter batch ID to reprioritise (or '): ", additionalValues=["'"])
-    if bid_raw == "'":
+    _show_queue_status(session, is_units)
+    print()
+    goal_ids = [r["request_id"] for r in active]
+    sel = read(msg="  Enter goal ID to reprioritise (or ' to cancel): ",
+               min=1, digit=True, additionalValues=["'"])
+    if sel == "'":
         return
-    try:
-        bid = int(str(bid_raw).strip())
-    except ValueError:
-        print("  Invalid batch ID.")
-        return
-
-    if bid not in batch_ids:
-        print(f"  Batch {bid} not found.")
+    if sel not in goal_ids:
+        print(f"  {bcolors.RED}ID {sel} not found.{bcolors.ENDC}")
         return
 
-    new_pri_raw = read(msg="  New priority (1=highest): ", min=1, digit=True, additionalValues=["'"])
-    if new_pri_raw == "'":
+    goal = next(r for r in active if r["request_id"] == sel)
+    new_pri = read(msg=f"  New priority for {goal['unit_name']} (1=highest): ",
+                   min=1, digit=True, additionalValues=["'"])
+    if new_pri == "'":
         return
-
-    now = int(time.time())
-    all_rows = csv_load_orders(session, is_units)
-    for r in all_rows:
-        if r["batch_id"] == bid:
-            r["priority"] = int(new_pri_raw)
-            r["last_updated"] = now
-    csv_save_orders(session, is_units, all_rows)
-    print(f"  {bcolors.GREEN}Batch {bid} priority set to {int(new_pri_raw)}.{bcolors.ENDC}")
+    recruit_csv_update(session, is_units, sel, priority=new_pri)
+    print(f"  {bcolors.GREEN}Priority updated to {new_pri}.{bcolors.ENDC}")
 
 
-def _manage_running_session(session, event, is_units):
-    """
-    Top-level menu when a session is already running.
-    All changes are written to CSV; the background loop picks them up.
-    Returns True if the caller should exit (user stopped session or returned to menu).
-    """
-    cities_ids, cities = getIdsOfCities(session)
+# ---------------------------------------------------------------------------
+# Legacy shim wrappers used by old code paths still in _activate_worker etc.
+# ---------------------------------------------------------------------------
+def _add_to_queue_ui(session, is_units, cities_ids=None, cities=None):
+    return _add_to_goals_ui(session, is_units)
 
-    while True:
-        banner()
-        print("=" * 60)
-        print("  AUTO RECRUITMENT MANAGER — RUNNING SESSION")
-        print("=" * 60)
-        print()
-        _show_queue_status(session, is_units)
-        print()
-        print("Options:")
-        print("  1. Add units to queue")
-        print("  2. Remove / reduce units in queue")
-        print("  3. Adjust priority of a batch")
-        print("  4. Send progress report now")
-        print("  5. Stop recruitment (cancel all pending orders)")
-        print()
-        print("  (') Return to main menu")
-        print()
-
-        choice = read(msg="Select: ", min=1, max=5, digit=True, additionalValues=["'"])
-        print()
-
-        if choice == "'":
-            event.set()
-            return True
-
-        if choice == 1:
-            _add_to_queue_ui(session, is_units, cities_ids, cities)
-            enter()
-
-        elif choice == 2:
-            _remove_from_queue_ui(session, is_units)
-            enter()
-
-        elif choice == 3:
-            _adjust_priority_ui(session, is_units)
-            enter()
-
-        elif choice == 4:
-            try:
-                send_progress_report(session, is_units)
-                print(f"  {bcolors.GREEN}Progress report sent.{bcolors.ENDC}")
-            except Exception as e:
-                print(f"  {bcolors.RED}Failed to send report: {e}{bcolors.ENDC}")
-            enter()
-
-        elif choice == 5:
-            confirm = read(msg="Stop all pending recruitment? [Y/n]: ",
-                           values=["y", "Y", "n", "N", ""])
-            if confirm.lower() != "n":
-                # Create stop flag; the loop will detect it and exit cleanly
-                try:
-                    open(_stop_flag_path(session), 'w').close()
-                except Exception:
-                    pass
-                # Also mark all pending rows as cancelled
-                all_rows = csv_load_orders(session, is_units)
-                now = int(time.time())
-                for r in all_rows:
-                    if r["status"] in ("pending", "partial"):
-                        r["status"] = "cancelled"
-                        r["last_updated"] = now
-                csv_save_orders(session, is_units, all_rows)
-                print(f"  {bcolors.WARNING}Recruitment stopped.{bcolors.ENDC}")
-                enter()
-                event.set()
-                return True
 
 
 # =============================================================================
 # RECRUITMENT EXECUTION
 # =============================================================================
 
-def execute_recruitment(session, distribution, is_units=True):
-    """Immediate mode: place all orders at once, no retry loop."""
-    success = True
-    for b in distribution:
-        if not b.get('assignments'):
-            continue
-        action_code = _fetch_fresh_action_code(session, b, is_units)
-        if not action_code:
-            print(f"  {b['city_name']}: Failed to get action code")
-            success = False
-            continue
-        params = {
-            'action': 'BuildUnits',
-            'actionRequest': action_code,
-            'cityId': b['city_id'],
-            'position': b['building_position'],
-        }
-        for uid, qty in b['assignments'].items():
-            params[str(uid)] = qty
-        try:
-            session.post(params=params)
-            print(f"  {b['city_name']}: Ordered {sum(b['assignments'].values())} units")
-        except Exception as e:
-            print(f"  {b['city_name']}: Failed — {e}")
-            success = False
-    return success
-
-
-def execute_recruitment_loop(session, distribution, recruitment_order, cities,
-                             is_units, resource_check, saved_rows, cfg,
-                             stop_event=None):
+def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     """
-    Background recruitment loop.
+    Background recruitment loop (goals-based, dynamic building assignment).
 
     Each cycle:
-    1. Reload active rows from CSV (picks up any live queue changes)
-    2. Refresh city data: resources + live isBusy per building slot
-    3. Sort buildings by their priority
-    4. For each (non-busy) building, calculate how many units can be placed;
-       if >= 20% threshold, POST BuildUnits
-    5. Units are considered DONE once posted (mark row as 'ordered' in CSV)
-    6. Handle resource import requests when import is enabled and resources short
-    7. Send periodic progress reports if configured
-
-    Crash-safe: all state lives in the CSV, so the session can be resumed.
+    1. Reload goals CSV — picks up any live changes
+    2. Per-city pass: fetch resources + enumerate all barracks/shipyards
+    3. For each idle building: match the highest-priority active goal that
+       this building can train, calculate affordable quantity (>= 20% threshold),
+       POST BuildUnits, then decrement the goals CSV
+    4. Request resource imports if enabled and nothing could be placed
+    5. Sleep (interruptible by wake flag or stop_event)
     """
-    session_id = str(int(time.time()))
-    all_city_ids = list(set(b['city_id'] for b in distribution))
+    building_type = "barracks" if is_units else "shipyard"
 
-    # Ensure every building in distribution has unit_data
-    bld_map = {(b['city_id'], b['building_position']): b for b in distribution}
+    # Fetch city list once — cities rarely change mid-session
+    cities_ids, cities = getIdsOfCities(session)
+    all_city_ids = list(cities_ids)
 
-    # Import cooldown: track when we last requested imports per city
+    # Load cached building list; scan once if missing
+    cached_buildings = _load_buildings_cache(session, is_units)
+    if not cached_buildings:
+        session.setStatus(f"Scanning {building_type}s across all cities (one-time)...")
+        cached_buildings = _scan_buildings(session, is_units, all_city_ids, cities)
+        if cached_buildings:
+            _save_buildings_cache(session, is_units, cached_buildings)
+        else:
+            sendToBot(session, f"Auto Recruitment: no {building_type}s found — aborting.")
+            return
+
+    # (city_id, building_position) -> unit_data dict; cleared on busy→idle transition
+    bld_unit_data_cache = {}
+    bld_was_busy = {}
+
     import_requested_at = {}
-    IMPORT_COOLDOWN_SECS = 2 * 3600  # re-request at most every 2 hours
+    IMPORT_COOLDOWN_SECS = 2 * 3600
 
     consecutive_errors = 0
     MAX_ERRORS = 10
 
     last_order_time = time.time()
-    stall_warned    = False
-    STALL_WARN_SECS = 24 * 3600  # warn after 24 h with no successful order
+    stall_warned = False
+    STALL_WARN_SECS = 24 * 3600
 
     while True:
         # --- Check stop flag ---
@@ -1811,81 +1776,40 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
             session.setStatus("Auto Recruitment Manager: stopped by user")
             break
 
-        # --- Reload CSV each cycle to pick up live queue changes ---
-        all_rows = csv_load_orders(session, is_units)
-        active_rows = [r for r in all_rows if r["status"] in ("pending", "partial")]
+        # --- Reload goals CSV each cycle ---
+        all_rows = recruit_csv_load(session, is_units)
+        active_goals = [r for r in all_rows
+                        if r["status"] == "active" and r["qty_remaining"] > 0]
 
-        if not active_rows:
+        if not active_goals:
             session.setStatus("Auto Recruitment complete!")
-            sendToBot(session, "Auto Recruitment: all orders placed successfully.")
-            csv_delete_orders(session, is_units)
-            delete_config(session)
+            sendToBot(session, "Auto Recruitment: all goals completed.")
             break
 
-        # Rebuild remaining_assignments for each building from live CSV data
-        for b in distribution:
-            b['remaining_assignments'] = {}
-        for r in active_rows:
-            key = (r['city_id'], r['building_position'])
-            b = bld_map.get(key)
-            if b is None:
-                # New building added via queue management — create an entry
-                b = {
-                    'city_id':           r['city_id'],
-                    'city_name':         r['city_name'],
-                    'building_position': r['building_position'],
-                    'building_level':    r['building_level'],
-                    'is_busy':           False,
-                    'queue_remaining_time': 0,
-                    'unit_data':         {},
-                    'action_code':       None,
-                    'remaining_assignments': {},
-                    'assignments':       {},
-                }
-                bld_map[key] = b
-                distribution.append(b)
-            b['remaining_assignments'].setdefault(r['unit_type_id'], 0)
-            b['remaining_assignments'][r['unit_type_id']] = max(
-                b['remaining_assignments'][r['unit_type_id']], r['qty_remaining']
-            )
-            # If this unit_type is not in unit_data, refresh the building
-            if r['unit_type_id'] not in b.get('unit_data', {}):
-                fresh = fetch_building_data(session, b, is_units)
-                if fresh:
-                    b['unit_data'] = fresh['unit_data']
-
-        # --- Build priority map: (city_id, pos) -> min priority ---
-        priority_map = {}
-        for r in active_rows:
-            key = (r['city_id'], r['building_position'])
-            priority_map[key] = min(priority_map.get(key, 9999), r['priority'])
-
-        # --- Refresh city resources + update building busy status ---
+        # --- Per-city pass: resources + live slot data (one HTTP call per city) ---
+        # Building positions come from the cache; we only need the slot map for
+        # resources and busy/queue state — no re-enumeration needed.
         city_resources = {}
-        city_data_cache = {}
+        city_pos_map = {}   # cid -> {position -> slot dict}
+        fetch_error = False
 
-        for b in distribution:
-            cid = b['city_id']
-            if cid in city_data_cache:
-                continue
+        for cid in all_city_ids:
             try:
                 html = session.get(city_url + str(cid))
                 city_data = getCity(html)
-                city_data_cache[cid] = (html, city_data)
 
                 avail = city_data.get('availableResources', [0] * 5)
                 if len(avail) < 5:
                     avail = avail + [0] * (5 - len(avail))
 
                 citizens = 0
-                for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)', r'"citizens"\s*:\s*(\d+)'):
+                for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)',
+                             r'"citizens"\s*:\s*(\d+)'):
                     m = re.search(pat, html)
                     if m:
                         citizens = int(m.group(1).replace(',', ''))
                         break
 
-                # Apply RRS snapshot so we don't count resources reserved by
-                # other modules.  Citizens have no RRS resource index — kept raw.
                 if RRS_AVAILABLE:
                     res_avail = []
                     for i in range(5):
@@ -1900,111 +1824,210 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                     'marble':  res_avail[2], 'crystal': res_avail[3],
                     'sulfur':  res_avail[4],
                 }
+
+                city_pos_map[cid] = {
+                    slot.get('position'): slot
+                    for slot in city_data.get('position', [])
+                    if slot.get('position') is not None
+                }
+
                 consecutive_errors = 0
             except Exception as e:
                 consecutive_errors += 1
                 if consecutive_errors >= MAX_ERRORS:
-                    msg = f"Auto Recruitment: {consecutive_errors} consecutive network errors, aborting.\n{e}"
+                    msg = (f"Auto Recruitment: {consecutive_errors} consecutive "
+                           f"network errors, aborting.\n{e}")
                     sendToBot(session, msg)
                     raise RuntimeError(msg)
-                session.setStatus(f"Network error ({consecutive_errors}/{MAX_ERRORS}), retrying...")
-                wait(60)
-                continue
+                session.setStatus(
+                    f"Network error ({consecutive_errors}/{MAX_ERRORS}), retrying...")
+                fetch_error = True
+                break
 
-        # Update building busy flags from fresh city data
-        for b in distribution:
-            if not b.get('remaining_assignments'):
+        if fetch_error:
+            _wait_or_wake(session, is_units, stop_event, 60)
+            _renew_worker_lock(session, is_units)
+            continue
+
+        # Assemble all_buildings from the static cache + live busy/queue state
+        all_buildings = []
+        for b_static in cached_buildings:
+            cid = b_static['city_id']
+            if cid not in city_pos_map:
+                continue  # city fetch failed this cycle
+            slot = city_pos_map[cid].get(b_static['building_position'], {})
+            is_b = bool(slot.get('isBusy', False))
+            eta = slot.get('completed')
+            try:
+                queue_time = max(0, int(eta) - int(time.time())) if eta else 0
+            except (TypeError, ValueError):
+                queue_time = 0
+            all_buildings.append({
+                **b_static,
+                'is_busy':              is_b,
+                'queue_remaining_time': queue_time,
+            })
+
+        # Detect busy→idle transitions; evict stale unit_data cache entries
+        for b in all_buildings:
+            key = (b['city_id'], b['building_position'])
+            was = bld_was_busy.get(key, False)
+            now_busy = b['is_busy']
+            if was and not now_busy:
+                bld_unit_data_cache.pop(key, None)
+            bld_was_busy[key] = now_busy
+
+        # Sort goals by priority (lower = higher priority), then by request_id
+        active_goals.sort(key=lambda r: (r['priority'], r['request_id']))
+
+        # goals lookup: unit_type_id -> sorted goal list
+        goals_by_unit = {}
+        for g in active_goals:
+            goals_by_unit.setdefault(g['unit_type_id'], []).append(g)
+
+        buildings_recruited = 0
+        total_placed = 0
+
+        for b in all_buildings:
+            if b['is_busy']:
                 continue
             cid = b['city_id']
-            pos = b['building_position']
-            _, city_data = city_data_cache.get(cid, (None, {}))
-            for slot in city_data.get('position', []):
-                if slot.get('position') == pos:
-                    b['is_busy'] = bool(slot.get('isBusy', False))
-                    eta = slot.get('completed')
-                    try:
-                        b['queue_remaining_time'] = max(0, int(eta) - int(time.time())) if eta else 0
-                    except (TypeError, ValueError):
-                        b['queue_remaining_time'] = 0
+            if cid not in city_resources:
+                continue
+            key = (cid, b['building_position'])
+
+            # Lazy-load unit_data for this building (cached across cycles)
+            if key not in bld_unit_data_cache:
+                bld_data = fetch_building_data(session, b, is_units)
+                if not bld_data or not bld_data.get('unit_data'):
+                    continue
+                bld_unit_data_cache[key] = bld_data['unit_data']
+
+            unit_data = bld_unit_data_cache[key]
+
+            # Pick highest-priority goal this building can train
+            chosen_goal = None
+            chosen_uid = None
+            for g in active_goals:
+                if g['unit_type_id'] in unit_data:
+                    chosen_goal = g
+                    chosen_uid = g['unit_type_id']
                     break
 
-        # --- Sort buildings by priority ---
-        active_buildings = [
-            b for b in distribution
-            if b.get('remaining_assignments') and b['city_id'] in city_resources
-        ]
-        active_buildings.sort(
-            key=lambda b: priority_map.get((b['city_id'], b['building_position']), 9999)
-        )
-
-        # --- Determine what to recruit this cycle ---
-        buildings_to_recruit = []
-        total_can_recruit = 0
-        total_remaining = sum(sum(b.get('remaining_assignments', {}).values()) for b in distribution)
-
-        for b in active_buildings:
-            remaining = b.get('remaining_assignments', {})
-            if not remaining or b.get('is_busy', False):
+            if chosen_goal is None:
                 continue
 
-            cid = b['city_id']
-            avail = city_resources[cid].copy()
-            bldg_total = sum(remaining.values())
-            threshold = max(1, int(bldg_total * 0.20))
+            ud = unit_data[chosen_uid]
+            res = city_resources[cid]
+            qty_needed = chosen_goal['qty_remaining']
+            threshold = max(1, int(qty_needed * 0.20))
 
-            can_recruit = {}
-            cycle_total = 0
+            # Calculate max affordable quantity
+            max_p = qty_needed
+            for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
+                cost = ud.get(res_key, 0)
+                if cost > 0:
+                    max_p = min(max_p, res[res_key] // cost)
 
-            for uid, qty_needed in remaining.items():
-                ud = b.get('unit_data', {}).get(uid)
-                if ud is None:
-                    continue
-                max_p = qty_needed
-                for res_key, avail_key in (
-                    ('citizens','citizens'), ('wood','wood'), ('wine','wine'),
-                    ('marble','marble'), ('crystal','crystal'), ('sulfur','sulfur'),
-                ):
-                    cost = ud.get(res_key, 0)
-                    if cost > 0:
-                        max_p = min(max_p, avail[avail_key] // cost)
+            if max_p < threshold:
+                continue
 
-                if max_p > 0:
-                    can_recruit[uid] = max_p
-                    cycle_total += max_p
-                    for res_key in ('citizens','wood','wine','marble','crystal','sulfur'):
-                        avail[res_key] -= ud.get(res_key, 0) * max_p
+            # Reserve resources with RRS before POSTing
+            reservation_ids = []
+            if RRS_AVAILABLE:
+                for res_idx, res_key in enumerate(('wood','wine','marble','crystal','sulfur')):
+                    cost = ud.get(res_key, 0) * max_p
+                    if cost <= 0:
+                        continue
+                    rid = rrs_reserve(
+                        session, city_id=cid, city_name=b['city_name'],
+                        resource_index=res_idx, amount=cost,
+                        module_name=MODULE_NAME,
+                        reason=f"Recruit {ud.get('name', chosen_uid)} x{max_p}",
+                        release_at=time.time() + 300,
+                    )
+                    if rid:
+                        reservation_ids.append(rid)
 
-            if cycle_total >= threshold:
-                # Commit deduction to shared city pool
-                for uid, qty in can_recruit.items():
-                    ud = b['unit_data'][uid]
-                    for res_key in ('citizens','wood','wine','marble','crystal','sulfur'):
-                        city_resources[cid][res_key] -= ud.get(res_key, 0) * qty
+            action_code = _fetch_fresh_action_code(session, b, is_units)
+            if not action_code:
+                if RRS_AVAILABLE:
+                    for rid in reservation_ids:
+                        rrs_release(session, rid, MODULE_NAME)
+                continue
 
-                buildings_to_recruit.append({
-                    'building':  b,
-                    'to_recruit': can_recruit,
-                    'cycle_total': cycle_total,
-                    'bldg_total':  bldg_total,
-                })
-                total_can_recruit += cycle_total
+            params = {
+                'action':        'BuildUnits',
+                'actionRequest': action_code,
+                'cityId':        cid,
+                'position':      b['building_position'],
+                str(chosen_uid): max_p,
+            }
 
-        # --- Handle resource import if enabled and nothing can be recruited ---
-        if not buildings_to_recruit and cfg.get("resource_import_enabled"):
+            try:
+                session.post(params=params)
+                unit_name = ud.get('name', str(chosen_uid))
+                print(f"  {b['city_name']} L{b['building_level']}: "
+                      f"Placed {max_p:,} {unit_name} "
+                      f"(goal #{chosen_goal['request_id']})")
+
+                # Decrement the goals CSV
+                recruit_csv_deduct(session, is_units, chosen_goal['request_id'], max_p)
+
+                # Deduct from city resource pool to prevent double-spend this cycle
+                for res_key in ('citizens','wood','wine','marble','crystal','sulfur'):
+                    city_resources[cid][res_key] = max(
+                        0, city_resources[cid][res_key] - ud.get(res_key, 0) * max_p
+                    )
+
+                # Mark building as busy so later buildings in this cycle skip it
+                b['is_busy'] = True
+                bld_was_busy[key] = True
+
+                if RRS_AVAILABLE:
+                    for rid in reservation_ids:
+                        rrs_release(session, rid, MODULE_NAME)
+
+                buildings_recruited += 1
+                total_placed += max_p
+                last_order_time = time.time()
+                stall_warned = False
+
+                # Reload goals to reflect the deduction for subsequent buildings
+                all_rows = recruit_csv_load(session, is_units)
+                active_goals = [r for r in all_rows
+                                if r["status"] == "active" and r["qty_remaining"] > 0]
+                active_goals.sort(key=lambda r: (r['priority'], r['request_id']))
+                goals_by_unit = {}
+                for g in active_goals:
+                    goals_by_unit.setdefault(g['unit_type_id'], []).append(g)
+
+            except Exception as e:
+                print(f"  {b['city_name']}: POST failed — {e}")
+                if RRS_AVAILABLE:
+                    for rid in reservation_ids:
+                        rrs_release(session, rid, MODULE_NAME)
+
+        # --- Resource import if nothing was placed this cycle ---
+        if buildings_recruited == 0 and cfg.get("resource_import_enabled"):
             now_ts = int(time.time())
-            for b in active_buildings:
-                if b.get('is_busy'):
+            for b in all_buildings:
+                if b['is_busy']:
                     continue
                 cid = b['city_id']
                 if now_ts - import_requested_at.get(cid, 0) < IMPORT_COOLDOWN_SECS:
                     continue
-                # Calculate deficit for this city
+                key = (cid, b['building_position'])
+                unit_data = bld_unit_data_cache.get(key, {})
                 deficit = [0, 0, 0, 0, 0]
-                for uid, qty in b.get('remaining_assignments', {}).items():
-                    ud = b.get('unit_data', {}).get(uid, {})
-                    for i, key in enumerate(('wood','wine','marble','crystal','sulfur')):
-                        cost = ud.get(key, 0) * qty
-                        have = city_resources.get(cid, {}).get(key, 0)
+                for uid, ud in unit_data.items():
+                    if uid not in goals_by_unit:
+                        continue
+                    goal = goals_by_unit[uid][0]
+                    qty = goal['qty_remaining']
+                    for i, res_key in enumerate(('wood','wine','marble','crystal','sulfur')):
+                        cost = ud.get(res_key, 0) * qty
+                        have = city_resources.get(cid, {}).get(res_key, 0)
                         deficit[i] = max(deficit[i], max(0, cost - have))
                 if any(d > 0 for d in deficit):
                     requests = _request_resource_import(
@@ -2012,151 +2035,50 @@ def execute_recruitment_loop(session, distribution, recruitment_order, cities,
                     )
                     if requests:
                         import_requested_at[cid] = now_ts
-                        msg = f"Resource import requested for {b['city_name']}:\n" + "\n".join(f"  {r}" for r in requests)
+                        msg = (f"Resource import requested for {b['city_name']}:\n"
+                               + "\n".join(f"  {r}" for r in requests))
                         sendToBot(session, msg)
 
-        # --- Wait if nothing to recruit ---
-        if not buildings_to_recruit:
-            any_busy = any(b.get('is_busy') for b in active_buildings if b.get('remaining_assignments'))
+        # --- Status line and periodic report ---
+        any_busy = any(b['is_busy'] for b in all_buildings)
+        total_remaining = sum(r['qty_remaining'] for r in active_goals)
 
-            soonest_queue = None
-            for b in active_buildings:
-                qt = b.get('queue_remaining_time', 0)
-                if b.get('is_busy') and qt > 0:
-                    soonest_queue = min(soonest_queue or qt, qt)
+        if buildings_recruited > 0:
+            label = f"Placed {total_placed:,} units this cycle"
+        elif any_busy:
+            label = "Waiting for building queues..."
+        else:
+            label = "Waiting for resources..."
 
-            if any_busy:
-                # Wake up just after the soonest queue finishes; cap at 30 min
-                sleep_secs = min((soonest_queue + 30) if soonest_queue else 300, 1800)
-            else:
-                # Resource shortage: honour RRS retry_hours if available
-                if RRS_AVAILABLE:
-                    retry_secs = int(rrs_get_config(session)["retry_hours"] * 3600)
-                else:
-                    retry_secs = 300
-                sleep_secs = min(retry_secs, 1800)
-
-            label = "Waiting for queues..." if any_busy else "Waiting for resources..."
-            session.setStatus(f"{label} {total_remaining:,} units remaining")
-            cfg = _maybe_send_report(session, is_units, cfg)
-            wait(sleep_secs)
-            continue
-
-        # --- Execute recruitment ---
-        session.setStatus(f"Recruiting {total_can_recruit:,}/{total_remaining:,} units...")
-
-        for info in buildings_to_recruit:
-            b = info['building']
-            to_recruit = info['to_recruit']
-            cid = b['city_id']
-            pos = b['building_position']
-
-            action_code = _fetch_fresh_action_code(session, b, is_units)
-            if not action_code:
-                print(f"  {b['city_name']}: Failed to get action code, skipping")
-                continue
-
-            # --- Reserve resources with RRS before touching city stocks ---
-            # release_at gives the game 5 minutes to process the POST;
-            # release_all_for_module in the finally block covers any edge case.
-            reservation_ids = []
-            if RRS_AVAILABLE:
-                _RES_KEYS = ('wood', 'wine', 'marble', 'crystal', 'sulfur')
-                for uid, qty in to_recruit.items():
-                    ud = b.get('unit_data', {}).get(uid, {})
-                    unit_label = ud.get('name', str(uid))
-                    for res_idx, res_key in enumerate(_RES_KEYS):
-                        cost = ud.get(res_key, 0) * qty
-                        if cost <= 0:
-                            continue
-                        rid = rrs_reserve(
-                            session,
-                            city_id=cid,
-                            city_name=b['city_name'],
-                            resource_index=res_idx,
-                            amount=cost,
-                            module_name=MODULE_NAME,
-                            reason=f"Recruit {unit_label} x{qty}",
-                            release_at=time.time() + 300,
-                        )
-                        if rid:
-                            reservation_ids.append(rid)
-
-            params = {
-                'action':        'BuildUnits',
-                'actionRequest': action_code,
-                'cityId':        cid,
-                'position':      pos,
-            }
-            for uid, qty in to_recruit.items():
-                params[str(uid)] = qty
-
-            try:
-                session.post(params=params)
-                placed = sum(to_recruit.values())
-                pct = placed / info['bldg_total'] * 100
-                print(f"  {b['city_name']} L{b['building_level']}: "
-                      f"Placed {placed:,} units ({pct:.0f}% of remaining)")
-
-                # Resources consumed by the game — release reservations
-                if RRS_AVAILABLE:
-                    for rid in reservation_ids:
-                        result = rrs_release(session, rid, MODULE_NAME)
-                        # True = released OK, False = already expired (fine)
-                        if result is None:
-                            print(f"  RRS warning: reservation {rid} not owned by "
-                                  f"{MODULE_NAME} — possible state inconsistency")
-
-                # Update in-memory remaining
-                for uid, qty in to_recruit.items():
-                    b['remaining_assignments'][uid] = max(
-                        0, b['remaining_assignments'].get(uid, 0) - qty
-                    )
-                    if b['remaining_assignments'][uid] == 0:
-                        del b['remaining_assignments'][uid]
-
-                # Persist to CSV — mark as ordered once qty_remaining hits 0
-                now_ts = int(time.time())
-                updated_rows = csv_load_orders(session, is_units)
-                for r in updated_rows:
-                    if r['city_id'] != cid or r['building_position'] != pos:
-                        continue
-                    uid = r['unit_type_id']
-                    if uid not in to_recruit:
-                        continue
-                    new_remaining = max(0, r['qty_remaining'] - to_recruit[uid])
-                    new_status = "ordered" if new_remaining == 0 else "partial"
-                    r['qty_remaining'] = new_remaining
-                    r['status'] = new_status
-                    r['last_updated'] = now_ts
-                csv_save_orders(session, is_units, updated_rows)
-                last_order_time = time.time()
-                stall_warned    = False
-
-            except Exception as e:
-                print(f"  {b['city_name']}: POST failed — {e}")
-                # POST failed — release reservations so resources aren't locked
-                if RRS_AVAILABLE:
-                    for rid in reservation_ids:
-                        rrs_release(session, rid, MODULE_NAME)
-
-        # Interruptible sleep — wake flag or stop_event exits early
-        _wait_or_wake(session, is_units, stop_event, 30)
-
-        # Renew worker-lock heartbeat so _is_worker_running stays True
-        _renew_worker_lock(session, is_units)
-
+        session.setStatus(
+            f"Auto Recruitment: {label}  |  {total_remaining:,} remaining")
         cfg = _maybe_send_report(session, is_units, cfg)
 
-        # Stall guard: if no order has been placed in STALL_WARN_SECS, warn once
+        # Stall guard: warn after 24 h with no successful order
         if not stall_warned and (time.time() - last_order_time) >= STALL_WARN_SECS:
             stall_warned = True
             sendToBot(
                 session,
-                f"Auto Recruitment Manager: no units ordered in the last 24 h.\n"
-                f"Check that buildings are reachable and resources are available.\n"
-                f"Use the queue manager to cancel orders if needed.",
+                "Auto Recruitment Manager: no units ordered in the last 24 h.\n"
+                "Check that buildings are reachable and resources are available.\n"
+                "Use the queue manager to cancel orders if needed.",
             )
+
+        # --- Sleep duration ---
+        if any_busy:
+            soonest = None
+            for b in all_buildings:
+                qt = b.get('queue_remaining_time', 0)
+                if b['is_busy'] and qt > 0:
+                    soonest = min(soonest if soonest is not None else qt, qt)
+            sleep_secs = min((soonest + 30) if soonest is not None else 300, 1800)
+        elif RRS_AVAILABLE:
+            sleep_secs = min(int(rrs_get_config(session)["retry_hours"] * 3600), 1800)
+        else:
+            sleep_secs = 300
+
+        _wait_or_wake(session, is_units, stop_event, sleep_secs)
+        _renew_worker_lock(session, is_units)
 
 
 # =============================================================================
@@ -2196,12 +2118,11 @@ def _activate_worker(session, event, is_units):
         pass
     _consume_wake_flag(session, is_units)
 
-    saved_rows = csv_load_orders(session, is_units)
-    distribution, recruitment_order = _load_distribution_from_csv(session, is_units, saved_rows)
+    all_rows = recruit_csv_load(session, is_units)
     cfg = load_config(session)
 
-    total_rem = sum(r["qty_remaining"] for r in saved_rows
-                    if r["status"] in ("pending", "partial"))
+    total_rem = sum(r["qty_remaining"] for r in all_rows
+                    if r["status"] == "active" and r["qty_remaining"] > 0)
     unit_type_str = "units" if is_units else "ships"
     info = f"\nAuto Recruitment Manager ({unit_type_str}): {total_rem:,} remaining\n"
 
@@ -2212,11 +2133,7 @@ def _activate_worker(session, event, is_units):
 
     stop_event = threading.Event()
     try:
-        execute_recruitment_loop(
-            session, distribution, recruitment_order,
-            {}, is_units, {}, saved_rows, cfg,
-            stop_event=stop_event,
-        )
+        execute_recruitment_loop(session, is_units, cfg, stop_event=stop_event)
     except Exception:
         try:
             sendToBot(session, f"Auto Recruitment Manager crashed:\n{traceback.format_exc()}")
@@ -2335,7 +2252,7 @@ def _edit_queue_menu(session, is_units):
             return
         print()
         if choice == 1:
-            _remove_from_queue_ui(session, is_units)
+            _remove_goal_ui(session, is_units)
             enter()
         elif choice == 2:
             _adjust_priority_ui(session, is_units)
@@ -2383,15 +2300,16 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print()
                 print(f"  {_worker_status_line(session, is_units)}")
 
-                all_rows = csv_load_orders(session, is_units)
-                active = [r for r in all_rows if r["status"] in ("pending", "partial")]
+                all_rows = recruit_csv_load(session, is_units)
+                active = [r for r in all_rows
+                          if r["status"] == "active" and r["qty_remaining"] > 0]
                 if active:
                     total_rem = sum(r["qty_remaining"] for r in active)
-                    n_blds = len({(r["city_id"], r["building_position"]) for r in active})
-                    print(f"  Queue: {total_rem:,} {kind.lower()} remaining across "
-                          f"{n_blds} building(s)")
+                    n_goals = len(active)
+                    print(f"  Goals: {total_rem:,} {kind.lower()} remaining "
+                          f"across {n_goals} active goal(s)")
                 else:
-                    print(f"  Queue: empty")
+                    print(f"  Goals: empty")
                 print()
 
                 worker_running = _is_worker_running(session, is_units)
@@ -2404,15 +2322,17 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                       f"{bcolors.BOLD}(o){bcolors.ENDC} Stop worker   "
                       f"{bcolors.BOLD}(r){bcolors.ENDC} Force-check now")
                 print()
-                print("  (1) Add to queue")
-                print("  (2) View queue")
-                print("  (3) Edit queue  (remove / adjust priority)")
-                print("  (4) Send progress report now")
+                print("  (1) Add to goals")
+                print("  (2) View goals")
+                print("  (3) Building status  (what each building is doing)")
+                print("  (4) Edit goals  (remove / adjust priority)")
+                print("  (5) Send progress report now")
+                print("  (6) Refresh building list  (rescan after upgrades)")
                 print()
                 print("  (') Back to type selection")
                 print()
 
-                choice = read(msg="Select: ", min=1, max=4, digit=True,
+                choice = read(msg="Select: ", min=1, max=6, digit=True,
                               additionalValues=["'", "s", "S", "o", "O", "r", "R"])
 
                 if isinstance(choice, str):
@@ -2456,25 +2376,38 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
 
                     continue  # unrecognised letter
 
-                # Numeric options — load city list lazily
-                if cities_ids is None:
-                    cities_ids, cities = getIdsOfCities(session)
-
+                # Numeric options
                 if choice == 1:
-                    _add_to_queue_ui(session, is_units, cities_ids, cities)
+                    _add_to_goals_ui(session, is_units)
                     enter()
                 elif choice == 2:
                     banner()
                     _show_queue_status(session, is_units)
                     enter()
                 elif choice == 3:
-                    _edit_queue_menu(session, is_units)
+                    _view_building_status(session, is_units)
+                    enter()
                 elif choice == 4:
+                    _edit_queue_menu(session, is_units)
+                elif choice == 5:
                     try:
                         send_progress_report(session, is_units)
                         print(f"\n  {bcolors.GREEN}Progress report sent.{bcolors.ENDC}")
                     except Exception as e:
                         print(f"\n  {bcolors.RED}Failed to send report: {e}{bcolors.ENDC}")
+                    enter()
+                elif choice == 6:
+                    btype = "barracks" if is_units else "shipyards"
+                    print(f"\n  Scanning all {btype} across all cities...")
+                    _clear_buildings_cache(session, is_units)
+                    cids, cits = getIdsOfCities(session)
+                    fresh = _scan_buildings(session, is_units, list(cids), cits)
+                    if fresh:
+                        _save_buildings_cache(session, is_units, fresh)
+                        print(f"  {bcolors.GREEN}Found {len(fresh)} {btype}. "
+                              f"Cache updated.{bcolors.ENDC}")
+                    else:
+                        print(f"  {bcolors.WARNING}No {btype} found.{bcolors.ENDC}")
                     enter()
 
     except KeyboardInterrupt:
