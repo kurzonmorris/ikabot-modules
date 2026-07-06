@@ -1849,6 +1849,7 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     last_order_time = time.time()
     stall_warned = False
     STALL_WARN_SECS = 24 * 3600
+    idle_notified = False  # avoid spamming "all goals placed" each idle cycle
 
     while True:
         # --- Check stop flag ---
@@ -1866,9 +1867,19 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                         if r["status"] == "active" and r["qty_remaining"] > 0]
 
         if not active_goals:
-            session.setStatus("Auto Recruitment complete!")
-            sendToBot(session, "Auto Recruitment: all goals completed.")
-            break
+            # All goals placed — stay alive so new goals added to the CSV are
+            # picked up automatically without restarting the worker.
+            if not idle_notified:
+                session.setStatus("Auto Recruitment: all goals placed — idle")
+                sendToBot(session,
+                    "Auto Recruitment: all goals placed into build queue.\n"
+                    "Worker staying alive — add new goals or stop with (o).")
+                idle_notified = True
+            _wait_or_wake(session, is_units, stop_event, 300)
+            _renew_worker_lock(session, is_units)
+            continue
+
+        idle_notified = False  # reset when goals are present again
 
         # --- Per-city pass: resources + live slot data (one HTTP call per city) ---
         # Building positions come from the cache; we only need the slot map for
@@ -2006,8 +2017,11 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             qty_needed = chosen_goal['qty_remaining']
             threshold = max(1, int(qty_needed * 0.20))
 
-            # Calculate max affordable quantity
+            # Calculate max affordable quantity, capped by the building's slider max
+            max_buildable = ud.get('max_buildable', 0)
             max_p = qty_needed
+            if max_buildable > 0:
+                max_p = min(max_p, max_buildable)
             for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
                 cost = ud.get(res_key, 0)
                 if cost > 0:
