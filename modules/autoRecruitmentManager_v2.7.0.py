@@ -1532,23 +1532,35 @@ def _load_distribution_from_csv(session, is_units, rows):
 # =============================================================================
 
 def _show_queue_status(session, is_units):
-    """Print goals progress table."""
+    """Print goals progress table (active goals only)."""
     kind = "Units" if is_units else "Ships"
     rows = recruit_csv_load(session, is_units)
-    active = [r for r in rows if r["status"] in ("active", "completed")]
-    if not active:
+    active    = [r for r in rows if r["status"] == "active"]
+    completed = [r for r in rows if r["status"] == "completed"]
+
+    if not active and not completed:
         print(f"  No {kind.lower()} goals set.")
         return
 
-    print(f"  {'ID':>4}  {'Pri':>3}  {'Unit':<22}  {'Placed':>8}  {'Goal':>8}  {'%':>6}  Status")
+    if not active:
+        n = len(completed)
+        total = sum(r["qty_total"] for r in completed)
+        print(f"  All goals placed ({n} goal{'s' if n != 1 else ''}, "
+              f"{total:,} {kind.lower()} in build queue).")
+        return
+
+    print(f"  {'ID':>4}  {'Pri':>3}  {'Unit':<22}  {'Placed':>8}  {'Goal':>8}  {'%':>6}  {'':8}")
     print("  " + "-" * 68)
     for r in sorted(active, key=lambda x: (x["priority"], x["unit_name"])):
         placed = r["qty_total"] - r["qty_remaining"]
         pct = _pct(placed, r["qty_total"])
-        bar   = _ascii_bar(placed, r["qty_total"], 8)
-        done  = " DONE" if r["status"] == "completed" else ""
+        bar = _ascii_bar(placed, r["qty_total"], 8)
         print(f"  {r['request_id']:>4}  {r['priority']:>3}  {r['unit_name']:<22}  "
-              f"{placed:>8,}  {r['qty_total']:>8,}  {pct:>5}%  {bar}{done}")
+              f"{placed:>8,}  {r['qty_total']:>8,}  {pct:>5}%  {bar}")
+
+    if completed:
+        names = ", ".join(r["unit_name"] for r in completed)
+        print(f"\n  Completed: {names}")
 
 
 def _view_building_status(session, is_units):
