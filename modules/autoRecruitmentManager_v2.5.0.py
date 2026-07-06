@@ -1166,7 +1166,7 @@ def fetch_building_data(session, building_info, is_units=True):
     if not template_data:
         return None
 
-    slider_prefix = f"js_{view_name}Slider"
+    slider_prefix = "js_barracksSlider"  # game reuses this key name for shipyard too
     for key, value in template_data.items():
         if not key.startswith(slider_prefix) or not isinstance(value, dict):
             continue
