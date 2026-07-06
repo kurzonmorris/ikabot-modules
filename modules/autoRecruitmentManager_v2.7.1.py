@@ -18,10 +18,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.7.0
+Version: 2.7.1
 """
 
-MODULE_VERSION = "2.7.0"
+MODULE_VERSION = "2.7.1"
 
 import csv
 import glob
@@ -138,6 +138,22 @@ _OLD_CSV_SENTINEL = "batch_id"
 
 def _safe(value):
     return re.sub(r'[^\w.-]', '_', str(value))
+
+
+def _to_num(value):
+    """Coerce a game-supplied value to int/float. The Ikariam JSON sometimes
+    returns numeric fields as strings (e.g. '1000', '71.0'). Returns 0 on
+    anything unparseable so downstream arithmetic never crashes."""
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        s = str(value).replace(',', '').strip()
+        if s == "":
+            return 0
+        f = float(s)
+        return int(f) if f.is_integer() else f
+    except (ValueError, TypeError):
+        return 0
 
 
 def _account_suffix(session):
@@ -673,11 +689,17 @@ def _calculate_recruitment_eta(session, all_rows):
     except Exception:
         return None
 
-    # Scan buildings: collect citizens + spu per unit type, count buildings
-    # unit_stats[uid] = {'citizens': N, 'spu_sum': X, 'spu_count': N}
+    # Building count — use the cache so we get ALL buildings, not just the first
+    # city that happens to cover all needed unit types.
+    cached_blds = _load_buildings_cache(session, is_units)
+    num_buildings = len(cached_blds) if cached_blds else 0
+
+    # Scan buildings for unit stats (citizens + spu per unit type).
+    # We break early once every needed unit type has been sampled — that's fine
+    # for stats, because the same unit type has the same citizen cost everywhere
+    # and spu only varies with building level (averaged across sampled buildings).
     unit_stats = {}
     all_city_ids = set()
-    num_buildings = 0
 
     for cid in cities_ids:
         try:
@@ -700,7 +722,6 @@ def _calculate_recruitment_eta(session, all_rows):
                 if not data:
                     continue
                 all_city_ids.add(cid)
-                num_buildings += 1
                 for uid, ud in data.get("unit_data", {}).items():
                     if uid not in needed_uids:
                         continue
@@ -717,7 +738,7 @@ def _calculate_recruitment_eta(session, all_rows):
             except Exception:
                 pass
         if needed_uids <= set(unit_stats.keys()):
-            break  # have data for every unit type we need
+            break  # have cost/spu data for all needed unit types
 
     # --- Citizen bottleneck ---
     citizens_needed = sum(
@@ -1182,18 +1203,20 @@ def fetch_building_data(session, building_info, is_units=True):
             if not uid:
                 continue
             costs = cd.get('costs', {})
+            # The game returns some numeric fields as strings (e.g. max_value,
+            # and occasionally costs). Coerce everything used in arithmetic.
             result['unit_data'][uid] = {
                 'name':          cd.get('local_name', ''),
                 'identifier':    cd.get('identifier', ''),
-                'citizens':      costs.get('citizens', 0),
-                'wood':          costs.get('wood', 0),
-                'wine':          costs.get('wine', 0),
-                'marble':        costs.get('marble', 0),
-                'crystal':       costs.get('crystal', 0),
-                'sulfur':        costs.get('sulfur', 0),
-                'upkeep':        costs.get('upkeep', 0),
-                'time_seconds':  costs.get('completiontime', 0),
-                'max_buildable': slider_info.get('max_value', 0),
+                'citizens':      _to_num(costs.get('citizens', 0)),
+                'wood':          _to_num(costs.get('wood', 0)),
+                'wine':          _to_num(costs.get('wine', 0)),
+                'marble':        _to_num(costs.get('marble', 0)),
+                'crystal':       _to_num(costs.get('crystal', 0)),
+                'sulfur':        _to_num(costs.get('sulfur', 0)),
+                'upkeep':        _to_num(costs.get('upkeep', 0)),
+                'time_seconds':  _to_num(costs.get('completiontime', 0)),
+                'max_buildable': _to_num(slider_info.get('max_value', 0)),
             }
         except (json.JSONDecodeError, KeyError, TypeError):
             continue
@@ -1527,23 +1550,35 @@ def _load_distribution_from_csv(session, is_units, rows):
 # =============================================================================
 
 def _show_queue_status(session, is_units):
-    """Print goals progress table."""
+    """Print goals progress table (active goals only)."""
     kind = "Units" if is_units else "Ships"
     rows = recruit_csv_load(session, is_units)
-    active = [r for r in rows if r["status"] in ("active", "completed")]
-    if not active:
+    active    = [r for r in rows if r["status"] == "active"]
+    completed = [r for r in rows if r["status"] == "completed"]
+
+    if not active and not completed:
         print(f"  No {kind.lower()} goals set.")
         return
 
-    print(f"  {'ID':>4}  {'Pri':>3}  {'Unit':<22}  {'Placed':>8}  {'Goal':>8}  {'%':>6}  Status")
+    if not active:
+        n = len(completed)
+        total = sum(r["qty_total"] for r in completed)
+        print(f"  All goals placed ({n} goal{'s' if n != 1 else ''}, "
+              f"{total:,} {kind.lower()} in build queue).")
+        return
+
+    print(f"  {'ID':>4}  {'Pri':>3}  {'Unit':<22}  {'Placed':>8}  {'Goal':>8}  {'%':>6}  {'':8}")
     print("  " + "-" * 68)
     for r in sorted(active, key=lambda x: (x["priority"], x["unit_name"])):
         placed = r["qty_total"] - r["qty_remaining"]
         pct = _pct(placed, r["qty_total"])
-        bar   = _ascii_bar(placed, r["qty_total"], 8)
-        done  = " DONE" if r["status"] == "completed" else ""
+        bar = _ascii_bar(placed, r["qty_total"], 8)
         print(f"  {r['request_id']:>4}  {r['priority']:>3}  {r['unit_name']:<22}  "
-              f"{placed:>8,}  {r['qty_total']:>8,}  {pct:>5}%  {bar}{done}")
+              f"{placed:>8,}  {r['qty_total']:>8,}  {pct:>5}%  {bar}")
+
+    if completed:
+        names = ", ".join(r["unit_name"] for r in completed)
+        print(f"\n  Completed: {names}")
 
 
 def _view_building_status(session, is_units):
