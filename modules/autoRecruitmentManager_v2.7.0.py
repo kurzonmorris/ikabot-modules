@@ -673,11 +673,17 @@ def _calculate_recruitment_eta(session, all_rows):
     except Exception:
         return None
 
-    # Scan buildings: collect citizens + spu per unit type, count buildings
-    # unit_stats[uid] = {'citizens': N, 'spu_sum': X, 'spu_count': N}
+    # Building count — use the cache so we get ALL buildings, not just the first
+    # city that happens to cover all needed unit types.
+    cached_blds = _load_buildings_cache(session, is_units)
+    num_buildings = len(cached_blds) if cached_blds else 0
+
+    # Scan buildings for unit stats (citizens + spu per unit type).
+    # We break early once every needed unit type has been sampled — that's fine
+    # for stats, because the same unit type has the same citizen cost everywhere
+    # and spu only varies with building level (averaged across sampled buildings).
     unit_stats = {}
     all_city_ids = set()
-    num_buildings = 0
 
     for cid in cities_ids:
         try:
@@ -700,7 +706,6 @@ def _calculate_recruitment_eta(session, all_rows):
                 if not data:
                     continue
                 all_city_ids.add(cid)
-                num_buildings += 1
                 for uid, ud in data.get("unit_data", {}).items():
                     if uid not in needed_uids:
                         continue
@@ -717,7 +722,7 @@ def _calculate_recruitment_eta(session, all_rows):
             except Exception:
                 pass
         if needed_uids <= set(unit_stats.keys()):
-            break  # have data for every unit type we need
+            break  # have cost/spu data for all needed unit types
 
     # --- Citizen bottleneck ---
     citizens_needed = sum(
