@@ -524,7 +524,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.2.0                 \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.2.1                 \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -4941,7 +4941,7 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
     html = session.get(city_url + dest_city_id)
     try:
         destination_city = getCity(html)
-    except (AttributeError, TypeError, KeyError):
+    except (AttributeError, TypeError, KeyError, RuntimeError):
         if should_notify(notif_config, "error"):
             sendToBot(session,
                       f"CONSOLIDATE ERROR\n"
@@ -4970,7 +4970,7 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
         html = session.get(city_url + str(cid))
         try:
             oc_fresh = getCity(html)
-        except (AttributeError, TypeError, KeyError):
+        except (AttributeError, TypeError, KeyError, RuntimeError):
             continue
 
         toSend = [0] * len(materials_names)
@@ -5005,8 +5005,11 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                     (oc_fresh["name"], destination_city["name"], toSend))
             elif result["success"]:
                 cycle_sent += 1
-                html = session.get(city_url + dest_city_id)
-                destination_city = getCity(html)
+                try:
+                    html = session.get(city_url + dest_city_id)
+                    destination_city = getCity(html)
+                except (AttributeError, TypeError, KeyError, RuntimeError):
+                    pass  # keep previous data; send_shipment re-verifies
             if result.get("shortfalls"):
                 exhaustion_log.append(
                     (oc_fresh["name"], destination_city["name"],
@@ -5050,7 +5053,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
         html = session.get(city_url + str(dcid))
         try:
             dest_city = getCity(html)
-        except (AttributeError, TypeError, KeyError):
+        except (AttributeError, TypeError, KeyError, RuntimeError):
             continue
         dest_island = _get_island_cached(session, island_id=dest_city["islandId"])
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
@@ -5058,7 +5061,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
         html = session.get(city_url + src_city_id)
         try:
             origin_city = getCity(html)
-        except (AttributeError, TypeError, KeyError):
+        except (AttributeError, TypeError, KeyError, RuntimeError):
             return cycle_sent
 
         toSend = [0] * len(materials_names)
@@ -5140,7 +5143,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
         html = session.get(city_url + dcid_str)
         try:
             dest_fresh = getCity(html)
-        except (AttributeError, TypeError, KeyError):
+        except (AttributeError, TypeError, KeyError, RuntimeError):
             continue
         dest_island = _get_island_cached(session, island_id=dest_fresh["islandId"])
         coords = f"[{dest_island['x']}:{dest_island['y']}]"
@@ -5169,7 +5172,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
             html = session.get(city_url + cid_str)
             try:
                 src_fresh = getCity(html)
-            except (AttributeError, TypeError, KeyError):
+            except (AttributeError, TypeError, KeyError, RuntimeError):
                 continue
             reserves = source_reserves.get(cid_str, [0] * len(materials_names))
             to_send = [0] * len(materials_names)
@@ -5197,7 +5200,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                     try:
                         html = session.get(city_url + dcid_str)
                         dest_fresh = getCity(html)
-                    except (AttributeError, TypeError, KeyError):
+                    except (AttributeError, TypeError, KeyError, RuntimeError):
                         break
                 if result.get("shortfalls"):
                     exhaustion_log.append(
@@ -5235,7 +5238,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
         html = session.get(city_url + str(cid))
         try:
             all_cities.append(getCity(html))
-        except (AttributeError, TypeError, KeyError):
+        except (AttributeError, TypeError, KeyError, RuntimeError):
             continue
 
     if not all_cities:
@@ -5351,7 +5354,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
     html = session.get(city_url + dest_city_id)
     try:
         destination_city = getCity(html)
-    except (AttributeError, TypeError, KeyError):
+    except (AttributeError, TypeError, KeyError, RuntimeError):
         return 0
     destination_island = _get_island_cached(session, island_id=destination_city["islandId"])
 
@@ -5373,7 +5376,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
             suppliers.append(sup)
             for i in range(len(materials_names)):
                 sup_totals[i] += sup["availableResources"][i]
-        except (AttributeError, TypeError, KeyError):
+        except (AttributeError, TypeError, KeyError, RuntimeError):
             continue
 
     if not suppliers:
@@ -5714,7 +5717,10 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
         has_except = any(m == "except" for m, _ in parsed_res)
         if has_except:
-            src_fresh = getCity(session.get(city_url + src_city_id))
+            try:
+                src_fresh = getCity(session.get(city_url + src_city_id))
+            except (AttributeError, TypeError, KeyError, RuntimeError):
+                return False, False, False  # row stays pending, next cycle retries
             raw_a = src_fresh.get("availableResources", [])
             if RRS_AVAILABLE:
                 adj_a = [
@@ -5729,7 +5735,10 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 None, csv_resource_cols,
             )
             dest_city_id = str(route[1]["id"])
-            dest_fresh = getCity(session.get(city_url + dest_city_id))
+            try:
+                dest_fresh = getCity(session.get(city_url + dest_city_id))
+            except (AttributeError, TypeError, KeyError, RuntimeError):
+                return False, False, False  # row stays pending, next cycle retries
             dest_space = dest_fresh.get(
                 "freeSpaceForResources", [0] * len(materials_names)
             )
