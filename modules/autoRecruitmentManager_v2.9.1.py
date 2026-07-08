@@ -11,17 +11,17 @@ Features:
 - Distribute recruitment across multiple buildings (speed-weighted, balanced)
 - Dynamic fetching of build times and costs (server-specific)
 - Priority queue: each order batch has an independent priority level
-- Resource shortage handling with 20% threshold batching
+- Resource shortage handling: each idle building places whatever it can afford
 - Busy building detection with smart wait / include options
 - CSV-backed persistence: survives crashes and restarts
 - Live queue management: add / remove units while running
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.7.1
+Version: 2.9.1
 """
 
-MODULE_VERSION = "2.7.1"
+MODULE_VERSION = "2.9.1"
 
 import csv
 import glob
@@ -593,10 +593,59 @@ def _pct(current, total):
     return f"{100 * current / total:.1f}"
 
 
+def _parse_growth_from_townhall(text):
+    """
+    Extract hourly citizen growth from a Town Hall response.
+
+    The growth value ONLY appears in the Town Hall popup HTML:
+      <li id="js_TownHallPopulationGrowth" class="growth_positive">
+        Growth: <span id="js_TownHallPopulationGrowthValue">59.49 </span> per Hour
+      </li>
+    The <li> class carries the sign (growth_negative when below zero); the
+    <span> holds the magnitude. Returns a float (0.0 is valid) or None.
+    """
+    # The town hall arrives as an ajax JSON envelope; json.loads decodes the
+    # escaped quotes back to real ones so the HTML regex below matches. Fall
+    # back to the raw text if it isn't JSON.
+    haystacks = []
+    try:
+        data = json.loads(text)
+        stack = [data]
+        while stack:
+            o = stack.pop()
+            if isinstance(o, str):
+                haystacks.append(o)
+            elif isinstance(o, dict):
+                stack.extend(o.values())
+            elif isinstance(o, list):
+                stack.extend(o)
+    except (ValueError, TypeError):
+        haystacks = [text]
+
+    for s in haystacks:
+        val_m = re.search(
+            r'id="js_TownHallPopulationGrowthValue"[^>]*>\s*([-\d.,]+)', s)
+        if not val_m:
+            continue
+        try:
+            magnitude = float(val_m.group(1).replace(',', ''))
+        except ValueError:
+            continue
+        sign_m = re.search(
+            r'id="js_TownHallPopulationGrowth"[^>]*class="([^"]*)"', s)
+        negative = bool(sign_m) and "growth_negative" in sign_m.group(1)
+        return -magnitude if negative else magnitude
+    return None
+
+
 def _fetch_citizen_growth(session, city_id):
     """
     Return (free_citizens, growth_per_hour) for a city.
-    growth_per_hour is None if the game does not expose it in a known field.
+
+    Free citizens come from the plain city view. The hourly growth rate is
+    NOT present there — it is rendered only inside the Town Hall popup — so we
+    open the Town Hall (always position 0, but resolved from city data to be
+    safe) and parse its HTML. growth_per_hour is None only if that fetch fails.
     """
     try:
         html = session.get(city_url + str(city_id))
@@ -609,49 +658,29 @@ def _fetch_citizen_growth(session, city_id):
                 free = int(m.group(1).replace(',', ''))
                 break
 
-        # Citizen growth rate — primary source: Town Hall population widget
-        # <li id="js_TownHallPopulationGrowth" class="growth_positive">
-        #   <span id="js_TownHallPopulationGrowthValue" class="green">59.49 </span>
-        # The li class tells us the sign; the span holds the magnitude.
-        growth = None
-        val_m  = re.search(r'id="js_TownHallPopulationGrowthValue"[^>]*>\s*([\d.]+)', html)
-        if val_m:
-            magnitude = float(val_m.group(1))
-            sign_m = re.search(r'id="js_TownHallPopulationGrowth"[^>]*class="([^"]*)"', html)
-            negative = sign_m and "growth_negative" in sign_m.group(1)
-            growth = -magnitude if negative else magnitude
-
-        # Fallback: generic JSON field names from the raw city data
-        if growth is None:
-            for pat in (
-                r'"citizensGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"citizenGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"citizensGrowthPerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"citizenIncreasePerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"populationGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"citizenIncrement"\s*:\s*(-?\d+(?:\.\d+)?)',
-            ):
-                m = re.search(pat, html)
-                if m:
-                    growth = float(m.group(1))
+        # Resolve the Town Hall position (it is position 0 in every city, but
+        # read it from the city data in case that ever changes).
+        th_pos = 0
+        try:
+            city_data = getCity(html)
+            for slot in city_data.get('position', []):
+                if slot.get('building') == 'townHall':
+                    th_pos = slot.get('position', 0)
                     break
+        except Exception:
+            pass
 
-        # Also try the updateGlobalData AJAX endpoint
-        if growth is None:
-            try:
-                data = session.get("view=updateGlobalData&ajax=1", noIndex=True)
-                hd = json.loads(data, strict=False)[0][1]["headerData"]
-                for field in ("citizensGrowth", "citizenGrowth",
-                              "citizensGrowthPerHour", "citizenIncreasePerHour",
-                              "citizenIncrement", "populationGrowth"):
-                    if field in hd:
-                        growth = float(hd[field])
-                        break
-                    if field in hd.get("currentResources", {}):
-                        growth = float(hd["currentResources"][field])
-                        break
-            except Exception:
-                pass
+        # Open the Town Hall popup (ajax) and parse the growth value from it.
+        growth = None
+        try:
+            params = (
+                f"view=townHall&cityId={city_id}&position={th_pos}"
+                f"&backgroundView=city&currentCityId={city_id}&ajax=1"
+            )
+            resp = session.post(params)
+            growth = _parse_growth_from_townhall(resp)
+        except Exception:
+            growth = None
 
         return free, growth
     except Exception:
@@ -746,18 +775,32 @@ def _calculate_recruitment_eta(session, all_rows):
         for r in active
     )
 
-    total_free     = 0
-    total_growth_ph = 0.0
-    growth_unknown  = False
+    total_free        = 0
+    known_growth_ph   = 0.0
+    growth_ok_count   = 0
+    growth_failed     = []  # city_ids whose growth couldn't be read
     city_ids_to_check = list(all_city_ids) or list(cities_ids)
 
     for cid in city_ids_to_check:
         free, growth = _fetch_citizen_growth(session, cid)
         total_free += free
         if growth is not None:
-            total_growth_ph += growth
+            known_growth_ph += growth
+            growth_ok_count += 1
         else:
-            growth_unknown = True
+            growth_failed.append(cid)
+
+    # Degrade gracefully: if SOME cities reported growth, estimate the total by
+    # scaling the known average across all cities rather than blanking the ETA.
+    # Only treat growth as fully unknown when EVERY city failed.
+    growth_unknown = (growth_ok_count == 0)
+    if growth_unknown:
+        total_growth_ph = 0.0
+    elif growth_failed:
+        avg = known_growth_ph / growth_ok_count
+        total_growth_ph = avg * len(city_ids_to_check)  # extrapolate missing
+    else:
+        total_growth_ph = known_growth_ph
 
     deficit = max(0, citizens_needed - total_free)
     citizen_wait_h = None
@@ -810,6 +853,8 @@ def _calculate_recruitment_eta(session, all_rows):
         "num_buildings":      num_buildings,
         "combined_eta_hours": combined_eta_h,
         "growth_unknown":     growth_unknown,
+        "growth_cities_ok":   growth_ok_count,
+        "growth_cities_failed": len(growth_failed),
         "build_unknown":      build_unknown,
     }
 
@@ -901,11 +946,14 @@ def _build_progress_report(all_rows, group_completed=False, eta=None):
             lines.append(f"  Citizens : {ca:,} available / {cn:,} needed"
                          + (f"  ({def_:,} short)" if def_ > 0 else "  [sufficient]"))
             if def_ > 0:
+                failed = eta.get("growth_cities_failed", 0)
+                partial = "  [partial: {} cit(y/ies) unread]".format(failed) if failed else ""
                 if eta.get("growth_unknown"):
-                    lines.append("  Cit. wait: unknown (growth rate unavailable)")
+                    lines.append("  Cit. wait: unknown (growth rate unavailable"
+                                 " — could not read any Town Hall)")
                 elif gph and gph > 0:
                     lines.append(f"  Cit. wait: ~{_format_hours(cw_h)}"
-                                 f"  (growth ~{gph:,.0f}/hr)")
+                                 f"  (growth ~{gph:,.0f}/hr){partial}")
                 else:
                     lines.append("  Cit. wait: unknown (growth rate is 0)")
             else:
@@ -944,9 +992,13 @@ def send_progress_report(session, is_units, group_completed=False):
     if not all_rows:
         return
 
+    # ETA must be single-type: it scans one building type, so mixing unit and
+    # ship goals would corrupt the citizen/build-time maths. Scope it to the
+    # worker's own type (the one whose rows we can actually cost out).
     eta = None
     try:
-        eta = _calculate_recruitment_eta(session, all_rows)
+        eta_rows = [r for r in all_rows if r["is_units"] == is_units]
+        eta = _calculate_recruitment_eta(session, eta_rows)
     except Exception:
         pass
 
@@ -1630,8 +1682,16 @@ def _view_building_status(session, is_units):
         if not city_buildings:
             continue
 
+        # Citizen growth diagnostic (read from the Town Hall). Shows whether
+        # growth is readable per city so a failing city is easy to spot.
+        free_cit, growth = _fetch_citizen_growth(session, cid)
+        if growth is None:
+            growth_str = f"{bcolors.RED}growth: unreadable{bcolors.ENDC}"
+        else:
+            growth_str = f"growth: {growth:+.2f}/hr"
         print(f"  {bcolors.BOLD}{city_name}{bcolors.ENDC} "
-              f"({len(city_buildings)} {building_type})")
+              f"({len(city_buildings)} {building_type})  |  "
+              f"{free_cit:,} free citizens, {growth_str}")
 
         for b in sorted(city_buildings, key=lambda x: -x['building_level']):
             total_buildings += 1
@@ -1667,7 +1727,7 @@ def _view_building_status(session, is_units):
         total_rem = sum(g["qty_remaining"] for g in goals)
         print(f"  Goals remaining: {total_rem:,} units across {len(goals)} goal(s)")
     else:
-        print(f"  No active goals — add some with (1) Add to queue")
+        print(f"  No active goals — add some with (1) Add to goals")
 
 
 def _add_to_goals_ui(session, is_units):
@@ -1849,12 +1909,13 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     1. Reload goals CSV — picks up any live changes
     2. Per-city pass: fetch resources + enumerate all barracks/shipyards
     3. For each idle building: match the highest-priority active goal that
-       this building can train, calculate affordable quantity (>= 20% threshold),
+       this building can train, calculate affordable quantity (>= 1 unit),
        POST BuildUnits, then decrement the goals CSV
     4. Request resource imports if enabled and nothing could be placed
     5. Sleep (interruptible by wake flag or stop_event)
     """
     building_type = "barracks" if is_units else "shipyard"
+    building_noun = "units" if is_units else "ships"
 
     # Fetch city list once — cities rarely change mid-session
     cities_ids, cities = getIdsOfCities(session)
@@ -1885,6 +1946,10 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     stall_warned = False
     STALL_WARN_SECS = 24 * 3600
     idle_notified = False  # avoid spamming "all goals placed" each idle cycle
+    first_report_sent = False  # hold the very first report until troops are
+                               # ordered — a maxed-out city reads 0 growth until
+                               # production starts consuming its population, so
+                               # the first ETA must be taken AFTER ordering.
 
     while True:
         # --- Check stop flag ---
@@ -2034,35 +2099,41 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                 bld_unit_data_cache[key] = bld_data['unit_data']
 
             unit_data = bld_unit_data_cache[key]
+            res = city_resources[cid]
 
-            # Pick highest-priority goal this building can train
+            # Walk goals in priority order and build the FIRST one this building
+            # can both train AND currently afford (>= 1 unit). Falling through to
+            # a lower-priority affordable goal keeps the building working when the
+            # top-priority goal is momentarily unaffordable (no citizens / short
+            # on a resource) instead of leaving it idle.
             chosen_goal = None
             chosen_uid = None
+            ud = None
+            max_p = 0
             for g in active_goals:
-                if g['unit_type_id'] in unit_data:
+                uid = g['unit_type_id']
+                if uid not in unit_data:
+                    continue
+                cand = unit_data[uid]
+
+                # Max affordable, capped by the building's slider max and the goal
+                cap = g['qty_remaining']
+                mb = cand.get('max_buildable', 0)
+                if mb > 0:
+                    cap = min(cap, mb)
+                for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
+                    cost = cand.get(res_key, 0)
+                    if cost > 0:
+                        cap = min(cap, res[res_key] // cost)
+
+                if cap >= 1:
                     chosen_goal = g
-                    chosen_uid = g['unit_type_id']
+                    chosen_uid = uid
+                    ud = cand
+                    max_p = cap
                     break
 
             if chosen_goal is None:
-                continue
-
-            ud = unit_data[chosen_uid]
-            res = city_resources[cid]
-            qty_needed = chosen_goal['qty_remaining']
-            threshold = max(1, int(qty_needed * 0.20))
-
-            # Calculate max affordable quantity, capped by the building's slider max
-            max_buildable = ud.get('max_buildable', 0)
-            max_p = qty_needed
-            if max_buildable > 0:
-                max_p = min(max_p, max_buildable)
-            for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
-                cost = ud.get(res_key, 0)
-                if cost > 0:
-                    max_p = min(max_p, res[res_key] // cost)
-
-            if max_p < threshold:
                 continue
 
             # Reserve resources with RRS before POSTing
@@ -2177,7 +2248,7 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
         total_remaining = sum(r['qty_remaining'] for r in active_goals)
 
         if buildings_recruited > 0:
-            label = f"Placed {total_placed:,} units this cycle"
+            label = f"Placed {total_placed:,} {building_noun} this cycle"
         elif any_busy:
             label = "Waiting for building queues..."
         else:
@@ -2185,7 +2256,30 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
 
         session.setStatus(
             f"Auto Recruitment: {label}  |  {total_remaining:,} remaining")
-        cfg = _maybe_send_report(session, is_units, cfg)
+
+        # First report: wait until troops have actually been ordered across the
+        # cities. Ordering frees population in maxed-out cities, so the growth
+        # rate read now reflects reality instead of a misleading 0/hr. After
+        # this one, fall back to the normal interval-based reporting.
+        if not first_report_sent:
+            if buildings_recruited > 0:
+                if cfg.get("report_enabled"):
+                    try:
+                        send_progress_report(
+                            session, is_units,
+                            group_completed=cfg.get("report_group_completed", False),
+                        )
+                    except Exception:
+                        pass
+                    cfg["last_report_time"] = int(time.time())
+                    try:
+                        save_config(session, cfg)
+                    except Exception:
+                        pass
+                first_report_sent = True
+            # else: nothing ordered yet — hold the first report back.
+        else:
+            cfg = _maybe_send_report(session, is_units, cfg)
 
         # Stall guard: warn after 24 h with no successful order
         if not stall_warned and (time.time() - last_order_time) >= STALL_WARN_SECS:
@@ -2223,8 +2317,8 @@ def _activate_worker(session, event, is_units):
     kind = "units" if is_units else "ships"
 
     if not csv_has_active_orders(session, is_units):
-        print(f"\n  {bcolors.WARNING}No pending {kind} orders in the queue.{bcolors.ENDC}")
-        print(f"  Add orders first using option (1).")
+        print(f"\n  {bcolors.WARNING}No active {kind} goals to work on.{bcolors.ENDC}")
+        print(f"  Add goals first using option (1).")
         enter()
         return False  # caller stays in menu
 
@@ -2292,16 +2386,20 @@ def _activate_worker(session, event, is_units):
 
 
 def _stop_worker_cmd(session, is_units):
-    """Touch stop flag so the running loop exits at its next cycle."""
+    """Touch stop flag so the running loop exits, and wake it from any sleep."""
     kind = "units" if is_units else "ships"
     if not _is_worker_running(session, is_units):
         print(f"\n  {bcolors.WARNING}No {kind} worker appears to be running.{bcolors.ENDC}")
         enter()
         return
     pathlib.Path(_stop_flag_path(session)).touch()
+    # Wake the worker so it doesn't wait out a long sleep (up to 30 min)
+    # before noticing the stop flag at the top of its next cycle.
+    _touch_wake_flag(session, is_units)
     print(
         f"\n  {bcolors.GREEN}Stop signal sent.{bcolors.ENDC} "
-        f"The worker will exit within {WORKER_LOCK_STALE_SECONDS} s."
+        f"The worker will finish its current step and exit within "
+        f"~{WAKE_POLL_SECONDS} s (a cycle already mid-fetch may take longer)."
     )
     enter()
 
@@ -2366,17 +2464,17 @@ def _setup_worker_config(session, is_units):
 
 
 def _edit_queue_menu(session, is_units):
-    """Sub-menu to remove units or adjust batch priority."""
+    """Sub-menu to remove a goal or adjust a goal's priority."""
     while True:
         banner()
         print("=" * 60)
-        print("  EDIT QUEUE")
+        print("  EDIT GOALS")
         print("=" * 60)
         print()
         _show_queue_status(session, is_units)
         print()
-        print("  (1) Remove / reduce units in queue")
-        print("  (2) Adjust batch priority")
+        print("  (1) Remove / reduce a goal")
+        print("  (2) Adjust a goal's priority")
         print()
         print("  (') Back")
         print()
@@ -2461,11 +2559,12 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print("  (4) Edit goals  (remove / adjust priority)")
                 print("  (5) Send progress report now")
                 print("  (6) Refresh building list  (rescan after upgrades)")
+                print("  (7) Worker settings  (reports / resource import)")
                 print()
                 print("  (') Back to type selection")
                 print()
 
-                choice = read(msg="Select: ", min=1, max=6, digit=True,
+                choice = read(msg="Select: ", min=1, max=7, digit=True,
                               additionalValues=["'", "s", "S", "o", "O", "r", "R"])
 
                 if isinstance(choice, str):
@@ -2474,8 +2573,10 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                         break  # back to outer (type-selection) loop
 
                     if letter == "s":
-                        cfg = load_config(session)
-                        if not cfg:
+                        # First run for this account: no config file yet, so ask
+                        # for reporting / import settings. load_config() always
+                        # returns defaults, so check the file itself.
+                        if not os.path.exists(_config_path(session)):
                             cfg = _setup_worker_config(session, is_units)
                             if cfg is None:
                                 continue  # user backed out of settings
@@ -2502,7 +2603,7 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                         else:
                             _touch_wake_flag(session, is_units)
                             print(f"\n  {bcolors.GREEN}Force-check signal sent.{bcolors.ENDC} "
-                                  f"The worker will scan for empty queues within "
+                                  f"The worker will re-check goals and buildings within "
                                   f"{WAKE_POLL_SECONDS} s.")
                             enter()
                         continue
@@ -2541,6 +2642,15 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                               f"Cache updated.{bcolors.ENDC}")
                     else:
                         print(f"  {bcolors.WARNING}No {btype} found.{bcolors.ENDC}")
+                    enter()
+                elif choice == 7:
+                    new_cfg = _setup_worker_config(session, is_units)
+                    if new_cfg is not None:
+                        save_config(session, new_cfg)
+                        print(f"\n  {bcolors.GREEN}Settings saved.{bcolors.ENDC}")
+                        if _is_worker_running(session, is_units):
+                            print("  A worker is running — restart it (o then s) "
+                                  "for changes to take effect.")
                     enter()
 
     except KeyboardInterrupt:
