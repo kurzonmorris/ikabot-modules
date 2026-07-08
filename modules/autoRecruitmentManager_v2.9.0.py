@@ -18,10 +18,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.8.0
+Version: 2.9.0
 """
 
-MODULE_VERSION = "2.8.0"
+MODULE_VERSION = "2.9.0"
 
 import csv
 import glob
@@ -593,10 +593,59 @@ def _pct(current, total):
     return f"{100 * current / total:.1f}"
 
 
+def _parse_growth_from_townhall(text):
+    """
+    Extract hourly citizen growth from a Town Hall response.
+
+    The growth value ONLY appears in the Town Hall popup HTML:
+      <li id="js_TownHallPopulationGrowth" class="growth_positive">
+        Growth: <span id="js_TownHallPopulationGrowthValue">59.49 </span> per Hour
+      </li>
+    The <li> class carries the sign (growth_negative when below zero); the
+    <span> holds the magnitude. Returns a float (0.0 is valid) or None.
+    """
+    # The town hall arrives as an ajax JSON envelope; json.loads decodes the
+    # escaped quotes back to real ones so the HTML regex below matches. Fall
+    # back to the raw text if it isn't JSON.
+    haystacks = []
+    try:
+        data = json.loads(text)
+        stack = [data]
+        while stack:
+            o = stack.pop()
+            if isinstance(o, str):
+                haystacks.append(o)
+            elif isinstance(o, dict):
+                stack.extend(o.values())
+            elif isinstance(o, list):
+                stack.extend(o)
+    except (ValueError, TypeError):
+        haystacks = [text]
+
+    for s in haystacks:
+        val_m = re.search(
+            r'id="js_TownHallPopulationGrowthValue"[^>]*>\s*([-\d.,]+)', s)
+        if not val_m:
+            continue
+        try:
+            magnitude = float(val_m.group(1).replace(',', ''))
+        except ValueError:
+            continue
+        sign_m = re.search(
+            r'id="js_TownHallPopulationGrowth"[^>]*class="([^"]*)"', s)
+        negative = bool(sign_m) and "growth_negative" in sign_m.group(1)
+        return -magnitude if negative else magnitude
+    return None
+
+
 def _fetch_citizen_growth(session, city_id):
     """
     Return (free_citizens, growth_per_hour) for a city.
-    growth_per_hour is None if the game does not expose it in a known field.
+
+    Free citizens come from the plain city view. The hourly growth rate is
+    NOT present there — it is rendered only inside the Town Hall popup — so we
+    open the Town Hall (always position 0, but resolved from city data to be
+    safe) and parse its HTML. growth_per_hour is None only if that fetch fails.
     """
     try:
         html = session.get(city_url + str(city_id))
@@ -609,49 +658,29 @@ def _fetch_citizen_growth(session, city_id):
                 free = int(m.group(1).replace(',', ''))
                 break
 
-        # Citizen growth rate — primary source: Town Hall population widget
-        # <li id="js_TownHallPopulationGrowth" class="growth_positive">
-        #   <span id="js_TownHallPopulationGrowthValue" class="green">59.49 </span>
-        # The li class tells us the sign; the span holds the magnitude.
-        growth = None
-        val_m  = re.search(r'id="js_TownHallPopulationGrowthValue"[^>]*>\s*([\d.]+)', html)
-        if val_m:
-            magnitude = float(val_m.group(1))
-            sign_m = re.search(r'id="js_TownHallPopulationGrowth"[^>]*class="([^"]*)"', html)
-            negative = sign_m and "growth_negative" in sign_m.group(1)
-            growth = -magnitude if negative else magnitude
-
-        # Fallback: generic JSON field names from the raw city data
-        if growth is None:
-            for pat in (
-                r'"citizensGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"citizenGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"citizensGrowthPerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"citizenIncreasePerHour"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"populationGrowth"\s*:\s*(-?\d+(?:\.\d+)?)',
-                r'"citizenIncrement"\s*:\s*(-?\d+(?:\.\d+)?)',
-            ):
-                m = re.search(pat, html)
-                if m:
-                    growth = float(m.group(1))
+        # Resolve the Town Hall position (it is position 0 in every city, but
+        # read it from the city data in case that ever changes).
+        th_pos = 0
+        try:
+            city_data = getCity(html)
+            for slot in city_data.get('position', []):
+                if slot.get('building') == 'townHall':
+                    th_pos = slot.get('position', 0)
                     break
+        except Exception:
+            pass
 
-        # Also try the updateGlobalData AJAX endpoint
-        if growth is None:
-            try:
-                data = session.get("view=updateGlobalData&ajax=1", noIndex=True)
-                hd = json.loads(data, strict=False)[0][1]["headerData"]
-                for field in ("citizensGrowth", "citizenGrowth",
-                              "citizensGrowthPerHour", "citizenIncreasePerHour",
-                              "citizenIncrement", "populationGrowth"):
-                    if field in hd:
-                        growth = float(hd[field])
-                        break
-                    if field in hd.get("currentResources", {}):
-                        growth = float(hd["currentResources"][field])
-                        break
-            except Exception:
-                pass
+        # Open the Town Hall popup (ajax) and parse the growth value from it.
+        growth = None
+        try:
+            params = (
+                f"view=townHall&cityId={city_id}&position={th_pos}"
+                f"&backgroundView=city&currentCityId={city_id}&ajax=1"
+            )
+            resp = session.post(params)
+            growth = _parse_growth_from_townhall(resp)
+        except Exception:
+            growth = None
 
         return free, growth
     except Exception:
@@ -746,18 +775,32 @@ def _calculate_recruitment_eta(session, all_rows):
         for r in active
     )
 
-    total_free     = 0
-    total_growth_ph = 0.0
-    growth_unknown  = False
+    total_free        = 0
+    known_growth_ph   = 0.0
+    growth_ok_count   = 0
+    growth_failed     = []  # city_ids whose growth couldn't be read
     city_ids_to_check = list(all_city_ids) or list(cities_ids)
 
     for cid in city_ids_to_check:
         free, growth = _fetch_citizen_growth(session, cid)
         total_free += free
         if growth is not None:
-            total_growth_ph += growth
+            known_growth_ph += growth
+            growth_ok_count += 1
         else:
-            growth_unknown = True
+            growth_failed.append(cid)
+
+    # Degrade gracefully: if SOME cities reported growth, estimate the total by
+    # scaling the known average across all cities rather than blanking the ETA.
+    # Only treat growth as fully unknown when EVERY city failed.
+    growth_unknown = (growth_ok_count == 0)
+    if growth_unknown:
+        total_growth_ph = 0.0
+    elif growth_failed:
+        avg = known_growth_ph / growth_ok_count
+        total_growth_ph = avg * len(city_ids_to_check)  # extrapolate missing
+    else:
+        total_growth_ph = known_growth_ph
 
     deficit = max(0, citizens_needed - total_free)
     citizen_wait_h = None
@@ -810,6 +853,8 @@ def _calculate_recruitment_eta(session, all_rows):
         "num_buildings":      num_buildings,
         "combined_eta_hours": combined_eta_h,
         "growth_unknown":     growth_unknown,
+        "growth_cities_ok":   growth_ok_count,
+        "growth_cities_failed": len(growth_failed),
         "build_unknown":      build_unknown,
     }
 
@@ -901,11 +946,14 @@ def _build_progress_report(all_rows, group_completed=False, eta=None):
             lines.append(f"  Citizens : {ca:,} available / {cn:,} needed"
                          + (f"  ({def_:,} short)" if def_ > 0 else "  [sufficient]"))
             if def_ > 0:
+                failed = eta.get("growth_cities_failed", 0)
+                partial = "  [partial: {} cit(y/ies) unread]".format(failed) if failed else ""
                 if eta.get("growth_unknown"):
-                    lines.append("  Cit. wait: unknown (growth rate unavailable)")
+                    lines.append("  Cit. wait: unknown (growth rate unavailable"
+                                 " — could not read any Town Hall)")
                 elif gph and gph > 0:
                     lines.append(f"  Cit. wait: ~{_format_hours(cw_h)}"
-                                 f"  (growth ~{gph:,.0f}/hr)")
+                                 f"  (growth ~{gph:,.0f}/hr){partial}")
                 else:
                     lines.append("  Cit. wait: unknown (growth rate is 0)")
             else:
@@ -1634,8 +1682,16 @@ def _view_building_status(session, is_units):
         if not city_buildings:
             continue
 
+        # Citizen growth diagnostic (read from the Town Hall). Shows whether
+        # growth is readable per city so a failing city is easy to spot.
+        free_cit, growth = _fetch_citizen_growth(session, cid)
+        if growth is None:
+            growth_str = f"{bcolors.RED}growth: unreadable{bcolors.ENDC}"
+        else:
+            growth_str = f"growth: {growth:+.2f}/hr"
         print(f"  {bcolors.BOLD}{city_name}{bcolors.ENDC} "
-              f"({len(city_buildings)} {building_type})")
+              f"({len(city_buildings)} {building_type})  |  "
+              f"{free_cit:,} free citizens, {growth_str}")
 
         for b in sorted(city_buildings, key=lambda x: -x['building_level']):
             total_buildings += 1
