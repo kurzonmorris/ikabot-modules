@@ -193,6 +193,19 @@ def _fetch_and_cache_island(session, x, y, cache):
     return island, cities
 
 
+def _find_island_by_city_id(session, city_id):
+    """Search the island cache for the island containing the given city.
+    Used to resolve foreign destination cities, whose own city page cannot
+    be fetched. Returns a getIsland()-compatible dict or None."""
+    cache = _load_island_cache(session)
+    cid = str(city_id)
+    for entry in cache.values():
+        for c in entry.get("cities", []):
+            if str(c.get("id", "")) == cid:
+                return _island_from_cache(entry)
+    return None
+
+
 def _get_island_cached(session, island_id=None, x=None, y=None):
     """Unified island lookup — cache hit returns instantly, miss fetches & caches.
 
@@ -524,7 +537,7 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.2.1                 \u2551")
+    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.2.2                 \u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -1543,7 +1556,12 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         return result
 
     # 0b. Check destination city for occupation / blockade
-    dest_occ, dest_block = _check_city_status(session, dest_city["id"])
+    # (skip for foreign cities — their page cannot be fetched, the request
+    # would return our own city and check the wrong one)
+    if dest_city.get("isOwnCity", True):
+        dest_occ, dest_block = _check_city_status(session, dest_city["id"])
+    else:
+        dest_occ, dest_block = False, False
     if dest_occ:
         result["city_unavailable"] = True
         result["error"] = f"{dest_city['name']} (dest) is occupied by enemy"
@@ -2676,12 +2694,20 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
 
                 dest_data = cities_on_island[cc - 1]
                 dest_id = dest_data["id"]
-                html = session.get(city_url + str(dest_id))
-                destination_city = getCity(html)
-                destination_city["isOwnCity"] = (
+                is_own = (
                     dest_data.get("state", "") == ""
                     and dest_data.get("Name", "") == session.username
                 )
+                if is_own:
+                    html = session.get(city_url + str(dest_id))
+                    destination_city = getCity(html)
+                    destination_city["isOwnCity"] = True
+                else:
+                    # A foreign city page cannot be fetched — requesting it
+                    # returns our own city. Use the island data instead.
+                    destination_city = dict(dest_data)
+                    destination_city["islandId"] = island["id"]
+                    destination_city["isOwnCity"] = False
                 dest_player = dest_data.get("Name", "Unknown")
 
                 print(f"\nSelected: {destination_city['name']} ({dest_player})")
@@ -4948,7 +4974,31 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                       f"Could not load destination city (ID: {dest_city_id}).\n"
                       f"Session may have expired or city no longer exists.")
         return 0
-    island = _get_island_cached(session, island_id=destination_city["islandId"])
+    dest_is_foreign = str(destination_city.get("id", "")) != dest_city_id
+    if dest_is_foreign:
+        # Requesting a foreign city id returns our own city — resolve the
+        # real destination from the island cache instead.
+        island = _find_island_by_city_id(session, dest_city_id)
+        dest_entry = None
+        if island is not None:
+            for c_ent in island.get("cities", []):
+                if str(c_ent.get("id", "")) == dest_city_id:
+                    dest_entry = c_ent
+                    break
+        if dest_entry is None:
+            if should_notify(notif_config, "error"):
+                sendToBot(session,
+                          f"CONSOLIDATE ERROR\n"
+                          f"External destination (ID: {dest_city_id}) not "
+                          f"found in island cache. Open Island Cache and "
+                          f"search its coordinates, then retry.")
+            return 0
+        destination_city = dict(dest_entry)
+        destination_city["islandId"] = island["id"]
+        destination_city["isOwnCity"] = False
+    else:
+        destination_city["isOwnCity"] = True
+        island = _get_island_cached(session, island_id=destination_city["islandId"])
     coords = f"[{island['x']}:{island['y']}]"
 
     excluded = _rrs_excluded_set(session)
@@ -5005,11 +5055,12 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                     (oc_fresh["name"], destination_city["name"], toSend))
             elif result["success"]:
                 cycle_sent += 1
-                try:
-                    html = session.get(city_url + dest_city_id)
-                    destination_city = getCity(html)
-                except (AttributeError, TypeError, KeyError, RuntimeError):
-                    pass  # keep previous data; send_shipment re-verifies
+                if not dest_is_foreign:
+                    try:
+                        html = session.get(city_url + dest_city_id)
+                        destination_city = getCity(html)
+                    except (AttributeError, TypeError, KeyError, RuntimeError):
+                        pass  # keep previous data; send_shipment re-verifies
             if result.get("shortfalls"):
                 exhaustion_log.append(
                     (oc_fresh["name"], destination_city["name"],
