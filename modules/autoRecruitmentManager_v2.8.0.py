@@ -18,10 +18,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.7.2
+Version: 2.8.0
 """
 
-MODULE_VERSION = "2.7.2"
+MODULE_VERSION = "2.8.0"
 
 import csv
 import glob
@@ -944,9 +944,13 @@ def send_progress_report(session, is_units, group_completed=False):
     if not all_rows:
         return
 
+    # ETA must be single-type: it scans one building type, so mixing unit and
+    # ship goals would corrupt the citizen/build-time maths. Scope it to the
+    # worker's own type (the one whose rows we can actually cost out).
     eta = None
     try:
-        eta = _calculate_recruitment_eta(session, all_rows)
+        eta_rows = [r for r in all_rows if r["is_units"] == is_units]
+        eta = _calculate_recruitment_eta(session, eta_rows)
     except Exception:
         pass
 
@@ -1667,7 +1671,7 @@ def _view_building_status(session, is_units):
         total_rem = sum(g["qty_remaining"] for g in goals)
         print(f"  Goals remaining: {total_rem:,} units across {len(goals)} goal(s)")
     else:
-        print(f"  No active goals — add some with (1) Add to queue")
+        print(f"  No active goals — add some with (1) Add to goals")
 
 
 def _add_to_goals_ui(session, is_units):
@@ -1855,6 +1859,7 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     5. Sleep (interruptible by wake flag or stop_event)
     """
     building_type = "barracks" if is_units else "shipyard"
+    building_noun = "units" if is_units else "ships"
 
     # Fetch city list once — cities rarely change mid-session
     cities_ids, cities = getIdsOfCities(session)
@@ -2034,38 +2039,41 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                 bld_unit_data_cache[key] = bld_data['unit_data']
 
             unit_data = bld_unit_data_cache[key]
+            res = city_resources[cid]
 
-            # Pick highest-priority goal this building can train
+            # Walk goals in priority order and build the FIRST one this building
+            # can both train AND currently afford (>= 1 unit). Falling through to
+            # a lower-priority affordable goal keeps the building working when the
+            # top-priority goal is momentarily unaffordable (no citizens / short
+            # on a resource) instead of leaving it idle.
             chosen_goal = None
             chosen_uid = None
+            ud = None
+            max_p = 0
             for g in active_goals:
-                if g['unit_type_id'] in unit_data:
+                uid = g['unit_type_id']
+                if uid not in unit_data:
+                    continue
+                cand = unit_data[uid]
+
+                # Max affordable, capped by the building's slider max and the goal
+                cap = g['qty_remaining']
+                mb = cand.get('max_buildable', 0)
+                if mb > 0:
+                    cap = min(cap, mb)
+                for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
+                    cost = cand.get(res_key, 0)
+                    if cost > 0:
+                        cap = min(cap, res[res_key] // cost)
+
+                if cap >= 1:
                     chosen_goal = g
-                    chosen_uid = g['unit_type_id']
+                    chosen_uid = uid
+                    ud = cand
+                    max_p = cap
                     break
 
             if chosen_goal is None:
-                continue
-
-            ud = unit_data[chosen_uid]
-            res = city_resources[cid]
-            qty_needed = chosen_goal['qty_remaining']
-
-            # Calculate max affordable quantity, capped by the building's slider max
-            max_buildable = ud.get('max_buildable', 0)
-            max_p = qty_needed
-            if max_buildable > 0:
-                max_p = min(max_p, max_buildable)
-            for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
-                cost = ud.get(res_key, 0)
-                if cost > 0:
-                    max_p = min(max_p, res[res_key] // cost)
-
-            # An idle building should place whatever it can afford. (Earlier
-            # versions required >= 20% of the whole goal in one order, which
-            # stalled large/expensive goals — e.g. 5,000 Gyrocopters needed
-            # 1,000 affordable at once or nothing was built.)
-            if max_p < 1:
                 continue
 
             # Reserve resources with RRS before POSTing
@@ -2180,7 +2188,7 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
         total_remaining = sum(r['qty_remaining'] for r in active_goals)
 
         if buildings_recruited > 0:
-            label = f"Placed {total_placed:,} units this cycle"
+            label = f"Placed {total_placed:,} {building_noun} this cycle"
         elif any_busy:
             label = "Waiting for building queues..."
         else:
@@ -2226,8 +2234,8 @@ def _activate_worker(session, event, is_units):
     kind = "units" if is_units else "ships"
 
     if not csv_has_active_orders(session, is_units):
-        print(f"\n  {bcolors.WARNING}No pending {kind} orders in the queue.{bcolors.ENDC}")
-        print(f"  Add orders first using option (1).")
+        print(f"\n  {bcolors.WARNING}No active {kind} goals to work on.{bcolors.ENDC}")
+        print(f"  Add goals first using option (1).")
         enter()
         return False  # caller stays in menu
 
@@ -2295,16 +2303,20 @@ def _activate_worker(session, event, is_units):
 
 
 def _stop_worker_cmd(session, is_units):
-    """Touch stop flag so the running loop exits at its next cycle."""
+    """Touch stop flag so the running loop exits, and wake it from any sleep."""
     kind = "units" if is_units else "ships"
     if not _is_worker_running(session, is_units):
         print(f"\n  {bcolors.WARNING}No {kind} worker appears to be running.{bcolors.ENDC}")
         enter()
         return
     pathlib.Path(_stop_flag_path(session)).touch()
+    # Wake the worker so it doesn't wait out a long sleep (up to 30 min)
+    # before noticing the stop flag at the top of its next cycle.
+    _touch_wake_flag(session, is_units)
     print(
         f"\n  {bcolors.GREEN}Stop signal sent.{bcolors.ENDC} "
-        f"The worker will exit within {WORKER_LOCK_STALE_SECONDS} s."
+        f"The worker will finish its current step and exit within "
+        f"~{WAKE_POLL_SECONDS} s (a cycle already mid-fetch may take longer)."
     )
     enter()
 
@@ -2369,17 +2381,17 @@ def _setup_worker_config(session, is_units):
 
 
 def _edit_queue_menu(session, is_units):
-    """Sub-menu to remove units or adjust batch priority."""
+    """Sub-menu to remove a goal or adjust a goal's priority."""
     while True:
         banner()
         print("=" * 60)
-        print("  EDIT QUEUE")
+        print("  EDIT GOALS")
         print("=" * 60)
         print()
         _show_queue_status(session, is_units)
         print()
-        print("  (1) Remove / reduce units in queue")
-        print("  (2) Adjust batch priority")
+        print("  (1) Remove / reduce a goal")
+        print("  (2) Adjust a goal's priority")
         print()
         print("  (') Back")
         print()
@@ -2464,11 +2476,12 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print("  (4) Edit goals  (remove / adjust priority)")
                 print("  (5) Send progress report now")
                 print("  (6) Refresh building list  (rescan after upgrades)")
+                print("  (7) Worker settings  (reports / resource import)")
                 print()
                 print("  (') Back to type selection")
                 print()
 
-                choice = read(msg="Select: ", min=1, max=6, digit=True,
+                choice = read(msg="Select: ", min=1, max=7, digit=True,
                               additionalValues=["'", "s", "S", "o", "O", "r", "R"])
 
                 if isinstance(choice, str):
@@ -2477,8 +2490,10 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                         break  # back to outer (type-selection) loop
 
                     if letter == "s":
-                        cfg = load_config(session)
-                        if not cfg:
+                        # First run for this account: no config file yet, so ask
+                        # for reporting / import settings. load_config() always
+                        # returns defaults, so check the file itself.
+                        if not os.path.exists(_config_path(session)):
                             cfg = _setup_worker_config(session, is_units)
                             if cfg is None:
                                 continue  # user backed out of settings
@@ -2505,7 +2520,7 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                         else:
                             _touch_wake_flag(session, is_units)
                             print(f"\n  {bcolors.GREEN}Force-check signal sent.{bcolors.ENDC} "
-                                  f"The worker will scan for empty queues within "
+                                  f"The worker will re-check goals and buildings within "
                                   f"{WAKE_POLL_SECONDS} s.")
                             enter()
                         continue
@@ -2544,6 +2559,15 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                               f"Cache updated.{bcolors.ENDC}")
                     else:
                         print(f"  {bcolors.WARNING}No {btype} found.{bcolors.ENDC}")
+                    enter()
+                elif choice == 7:
+                    new_cfg = _setup_worker_config(session, is_units)
+                    if new_cfg is not None:
+                        save_config(session, new_cfg)
+                        print(f"\n  {bcolors.GREEN}Settings saved.{bcolors.ENDC}")
+                        if _is_worker_running(session, is_units):
+                            print("  A worker is running — restart it (o then s) "
+                                  "for changes to take effect.")
                     enter()
 
     except KeyboardInterrupt:
