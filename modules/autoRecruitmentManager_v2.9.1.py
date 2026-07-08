@@ -18,10 +18,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.9.0
+Version: 2.9.1
 """
 
-MODULE_VERSION = "2.9.0"
+MODULE_VERSION = "2.9.1"
 
 import csv
 import glob
@@ -1946,6 +1946,10 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     stall_warned = False
     STALL_WARN_SECS = 24 * 3600
     idle_notified = False  # avoid spamming "all goals placed" each idle cycle
+    first_report_sent = False  # hold the very first report until troops are
+                               # ordered — a maxed-out city reads 0 growth until
+                               # production starts consuming its population, so
+                               # the first ETA must be taken AFTER ordering.
 
     while True:
         # --- Check stop flag ---
@@ -2252,7 +2256,30 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
 
         session.setStatus(
             f"Auto Recruitment: {label}  |  {total_remaining:,} remaining")
-        cfg = _maybe_send_report(session, is_units, cfg)
+
+        # First report: wait until troops have actually been ordered across the
+        # cities. Ordering frees population in maxed-out cities, so the growth
+        # rate read now reflects reality instead of a misleading 0/hr. After
+        # this one, fall back to the normal interval-based reporting.
+        if not first_report_sent:
+            if buildings_recruited > 0:
+                if cfg.get("report_enabled"):
+                    try:
+                        send_progress_report(
+                            session, is_units,
+                            group_completed=cfg.get("report_group_completed", False),
+                        )
+                    except Exception:
+                        pass
+                    cfg["last_report_time"] = int(time.time())
+                    try:
+                        save_config(session, cfg)
+                    except Exception:
+                        pass
+                first_report_sent = True
+            # else: nothing ordered yet — hold the first report back.
+        else:
+            cfg = _maybe_send_report(session, is_units, cfg)
 
         # Stall guard: warn after 24 h with no successful order
         if not stall_warned and (time.time() - last_order_time) >= STALL_WARN_SECS:
