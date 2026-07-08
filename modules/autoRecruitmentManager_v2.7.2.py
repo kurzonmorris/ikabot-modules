@@ -11,17 +11,17 @@ Features:
 - Distribute recruitment across multiple buildings (speed-weighted, balanced)
 - Dynamic fetching of build times and costs (server-specific)
 - Priority queue: each order batch has an independent priority level
-- Resource shortage handling with 20% threshold batching
+- Resource shortage handling: each idle building places whatever it can afford
 - Busy building detection with smart wait / include options
 - CSV-backed persistence: survives crashes and restarts
 - Live queue management: add / remove units while running
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.7.1
+Version: 2.7.2
 """
 
-MODULE_VERSION = "2.7.1"
+MODULE_VERSION = "2.7.2"
 
 import csv
 import glob
@@ -1849,7 +1849,7 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     1. Reload goals CSV — picks up any live changes
     2. Per-city pass: fetch resources + enumerate all barracks/shipyards
     3. For each idle building: match the highest-priority active goal that
-       this building can train, calculate affordable quantity (>= 20% threshold),
+       this building can train, calculate affordable quantity (>= 1 unit),
        POST BuildUnits, then decrement the goals CSV
     4. Request resource imports if enabled and nothing could be placed
     5. Sleep (interruptible by wake flag or stop_event)
@@ -2050,7 +2050,6 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             ud = unit_data[chosen_uid]
             res = city_resources[cid]
             qty_needed = chosen_goal['qty_remaining']
-            threshold = max(1, int(qty_needed * 0.20))
 
             # Calculate max affordable quantity, capped by the building's slider max
             max_buildable = ud.get('max_buildable', 0)
@@ -2062,7 +2061,11 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                 if cost > 0:
                     max_p = min(max_p, res[res_key] // cost)
 
-            if max_p < threshold:
+            # An idle building should place whatever it can afford. (Earlier
+            # versions required >= 20% of the whole goal in one order, which
+            # stalled large/expensive goals — e.g. 5,000 Gyrocopters needed
+            # 1,000 affordable at once or nothing was built.)
+            if max_p < 1:
                 continue
 
             # Reserve resources with RRS before POSTing
