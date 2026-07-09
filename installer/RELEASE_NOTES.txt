@@ -1,7 +1,21 @@
-Version: 1.3.0
+Version: 1.4.0
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 1.4.0
+-----------------
+- Module downloads now ask before overwriting bulkdistribution.csv
+  (declining keeps your existing file and its saved settings)
+- CSV files are never renamed by the version-suffix stripper
+- Maintenance menu redesigned with two columns: Standard (cmd) and
+  PowerShell open/close all instances
+- Added open-all-instances.ps1 — PowerShell script that opens all
+  numbered shortcuts in order; copied to the shortcuts folder on install
+- Fixed mod version not being detected (now parsed from the release
+  asset name instead of the download URL)
+- build.bat uses 'python -m PyInstaller' so it works without
+  pyinstaller on PATH
 
 Changes in 1.3.0
 -----------------
