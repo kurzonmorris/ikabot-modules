@@ -47,7 +47,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.2.3"
+MODULE_VERSION = "10.2.4"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -1397,9 +1397,15 @@ def _notify_deadline_cut(session, notif_config, mode_label, remaining_desc):
     if should_notify(notif_config, "error"):
         try:
             sendToBot(session,
-                      f"{mode_label}: cycle time limit reached — "
-                      f"{remaining_desc} not attempted. The next cycle "
-                      f"recalculates from current stock and starts fresh.")
+                      f"{mode_label} — RAN OUT OF TIME THIS CYCLE\n"
+                      f"Deliveries took longer than the schedule's "
+                      f"interval, so {remaining_desc} did not get a turn "
+                      f"this cycle.\n"
+                      f"Nothing is lost: the next cycle re-checks every "
+                      f"city's stock and sends what is needed.\n"
+                      f"If you get this message every cycle, the interval "
+                      f"is too short for the amount being shipped — use a "
+                      f"longer interval or more ships.")
         except Exception:
             pass
 
@@ -1539,7 +1545,12 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         result["error"] = f"{origin_city['name']} is occupied by enemy"
         if should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+                      f"SHIPMENT SKIPPED\n{prefix}\n"
+                      f"Reason: {origin_city['name']} is occupied by an "
+                      f"enemy, so no ships can leave it.\n"
+                      f"The shipment will be tried again next cycle. To "
+                      f"fix it sooner, free the city or remove it from "
+                      f"this schedule.")
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
@@ -1551,7 +1562,11 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         result["error"] = f"{origin_city['name']} port is blockaded"
         if should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+                      f"SHIPMENT SKIPPED\n{prefix}\n"
+                      f"Reason: an enemy fleet is blockading the port of "
+                      f"{origin_city['name']}, so ships cannot leave.\n"
+                      f"The shipment will be tried again next cycle, once "
+                      f"the blockade is gone.")
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
@@ -1571,7 +1586,11 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         result["error"] = f"{dest_city['name']} (dest) is occupied by enemy"
         if should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+                      f"SHIPMENT SKIPPED\n{prefix}\n"
+                      f"Reason: the destination city {dest_city['name']} "
+                      f"is occupied by an enemy, so resources cannot be "
+                      f"delivered there.\n"
+                      f"The shipment will be tried again next cycle.")
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
@@ -1583,7 +1602,12 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         result["error"] = f"{dest_city['name']} (dest) port is blockaded"
         if should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+                      f"SHIPMENT SKIPPED\n{prefix}\n"
+                      f"Reason: an enemy fleet is blockading the port of "
+                      f"the destination city {dest_city['name']}, so "
+                      f"nothing can be delivered there.\n"
+                      f"The shipment will be tried again next cycle, once "
+                      f"the blockade is gone.")
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
@@ -1601,7 +1625,12 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         result["error"] = f"No {ship_type_name} available (timed out)"
         if should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"SHIPMENT SKIPPED\n{prefix}\n{result['error']}")
+                      f"SHIPMENT SKIPPED\n{prefix}\n"
+                      f"Reason: no free {ship_type_name} — they were all "
+                      f"busy on other trips for the whole waiting period.\n"
+                      f"The shipment will be tried again next cycle. If "
+                      f"this happens often, buy more {ship_type_name} or "
+                      f"spread your schedules out in time.")
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
@@ -1632,8 +1661,10 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         if attempt < max_lock_retries:
             if should_notify(notif_config, "error"):
                 sendToBot(session,
-                          f"Lock attempt {attempt}/{max_lock_retries} "
-                          f"failed for {prefix}Retrying in 60s...")
+                          f"SHIPMENT WAITING\n{prefix}\n"
+                          f"Another ikabot task is using the ships right "
+                          f"now (attempt {attempt}/{max_lock_retries}). "
+                          f"Trying again in 60 seconds...")
             time.sleep(60)
 
     if not lock_acquired:
@@ -1643,7 +1674,14 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         )
         if should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"SHIPMENT FAILED\n{prefix}\n{result['error']}")
+                      f"SHIPMENT FAILED\n{prefix}\n"
+                      f"Reason: another ikabot task kept the ships "
+                      f"reserved and never released them "
+                      f"({max_lock_retries} attempts over several "
+                      f"minutes).\n"
+                      f"The shipment will be tried again next cycle. If "
+                      f"this keeps happening, another ikabot module is "
+                      f"probably stuck — restarting ikabot clears it.")
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
@@ -1661,7 +1699,12 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
             result["error"] = "Ships became unavailable before sending"
             if should_notify(notif_config, "error"):
                 sendToBot(session,
-                          f"SHIPMENT DELAYED\n{prefix}\n{result['error']}")
+                          f"SHIPMENT DELAYED\n{prefix}\n"
+                          f"Reason: the free ships were grabbed by "
+                          f"something else at the last moment (another "
+                          f"task or a manual send).\n"
+                          f"The shipment will be tried again next "
+                          f"cycle.")
             log_shipment(log_path, session, mode_name,
                          origin_city["name"], "", dest_city["name"],
                          dest_island_coords, dest_player, resources,
@@ -1742,7 +1785,10 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
             "next cycle recalculates" if result["partial"] else None
         )
         if should_notify(notif_config, "all"):
-            extra = "\n(partial — cycle time limit reached)" if result["partial"] else ""
+            extra = ("\nNOTE: only part of the planned cargo was sent — "
+                     "the schedule's time ran out mid-delivery. The rest "
+                     "is included in the next cycle automatically."
+                     if result["partial"] else "")
             sendToBot(session,
                       f"SHIPMENT SENT\nAccount: {session.username}\n"
                       f"From: {origin_city['name']}\n"
@@ -1764,7 +1810,10 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                       f"SHIPMENT FAILED\nAccount: {session.username}\n"
                       f"From: {origin_city['name']}\n"
                       f"To: {dest_island_coords} {dest_city['name']}\n"
-                      f"Error: {result['error']}")
+                      f"Something unexpected went wrong while sending — "
+                      f"the shipment was not completed and will be tried "
+                      f"again next cycle.\n"
+                      f"Technical detail: {result['error']}")
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
@@ -4830,7 +4879,13 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
         try:
             sendToBot(
                 session,
-                f"Transport worker crashed:\n{traceback.format_exc()}",
+                f"TRANSPORT SCHEDULER STOPPED\n"
+                f"The background scheduler hit an unexpected error and "
+                f"shut down. Your schedules are saved, but NOTHING WILL "
+                f"BE SENT until you start it again: open Resource "
+                f"Transport Manager and press (s).\n"
+                f"Technical detail (useful when reporting the "
+                f"problem):\n{traceback.format_exc()}",
             )
         except Exception:
             pass
@@ -4930,7 +4985,10 @@ def _notify_resource_exhaustion(session, notif_config, mode_label,
         return
     if not should_notify(notif_config, "error"):
         return
-    lines = ["RESOURCE SUPPLY EXHAUSTED"]
+    lines = ["SOURCE CITY RAN OUT OF RESOURCES",
+             "Some cities had less in stock than planned when the ships",
+             "were loaded (something else spent it first). The missing",
+             "amounts below were left out; everything else was sent:"]
     total_missing = [0] * 5
     for src_name, dst_name, shortfalls_dict in exhaustion_log:
         parts = [f"{_RES_NAMES[i]}:{v:,}" for i, v in shortfalls_dict.items()
@@ -4941,8 +4999,9 @@ def _notify_resource_exhaustion(session, notif_config, mode_label,
                 total_missing[i] += v
     tot_parts = [f"{_RES_NAMES[i]}:{v:,}"
                  for i, v in enumerate(total_missing) if v > 0]
-    lines.append(f"Total cancelled: {', '.join(tot_parts)}")
-    lines.append("These resources were cancelled for this cycle.")
+    lines.append(f"Total left out: {', '.join(tot_parts)}")
+    lines.append("The next cycle recalculates from what is actually "
+                 "in stock, so no action is needed.")
     sendToBot(session, f"{mode_label}\n" + "\n".join(lines))
 
 
@@ -4952,7 +5011,10 @@ def _notify_small_shipments(session, notif_config, mode_label,
         return
     if not should_notify(notif_config, "error"):
         return
-    lines = [f"SMALL SHIPMENTS SKIPPED (below {min_threshold:,})"]
+    lines = [f"SMALL SHIPMENTS SKIPPED",
+             f"These shipments were smaller than your minimum shipment "
+             f"size of {min_threshold:,} (set with the (T) option), so "
+             f"they were skipped to avoid wasting ship trips:"]
     total_unshipped = [0] * 5
     for src, dst, res in small_shipments:
         parts = [f"{_RES_NAMES[i]}:{v:,}" for i, v in enumerate(res) if v > 0]
@@ -4961,7 +5023,9 @@ def _notify_small_shipments(session, notif_config, mode_label,
             total_unshipped[i] += res[i]
     tot_parts = [f"{_RES_NAMES[i]}:{v:,}"
                  for i, v in enumerate(total_unshipped) if v > 0]
-    lines.append(f"Total unshipped: {', '.join(tot_parts)}")
+    lines.append(f"Total not shipped: {', '.join(tot_parts)}")
+    lines.append("They will be sent once enough accumulates, or lower "
+                 "the minimum with (T) when editing the schedule.")
     sendToBot(session, f"{mode_label}\n" + "\n".join(lines))
 
 
@@ -4985,9 +5049,15 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
     except (AttributeError, TypeError, KeyError, RuntimeError):
         if should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"CONSOLIDATE ERROR\n"
-                      f"Could not load destination city (ID: {dest_city_id}).\n"
-                      f"Session may have expired or city no longer exists.")
+                      f"CONSOLIDATE — CYCLE SKIPPED\n"
+                      f"The bot could not read the destination city's "
+                      f"data from the game (city ID: {dest_city_id}).\n"
+                      f"This usually means the game session expired or "
+                      f"the game server hiccuped. The schedule stays "
+                      f"active and will try again at its next scheduled "
+                      f"time.\n"
+                      f"If this repeats every cycle, log in to the game "
+                      f"once or restart ikabot.")
         return 0
     dest_is_foreign = str(destination_city.get("id", "")) != dest_city_id
     if dest_is_foreign:
@@ -5003,10 +5073,16 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
         if dest_entry is None:
             if should_notify(notif_config, "error"):
                 sendToBot(session,
-                          f"CONSOLIDATE ERROR\n"
-                          f"External destination (ID: {dest_city_id}) not "
-                          f"found in island cache. Open Island Cache and "
-                          f"search its coordinates, then retry.")
+                          f"CONSOLIDATE — CYCLE SKIPPED\n"
+                          f"This schedule delivers to another player's "
+                          f"city, which the bot looks up in its saved "
+                          f"island data. That saved entry is missing "
+                          f"(the island cache may have been cleared).\n"
+                          f"To fix: open Resource Transport Manager -> "
+                          f"(8) Island Cache -> (1) Search area, and "
+                          f"enter the destination island's coordinates. "
+                          f"The schedule will then work again on its "
+                          f"own.")
             return 0
         destination_city = dict(dest_entry)
         destination_city["islandId"] = island["id"]
@@ -5459,8 +5535,14 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
     if routes is None:
         if should_notify(notif_config, "error"):
             sendToBot(session,
-                      f"AUTO SEND: Could not allocate resources for "
-                      f"{destination_city['name']}")
+                      f"AUTO SEND — NOTHING SENT\n"
+                      f"Your cities together do not have enough "
+                      f"resources to cover the amounts requested for "
+                      f"{destination_city['name']}.\n"
+                      f"Nothing was sent this cycle; it will try again "
+                      f"at the next scheduled time. If this keeps "
+                      f"happening, lower the requested amounts in the "
+                      f"schedule.")
         return 0
 
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
@@ -5515,7 +5597,15 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 rows.append(row)
     except Exception as e:
         if should_notify(notif_config, "error"):
-            sendToBot(session, f"BULK DIST ERROR\nCould not read CSV: {e}")
+            sendToBot(session,
+                      f"BULK DIST — CYCLE SKIPPED\n"
+                      f"The bot could not open or read your CSV file:\n"
+                      f"{csv_path}\n"
+                      f"Check that the file still exists and is not open "
+                      f"in Excel (Excel locks files while open). The "
+                      f"schedule will try again at its next scheduled "
+                      f"time.\n"
+                      f"Technical detail: {e}")
         return 0
 
     if run_column not in (fieldnames or []):
@@ -5641,7 +5731,12 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     if mismatches and should_notify(notif_config, "error"):
         sendToBot(session,
-                  f"BULK DIST ISSUES\n" + "\n".join(mismatches))
+                  f"BULK DIST — SOME ROWS SKIPPED\n"
+                  f"These CSV rows could not be matched to a real city "
+                  f"in the game (wrong coordinates, renamed city, or "
+                  f"changed owner). They were skipped and the reason was "
+                  f"written to the Issues column of your CSV:\n"
+                  + "\n".join(mismatches))
 
     routes = []
     session.setStatus(
@@ -5746,7 +5841,12 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     if not routes:
         if should_notify(notif_config, "error"):
-            sendToBot(session, "BULK DIST: No valid routes found")
+            sendToBot(session,
+                      "BULK DIST — NOTHING TO SEND\n"
+                      "No pending CSV rows could be turned into "
+                      "shipments this cycle. Either every row is already "
+                      "done for this run, or the remaining rows have "
+                      "problems (see the Issues column in the CSV).")
         return 0
 
     if should_notify(notif_config, "start"):
@@ -5920,8 +6020,13 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             skipped += total - idx
             if should_notify(notif_config, "error"):
                 sendToBot(session,
-                          f"BULK DIST: cycle time limit reached — "
-                          f"{total - idx} route(s) deferred to next cycle")
+                          f"BULK DIST — RAN OUT OF TIME THIS CYCLE\n"
+                          f"Deliveries took longer than the schedule's "
+                          f"interval, so {total - idx} row(s) were not "
+                          f"attempted this time.\n"
+                          f"They stay pending in the CSV and continue "
+                          f"automatically next cycle — no action "
+                          f"needed.")
             break
         src_name = route_info[7]
         dest_name = route_info[3]
@@ -5998,10 +6103,16 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             for ri in deferred_routes:
                 blocked_names.add(ri[7])
             sendToBot(session,
-                      f"BULK DIST: {len(deferred_routes)} shipment(s) "
-                      f"permanently skipped (no AP after "
-                      f"{ap_wait_mins}min)\n"
-                      f"Cities: {', '.join(sorted(blocked_names))}")
+                      f"BULK DIST — {len(deferred_routes)} SHIPMENT(S) "
+                      f"SKIPPED THIS CYCLE\n"
+                      f"These source cities had no action points for "
+                      f"{ap_wait_mins} minutes: "
+                      f"{', '.join(sorted(blocked_names))}\n"
+                      f"(A city needs 1 free action point to send ships; "
+                      f"they are used by attacks/transports and free up "
+                      f"when those return.)\n"
+                      f"The rows stay pending and will be tried again "
+                      f"next cycle.")
 
     _notify_small_shipments(session, notif_config, "BULK DIST",
                             small_shipments, min_threshold)
@@ -6068,9 +6179,13 @@ def execute_schedule(session, sched, notif_config, log_path):
         if should_notify(notif_config, "error"):
             sendToBot(
                 session,
-                f"SCHEDULE #{sid} ERROR\n"
+                f"SCHEDULE #{sid} ERROR — CYCLE CANCELLED\n"
                 f"Mode: {mode_label}\n"
-                f"Error: {traceback.format_exc()}",
+                f"This schedule hit an unexpected error, so this cycle "
+                f"was cancelled. The schedule stays active and will run "
+                f"again at its next scheduled time.\n"
+                f"Technical detail (useful when reporting the "
+                f"problem):\n{traceback.format_exc()}",
             )
         return 0
 
@@ -6138,8 +6253,13 @@ def transport_scheduler_loop(session, stop_event):
                 cycle_sent = execute_schedule(session, sched, notif_config, log_path)
             except Exception as exc:
                 try:
-                    msg = f"Schedule {sid} crashed: {exc}"
-                    sendToBot(session, msg)
+                    sendToBot(
+                        session,
+                        f"SCHEDULE #{sid} ERROR — WILL RETRY IN 1 HOUR\n"
+                        f"The schedule hit an unexpected problem and "
+                        f"this cycle was skipped. It will automatically "
+                        f"try again in 1 hour.\n"
+                        f"Technical detail: {exc}")
                 except Exception:
                     pass
                 transport_csv_update(
@@ -6336,7 +6456,13 @@ def _activate_transport_worker(session, event):
         try:
             sendToBot(
                 session,
-                f"Transport worker crashed:\n{traceback.format_exc()}",
+                f"TRANSPORT SCHEDULER STOPPED\n"
+                f"The background scheduler hit an unexpected error and "
+                f"shut down. Your schedules are saved, but NOTHING WILL "
+                f"BE SENT until you start it again: open Resource "
+                f"Transport Manager and press (s).\n"
+                f"Technical detail (useful when reporting the "
+                f"problem):\n{traceback.format_exc()}",
             )
         except Exception:
             pass
