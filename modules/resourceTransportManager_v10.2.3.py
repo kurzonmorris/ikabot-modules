@@ -47,6 +47,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
+MODULE_VERSION = "10.2.3"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -537,7 +538,8 @@ def print_module_banner(page_title=None):
     rule = "\u2500" * 58
     print("\n")
     print(f"{C.HEADER}\u2554{bar}\u2557")
-    print(f"\u2551          RESOURCE TRANSPORT MANAGER v10.2.2                 \u2551")
+    title = f"RESOURCE TRANSPORT MANAGER v{MODULE_VERSION}"
+    print(f"\u2551{title:^58}\u2551")
     print(f"\u255a{bar}\u255d{C.RESET}")
     if page_title:
         print(f"\n{C.BOLD}{page_title}{C.RESET}")
@@ -900,6 +902,7 @@ def _lock_acquire(lock_path, timeout=30, stale_after=60):
     my_payload = json.dumps({
         "pid": os.getpid(),
         "timestamp": time.time(),
+        "version": MODULE_VERSION,
     }).encode()
     while time.time() - start < timeout:
         try:
@@ -946,7 +949,8 @@ def _lock_refresh(lock_path):
     """Rewrite the lock file with a fresh timestamp to prevent stale detection."""
     try:
         with open(lock_path, "w") as f:
-            json.dump({"pid": os.getpid(), "timestamp": time.time()}, f)
+            json.dump({"pid": os.getpid(), "timestamp": time.time(),
+                       "version": MODULE_VERSION}, f)
     except Exception:
         pass
 
@@ -2333,6 +2337,17 @@ def _scheduler_status_line(session):
 
     if worker_running:
         status = f"{C.OK}RUNNING{C.RESET}"
+        worker_ver = None
+        try:
+            with open(transport_worker_lock_path(session), "r") as f:
+                worker_ver = json.load(f).get("version")
+        except Exception:
+            pass
+        if worker_ver != MODULE_VERSION:
+            shown = worker_ver if worker_ver else "older version"
+            status += (f"  {C.WARN}(worker on {shown}, file is "
+                       f"v{MODULE_VERSION} — press (o) then (s) to "
+                       f"restart it){C.RESET}")
     else:
         status = f"{C.WARN}STOPPED{C.RESET}"
 
