@@ -47,7 +47,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.2.6"
+MODULE_VERSION = "10.3.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
