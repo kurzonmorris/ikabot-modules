@@ -47,7 +47,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.2.5"
+MODULE_VERSION = "10.2.6"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -6428,7 +6428,8 @@ def _activate_transport_worker(session, event):
     print(f"  {C.BOLD}(1){C.RESET} Continue as scheduled")
     print(f"  {C.DIM}    Missed runs execute immediately, then resume normal timing.{C.RESET}")
     print(f"  {C.BOLD}(2){C.RESET} Start from now")
-    print(f"  {C.DIM}    Reset all timers — first run happens after the interval.{C.RESET}")
+    print(f"  {C.DIM}    Everything sends immediately, then repeats on its"
+          f" interval from this point.{C.RESET}")
     print(f"  {C.BOLD}('){C.RESET} Cancel")
 
     choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
@@ -6446,8 +6447,9 @@ def _activate_transport_worker(session, event):
         if s.get("status") == "pending":
             updates["status"] = "active"
         if resume_mode == "from_now":
-            interval = s.get("interval_hours", 0)
-            updates["next_run"] = (now + interval * 3600) if interval > 0 else now
+            # Send now — the scheduler sets the next run to
+            # now + interval after this first cycle completes.
+            updates["next_run"] = now
         elif resume_mode == "continue":
             nr = s.get("next_run", "")
             if nr == "" or nr == 0:
