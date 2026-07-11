@@ -47,7 +47,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.2.4"
+MODULE_VERSION = "10.2.5"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -5584,6 +5584,13 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     csv_path = sched.get("bulk_csv_path", "")
     run_column = sched.get("bulk_run_column", "")
     if not csv_path or not run_column:
+        if should_notify(notif_config, "error"):
+            sendToBot(session,
+                      "BULK DIST — CYCLE SKIPPED\n"
+                      "This schedule is missing its CSV file path or run "
+                      "slot (the saved schedule data is incomplete). "
+                      "Delete the schedule and create it again through "
+                      "the Bulk Distribution menu.")
         return 0
 
     csv_resource_cols = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
@@ -5779,20 +5786,33 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 if p.isdigit():
                     done_indices.add(int(p))
 
-        try:
-            dest_html = session.get(city_url + str(matched_city["id"]))
-            dest_city = getCity(dest_html)
-        except Exception as e:
-            row[issues_col] = f"Error fetching city details: {e}"
-            try:
-                write_csv_atomic(csv_path, fieldnames, rows)
-            except Exception as _csv_err:
-                session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
-            continue
-
-        dest_space = dest_city.get(
-            "freeSpaceForResources", [0] * len(materials_names)
+        is_own_dest = (
+            matched_city.get("state", "") == ""
+            and matched_city.get("Name", "") == session.username
         )
+        if is_own_dest:
+            try:
+                dest_html = session.get(city_url + str(matched_city["id"]))
+                dest_city = getCity(dest_html)
+            except Exception as e:
+                row[issues_col] = f"Error fetching city details: {e}"
+                try:
+                    write_csv_atomic(csv_path, fieldnames, rows)
+                except Exception as _csv_err:
+                    session.setStatus(f"[WARN] CSV write failed: {_csv_err}")
+                continue
+            dest_city["isOwnCity"] = True
+            dest_space = dest_city.get(
+                "freeSpaceForResources", [0] * len(materials_names)
+            )
+        else:
+            # Foreign city — its page cannot be fetched (the request
+            # would return our own city). Use the island data and skip
+            # the warehouse-space clamp (their space is unknown).
+            dest_city = dict(matched_city)
+            dest_city["islandId"] = island["id"]
+            dest_city["isOwnCity"] = False
+            dest_space = None
         for src_idx, src_city in src_cities:
             if src_idx in done_indices:
                 continue
@@ -5812,9 +5832,10 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 row, csv_resource_cols,
                 issues_key=issues_col,
             )
-            for i in range(len(resources)):
-                if i < len(dest_space):
-                    resources[i] = min(resources[i], dest_space[i])
+            if dest_space is not None:
+                for i in range(len(resources)):
+                    if i < len(dest_space):
+                        resources[i] = min(resources[i], dest_space[i])
             if sum(resources) == 0:
                 continue
             route = (src_city, dest_city, island["id"], *resources)
@@ -5900,17 +5921,21 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
                 parsed_res, adj_a,
                 None, csv_resource_cols,
             )
-            dest_city_id = str(route[1]["id"])
-            try:
-                dest_fresh = getCity(session.get(city_url + dest_city_id))
-            except (AttributeError, TypeError, KeyError, RuntimeError):
-                return False, False, False  # row stays pending, next cycle retries
-            dest_space = dest_fresh.get(
-                "freeSpaceForResources", [0] * len(materials_names)
-            )
-            for i in range(len(resources)):
-                if i < len(dest_space):
-                    resources[i] = min(resources[i], dest_space[i])
+            if route[1].get("isOwnCity", True):
+                dest_city_id = str(route[1]["id"])
+                try:
+                    dest_fresh = getCity(session.get(city_url + dest_city_id))
+                except (AttributeError, TypeError, KeyError, RuntimeError):
+                    return False, False, False  # row stays pending, next cycle retries
+                dest_space = dest_fresh.get(
+                    "freeSpaceForResources", [0] * len(materials_names)
+                )
+                for i in range(len(resources)):
+                    if i < len(dest_space):
+                        resources[i] = min(resources[i], dest_space[i])
+            else:
+                # Foreign destination — space unknown, keep island data
+                dest_fresh = route[1]
             for i in src_exhausted:
                 if i < len(resources):
                     resources[i] = 0
