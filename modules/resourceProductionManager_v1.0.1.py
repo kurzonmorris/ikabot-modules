@@ -74,7 +74,7 @@ from ikabot.helpers.varios import *
 # The external-module loader reads these two names.
 MODULE_NAME = "Resource Production Manager"
 MODULE_ENTRY = "resourceProductionManager"
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # Modes offered on the main menu.
 MODE_SCAN = 1
@@ -751,7 +751,7 @@ def resourceProductionManager(session, event, stdin_fd, predetermined_input):
 
         while True:
             banner()
-            print("Resource Production Manager")
+            print(f"Resource Production Manager  v{__version__}")
             print("===========================\n")
             print("Set how many workers each city puts on WOOD and its LUXURY good")
             print("(Wine / Marble / Crystal / Sulfur), in bulk, as a percentage.\n")
