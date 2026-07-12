@@ -50,25 +50,31 @@ This file is a standalone ikabot external module. Drop it in your external
 modules directory (main-menu option 30) and it appears in the list.
 """
 
-import json
-import os
-import re
 import sys
+import os
+import json
+import re
 import traceback
 
+# Mirror the import style of the other modules in this repo. The star imports
+# transitively provide `config`, `bcolors`, `read`, `getIdsOfCities`, `wait`,
+# `getDateTime`, `sendToBot`, etc., and stay compatible with older ikabot
+# installs. `config` is imported explicitly so the entry point can never fail
+# with a NameError regardless of how the helpers are wired.
+import ikabot.config as config
 from ikabot.config import *
-from ikabot.helpers.botComm import sendToBot, notificationDataIsValid
+from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getCity
-from ikabot.helpers.gui import banner, bcolors, enter
-from ikabot.helpers.pedirInfo import read, getIdsOfCities
+from ikabot.helpers.gui import *
+from ikabot.helpers.pedirInfo import *
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
-from ikabot.helpers.varios import wait, getDateTime
+from ikabot.helpers.varios import *
 
 # The external-module loader reads these two names.
 MODULE_NAME = "Resource Production Manager"
 MODULE_ENTRY = "resourceProductionManager"
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # Modes offered on the main menu.
 MODE_SCAN = 1
@@ -149,6 +155,19 @@ def save_memory(session, data):
             json.dump(data, f, indent=2)
     except OSError:
         pass
+
+
+def _notifications_ready(session):
+    """True if the player has a notification channel configured.
+
+    `notificationDataIsValid` is a relatively recent helper; if the running
+    ikabot is older and doesn't have it, we assume notifications are ready
+    (the actual send is guarded separately) so this never breaks startup.
+    """
+    try:
+        return notificationDataIsValid(session)
+    except Exception:
+        return True
 
 
 def remember_city(session, memory, city):
@@ -649,7 +668,7 @@ def configure_and_run(session, event, memory, mode):
     print(f"  Schedule  : {format_interval(interval_seconds)}")
     print()
 
-    if not notificationDataIsValid(session):
+    if not _notifications_ready(session):
         print(f"{bcolors.WARNING}Note: you have no Telegram/Discord/ntfy notifications set up,")
         print(f"so the completion message won't reach you. Set them up in main-menu")
         print(f"option 21 if you want it.{bcolors.ENDC}")
@@ -682,7 +701,7 @@ def configure_and_run(session, event, memory, mode):
             try:
                 results = apply_plan(session, memory, cities, plan)
                 report = build_report(mode, plan, results, interval_seconds)
-                if notificationDataIsValid(session):
+                if _notifications_ready(session):
                     sendToBot(session, report)
                 session.setStatus(f"Ran at {getDateTime()}")
             except KeyboardInterrupt:
@@ -694,7 +713,7 @@ def configure_and_run(session, event, memory, mode):
                     "but will keep running.\n" + traceback.format_exc()
                 )
                 traceback.print_exc()
-                if notificationDataIsValid(session):
+                if _notifications_ready(session):
                     try:
                         sendToBot(session, err)
                     except Exception:
@@ -732,7 +751,7 @@ def resourceProductionManager(session, event, stdin_fd, predetermined_input):
 
         while True:
             banner()
-            print("Resource Production Manager")
+            print(f"Resource Production Manager  v{__version__}")
             print("===========================\n")
             print("Set how many workers each city puts on WOOD and its LUXURY good")
             print("(Wine / Marble / Crystal / Sulfur), in bulk, as a percentage.\n")
