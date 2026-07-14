@@ -302,111 +302,139 @@ def apply_tavern(session, body):
         return {"ok": False, "error": str(e)}
 
 
-# ── Modify Production ────────────────────────────────────────────────────────
+# ── Resource Production Manager ───────────────────────────────────────────────
+
+def _resprod_module_path():
+    """Return path to resourceProductionManager_vX.Y.Z.py, or None if absent."""
+    try:
+        for name in os.listdir(_MODULES_DIR):
+            if re.match(r"resourceProductionManager_v[\d.]+\.py$", name):
+                return os.path.join(_MODULES_DIR, name)
+    except OSError:
+        pass
+    return None
+
+
+def _load_resprod():
+    """Dynamically load the Resource Production Manager module, or None."""
+    path = _resprod_module_path()
+    if not path:
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("resourceProductionManager", path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def get_prod_status(session):
+    """Return whether the Resource Production Manager module is present."""
+    mod = _load_resprod()
+    return {"available": mod is not None,
+            "version": getattr(mod, "__version__", None) if mod else None}
+
 
 def modify_production(session, body):
-    """Apply worker percentages to resource/tradegood buildings.
+    """Apply worker percentages by delegating to the Resource Production
+    Manager module (resourceProductionManager_vX.Y.Z.py).
 
     body fields:
-      city_ids        : list of int city IDs to apply to
-      resource_types  : list containing "resource", "tradegood", or both
-      wood_pct        : int 0-100  (used when "resource" is in resource_types)
-      luxury_pct      : int 0-100  (used when "tradegood" is in resource_types)
-      maximise        : bool — if true and pct==100, includes overcharge workers
+      city_ids   : list of int city IDs to apply to
+      mode        : "wood" | "luxury" | "wood_then_luxury" | "luxury_then_wood"
+      wood_pct    : int 0-100  (used when the mode includes wood)
+      luxury_pct  : int 0-100  (used when the mode includes luxury)
+      overcharge  : bool — if true and luxury_pct==100, fill luxury beyond 100%
+
+    Backwards compatible with the older UI payload that sent
+    `resource_types` + `maximise` instead of `mode` + `overcharge`.
     """
-    from ikabot.helpers.getJson import getCity, getIsland
-    from ikabot.config import actionRequest, island_url, city_url
-    import time as _time
+    mod = _load_resprod()
+    if mod is None:
+        return {"ok": False,
+                "error": "Resource Production Manager module not installed."}
 
-    city_ids       = body.get("city_ids") or []
-    resource_types = body.get("resource_types") or []
-    wood_pct       = max(0, min(100, int(body.get("wood_pct", 100))))
-    luxury_pct     = max(0, min(100, int(body.get("luxury_pct", 100))))
-    maximise       = bool(body.get("maximise", False))
-
+    city_ids = body.get("city_ids") or []
     if not city_ids:
         return {"ok": False, "error": "No cities specified."}
-    if not resource_types:
-        return {"ok": False, "error": "No resource types specified."}
 
-    results = []
+    wood_pct   = max(0, min(100, int(body.get("wood_pct", 100))))
+    luxury_pct = max(0, min(100, int(body.get("luxury_pct", 100))))
+    overcharge = bool(body.get("overcharge", body.get("maximise", False)))
 
-    # Group cities by island so we only fetch each island once.
-    island_cache = {}
-    cities_data  = {}
-    for cid in city_ids:
-        try:
-            html = session.get(city_url + str(cid))
-            city = getCity(html)
-            cities_data[cid] = city
-            iid = city.get("islandId")
-            if iid and iid not in island_cache:
-                island_cache[iid] = getIsland(session.get(island_url + str(iid)))
-        except Exception as e:
-            results.append({"city_id": cid, "ok": False, "error": str(e)})
+    # Resolve the mode. Prefer the new `mode` field; fall back to the old
+    # `resource_types` list so older extension builds keep working.
+    mode = body.get("mode")
+    if mode not in ("wood", "luxury", "wood_then_luxury", "luxury_then_wood"):
+        rtypes = body.get("resource_types") or []
+        has_wood = "resource" in rtypes
+        has_lux  = "tradegood" in rtypes
+        if has_wood and has_lux:
+            mode = "wood_then_luxury"
+        elif has_lux:
+            mode = "luxury"
+        else:
+            mode = "wood"
 
-    current_city_id = getCity(session.get()).get("id")
+    mode_map = {
+        "wood":             mod.MODE_WOOD,
+        "luxury":           mod.MODE_LUXURY,
+        "wood_then_luxury": mod.MODE_WOOD_THEN_LUXURY,
+        "luxury_then_wood": mod.MODE_LUXURY_THEN_WOOD,
+    }
+    mode_const = mode_map[mode]
+    order = mod.MODE_ORDER[mode_const]
 
-    for cid in city_ids:
-        city = cities_data.get(cid)
-        if not city:
+    plan = {
+        "order":      order,
+        "wood_pct":   wood_pct   if mod.RES_WOOD   in order else None,
+        "luxury_pct": luxury_pct if mod.RES_LUXURY in order else None,
+        "overcharge": overcharge,
+    }
+
+    # Build the city list the module expects: {id, name, luxury_name}.
+    from ikabot.helpers.pedirInfo import getIdsOfCities
+    try:
+        _all_ids, all_cities = getIdsOfCities(session)
+    except Exception as e:
+        return {"ok": False, "error": f"Could not fetch city list: {e}"}
+
+    from ikabot.config import materials_names
+    wanted = {str(c) for c in city_ids}
+    cities = []
+    for cid, c in all_cities.items():
+        if str(cid) not in wanted and str(c.get("id")) not in wanted:
             continue
-        island_id = city.get("islandId")
-        island    = island_cache.get(island_id, {})
-
-        # Switch session context to this city.
         try:
-            session.post(params={
-                "action": "header", "function": "changeCurrentCity",
-                "actionRequest": actionRequest, "cityId": cid,
-                "oldView": "city", "backgroundView": "city",
-                "currentCityId": current_city_id, "ajax": "1",
-            })
-            current_city_id = cid
-        except Exception:
-            pass
+            luxury_name = materials_names[int(c["tradegood"])]
+        except (KeyError, ValueError, TypeError):
+            luxury_name = ""
+        cities.append({"id": cid, "name": c.get("name", str(cid)),
+                       "luxury_name": luxury_name})
 
-        city_result = {"city_id": cid, "city_name": city.get("name", str(cid)), "changes": []}
+    if not cities:
+        return {"ok": False, "error": "None of the requested cities were found."}
 
-        for rtype in resource_types:
-            pct = wood_pct if rtype == "resource" else luxury_pct
-            try:
-                url = (f"view={rtype}&type={rtype}&islandId={island_id}"
-                       f"&cityId={cid}&backgroundView=island"
-                       f"&currentIslandId={island_id}&actionRequest={actionRequest}&ajax=1")
-                resp      = session.post(url)
-                resp_json = json.loads(resp, strict=False)
-                slider    = resp_json[2][1][f"js_ResourceSlider"]["slider"]
-                max_norm  = slider["max_value"]
-                overcharge = slider.get("overcharge", 0)
+    memory = mod.load_memory(session)
 
-                if pct == 100 and maximise:
-                    final = max_norm + overcharge
-                else:
-                    final = int(max_norm * pct / 100)
+    try:
+        raw = mod.apply_plan(session, memory, cities, plan)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
-                worker_key = "rw" if rtype == "resource" else "tw"
-                session.post(params={
-                    "islandId": island_id, "cityId": cid,
-                    "type": rtype, "screen": rtype,
-                    "action": "IslandScreen", "function": "workerPlan",
-                    worker_key: final, "templateView": rtype,
-                    "actionRequest": actionRequest, "ajax": "1",
-                })
-                city_result["changes"].append({
-                    "type": rtype, "pct": pct, "workers": final, "ok": True,
-                })
-            except Exception as e:
-                city_result["changes"].append({
-                    "type": rtype, "pct": pct, "ok": False, "error": str(e),
-                })
+    # Translate the module's per-city report into the extension's shape.
+    results = []
+    for entry in (raw or []):
+        results.append({
+            "city_name": entry.get("name", ""),
+            "ok":        entry.get("error") is None,
+            "error":     entry.get("error"),
+            "changes":   entry.get("changes", []),
+        })
 
-            _time.sleep(1)
-
-        city_result["ok"] = all(c["ok"] for c in city_result["changes"])
-        results.append(city_result)
-
-    return {"ok": True, "results": results}
+    return {"ok": True, "mode": mode, "results": results}
 
 
 # ── Main dispatcher ───────────────────────────────────────────────────────────
@@ -445,6 +473,8 @@ def handle(session, request, flask):
         payload = {"processes": get_processes(session)}
     elif sub == "tavern_status":
         payload = get_tavern_status(session)
+    elif sub == "prod_status":
+        payload = get_prod_status(session)
     else:
         payload = {
             "construction": get_construction_queue(session),

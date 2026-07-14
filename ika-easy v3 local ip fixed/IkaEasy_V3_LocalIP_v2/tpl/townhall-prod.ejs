@@ -6,6 +6,11 @@
             <p style="color:#888;font-size:0.85em;margin:4px 0;">
                 Play through the ikabot web server to use Production Manager.
             </p>
+        <% } else if (!data.moduleAvailable) { %>
+            <p style="color:#888;font-size:0.85em;margin:4px 0;">
+                Install the <b>Resource Production Manager</b> ikabot module
+                (main menu &rarr; option 30) to use this section.
+            </p>
         <% } else { %>
 
             <table class="table01" style="width:100%;margin-bottom:8px;">
@@ -30,25 +35,35 @@
                     </td>
                 </tr>
 
-                <!-- Resource type -->
+                <!-- Mode -->
                 <tr>
-                    <td><b>Resource</b></td>
+                    <td><b>Mode</b></td>
                     <td>
                         <label class="ikaeasy-form" style="margin-right:10px;">
                             <input type="radio" name="ikaeasy_prod_types" value="wood"
                                 <%= data.saved.types === 'wood' ? 'checked' : '' %> />
-                            Wood
+                            Wood only
                         </label>
                         <label class="ikaeasy-form" style="margin-right:10px;">
                             <input type="radio" name="ikaeasy_prod_types" value="luxury"
                                 <%= data.saved.types === 'luxury' ? 'checked' : '' %> />
-                            Luxury
+                            Luxury only
+                        </label>
+                        <br/>
+                        <label class="ikaeasy-form" style="margin-right:10px;">
+                            <input type="radio" name="ikaeasy_prod_types" value="wood_then_luxury"
+                                <%= data.saved.types === 'wood_then_luxury' ? 'checked' : '' %> />
+                            Wood first, then Luxury
                         </label>
                         <label class="ikaeasy-form">
-                            <input type="radio" name="ikaeasy_prod_types" value="both"
-                                <%= data.saved.types === 'both' ? 'checked' : '' %> />
-                            Both
+                            <input type="radio" name="ikaeasy_prod_types" value="luxury_then_wood"
+                                <%= data.saved.types === 'luxury_then_wood' ? 'checked' : '' %> />
+                            Luxury first, then Wood
                         </label>
+                        <div style="font-size:0.76em;color:#888;margin-top:3px;">
+                            When both are set, whichever is filled first gets first
+                            claim on free citizens.
+                        </div>
                     </td>
                 </tr>
 
@@ -94,14 +109,17 @@
                     </td>
                 </tr>
 
-                <!-- Maximise (overcharge) -->
+                <!-- Overcharge -->
                 <tr>
-                    <td><b>Maximise</b></td>
+                    <td><b>Overcharge</b></td>
                     <td>
                         <label class="ikaeasy-form">
                             <input type="checkbox" id="ikaeasy_prod_maximise"
                                 <%= data.saved.maximise ? 'checked' : '' %> />
-                            Use overcharge workers when slider is at 100%
+                            Overcharge luxury when its slider is at 100%
+                            <span style="font-size:0.78em;color:#c07000;">
+                                (produces more, costs gold continuously)
+                            </span>
                         </label>
                     </td>
                 </tr>
