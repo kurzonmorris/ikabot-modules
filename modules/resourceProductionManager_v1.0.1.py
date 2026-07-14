@@ -345,12 +345,13 @@ def ask_percentage(resource_label):
     return answer
 
 
-def ask_overcharge():
-    """Ask whether to overcharge luxury. Returns True/False, or None if backed out."""
+def ask_overcharge(resource_label):
+    """Ask whether to overcharge the given resource (WOOD or LUXURY).
+    Returns True/False, or None if backed out."""
     print()
-    print("Use OVERCHARGE for luxury?")
-    print("  Overcharge assigns MORE workers than the building's normal limit,")
-    print("  producing extra luxury but costing gold continuously.")
+    print(f"Use OVERCHARGE for {resource_label}?")
+    print(f"  Overcharge assigns MORE workers than the building's normal limit,")
+    print(f"  producing extra {resource_label.lower()} but costing gold continuously.")
     print("  (y = yes, N = no. Press Enter for no, or ' to go back.)")
     answer = read(values=["y", "Y", "n", "N", "", "'"], additionalValues=["'"])
     if answer == "'":
@@ -469,10 +470,11 @@ def apply_plan(session, memory, cities, plan):
     """Apply worker settings to every city and collect a per-city report.
 
     `plan` is a dict with keys:
-        order        : list of RES_WOOD / RES_LUXURY in the order to set them
-        wood_pct     : int or None
-        luxury_pct   : int or None
-        overcharge   : bool
+        order             : list of RES_WOOD / RES_LUXURY in the order to set them
+        wood_pct          : int or None
+        luxury_pct        : int or None
+        wood_overcharge   : bool
+        luxury_overcharge : bool
 
     Returns a list of per-city result dicts (used to build the notification).
     """
@@ -493,7 +495,12 @@ def apply_plan(session, memory, cities, plan):
             previous_city_id = city_id
 
             for resource_type in plan["order"]:
-                pct = plan["wood_pct"] if resource_type == RES_WOOD else plan["luxury_pct"]
+                if resource_type == RES_WOOD:
+                    pct = plan["wood_pct"]
+                    overcharge_flag = plan.get("wood_overcharge", False)
+                else:
+                    pct = plan["luxury_pct"]
+                    overcharge_flag = plan.get("luxury_overcharge", False)
                 if pct is None:
                     continue
 
@@ -501,7 +508,7 @@ def apply_plan(session, memory, cities, plan):
                     session, island_id, city_id, resource_type
                 )
 
-                use_overcharge = plan["overcharge"] and resource_type == RES_LUXURY
+                use_overcharge = overcharge_flag
                 if pct == 100 and use_overcharge:
                     target = total_max
                 else:
@@ -536,9 +543,10 @@ def build_report(mode, plan, results, interval_seconds, next_run=True):
 
     bits = []
     if plan["wood_pct"] is not None:
-        bits.append(f"Wood {plan['wood_pct']}%")
+        oc = " +overcharge" if plan.get("wood_overcharge") and plan["wood_pct"] == 100 else ""
+        bits.append(f"Wood {plan['wood_pct']}%{oc}")
     if plan["luxury_pct"] is not None:
-        oc = " +overcharge" if plan["overcharge"] and plan["luxury_pct"] == 100 else ""
+        oc = " +overcharge" if plan.get("luxury_overcharge") and plan["luxury_pct"] == 100 else ""
         bits.append(f"Luxury {plan['luxury_pct']}%{oc}")
     lines.append("Target: " + ", ".join(bits))
     lines.append("")
@@ -624,20 +632,26 @@ def configure_and_run(session, event, memory, mode):
 
     wood_pct = None
     luxury_pct = None
-    overcharge = False
+    wood_overcharge = False
+    luxury_overcharge = False
 
     if wants_wood:
         wood_pct = ask_percentage("WOOD")
         if wood_pct is None:
             return False
+        # Overcharge only makes sense when filling the building completely.
+        if wood_pct == 100:
+            wood_overcharge = ask_overcharge("WOOD")
+            if wood_overcharge is None:
+                return False
 
     if wants_luxury:
         luxury_pct = ask_percentage("LUXURY")
         if luxury_pct is None:
             return False
         if luxury_pct == 100:
-            overcharge = ask_overcharge()
-            if overcharge is None:
+            luxury_overcharge = ask_overcharge("LUXURY")
+            if luxury_overcharge is None:
                 return False
 
     interval_seconds, backed_out = ask_interval()
@@ -648,7 +662,8 @@ def configure_and_run(session, event, memory, mode):
         "order": order,
         "wood_pct": wood_pct,
         "luxury_pct": luxury_pct,
-        "overcharge": overcharge,
+        "wood_overcharge": wood_overcharge,
+        "luxury_overcharge": luxury_overcharge,
     }
 
     # Remember these settings so the next visit can be re-run quickly.
@@ -661,9 +676,10 @@ def configure_and_run(session, event, memory, mode):
     print(f"  Mode      : {MODE_LABELS[mode]}")
     print(f"  Cities    : {len(cities)}  ({', '.join(c['name'] for c in cities)})")
     if wood_pct is not None:
-        print(f"  Wood      : {wood_pct}%")
+        oc = "  (+ overcharge)" if wood_overcharge and wood_pct == 100 else ""
+        print(f"  Wood      : {wood_pct}%{oc}")
     if luxury_pct is not None:
-        oc = "  (+ overcharge)" if overcharge and luxury_pct == 100 else ""
+        oc = "  (+ overcharge)" if luxury_overcharge and luxury_pct == 100 else ""
         print(f"  Luxury    : {luxury_pct}%{oc}")
     print(f"  Schedule  : {format_interval(interval_seconds)}")
     print()
@@ -758,10 +774,11 @@ def resourceProductionManager(session, event, stdin_fd, predetermined_input):
             print("Pick what you want to do:\n")
             print("  (1) Scan cities        — just look at current production, change nothing")
             print("  (2) Change WOOD only")
-            print("  (3) Change LUXURY only — with the option to overcharge")
+            print("  (3) Change LUXURY only")
             print("  (4) Change WOOD, then LUXURY  — wood gets first pick of citizens")
             print("  (5) Change LUXURY, then WOOD  — luxury gets first pick of citizens")
             print()
+            print("  Wood and luxury can each be overcharged independently (asked at 100%).")
             print("  Options 2-5 can run once, or repeat in the background on a schedule")
             print("  (hours or days) and notify you after each run.")
             print()
