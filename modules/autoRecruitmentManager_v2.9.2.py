@@ -18,10 +18,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.9.1
+Version: 2.9.2
 """
 
-MODULE_VERSION = "2.9.1"
+MODULE_VERSION = "2.9.2"
 
 import csv
 import glob
@@ -2160,12 +2160,22 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                         rrs_release(session, rid, MODULE_NAME)
                 continue
 
+            # Match ikabot's canonical trainArmy payload. Barracks and shipyard
+            # use DIFFERENT functions: buildUnits vs buildShips. Sending the
+            # wrong one (the old 'action':'BuildUnits' for both) let troop
+            # orders work but silently no-op'd ship orders — the goal was still
+            # deducted, so ship goals falsely completed within a cycle.
             params = {
-                'action':        'BuildUnits',
-                'actionRequest': action_code,
-                'cityId':        cid,
-                'position':      b['building_position'],
-                str(chosen_uid): max_p,
+                'action':         'CityScreen',
+                'function':       'buildUnits' if is_units else 'buildShips',
+                'actionRequest':  action_code,
+                'cityId':         cid,
+                'position':       b['building_position'],
+                'backgroundView': 'city',
+                'currentCityId':  cid,
+                'templateView':   'barracks' if is_units else 'shipyard',
+                'ajax':           '1',
+                str(chosen_uid):  max_p,
             }
 
             try:
