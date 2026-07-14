@@ -1,9 +1,9 @@
-Version: 1.5.0
+Version: 2.0.0
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
 
-Changes in 1.5.0
+Changes in 2.0.0
 -----------------
 - Default install location is now your Desktop (Desktop\ikabot)
 - Maintenance menu rebuilt: Update Installer, Update Ikabot, Modules,

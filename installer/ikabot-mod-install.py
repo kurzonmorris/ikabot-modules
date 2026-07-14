@@ -45,7 +45,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "1.5.0"
+INSTALLER_VERSION = "2.0.0"
 
 GITHUB_API      = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/contents"
