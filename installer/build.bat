@@ -27,14 +27,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Zip the output folder
-set OUTDIR=dist\ikabot-mod-install
+rem Zip the single-file exe (onefile build)
+set OUTEXE=dist\ikabot-mod-install.exe
 set ZIPFILE=dist\ikabot-mod-install_v%VER%.zip
 
 echo.
-echo Zipping %OUTDIR% to %ZIPFILE% ...
+echo Zipping %OUTEXE% to %ZIPFILE% ...
 if exist "%ZIPFILE%" del "%ZIPFILE%"
-powershell -NoProfile -Command "Compress-Archive -Path '%OUTDIR%' -DestinationPath '%ZIPFILE%' -Force"
+powershell -NoProfile -Command "Compress-Archive -Path '%OUTEXE%' -DestinationPath '%ZIPFILE%' -Force"
 if errorlevel 1 (
     echo.
     echo ZIP FAILED
