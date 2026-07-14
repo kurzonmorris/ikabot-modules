@@ -74,7 +74,7 @@ from ikabot.helpers.varios import *
 # The external-module loader reads these two names.
 MODULE_NAME = "Resource Production Manager"
 MODULE_ENTRY = "resourceProductionManager"
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # Modes offered on the main menu.
 MODE_SCAN = 1
