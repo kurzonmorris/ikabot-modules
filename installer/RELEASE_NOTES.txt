@@ -1,7 +1,31 @@
-Version: 1.4.0
+Version: 2.0.0
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 2.0.0
+-----------------
+- Default install location is now your Desktop (Desktop\ikabot)
+- Maintenance menu rebuilt: Update Installer, Update Ikabot, Modules,
+  Status — the old Download/Update submenus are gone
+- Update Installer / Update Ikabot compare versions first and ask
+  "are you sure?" when the GitHub version matches what is installed
+- Update Ikabot is streamlined: download, instance count question,
+  sync — no shortcut steps
+- New Modules screen: lists every module and extra file with your
+  installed version, the GitHub version, and a per-file Update button,
+  plus an Update All button (asks whether to include .csv files)
+- Module downloads go to a new 'Ikabot Modules template' folder with
+  version numbers kept in filenames, then copy to modules/ without
+  the version suffix — old versions cleaned from both folders
+- 'Open all (PowerShell)' fixed: each instance now genuinely runs
+  inside its own PowerShell window (was opening cmd-style consoles)
+- open-all-instances.ps1 updated to launch instances in PowerShell
+  windows too
+- Status screen expanded: install folder, ikabot version, mod version,
+  installer version, instance count, .py module count, and a full list
+  of installed modules with their version numbers
+- ikabot version now stored alongside mod version in version.json
 
 Changes in 1.4.0
 -----------------
