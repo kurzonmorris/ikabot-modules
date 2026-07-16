@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.1.6"
+__version__ = "2.1.7"
 
 import csv
 import glob
@@ -28,6 +28,7 @@ from ikabot.config import (
     actionRequest,
     city_url,
     island_url,
+    material_img_hash,
     materials_names,
 )
 from ikabot.helpers.botComm import checkTelegramData, sendToBot, sendToBotDebug
@@ -603,9 +604,8 @@ def fetch_costs_for_building(session, city, building_slug):
     """
     # Step 1: load ikipedia listing page
     detail_url = (
-        "view=buildingDetail&buildingId=0&helpId=1&backgroundView=city"
-        "&currentCityId={cid}&templateView=ikipedia"
-        "&actionRequest={ar}&ajax=1"
+        "view=ikipedia&helpId=0&backgroundView=city"
+        "&currentCityId={cid}&actionRequest={ar}&ajax=1"
     ).format(cid=city["id"], ar=actionRequest)
     try:
         resp = session.post(detail_url)
@@ -631,7 +631,7 @@ def fetch_costs_for_building(session, city, building_slug):
         + re.escape(building_slug)
         + r'"[^>]*onclick="ajaxHandlerCall\(\'\?(.*?)\'\)'
     )
-    match = re.search(pat, building_html)
+    match = re.search(pat, building_html, re.IGNORECASE)
     if match is None:
         sendToBotDebug(
             session,
@@ -661,20 +661,24 @@ def fetch_costs_for_building(session, city, building_slug):
         )
         return {}
 
-    # Step 4: derive column → resource-index from th image filename.
-    # RESOURCE_FILENAMES = ("wood","wine","marble","glass","sulfur") matches
-    # materials_names_tec.  We do NOT hash PNG images; the URL filename already
-    # carries the identity (e.g. ".../wood.png" → index 0).
-    th_srcs = re.findall(r'<th class="costs"><img src="(.*?)\.png"', html_costs)
-    # The last th is usually a clock icon for build time — drop it if it
-    # doesn't match any known resource filename.
+    # Step 4: derive column → resource-index from <th> CDN image hashes.
+    # CDN URLs look like //gfN.geo.gfsrv.net/cdn{XX}/{30hex}.png — filenames
+    # are opaque MD5 hashes, not resource names.  Reconstruct the full 32-char
+    # MD5 from the two-char cdn-path prefix + the 30-char filename, then look
+    # it up in material_img_hash (order: wood, wine, marble, crystal, sulfur).
+    # The last <th class="costs"> is always a clock/time icon — drop it with [:-1].
+    th_srcs = re.findall(r'<th class="costs"><img src="(.*?)"', html_costs)
     col_to_res = []
-    for src in th_srcs:
-        fname = src.rstrip("/").split("/")[-1].lower()
-        try:
-            idx = RESOURCE_FILENAMES.index(fname)
-        except ValueError:
-            idx = -1  # unknown (e.g. time icon); values for this col ignored
+    for src in th_srcs[:-1]:  # last th = time icon, skip it
+        cdn_match = re.search(r'/cdn([0-9a-f]{2})/([0-9a-f]+)\.png', src, re.IGNORECASE)
+        if cdn_match:
+            full_hash = cdn_match.group(1) + cdn_match.group(2)
+            try:
+                idx = material_img_hash.index(full_hash)
+            except ValueError:
+                idx = -1
+        else:
+            idx = -1
         col_to_res.append(idx)
 
     # Step 5: research-discount multiplier (shared across all levels in this call)
