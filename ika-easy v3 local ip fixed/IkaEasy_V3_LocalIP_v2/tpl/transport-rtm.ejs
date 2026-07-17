@@ -1,0 +1,49 @@
+<div class="contentBox01h ikaeasy-transport-rtm" style="margin-top:10px;">
+    <h3 class="header">ikabot RTM Schedule</h3>
+    <div class="content" style="padding:6px 8px;">
+        <% if (!data.ikabotDetected) { %>
+            <p style="color:#888;font-size:0.85em;margin:4px 0;">
+                Play through the ikabot web server to enable RTM scheduling.
+            </p>
+        <% } else { %>
+            <p style="font-size:0.85em;margin:0 0 6px;">
+                Set amounts above using the sliders, then set a keep-reserve and interval below.
+                The route will send the same amounts every interval, keeping at least the reserve in each city.
+            </p>
+
+            <table class="table01" style="width:100%;margin-bottom:6px;">
+                <thead>
+                    <tr>
+                        <th style="width:90px;">Resource</th>
+                        <th>Keep in source city</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <% var resOrder = ['wood','wine','marble','glass','sulfur']; %>
+                    <% _.each(resOrder, function(res) { %>
+                        <tr>
+                            <td>
+                                <span class="resource_icon_small icon_<%= res %>"></span>
+                                <%= data.resNames[res] %>
+                            </td>
+                            <td>
+                                <input type="number" class="ikaeasy-rtm-keep" data-res="<%= res %>"
+                                    value="<%= data.keeps[res] || 0 %>" min="0"
+                                    style="width:100px;display:inline-block;" />
+                            </td>
+                        </tr>
+                    <% }); %>
+                </tbody>
+            </table>
+
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span>Repeat every</span>
+                <input type="number" id="ikaeasy_rtm_interval" value="4" min="1" max="720"
+                    style="width:55px;display:inline-block;" /> hours
+                <a class="button" id="ikaeasy_rtm_schedule_btn" href="#">Schedule with RTM</a>
+                <span id="ikaeasy_rtm_status" style="font-size:0.85em;line-height:28px;"></span>
+            </div>
+        <% } %>
+    </div>
+    <div class="footer"></div>
+</div>

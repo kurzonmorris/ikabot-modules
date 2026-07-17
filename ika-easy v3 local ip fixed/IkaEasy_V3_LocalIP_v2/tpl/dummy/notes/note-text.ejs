@@ -1,0 +1,9 @@
+<div>
+    <input type="text" class="textfield" value="<%- data.note.title %>" <%= (data.note.system) ? 'disabled="disabled"' : '' %> maxlength="25" placeholder="<%= lget('note.title_placeholder') %>" />
+    <textarea <%= (data.note.system) ? 'disabled="disabled"' : '' %>><%- data.note.text%></textarea>
+
+    <div class="ikaeasy-notes-buttons">
+        <a href="#" class="button" data-action="save"><%= lget('note.save_note') %></a>
+        <a href="#" class="button" data-action="delete"><%= lget('note.delete_note') %></a>
+    </div>
+</div>

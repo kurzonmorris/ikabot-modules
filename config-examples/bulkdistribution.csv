@@ -1,0 +1,68 @@
+Transport,X,Y,Player,City,City_Location,Wood,Wine,Marble,Crystal,Sulphur,From,Hours
+m,99,39,ugain,Castell Un,16,0,5500,0,0,0,,24
+m,99,39,ugain,Castell Dau,1,0,5500,0,0,0,,24
+m,99,39,ugain,Castell Tri,2,0,5500,0,0,0,,24
+m,99,39,ugain,Castell Pedwar,3,0,5500,0,0,0,,24
+m,99,39,ugain,Castell Pump,4,0,5500,0,0,0,,24
+m,99,39,ugain,Castell Chwech,5,0,5500,0,0,0,,24
+m,99,39,ugain,Castell Saith,6,0,5500,0,0,0,,24
+m,99,39,ugain,Castell Wyth,7,0,5500,0,0,0,,24
+m,99,39,fugs,Threpio,8,0,5500,0,0,0,,24
+m,99,39,fugs,k-2S0,9,0,5500,0,0,0,,24
+m,99,39,fugs,BB8,10,0,5500,0,0,0,,24
+m,99,39,fugs,chopper,11,0,5500,0,0,0,,24
+m,99,39,fugs,R2-D2,12,0,5500,0,0,0,,24
+m,99,39,fugs,HK-47,14,0,5500,0,0,0,,24
+m,98,39,tentguy,tents to go,1,0,5500,0,0,0,,24
+m,98,39,tentguy,tents r us,2,0,5500,0,0,0,,24
+m,98,39,tentguy,tenticles,3,0,5500,0,0,0,,24
+m,98,39,tentguy,tenporal,10,0,5500,0,0,0,,24
+m,98,39,tentguy,tentrick,11,0,5500,0,0,0,,24
+m,98,39,tentguy,tentourus,12,0,5500,0,0,0,,24
+m,98,39,8teen,S-8-5-u,5,0,5500,0,0,0,,24
+m,98,39,8teen,S-8-4-u,6,0,5500,0,0,0,,24
+m,98,39,8teen,S-8-3-u,7,0,5500,0,0,0,,24
+m,98,39,8teen,S-8-2-u,8,0,5500,0,0,0,,24
+m,98,39,8teen,S-8-6-u,4,0,5500,0,0,0,,24
+m,98,39,8teen,W-8teen-1,9,0,5500,0,0,0,,24
+m,98,40,hojo,Q-F-6,1,0,5500,0,0,0,,24
+m,98,40,hojo,Q-F-5,2,0,5500,0,0,0,,24
+m,98,40,hojo,Q-F-4,3,0,5500,0,0,0,,24
+m,98,40,hojo,Q-F-3,4,0,5500,0,0,0,,24
+m,98,40,hojo,Q-F-2,5,0,5500,0,0,0,,24
+m,98,40,hojo,Q-Five-1,6,0,5500,0,0,0,,24
+m,98,40,9ightly,Ninty-mk1-C,7,0,5500,0,0,0,,24
+m,98,40,9ightly,Ninty-mk2-C,8,0,5500,0,0,0,,24
+m,98,40,9ightly,Ninty-mk3-C,9,0,5500,0,0,0,,24
+m,98,40,9ightly,Ninty-mk4-C,10,0,5500,0,0,0,,24
+m,98,40,9ightly,Ninty-mk5-C,11,0,5500,0,0,0,,24
+m,98,40,9ightly,Ninty-mk6-C,12,0,5500,0,0,0,,24
+m,98,40,Boy Ozgur,BoyWonder,13,0,5500,0,0,0,,24
+m,98,40,hojo,Q-F-8,14,0,5500,0,0,0,,24
+m,98,40,hojo,Q-F-7,15,0,5500,0,0,0,,24
+m,98,42,7ty,7ev-Sulphur-6,5,0,5500,0,0,0,,24
+m,98,42,7ty,7ev-Sulphur-5,8,0,5500,0,0,0,,24
+m,98,42,7ty,7ev-Sulphur-4,10,0,5500,0,0,0,,24
+m,98,42,7ty,7ev-Sulphur-2,13,0,5500,0,0,0,,24
+m,98,42,7ty,7ev-Sulphur-3,14,0,5500,0,0,0,,24
+m,98,42,7ty,7ev-Sulphur-1,16,0,5500,0,0,0,,24
+m,97,39,Luke frame,Sixpert-1-M,5,0,5500,0,0,0,,24
+m,97,39,Luke frame,Sixpert-2-M,7,0,5500,0,0,0,,24
+m,97,39,Luke frame,Sixpert-3-M,8,0,5500,0,0,0,,24
+m,97,39,Luke frame,Sixpert-4-M,9,0,5500,0,0,0,,24
+m,97,39,Luke frame,Sixpert-5-M,10,0,5500,0,0,0,,24
+m,97,39,Luke frame,Sixpert-6-M,14,0,5500,0,0,0,,24
+m,97,39,Luke frame,Sixpert-7-M,15,0,5500,0,0,0,,24
+m,95,37,jubusixteen,Polis 6,9,0,5500,0,0,0,,24
+m,95,37,jubusixteen,Polis 5,10,0,5500,0,0,0,,24
+m,95,37,jubusixteen,Polis 4,11,0,5500,0,0,0,,24
+m,95,37,jubusixteen,Polis 3,12,0,5500,0,0,0,,24
+m,95,37,jubusixteen,Polis 2,13,0,5500,0,0,0,,24
+m,95,37,jubusixteen,Polis 1,15,0,5500,0,0,0,,24
+m,98,37,mawdeg,Un Marmor,7,0,5500,0,0,0,,24
+m,98,37,mawdeg,Dau Marmor,8,0,5500,0,0,0,,24
+m,98,37,mawdeg,Tri Marmor,9,0,5500,0,0,0,,24
+m,98,37,mawdeg,Pedwar Marmor,11,0,5500,0,0,0,,24
+m,98,37,mawdeg,Pump Marmor,14,0,5500,0,0,0,,24
+m,98,37,mawdeg,Chwech Marmor,13,0,5500,0,0,0,,24
+m,98,37,mawdeg,Saith Marmor,15,0,5500,0,0,0,,24

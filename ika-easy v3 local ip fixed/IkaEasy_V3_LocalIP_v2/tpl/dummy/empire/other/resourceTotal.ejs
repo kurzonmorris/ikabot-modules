@@ -1,0 +1,16 @@
+<%
+    let res = data.total[data.type] || { amount: 0, wine_spending: 0, production: 0 };
+%>
+<td class="empire-resource">
+    <div class="empire-resource-amount"><%= num(res.amount, 0, false) %></div>
+
+    <div class="empire-resource-production">
+        <% if (data.type === Const.Resources.WINE) { %>
+            <div class="red">
+                <%= num(-res.wine_spending) %>
+            </div>
+        <% }%>
+
+        <div class="green"><%= num(res.production) %></div>
+    </div>
+</td>

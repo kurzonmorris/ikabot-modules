@@ -1,0 +1,62 @@
+<div class="empire-tooltip">
+    <div class="empire-tooltip-title">
+        <%= LANGUAGE.getLocalizedString(data.resource) %>
+    </div>
+
+    <div class="empire-tooltip-content">
+        <div class="empire-tooltip-content-values">
+            <span><%= num(data.amount, 0, false) %></span>
+            <%= LANGUAGE.getLocalizedString('empire.resource_in_warehouse') %>:
+        </div>
+
+        <% if (data.hasProduction) { %>
+            <div class="empire-tooltip-content-values">
+                <span><%= num( data.production[data.resource] ) %></span>
+                <%= LANGUAGE.getLocalizedString('empire.resource_production_hourly') %>:
+            </div>
+            <div class="empire-tooltip-content-values">
+                <span><%= num( data.production[data.resource] * 24 ) %></span>
+                <%= LANGUAGE.getLocalizedString('empire.resource_production_daily') %>:
+            </div>
+        <% } %>
+
+        <% if ((data.resource === Const.Resources.WINE) && (data.production[Const.Resources.WINE_SPENDING] > 0)) { %>
+            <div class="empire-tooltip-content-values">
+                <span class="red">
+                    <%= Utils.transformHours(Math.abs(data.amount / data.production[Const.Resources.WINE_SPENDING])) %>
+                </span>
+                <%= LANGUAGE.getLocalizedString('empire.resource_ends_in') %>:
+            </div>
+
+            <div class="empire-tooltip-content-values">
+                <span class="red"><%= num(-data.production[Const.Resources.WINE_SPENDING]) %></span>
+                <%= LANGUAGE.getLocalizedString('empire.resource_expenses_hour') %>:
+            </div>
+
+            <div class="empire-tooltip-content-values">
+                <span class="red"><%= num(-data.production[Const.Resources.WINE_SPENDING] * 24) %></span>
+                <%= LANGUAGE.getLocalizedString('empire.resource_expenses_day') %>:
+            </div>
+
+            <div class="empire-tooltip-content-values">
+                <span class="red"><%= num(-data.production[Const.Resources.WINE_SPENDING] * 168) %></span>
+                <%= LANGUAGE.getLocalizedString('empire.resource_expenses_week') %>:
+            </div>
+
+            <div class="empire-tooltip-content-values">
+                <span class="red"><%= num(-data.production[Const.Resources.WINE_SPENDING] * 730) %></span>
+                <%= LANGUAGE.getLocalizedString('empire.resource_expenses_month') %>:
+            </div>
+        <% } %>
+
+        <div class="empire-tooltip-content-values">
+            <span><%= num(data.capacity, 0, false) %></span>
+            <%= LANGUAGE.getLocalizedString('empire.resource_capacity') %>:
+        </div>
+
+        <div class="empire-tooltip-content-values">
+            <span><%= num(data.safe, 0, false) %></span>
+            <%= LANGUAGE.getLocalizedString('empire.resource_safe') %>:
+        </div>
+    </div>
+</div>
