@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.1.7"
+__version__ = "2.1.8"
 
 import csv
 import glob
@@ -90,9 +90,44 @@ HARD_LEVEL_CAP = 150
 BUILD_POST_VERIFY_DELAY_SECONDS = 2
 SUPPLIER_LIST_TTL_SECONDS = 120
 
-# Order matches `materials_names_tec` in ikabot.config:
-# ["wood", "wine", "marble", "glass", "sulfur"]
-RESOURCE_FILENAMES = ("wood", "wine", "marble", "glass", "sulfur")
+# slug → ikipedia buildingId, captured from the live game's help grid
+# (every entry uses helpId=1, so the detail URL is fully derivable from this).
+# Keys are lowercased for case-insensitive lookup: city JSON uses camelCase
+# ("townHall") while the construction-dialog scrape may yield lowercase.
+BUILDING_HELP_IDS = {
+    "townhall": 0,
+    "port": 3,
+    "academy": 4,
+    "shipyard": 5,
+    "barracks": 6,
+    "warehouse": 7,
+    "wall": 8,
+    "tavern": 9,
+    "museum": 10,
+    "palace": 11,
+    "embassy": 12,
+    "branchoffice": 13,
+    "workshop": 15,
+    "safehouse": 16,
+    "palacecolony": 17,
+    "stonemason": 19,
+    "glassblowing": 20,
+    "winegrower": 21,
+    "alchemist": 22,
+    "carpentering": 23,
+    "architect": 24,
+    "optician": 25,
+    "vineyard": 26,
+    "fireworker": 27,
+    "temple": 28,
+    "dump": 29,
+    "piratefortress": 30,
+    "blackmarket": 31,
+    "marinechartarchive": 32,
+    "dockyard": 33,
+    "shrineofolympus": 34,
+    "chronosforge": 35,
+}
 
 # ---------------------------------------------------------------------------
 # Path helpers — every persistent file is per (server, username)
@@ -591,62 +626,37 @@ def fetch_costs_for_building(session, city, building_slug):
     """Fetch the per-level cost table for *building_slug* from the ikipedia.
 
     Returns dict[int, list[int]] mapping level → [wood, wine, marble, crystal,
-    sulphur].  Returns {} if the building has no ikipedia entry (wonders,
-    palace variants, embassy variants, etc.) so callers can gracefully skip
-    rather than crashing.
+    sulphur].  Returns {} if the building has no BUILDING_HELP_IDS entry so
+    callers can gracefully skip rather than crashing.
 
-    Column-to-resource mapping is derived from the <th> image filenames
+    Column-to-resource mapping is derived from the <th> CDN image hashes
     in the cost table — NOT assumed positional — because many buildings only
     show a subset of the five resources (carpentering = 1 col, barracks = 2,
     town hall = 3, etc.).  A positional assumption would write marble costs
     into the wine slot for a barracks row, which would break cost math and
     over-ship the wrong resources.
     """
-    # Step 1: load ikipedia listing page
-    detail_url = (
-        "view=ikipedia&helpId=0&backgroundView=city"
-        "&currentCityId={cid}&actionRequest={ar}&ajax=1"
-    ).format(cid=city["id"], ar=actionRequest)
-    try:
-        resp = session.post(detail_url)
-        building_html = json.loads(resp, strict=False)[1][1][1]
-    except Exception:
+    # Steps 1+2: build the detail URL directly from BUILDING_HELP_IDS.
+    # The old approach scraped the ikipedia listing page for each building's
+    # button, but the listing XHR no longer contains the button_building
+    # icons (they are rendered client-side by JS), so scraping can never
+    # match.  helpId=1 is constant for every building, so slug → buildingId
+    # is all we need.  Unknown slugs return {} so the scheduler's existing
+    # `cost is None → skip` branch handles them cleanly.
+    building_id = BUILDING_HELP_IDS.get(building_slug.lower())
+    if building_id is None:
         sendToBotDebug(
             session,
-            f"fetch_costs_for_building: ikipedia listing fetch failed for "
-            f"city {city.get('id')}:\n{traceback.format_exc()}",
-            True,
-        )
-        return {}
-
-    # Step 2: find the per-building ajaxHandlerCall URL in the ikipedia HTML.
-    # Guard: wonders / palace / museum slugs have no `button_building` entry
-    # here; the regex will return None, and we return {} so the scheduler's
-    # existing `cost is None → skip` branch handles it cleanly.
-    # [^>]* keeps the match inside the opening tag — avoids crossing element
-    # boundaries that re.DOTALL + .*? could cause, which yielded a wrong URL
-    # and sent raw game-rejection JSON to Telegram.
-    pat = (
-        r'<div class="(?:selected)? *button_building '
-        + re.escape(building_slug)
-        + r'"[^>]*onclick="ajaxHandlerCall\(\'\?(.*?)\'\)'
-    )
-    match = re.search(pat, building_html, re.IGNORECASE)
-    if match is None:
-        sendToBotDebug(
-            session,
-            f"fetch_costs_for_building: no ikipedia button for slug "
+            f"fetch_costs_for_building: no buildingId mapping for slug "
             f"'{building_slug}' in city {city.get('id')}",
             True,
         )
         return {}
-    # Apply .format only to the suffix we control — match.group(1) may contain
-    # literal braces from the game URL that would confuse str.format.
-    suffix = (
+    cost_url = (
+        "view=buildingDetail&buildingId={bid}&helpId=1"
         "&backgroundView=city&currentCityId={cid}"
         "&templateView=buildingDetail&actionRequest={ar}&ajax=1"
-    ).format(cid=city["id"], ar=actionRequest)
-    cost_url = match.group(1) + suffix
+    ).format(bid=building_id, cid=city["id"], ar=actionRequest)
 
     # Step 3: per-building cost table
     try:
