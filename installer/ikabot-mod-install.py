@@ -465,9 +465,30 @@ def _leading_num(name: str) -> int:
     return int(m.group()) if m else 0
 
 
+def _instance_lnks(folder: Path) -> list[Path]:
+    """Numbered instance shortcuts only (e.g. '1 ikariam.lnk'), sorted by number.
+
+    Ignores other shortcuts in the folder (installer, old manager tools, etc.)."""
+    if not folder.exists():
+        return []
+    return sorted(
+        [f for f in folder.glob("*.lnk") if f.name[0].isdigit()],
+        key=lambda p: _leading_num(p.name),
+    )
+
+
 def maint_open_all(install_dir: Path) -> None:
     sc_dir = install_dir / "shortcuts"
-    lnks = sorted(sc_dir.glob("*.lnk"), key=lambda p: _leading_num(p.name)) if sc_dir.exists() else []
+
+    # Clean up the retired AHK manager shortcut if it is still around
+    for stale in sc_dir.glob("ikabot_manager*.lnk") if sc_dir.exists() else []:
+        try:
+            stale.unlink()
+            print(f"  Removed old shortcut: {stale.name}")
+        except Exception:
+            pass
+
+    lnks = _instance_lnks(sc_dir)
 
     if not lnks:
         show_info(
@@ -477,10 +498,11 @@ def maint_open_all(install_dir: Path) -> None:
         picked = pick_folder("Select your ikabot shortcuts folder", initial=str(install_dir))
         if not picked:
             return
-        lnks = sorted(picked.glob("*.lnk"), key=lambda p: _leading_num(p.name))
+        lnks = _instance_lnks(picked)
 
     if not lnks:
-        show_error("No shortcut (.lnk) files were found in the selected folder.")
+        show_error("No numbered instance shortcuts (e.g. '1 ikariam.lnk')\n"
+                   "were found in the selected folder.")
         return
 
     for lnk in lnks:
@@ -554,16 +576,39 @@ def maint_close_all_ps() -> None:
     if not ask_yes_no("Close all running ikabot instances via PowerShell?", "Close All (PS)"):
         return
 
+    # Kill ikabot.exe processes AND the PowerShell host windows they run in
+    # (the -NoExit windows from 'Open all (PowerShell)' would otherwise stay open).
+    ps_script = (
+        "$closed = 0; "
+        "$ik = Get-CimInstance Win32_Process -Filter \"Name='ikabot.exe'\" "
+        "-ErrorAction SilentlyContinue; "
+        "$parents = @(); "
+        "foreach ($p in $ik) { "
+        "  $par = Get-Process -Id $p.ParentProcessId -ErrorAction SilentlyContinue; "
+        "  if ($par -and $par.Name -eq 'powershell') { $parents += $par } "
+        "}; "
+        "foreach ($p in $ik) { "
+        "  Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $closed++ "
+        "}; "
+        "$parents | Stop-Process -Force -ErrorAction SilentlyContinue; "
+        # Also close leftover PowerShell windows titled 'ikariam N' where
+        # ikabot has already exited but the -NoExit window is still open.
+        "Get-Process powershell -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.MainWindowTitle -match 'ikariam' -and $_.Id -ne $PID } | "
+        "Stop-Process -Force -ErrorAction SilentlyContinue; "
+        "exit ([int]($closed -eq 0))"
+    )
     res = subprocess.run(
-        ["powershell", "-WindowStyle", "Hidden", "-Command",
-         "$p = Get-Process -Name ikabot -ErrorAction SilentlyContinue; "
-         "if ($p) { $p | Stop-Process -Force; exit 0 } else { exit 1 }"],
+        ["powershell", "-WindowStyle", "Hidden", "-Command", ps_script],
         capture_output=True, text=True,
     )
     if res.returncode == 0:
-        show_info("All ikabot instances have been closed.", "Close All (PS) — Done")
+        show_info("All ikabot instances and their PowerShell windows have been closed.",
+                  "Close All (PS) — Done")
     else:
-        show_info("No ikabot instances were running.", "Close All (PS)")
+        show_info("No ikabot instances were running.\n"
+                  "Any leftover 'ikariam' PowerShell windows were closed.",
+                  "Close All (PS)")
 
 
 def find_ikabot_asset(releases: list[dict]) -> tuple[str, str, str] | None:
