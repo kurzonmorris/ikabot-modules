@@ -1223,7 +1223,7 @@ class Session:
                 time.sleep(ConnectionError_wait)
 
     def post(
-        self, url='', payloadPost={}, params={}, ignoreExpire=False, noIndex=False, fullResponse = False, noQuery=False, **kwargs
+        self, url='', payloadPost={}, params={}, ignoreExpire=False, noIndex=False, fullResponse = False, noQuery=False, _wrid_retries=0, **kwargs
     ):
         """Sends post request to ikariam
         Parameters
@@ -1313,7 +1313,30 @@ class Session:
                 if ignoreExpire is False:
                     assert self.__isExpired(resp) is False
                 if "TXT_ERROR_WRONG_REQUEST_ID" in resp:
-                    self.logger.warning("got TXT_ERROR_WRONG_REQUEST_ID, bad actionRequest")
+                    # The actionRequest token was stale — another concurrent
+                    # request (a background task, or the web-server browser)
+                    # rotated it before this POST landed. The server rejected
+                    # this request without executing it, so retrying with a
+                    # fresh token is safe. Bound the retries with a small
+                    # backoff so sustained token contention can't spiral into
+                    # unbounded recursion / a tight request loop.
+                    _WRID_MAX_RETRIES = 5
+                    if _wrid_retries >= _WRID_MAX_RETRIES:
+                        self.logger.warning(
+                            "got TXT_ERROR_WRONG_REQUEST_ID %d times; giving up on this "
+                            "request (actionRequest token contention — another task or the "
+                            "web-server browser keeps rotating the token)",
+                            _wrid_retries,
+                        )
+                        return resp if not fullResponse else response
+                    # Routine, self-healing retry — keep it at debug so it
+                    # doesn't spam the console during heavy web-server use.
+                    self.logger.debug(
+                        "got TXT_ERROR_WRONG_REQUEST_ID, refreshing token and retrying "
+                        "(attempt %d/%d)",
+                        _wrid_retries + 1, _WRID_MAX_RETRIES,
+                    )
+                    time.sleep(0.3 * (_wrid_retries + 1))  # brief backoff to let the token settle
                     return self.post(
                         url=url_original,
                         payloadPost=payloadPost_original,
@@ -1322,6 +1345,7 @@ class Session:
                         noIndex=noIndex,
                         fullResponse=fullResponse,
                         noQuery=noQuery,
+                        _wrid_retries=_wrid_retries + 1,
                         **kwargs,
                     )
                 # --- update developer runtime info ---
