@@ -465,9 +465,30 @@ def _leading_num(name: str) -> int:
     return int(m.group()) if m else 0
 
 
+def _instance_lnks(folder: Path) -> list[Path]:
+    """Numbered instance shortcuts only (e.g. '1 ikariam.lnk'), sorted by number.
+
+    Ignores other shortcuts in the folder (installer, old manager tools, etc.)."""
+    if not folder.exists():
+        return []
+    return sorted(
+        [f for f in folder.glob("*.lnk") if f.name[0].isdigit()],
+        key=lambda p: _leading_num(p.name),
+    )
+
+
 def maint_open_all(install_dir: Path) -> None:
     sc_dir = install_dir / "shortcuts"
-    lnks = sorted(sc_dir.glob("*.lnk"), key=lambda p: _leading_num(p.name)) if sc_dir.exists() else []
+
+    # Clean up the retired AHK manager shortcut if it is still around
+    for stale in sc_dir.glob("ikabot_manager*.lnk") if sc_dir.exists() else []:
+        try:
+            stale.unlink()
+            print(f"  Removed old shortcut: {stale.name}")
+        except Exception:
+            pass
+
+    lnks = _instance_lnks(sc_dir)
 
     if not lnks:
         show_info(
@@ -477,10 +498,11 @@ def maint_open_all(install_dir: Path) -> None:
         picked = pick_folder("Select your ikabot shortcuts folder", initial=str(install_dir))
         if not picked:
             return
-        lnks = sorted(picked.glob("*.lnk"), key=lambda p: _leading_num(p.name))
+        lnks = _instance_lnks(picked)
 
     if not lnks:
-        show_error("No shortcut (.lnk) files were found in the selected folder.")
+        show_error("No numbered instance shortcuts (e.g. '1 ikariam.lnk')\n"
+                   "were found in the selected folder.")
         return
 
     for lnk in lnks:
