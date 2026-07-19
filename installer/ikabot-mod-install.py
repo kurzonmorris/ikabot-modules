@@ -554,16 +554,39 @@ def maint_close_all_ps() -> None:
     if not ask_yes_no("Close all running ikabot instances via PowerShell?", "Close All (PS)"):
         return
 
+    # Kill ikabot.exe processes AND the PowerShell host windows they run in
+    # (the -NoExit windows from 'Open all (PowerShell)' would otherwise stay open).
+    ps_script = (
+        "$closed = 0; "
+        "$ik = Get-CimInstance Win32_Process -Filter \"Name='ikabot.exe'\" "
+        "-ErrorAction SilentlyContinue; "
+        "$parents = @(); "
+        "foreach ($p in $ik) { "
+        "  $par = Get-Process -Id $p.ParentProcessId -ErrorAction SilentlyContinue; "
+        "  if ($par -and $par.Name -eq 'powershell') { $parents += $par } "
+        "}; "
+        "foreach ($p in $ik) { "
+        "  Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $closed++ "
+        "}; "
+        "$parents | Stop-Process -Force -ErrorAction SilentlyContinue; "
+        # Also close leftover PowerShell windows titled 'ikariam N' where
+        # ikabot has already exited but the -NoExit window is still open.
+        "Get-Process powershell -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.MainWindowTitle -match 'ikariam' -and $_.Id -ne $PID } | "
+        "Stop-Process -Force -ErrorAction SilentlyContinue; "
+        "exit ([int]($closed -eq 0))"
+    )
     res = subprocess.run(
-        ["powershell", "-WindowStyle", "Hidden", "-Command",
-         "$p = Get-Process -Name ikabot -ErrorAction SilentlyContinue; "
-         "if ($p) { $p | Stop-Process -Force; exit 0 } else { exit 1 }"],
+        ["powershell", "-WindowStyle", "Hidden", "-Command", ps_script],
         capture_output=True, text=True,
     )
     if res.returncode == 0:
-        show_info("All ikabot instances have been closed.", "Close All (PS) — Done")
+        show_info("All ikabot instances and their PowerShell windows have been closed.",
+                  "Close All (PS) — Done")
     else:
-        show_info("No ikabot instances were running.", "Close All (PS)")
+        show_info("No ikabot instances were running.\n"
+                  "Any leftover 'ikariam' PowerShell windows were closed.",
+                  "Close All (PS)")
 
 
 def find_ikabot_asset(releases: list[dict]) -> tuple[str, str, str] | None:
