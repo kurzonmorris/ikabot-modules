@@ -214,6 +214,7 @@ def do_it(session, wine_city, wood_city, luxury_city, favour_tasks):
         wait(1)
 
         # collect favour cultural bonus
+        favour_cinetheater_city = None
         if wood_city:
             favour_cinetheater_city = wood_city
         if luxury_city:
