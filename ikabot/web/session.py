@@ -666,6 +666,23 @@ class Session:
             if 'token' not in r.text:
                 print("Failed to log in...")
                 print(f"Expected to get token in response to login request but instead got code {r.status_code} and body {r.text}")
+                # Gameforge rejected the generated blackbox token (or presented a
+                # challenge). Offer a manual blackbox retry before falling back to
+                # the gf-token-production cookie method (upstream #417/#419).
+                print("")
+                print("You can retry with a MANUAL blackbox token first.")
+                print("Obtain one here: https://ikabot-collective.github.io/IkabotAPI/")
+                print("Paste it below, or press [ENTER] to skip to the cookie method.")
+                manual_token = read(msg="Blackbox token (empty to skip):", empty=True)
+                if manual_token:
+                    manual_token = manual_token.strip()
+                    self.blackbox = manual_token if manual_token.startswith('tra:') else 'tra:' + manual_token
+                    data["blackbox"] = self.blackbox
+                    r = self.s.post(
+                        "https://spark-web.gameforge.com/api/v2/authProviders/mauth/sessions", json=data
+                    )
+
+            if 'token' not in r.text:
                 print(
                     "Log into the lobby via browser and then press CTRL + SHIFT + J to open up the javascript console"
                 )
