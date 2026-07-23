@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.1.8"
+__version__ = "2.1.9"
 
 import csv
 import glob
@@ -22,6 +22,8 @@ import threading
 import time
 import traceback
 from decimal import Decimal
+
+import psutil
 
 from ikabot import config
 from ikabot.config import (
@@ -227,7 +229,16 @@ def _lock_acquire(lock_file, timeout, stale_after):
             try:
                 with open(lock_file, "r") as f:
                     data = json.load(f)
-                if time.time() - data.get("timestamp", 0) > stale_after:
+                # A lock whose holder process is dead is stale immediately —
+                # don't make every waiter sit out the stale_after window when
+                # the holder was killed (window closed, Ctrl+C mid-write).
+                holder_pid = data.get("pid")
+                holder_dead = (
+                    isinstance(holder_pid, int)
+                    and holder_pid > 0
+                    and not psutil.pid_exists(holder_pid)
+                )
+                if holder_dead or time.time() - data.get("timestamp", 0) > stale_after:
                     os.remove(lock_file)
                     continue
             except (json.JSONDecodeError, KeyError, IOError):
@@ -268,7 +279,10 @@ class _csv_lock:
         self.path = csv_lock_path(session)
 
     def __enter__(self):
-        if not _lock_acquire(self.path, timeout=30, stale_after=60):
+        # stale_after MUST be < timeout: an orphaned lock (holder died without
+        # cleanup) is then always broken before waiters give up.  CSV holds
+        # last milliseconds, so 20s of staleness is already very generous.
+        if not _lock_acquire(self.path, timeout=30, stale_after=20):
             raise RuntimeError(f"Could not acquire CSV lock at {self.path}")
         return self
 
@@ -2642,7 +2656,20 @@ def scheduler_loop(session, stop_event):
         drain_shortage_events(session, city_state, now)
 
         # Hot-reload the CSV every tick so menu edits take effect immediately.
-        rows = csv_load(session)
+        # A lock-acquisition failure here must NOT kill the worker — log it,
+        # skip this tick, and try again; the lock helpers break stale/orphaned
+        # locks on their own within seconds.
+        try:
+            rows = csv_load(session)
+        except RuntimeError:
+            sendToBotDebug(
+                session,
+                "scheduler: CSV lock busy, skipping this tick:\n"
+                + traceback.format_exc(),
+                True,
+            )
+            stop_event.wait(15)
+            continue
         rows_by_city = {}
         for r in rows:
             rows_by_city.setdefault(r["city_id"], []).append(r)
