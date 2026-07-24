@@ -40,6 +40,11 @@ class Session:
         self._vault_lobby_token = lobby_token  # stored lobby token from vault (may be None)
         self.logger = getLogger(__name__)
         self.requestHistory = deque(maxlen=5)  # keep last 5 requests in history
+        # Every Ikariam response embeds a current actionRequest token. Cache the
+        # most recent one so POSTs don't each need a separate page fetch to scrape
+        # a fresh token (halves POST latency — very visible in the web server).
+        # Invalidated whenever the server reports the token was wrong.
+        self._cached_token = None
         # disable ssl verification warning
         requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
         self.__login(mail=mail, password=password)
@@ -1117,9 +1122,10 @@ class Session:
         else:
             obj.proxies.update({})
 
-    def __checkCookie(self):
+    def __checkCookie(self, sessionData=None):
         self.logger.info("__checkCookie()")
-        sessionData = self.getSessionData()
+        if sessionData is None:
+            sessionData = self.getSessionData()
 
         try:
             if self.s.cookies["PHPSESSID"] != sessionData["cookies"]["PHPSESSID"]:
@@ -1130,18 +1136,43 @@ class Session:
             except Exception:
                 self.__sessionExpired()
 
+    def __scrape_token(self, text):
+        """Pull the current actionRequest token out of a response and cache it.
+        Called after every get()/post() so subsequent POSTs can reuse it
+        instead of fetching a fresh page just to read the token."""
+        try:
+            # Cheap substring guard first: skips the regex entirely on binary
+            # asset responses (images/fonts) proxied by the web server, which
+            # never contain the token.
+            if not text or "actionRequest" not in text:
+                return
+            _m = re.search(r'actionRequest"?:\s*"(.*?)"', text)
+            if _m is not None:
+                self._cached_token = _m.group(1)
+        except Exception:
+            pass
+
     def __token(self):
-        """Generates a valid actionRequest token from the session
+        """Return a valid actionRequest token.
+
+        Uses the token scraped from the most recent response when available
+        (no network cost). Only falls back to fetching a page when there is no
+        cached token yet. If the cached token turns out to be stale the server
+        replies TXT_ERROR_WRONG_REQUEST_ID, which clears the cache and forces a
+        fresh fetch on the retry — so the cache is self-correcting.
         Returns
         -------
         token : str
             a string representing a valid actionRequest token
         """
+        if self._cached_token:
+            return self._cached_token
         html = self.get()
         _m = re.search(r'actionRequest"?:\s*"(.*?)"', html)
         if _m is None:
             raise RuntimeError("Could not find actionRequest token in page (unexpected server response)")
-        return _m.group(1)
+        self._cached_token = _m.group(1)
+        return self._cached_token
 
     def get(
         self, url='', params={}, ignoreExpire=False, noIndex=False, fullResponse=False, noQuery=False, **kwargs
@@ -1165,8 +1196,13 @@ class Session:
         html : str
             response from the server
         """
-        self.__checkCookie()
-        self.__update_proxy()
+        # Read the (encrypted) session file once per request and share it
+        # between the cookie check and the proxy update, instead of decrypting
+        # it twice. This halves the per-request session-data overhead, which
+        # adds up under the web server's many proxied requests.
+        _sessionData = self.getSessionData()
+        self.__checkCookie(sessionData=_sessionData)
+        self.__update_proxy(sessionData=_sessionData)
 
         if noIndex:
             url = self.urlBase.replace("index.php", "") + url
@@ -1216,6 +1252,9 @@ class Session:
                     raise requests.exceptions.ConnectionError  # repeat after 10 minutes
                 if ignoreExpire is False:
                     assert self.__isExpired(html) is False
+                # Cache the actionRequest token embedded in this page so the
+                # next POST can reuse it without a separate token-fetch request.
+                self.__scrape_token(html)
                 # --- update developer runtime info ---
                 try:
                     self.dev_api_host = self.host
@@ -1264,8 +1303,10 @@ class Session:
         url_original = url
         payloadPost_original = payloadPost
         params_original = params
-        self.__checkCookie()
-        self.__update_proxy()
+        # One session-file decrypt shared between both checks (see get()).
+        _sessionData = self.getSessionData()
+        self.__checkCookie(sessionData=_sessionData)
+        self.__update_proxy(sessionData=_sessionData)
 
         # add the request id
         token = self.__token()
@@ -1337,6 +1378,10 @@ class Session:
                     # fresh token is safe. Bound the retries with a small
                     # backoff so sustained token contention can't spiral into
                     # unbounded recursion / a tight request loop.
+                    # Drop the cached token so the retry's __token() fetches a
+                    # fresh one (otherwise it would reuse the same stale token
+                    # and fail every retry).
+                    self._cached_token = None
                     _WRID_MAX_RETRIES = 5
                     if _wrid_retries >= _WRID_MAX_RETRIES:
                         self.logger.warning(
@@ -1353,7 +1398,14 @@ class Session:
                         "(attempt %d/%d)",
                         _wrid_retries + 1, _WRID_MAX_RETRIES,
                     )
-                    time.sleep(0.3 * (_wrid_retries + 1))  # brief backoff to let the token settle
+                    # The recursive retry re-fetches a fresh token via __token(),
+                    # which is itself a network round-trip, so the first few
+                    # retries need NO extra sleep — adding one just stacks latency
+                    # onto every contended POST (very visible in the web server,
+                    # where a page change makes many POSTs). Only start a small
+                    # backoff on the later retries as a tight-loop safety valve.
+                    if _wrid_retries >= 2:
+                        time.sleep(0.2 * (_wrid_retries - 1))  # 0.2s, 0.4s on retries 3-4
                     return self.post(
                         url=url_original,
                         payloadPost=payloadPost_original,
@@ -1365,6 +1417,9 @@ class Session:
                         _wrid_retries=_wrid_retries + 1,
                         **kwargs,
                     )
+                # Successful POST — cache the rotated actionRequest token that
+                # the server returned so the next POST can reuse it.
+                self.__scrape_token(resp)
                 # --- update developer runtime info ---
                 try:
                     self.dev_api_host = self.host
@@ -1374,7 +1429,7 @@ class Session:
                     self.dev_gf_token = cookies.get("gf-token-production")
                 except Exception:
                     self.logger.debug("Failed to capture dev cookie snapshot", exc_info=True)
-                    
+
                 return resp if not fullResponse else response
             except AssertionError:
                 self.__sessionExpired()
