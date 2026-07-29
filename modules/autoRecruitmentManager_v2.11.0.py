@@ -11,6 +11,7 @@ Features:
 - Distribute recruitment across multiple buildings (speed-weighted, balanced)
 - Dynamic fetching of build times and costs (server-specific)
 - Priority queue: each order batch has an independent priority level
+- Per-type city include/exclude list (skip chosen cities when assigning work)
 - Configurable batch size: each order builds N% of a unit type's remaining
 - Resource shortage handling: each idle building places whatever it can afford
 - Busy building detection with smart wait / include options
@@ -19,10 +20,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.10.1
+Version: 2.11.0
 """
 
-MODULE_VERSION = "2.10.1"
+MODULE_VERSION = "2.11.0"
 
 import csv
 import glob
@@ -555,6 +556,11 @@ _DEFAULT_CONFIG = {
     # e.g. 1500 -> 300 -> 240 -> 192 ... which also spreads it across buildings.
     # 0 disables batching (each order uses the max the building can afford).
     "min_batch_pct":            0.20,
+    # Cities the worker must not recruit in, per building type (lists of
+    # city_id). Excluded cities are skipped entirely when assigning work; they
+    # may still act as SOURCES for resource imports.
+    "excluded_cities_units":    [],
+    "excluded_cities_ships":    [],
 }
 
 
@@ -579,6 +585,34 @@ def delete_config(session):
         os.remove(_config_path(session))
     except FileNotFoundError:
         pass
+
+
+# =============================================================================
+# EXCLUDED CITIES  — cities the worker must not recruit in
+# =============================================================================
+
+def _excluded_key(is_units):
+    return "excluded_cities_units" if is_units else "excluded_cities_ships"
+
+
+def get_excluded_city_ids(session, is_units, cfg=None):
+    """Return a set of city_ids excluded from recruitment for this type."""
+    if cfg is None:
+        cfg = load_config(session)
+    raw = cfg.get(_excluded_key(is_units), []) or []
+    out = set()
+    for v in raw:
+        try:
+            out.add(int(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def set_excluded_city_ids(session, is_units, city_ids):
+    cfg = load_config(session)
+    cfg[_excluded_key(is_units)] = sorted(int(c) for c in city_ids)
+    save_config(session, cfg)
 
 
 # =============================================================================
@@ -1654,10 +1688,13 @@ def _view_building_status(session, is_units):
         key=lambda r: (r["priority"], r["request_id"]),
     )
 
+    excluded_cities = get_excluded_city_ids(session, is_units)
+
     print()
     total_buildings = 0
     total_idle = 0
     total_busy = 0
+    total_excluded_buildings = 0
 
     for cid in cities_ids:
         city_name = cities[cid]['name']
@@ -1679,6 +1716,17 @@ def _view_building_status(session, is_units):
             })
 
         if not city_buildings:
+            continue
+
+        if cid in excluded_cities:
+            # Excluded: name it, say why nothing happens here, and skip the
+            # per-building probing (which would be wasted requests).
+            print(f"  {bcolors.BOLD}{city_name}{bcolors.ENDC} "
+                  f"({len(city_buildings)} {building_type})  |  "
+                  f"{bcolors.RED}EXCLUDED — no work assigned "
+                  f"(change in menu option 9){bcolors.ENDC}")
+            total_excluded_buildings += len(city_buildings)
+            print()
             continue
 
         # Citizen growth diagnostic (read from the Town Hall). Shows whether
@@ -1719,9 +1767,13 @@ def _view_building_status(session, is_units):
 
         print()
 
-    print(f"  Summary: {total_buildings} buildings total  |  "
-          f"{bcolors.GREEN}{total_idle} idle{bcolors.ENDC}  |  "
-          f"{bcolors.WARNING}{total_busy} building{bcolors.ENDC}")
+    summary = (f"  Summary: {total_buildings} buildings in use  |  "
+               f"{bcolors.GREEN}{total_idle} idle{bcolors.ENDC}  |  "
+               f"{bcolors.WARNING}{total_busy} building{bcolors.ENDC}")
+    if total_excluded_buildings:
+        summary += (f"  |  {bcolors.RED}{total_excluded_buildings} in excluded "
+                    f"cities{bcolors.ENDC}")
+    print(summary)
     if goals:
         total_rem = sum(g["qty_remaining"] for g in goals)
         print(f"  Goals remaining: {total_rem:,} units across {len(goals)} goal(s)")
@@ -1888,6 +1940,91 @@ def _adjust_priority_ui(session, is_units):
     print(f"  {bcolors.GREEN}Priority updated to {new_pri}.{bcolors.ENDC}")
 
 
+def _manage_cities_ui(session, is_units):
+    """
+    Include / exclude cities for recruitment. Lists every city that has a
+    building of this type, marks each INCLUDED or EXCLUDED, and lets the user
+    toggle them by number.
+    """
+    building_type = "barracks" if is_units else "shipyard"
+    kind = "Units" if is_units else "Ships"
+
+    # Prefer the cached building list (fast); fall back to a live scan.
+    cached = _load_buildings_cache(session, is_units)
+    if not cached:
+        print(f"\n  No building list cached yet — scanning {building_type}s...")
+        try:
+            cids, cits = getIdsOfCities(session)
+        except Exception as e:
+            print(f"  {bcolors.RED}Could not fetch cities: {e}{bcolors.ENDC}")
+            return
+        cached = _scan_buildings(session, is_units, list(cids), cits)
+        if cached:
+            _save_buildings_cache(session, is_units, cached)
+    if not cached:
+        print(f"  {bcolors.RED}No {building_type} found in any city.{bcolors.ENDC}")
+        return
+
+    # Collapse to one entry per city, counting buildings
+    city_info = {}
+    for b in cached:
+        cid = b['city_id']
+        e = city_info.setdefault(cid, {'name': b.get('city_name', str(cid)), 'n': 0})
+        e['n'] += 1
+    ordered = sorted(city_info.items(), key=lambda kv: kv[1]['name'].lower())
+
+    while True:
+        excluded = get_excluded_city_ids(session, is_units)
+        banner()
+        print("=" * 60)
+        print(f"  RECRUITMENT CITIES — {kind}")
+        print("=" * 60)
+        print()
+        print(f"  Excluded cities are skipped entirely when assigning work.")
+        print(f"  (They can still supply resources to other cities.)")
+        print()
+
+        for i, (cid, info) in enumerate(ordered, start=1):
+            if cid in excluded:
+                state = f"{bcolors.RED}EXCLUDED{bcolors.ENDC}"
+            else:
+                state = f"{bcolors.GREEN}INCLUDED{bcolors.ENDC}"
+            print(f"  ({i:>2}) {state}  {info['name']:<20} "
+                  f"{info['n']} {building_type}")
+
+        n_inc = len(ordered) - sum(1 for cid, _ in ordered if cid in excluded)
+        print()
+        print(f"  {n_inc} of {len(ordered)} cities in use.")
+        if n_inc == 0:
+            print(f"  {bcolors.WARNING}All cities excluded — nothing will be "
+                  f"built until you include at least one.{bcolors.ENDC}")
+        print()
+        print("  Enter a number to toggle that city.")
+        print("  (a) Include all    (n) Exclude all")
+        print("  (') Done")
+        print()
+
+        raw = read(msg="Select: ", min=1, max=len(ordered), digit=True,
+                   additionalValues=["'", "a", "A", "n", "N"])
+
+        if raw == "'":
+            return
+        if isinstance(raw, str):
+            letter = raw.lower()
+            if letter == "a":
+                set_excluded_city_ids(session, is_units, [])
+            elif letter == "n":
+                set_excluded_city_ids(session, is_units, [cid for cid, _ in ordered])
+            continue
+
+        cid = ordered[raw - 1][0]
+        if cid in excluded:
+            excluded.discard(cid)
+        else:
+            excluded.add(cid)
+        set_excluded_city_ids(session, is_units, excluded)
+
+
 # ---------------------------------------------------------------------------
 # Legacy shim wrappers used by old code paths still in _activate_worker etc.
 # ---------------------------------------------------------------------------
@@ -1969,6 +2106,11 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             batch_pct = 0.20
         batch_pct = max(0.0, min(1.0, batch_pct))
 
+        # Cities the user has excluded from recruiting (re-read each cycle so
+        # changes take effect live). Skipping them in the resource fetch below
+        # also removes their buildings from this cycle's work list.
+        excluded_cities = get_excluded_city_ids(session, is_units, cfg)
+
         # --- Reload goals CSV each cycle ---
         all_rows = recruit_csv_load(session, is_units)
         active_goals = [r for r in all_rows
@@ -1997,6 +2139,8 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
         fetch_error = False
 
         for cid in all_city_ids:
+            if cid in excluded_cities:
+                continue  # user-excluded: no work assigned here this cycle
             try:
                 html = session.get(city_url + str(cid))
                 city_data = getCity(html)
@@ -2348,6 +2492,17 @@ def _activate_worker(session, event, is_units):
         enter()
         return False  # caller stays in menu
 
+    # Don't start a worker that has nowhere to build.
+    _cached = _load_buildings_cache(session, is_units)
+    if _cached:
+        _excl = get_excluded_city_ids(session, is_units)
+        if _excl and all(b['city_id'] in _excl for b in _cached):
+            print(f"\n  {bcolors.RED}Every city is excluded — there is nowhere "
+                  f"to build.{bcolors.ENDC}")
+            print(f"  Include at least one city using option (9).")
+            enter()
+            return False
+
     wlock = _worker_lock_path(session, is_units)
     if _is_worker_running(session, is_units):
         print(f"\n  {bcolors.WARNING}A worker for {kind} is already running.{bcolors.ENDC}")
@@ -2618,6 +2773,15 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                     print(f"  Batch size: {_batch_pct*100:.0f}% of remaining per order")
                 else:
                     print(f"  Batch size: OFF (max affordable per order)")
+
+                _excl = get_excluded_city_ids(session, is_units)
+                if _excl:
+                    _cached = _load_buildings_cache(session, is_units) or []
+                    _names = sorted({b.get('city_name', str(b['city_id']))
+                                     for b in _cached if b['city_id'] in _excl})
+                    _shown = ", ".join(_names[:3]) + ("..." if len(_names) > 3 else "")
+                    print(f"  {bcolors.WARNING}Cities excluded: {len(_excl)}"
+                          f"{(' — ' + _shown) if _names else ''}{bcolors.ENDC}")
                 print()
 
                 worker_running = _is_worker_running(session, is_units)
@@ -2638,11 +2802,12 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print("  (6) Refresh building list  (rescan after upgrades)")
                 print("  (7) Worker settings  (reports / resource import)")
                 print("  (8) Batch size  (units built per order)")
+                print("  (9) Cities  (include / exclude cities)")
                 print()
                 print("  (') Back to type selection")
                 print()
 
-                choice = read(msg="Select: ", min=1, max=8, digit=True,
+                choice = read(msg="Select: ", min=1, max=9, digit=True,
                               additionalValues=["'", "s", "S", "o", "O", "r", "R"])
 
                 if isinstance(choice, str):
@@ -2735,6 +2900,8 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                     if _is_worker_running(session, is_units):
                         print("  A running worker applies this within one cycle.")
                     enter()
+                elif choice == 9:
+                    _manage_cities_ui(session, is_units)
 
     except KeyboardInterrupt:
         pass
