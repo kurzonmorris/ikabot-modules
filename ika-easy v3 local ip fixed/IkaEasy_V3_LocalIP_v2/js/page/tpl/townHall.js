@@ -19,40 +19,52 @@ class Page extends Parent {
             return;
         }
 
-        // Only show when playing through the ikabot proxy.
-        let ikabotDetected = false;
+        // Only show when playing through the ikabot proxy, and only enable the
+        // controls if the Resource Production Manager module is installed.
+        let ikabotDetected  = false;
+        let moduleAvailable = false;
         try {
             const r = await fetch(
-                `${location.origin}/index.php?ikabot=1&action=ikaeasy&ikaeasy=cities`,
+                `${location.origin}/index.php?ikabot=1&action=ikaeasy&ikaeasy=prod_status`,
                 { credentials: 'include', signal: AbortSignal.timeout(2000) }
             );
-            if (r.ok) ikabotDetected = true;
+            if (r.ok) {
+                ikabotDetected = true;
+                const data = await r.json();
+                moduleAvailable = !!data.available;
+            }
         } catch (_) {}
+
+        let savedTypes = localStorage.getItem(PROD_TYPES_KEY) || 'wood_then_luxury';
+        // Migrate the old 'both' value to the new ordered default.
+        if (savedTypes === 'both') savedTypes = 'wood_then_luxury';
 
         const saved = {
             scope:    localStorage.getItem(PROD_SCOPE_KEY)    || 'city',
-            types:    localStorage.getItem(PROD_TYPES_KEY)    || 'both',
+            types:    savedTypes,
             woodPct:  parseInt(localStorage.getItem(PROD_WOOD_PCT_KEY)) || 100,
             luxPct:   parseInt(localStorage.getItem(PROD_LUX_PCT_KEY))  || 100,
             maximise: localStorage.getItem(PROD_MAX_KEY) === 'true',
         };
 
-        const tpl      = await this.render('townhall-prod', { ikabotDetected, saved });
+        const tpl      = await this.render('townhall-prod', { ikabotDetected, moduleAvailable, saved });
         const $section = $(tpl);
         $section.attr('id', 'ikaeasy_prod_wrap');
 
         const $anchor = $('#townHall, .contentBox01h').last();
         $anchor.after($section);
 
-        if (ikabotDetected) {
+        if (ikabotDetected && moduleAvailable) {
             this._bindEvents($section);
             this._refreshSliderVisibility($section, saved.types);
         }
     }
 
     _refreshSliderVisibility($section, types) {
-        $('#ikaeasy_prod_wood_row', $section).toggle(types === 'wood' || types === 'both');
-        $('#ikaeasy_prod_lux_row',  $section).toggle(types === 'luxury' || types === 'both');
+        const wantsWood = (types === 'wood' || types === 'wood_then_luxury' || types === 'luxury_then_wood');
+        const wantsLux  = (types === 'luxury' || types === 'wood_then_luxury' || types === 'luxury_then_wood');
+        $('#ikaeasy_prod_wood_row', $section).toggle(wantsWood);
+        $('#ikaeasy_prod_lux_row',  $section).toggle(wantsLux);
     }
 
     _bindEvents($section) {
@@ -93,7 +105,7 @@ class Page extends Parent {
     async _applyProduction($section) {
         const $status  = $('#ikaeasy_prod_status', $section);
         const scope    = $('input[name="ikaeasy_prod_scope"]:checked', $section).val();
-        const types    = $('input[name="ikaeasy_prod_types"]:checked', $section).val();
+        const mode     = $('input[name="ikaeasy_prod_types"]:checked', $section).val();
         const woodPct  = parseInt($('#ikaeasy_prod_wood_slider', $section).val()) || 100;
         const luxPct   = parseInt($('#ikaeasy_prod_lux_slider',  $section).val()) || 100;
         const maximise = $('#ikaeasy_prod_maximise', $section).is(':checked');
@@ -108,10 +120,6 @@ class Page extends Parent {
             cityIds = [this._city.cityId];
         }
 
-        const resourceTypes = [];
-        if (types === 'wood' || types === 'both')   resourceTypes.push('resource');
-        if (types === 'luxury' || types === 'both') resourceTypes.push('tradegood');
-
         $status.css('color', '').text('Applying…');
         $('#ikaeasy_prod_apply', $section).prop('disabled', true);
 
@@ -125,10 +133,10 @@ class Page extends Parent {
                     body: JSON.stringify({
                         ikaeasy_action: 'modify_production',
                         city_ids:       cityIds,
-                        resource_types: resourceTypes,
+                        mode:           mode,
                         wood_pct:       woodPct,
                         luxury_pct:     luxPct,
-                        maximise:       maximise,
+                        overcharge:     maximise,
                     }),
                 }
             );

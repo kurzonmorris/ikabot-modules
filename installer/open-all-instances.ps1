@@ -1,5 +1,5 @@
 # open-all-instances.ps1
-# Opens every numbered ikabot shortcut in your shortcuts folder, in order.
+# Opens every ikabot instance in its own PowerShell window, in number order.
 # Reads the install location from the ikabot installer config automatically.
 
 $ErrorActionPreference = 'Stop'
@@ -19,38 +19,45 @@ if (-not $installDir -or -not (Test-Path $installDir)) {
     $installDir = Read-Host "ikabot install folder not found in config. Enter the path"
 }
 
-# ── Find shortcuts ────────────────────────────────────────────────────────────
-$scDir = Join-Path $installDir "shortcuts"
+# ── Find instance folders ─────────────────────────────────────────────────────
+$ikabotDir = Join-Path $installDir "ikabot"
 
-if (-not (Test-Path $scDir)) {
-    Write-Host "ERROR: Shortcuts folder not found: $scDir" -ForegroundColor Red
+if (-not (Test-Path $ikabotDir)) {
+    Write-Host "ERROR: ikabot folder not found: $ikabotDir" -ForegroundColor Red
     Write-Host "Make sure '$installDir' is your ikabot install folder."
     Read-Host "Press Enter to exit"
     exit 1
 }
 
-# Only numbered instance shortcuts (e.g. "1 ikariam.lnk"), skip installer shortcut
-$lnks = Get-ChildItem $scDir -Filter "*.lnk" |
-        Where-Object  { $_.Name -match '^\d' } |
-        Sort-Object   { [int]([regex]::Match($_.Name, '\d+').Value) }
+$folders = Get-ChildItem $ikabotDir -Directory |
+           Where-Object { $_.Name -match '^ikariam \d+$' } |
+           Sort-Object   { [int]($_.Name -replace '\D', '') }
 
-if ($lnks.Count -eq 0) {
-    Write-Host "No numbered shortcuts found in: $scDir" -ForegroundColor Yellow
+if ($folders.Count -eq 0) {
+    Write-Host "No ikariam instance folders found in: $ikabotDir" -ForegroundColor Yellow
     Read-Host "Press Enter to exit"
     exit 0
 }
 
-# ── Open each instance ────────────────────────────────────────────────────────
-Write-Host "Opening $($lnks.Count) ikabot instance(s) from:"
-Write-Host "  $scDir"
+# ── Open each instance in a PowerShell window ─────────────────────────────────
+Write-Host "Opening $($folders.Count) ikabot instance(s) from:"
+Write-Host "  $ikabotDir"
 Write-Host ""
 
-foreach ($lnk in $lnks) {
-    Write-Host "  $($lnk.Name)"
-    Start-Process -FilePath $lnk.FullName
+$launched = 0
+foreach ($folder in $folders) {
+    $exe = Join-Path $folder.FullName "ikabot.exe"
+    if (-not (Test-Path $exe)) {
+        Write-Host "  Skipping $($folder.Name) - no ikabot.exe found" -ForegroundColor Yellow
+        continue
+    }
+    Write-Host "  $($folder.Name)"
+    $cmd = "`$host.UI.RawUI.WindowTitle = '$($folder.Name)'; Set-Location '$($folder.FullName)'; & '.\ikabot.exe'"
+    Start-Process powershell -ArgumentList '-NoExit', '-Command', $cmd
+    $launched++
     Start-Sleep -Milliseconds 150
 }
 
 Write-Host ""
-Write-Host "Done. $($lnks.Count) instance(s) launched." -ForegroundColor Green
+Write-Host "Done. $launched instance(s) launched in PowerShell windows." -ForegroundColor Green
 Start-Sleep -Seconds 2
