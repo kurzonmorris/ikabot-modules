@@ -20,10 +20,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.11.0
+Version: 2.11.1
 """
 
-MODULE_VERSION = "2.11.0"
+MODULE_VERSION = "2.11.1"
 
 import csv
 import glob
@@ -1940,6 +1940,49 @@ def _adjust_priority_ui(session, is_units):
     print(f"  {bcolors.GREEN}Priority updated to {new_pri}.{bcolors.ENDC}")
 
 
+def _parse_index_selection(raw, max_n):
+    """
+    Parse a flexible index selection into a de-duplicated, ordered list.
+
+    Accepts any mix of separators and ranges:
+        "1, 2, 3"      "1 2 3 4"      "1-4, 6-9"      "1-3 7-12"      "5"
+
+    Returns (indices, errors). indices are 1-based and validated against
+    max_n; errors is a list of human-readable strings for bad tokens.
+    """
+    indices, errors, seen = [], [], set()
+    # Normalise range separators first so spaced forms ("2 - 5", "1 to 3")
+    # survive the whitespace split below.
+    text = re.sub(r'\s*(?:\.\.|\bto\b|-)\s*', '-', str(raw).strip(), flags=re.I)
+    # commas and semicolons are just separators, same as whitespace
+    for tok in re.split(r'[,;\s]+', text):
+        if not tok:
+            continue
+        m = re.fullmatch(r'(\d+)\s*(?:-|\.\.|to)\s*(\d+)', tok)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo > hi:
+                lo, hi = hi, lo
+            if lo < 1 or hi > max_n:
+                errors.append(f"{tok} (out of range 1-{max_n})")
+                continue
+            rng = range(lo, hi + 1)
+        elif tok.isdigit():
+            v = int(tok)
+            if v < 1 or v > max_n:
+                errors.append(f"{tok} (out of range 1-{max_n})")
+                continue
+            rng = (v,)
+        else:
+            errors.append(f"{tok} (not a number or range)")
+            continue
+        for v in rng:
+            if v not in seen:
+                seen.add(v)
+                indices.append(v)
+    return indices, errors
+
+
 def _manage_cities_ui(session, is_units):
     """
     Include / exclude cities for recruitment. Lists every city that has a
@@ -1973,6 +2016,7 @@ def _manage_cities_ui(session, is_units):
         e['n'] += 1
     ordered = sorted(city_info.items(), key=lambda kv: kv[1]['name'].lower())
 
+    note = ""   # feedback line shown after each action
     while True:
         excluded = get_excluded_city_ids(session, is_units)
         banner()
@@ -1998,31 +2042,64 @@ def _manage_cities_ui(session, is_units):
         if n_inc == 0:
             print(f"  {bcolors.WARNING}All cities excluded — nothing will be "
                   f"built until you include at least one.{bcolors.ENDC}")
+        if note:
+            print(f"  {note}")
         print()
-        print("  Enter a number to toggle that city.")
+        print("  Toggle cities by number — single, list or range:")
+        print(f"     3        1, 2, 3        1 2 3 4        1-4, 6-9        1-3 7-12")
+        print("  Or enter them one at a time (3 <enter>, 5 <enter>, ...).")
+        print()
         print("  (a) Include all    (n) Exclude all")
-        print("  (') Done")
+        print("  (<enter>) Finish and go back    (') Exit the module")
         print()
 
-        raw = read(msg="Select: ", min=1, max=len(ordered), digit=True,
-                   additionalValues=["'", "a", "A", "n", "N"])
+        raw = read(msg="Select: ", empty=True)
+        raw = "" if raw is None else str(raw).strip()
 
         if raw == "'":
-            return
-        if isinstance(raw, str):
-            letter = raw.lower()
-            if letter == "a":
-                set_excluded_city_ids(session, is_units, [])
-            elif letter == "n":
-                set_excluded_city_ids(session, is_units, [cid for cid, _ in ordered])
+            return "EXIT"          # caller closes the module entirely
+        if raw == "":
+            return None            # blank enter: done, back to the menu
+
+        letter = raw.lower()
+        if letter in ("a", "all"):
+            set_excluded_city_ids(session, is_units, [])
+            note = f"{bcolors.GREEN}All cities included.{bcolors.ENDC}"
+            continue
+        if letter in ("n", "none"):
+            set_excluded_city_ids(session, is_units, [cid for cid, _ in ordered])
+            note = f"{bcolors.WARNING}All cities excluded.{bcolors.ENDC}"
             continue
 
-        cid = ordered[raw - 1][0]
-        if cid in excluded:
-            excluded.discard(cid)
-        else:
-            excluded.add(cid)
+        picks, errors = _parse_index_selection(raw, len(ordered))
+        if not picks:
+            note = (f"{bcolors.RED}Nothing selected: "
+                    f"{'; '.join(errors) if errors else 'unrecognised input'}"
+                    f"{bcolors.ENDC}")
+            continue
+
+        # Toggle each picked city individually
+        turned_off, turned_on = [], []
+        for i in picks:
+            cid, info = ordered[i - 1]
+            if cid in excluded:
+                excluded.discard(cid)
+                turned_on.append(info['name'])
+            else:
+                excluded.add(cid)
+                turned_off.append(info['name'])
         set_excluded_city_ids(session, is_units, excluded)
+
+        parts = []
+        if turned_off:
+            parts.append(f"{bcolors.RED}excluded{bcolors.ENDC} "
+                         + ", ".join(turned_off))
+        if turned_on:
+            parts.append(f"{bcolors.GREEN}included{bcolors.ENDC} "
+                         + ", ".join(turned_on))
+        note = "  |  ".join(parts)
+        if errors:
+            note += f"   {bcolors.RED}(ignored: {'; '.join(errors)}){bcolors.ENDC}"
 
 
 # ---------------------------------------------------------------------------
@@ -2901,7 +2978,8 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                         print("  A running worker applies this within one cycle.")
                     enter()
                 elif choice == 9:
-                    _manage_cities_ui(session, is_units)
+                    if _manage_cities_ui(session, is_units) == "EXIT":
+                        return  # ' on the cities screen closes the module
 
     except KeyboardInterrupt:
         pass
