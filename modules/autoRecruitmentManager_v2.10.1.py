@@ -19,10 +19,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.10.0
+Version: 2.10.1
 """
 
-MODULE_VERSION = "2.10.0"
+MODULE_VERSION = "2.10.1"
 
 import csv
 import glob
@@ -656,19 +656,16 @@ def _fetch_citizen_growth(session, city_id):
     try:
         html = session.get(city_url + str(city_id))
 
-        # Free citizens from the city page (same pattern as the main loop)
+        # Free citizens — use getCity's parser rather than a local regex (a
+        # loose fallback used to match a unit COST instead of the real count).
         free = 0
-        for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)', r'"citizens"\s*:\s*(\d+)'):
-            m = re.search(pat, html)
-            if m:
-                free = int(m.group(1).replace(',', ''))
-                break
 
         # Resolve the Town Hall position (it is position 0 in every city, but
         # read it from the city data in case that ever changes).
         th_pos = 0
         try:
             city_data = getCity(html)
+            free = int(city_data.get('freeCitizens', 0) or 0)
             for slot in city_data.get('position', []):
                 if slot.get('building') == 'townHall':
                     th_pos = slot.get('position', 0)
@@ -1444,12 +1441,8 @@ def check_resources(session, distribution, cities):
         if len(avail) < 5:
             avail = avail + [0] * (5 - len(avail))
 
-        available_citizens = 0
-        for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)', r'"citizens"\s*:\s*(\d+)'):
-            m = re.search(pat, html)
-            if m:
-                available_citizens = int(m.group(1).replace(',', ''))
-                break
+        # getCity's parser — not a local regex (see note in the main loop).
+        available_citizens = int(city_data.get('freeCitizens', 0) or 0)
 
         result['available'][cid] = {
             'resources': dict(zip(('wood','wine','marble','crystal','sulfur'), avail)),
@@ -2012,13 +2005,12 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                 if len(avail) < 5:
                     avail = avail + [0] * (5 - len(avail))
 
-                citizens = 0
-                for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)',
-                             r'"citizens"\s*:\s*(\d+)'):
-                    m = re.search(pat, html)
-                    if m:
-                        citizens = int(m.group(1).replace(',', ''))
-                        break
+                # Use getCity's own freeCitizens parser. Do NOT re-parse with a
+                # local regex: the old fallback r'"citizens"\s*:\s*(\d+)' matched
+                # the first "citizens": in the page, which is a unit COST (1-2),
+                # not the free-citizen count — so citizens//cost came out as 1
+                # and only 1-2 troops were ever ordered.
+                citizens = int(city_data.get('freeCitizens', 0) or 0)
 
                 if RRS_AVAILABLE:
                     res_avail = []
@@ -2138,9 +2130,13 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                 if batch_pct > 0:
                     batch = max(1, math.ceil(g['qty_remaining'] * batch_pct))
                     cap = min(cap, batch)
-                mb = cand.get('max_buildable', 0)
-                if mb > 0:
-                    cap = min(cap, mb)
+                # NOTE: deliberately NOT capped by unit_data['max_buildable'].
+                # That is the slider's max at the moment the building was
+                # fetched, i.e. a snapshot of THEN-available resources. Because
+                # unit_data is cached across cycles, a stale low value (taken
+                # when the city was poor) kept throttling every later order.
+                # ikabot's own trainArmy never uses it either — the live
+                # resource maths below is the correct and sufficient limit.
                 for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
                     cost = cand.get(res_key, 0)
                     if cost > 0:
