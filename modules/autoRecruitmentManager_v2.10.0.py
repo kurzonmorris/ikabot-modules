@@ -11,6 +11,7 @@ Features:
 - Distribute recruitment across multiple buildings (speed-weighted, balanced)
 - Dynamic fetching of build times and costs (server-specific)
 - Priority queue: each order batch has an independent priority level
+- Configurable batch size: each order builds N% of a unit type's remaining
 - Resource shortage handling: each idle building places whatever it can afford
 - Busy building detection with smart wait / include options
 - CSV-backed persistence: survives crashes and restarts
@@ -18,10 +19,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.9.2
+Version: 2.10.0
 """
 
-MODULE_VERSION = "2.9.2"
+MODULE_VERSION = "2.10.0"
 
 import csv
 import glob
@@ -549,6 +550,11 @@ _DEFAULT_CONFIG = {
     "report_group_completed":   False,
     "resource_import_enabled":  False,
     "last_report_time":         0,
+    # Batch size: each production order builds this fraction of the unit type's
+    # CURRENT remaining (0.20 = 20%). A goal steps down over successive orders,
+    # e.g. 1500 -> 300 -> 240 -> 192 ... which also spreads it across buildings.
+    # 0 disables batching (each order uses the max the building can afford).
+    "min_batch_pct":            0.20,
 }
 
 
@@ -1961,6 +1967,15 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             session.setStatus("Auto Recruitment Manager: stopped by user")
             break
 
+        # --- Reload config each cycle so settings changes (batch %, reports,
+        #     import) apply live without restarting the worker. ---
+        cfg = load_config(session)
+        try:
+            batch_pct = float(cfg.get("min_batch_pct", 0.20))
+        except (TypeError, ValueError):
+            batch_pct = 0.20
+        batch_pct = max(0.0, min(1.0, batch_pct))
+
         # --- Reload goals CSV each cycle ---
         all_rows = recruit_csv_load(session, is_units)
         active_goals = [r for r in all_rows
@@ -2116,8 +2131,13 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                     continue
                 cand = unit_data[uid]
 
-                # Max affordable, capped by the building's slider max and the goal
+                # Order size = batch_pct of the goal's CURRENT remaining (so the
+                # goal steps down: 1500 -> 300 -> 240 ...), then capped by the
+                # building's slider max, the goal, and what the city can afford.
                 cap = g['qty_remaining']
+                if batch_pct > 0:
+                    batch = max(1, math.ceil(g['qty_remaining'] * batch_pct))
+                    cap = min(cap, batch)
                 mb = cand.get('max_buildable', 0)
                 if mb > 0:
                     cap = min(cap, mb)
@@ -2464,13 +2484,58 @@ def _setup_worker_config(session, is_units):
             print(f"  {bcolors.GREEN}Resource import enabled.{bcolors.ENDC}")
     print()
 
+    # Batch size (preserve any existing value; default 20%)
+    existing_pct = load_config(session).get("min_batch_pct", 0.20)
+    print("Batch size: each order builds this % of a unit type's remaining count")
+    print("(e.g. 20%: 1500 -> 300 -> 240 ...). 0 = build max affordable per order.")
+    pct_raw = read(
+        msg=f"Batch percentage (1-100, 0 to disable, default {existing_pct*100:.0f}): ",
+        min=0, max=100, digit=True, additionalValues=["'", ""]
+    )
+    if pct_raw == "'":
+        return None
+    min_batch_pct = (pct_raw / 100.0) if isinstance(pct_raw, int) else existing_pct
+    print()
+
     return {
         "report_enabled":          report_enabled,
         "report_interval_hours":   report_interval,
         "report_group_completed":  report_group_completed,
         "resource_import_enabled": resource_import_enabled,
+        "min_batch_pct":           min_batch_pct,
         "last_report_time":        0,
     }
+
+
+def _set_batch_pct_ui(session):
+    """Standalone quick-edit for the batch percentage (shared units+ships)."""
+    cfg = load_config(session)
+    current = cfg.get("min_batch_pct", 0.20)
+    print()
+    print("=" * 60)
+    print("  BATCH SIZE")
+    print("=" * 60)
+    if current > 0:
+        print(f"\n  Current: {current*100:.0f}% of each unit type's remaining per order.")
+    else:
+        print("\n  Current: batching OFF (each order builds the max affordable).")
+    print("  Each production order builds this % of what's left for that unit")
+    print("  type, so a goal steps down over successive orders. Example at 20%:")
+    print("    1500 remaining -> order 300 -> 1200 left -> order 240 -> 960 ...")
+    print("  A building that can't afford the full batch builds what it can, so")
+    print("  it never sits idle. Enter 0 to disable batching entirely.")
+    print("  Applies live to a running worker within one cycle.")
+    print()
+    raw = read(msg="  New batch percentage (0-100, or ' to cancel): ",
+               min=0, max=100, digit=True, additionalValues=["'"])
+    if raw == "'":
+        return
+    cfg["min_batch_pct"] = raw / 100.0
+    save_config(session, cfg)
+    if raw == 0:
+        print(f"\n  {bcolors.GREEN}Batching disabled — orders use max affordable.{bcolors.ENDC}")
+    else:
+        print(f"\n  {bcolors.GREEN}Batch size set to {raw}%.{bcolors.ENDC}")
 
 
 def _edit_queue_menu(session, is_units):
@@ -2551,6 +2616,12 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                           f"across {n_goals} active goal(s)")
                 else:
                     print(f"  Goals: empty")
+
+                _batch_pct = load_config(session).get("min_batch_pct", 0.20)
+                if _batch_pct > 0:
+                    print(f"  Batch size: {_batch_pct*100:.0f}% of remaining per order")
+                else:
+                    print(f"  Batch size: OFF (max affordable per order)")
                 print()
 
                 worker_running = _is_worker_running(session, is_units)
@@ -2570,11 +2641,12 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print("  (5) Send progress report now")
                 print("  (6) Refresh building list  (rescan after upgrades)")
                 print("  (7) Worker settings  (reports / resource import)")
+                print("  (8) Batch size  (units built per order)")
                 print()
                 print("  (') Back to type selection")
                 print()
 
-                choice = read(msg="Select: ", min=1, max=7, digit=True,
+                choice = read(msg="Select: ", min=1, max=8, digit=True,
                               additionalValues=["'", "s", "S", "o", "O", "r", "R"])
 
                 if isinstance(choice, str):
@@ -2659,8 +2731,13 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                         save_config(session, new_cfg)
                         print(f"\n  {bcolors.GREEN}Settings saved.{bcolors.ENDC}")
                         if _is_worker_running(session, is_units):
-                            print("  A worker is running — restart it (o then s) "
-                                  "for changes to take effect.")
+                            print("  A running worker applies the new settings "
+                                  "within one cycle — no restart needed.")
+                    enter()
+                elif choice == 8:
+                    _set_batch_pct_ui(session)
+                    if _is_worker_running(session, is_units):
+                        print("  A running worker applies this within one cycle.")
                     enter()
 
     except KeyboardInterrupt:
