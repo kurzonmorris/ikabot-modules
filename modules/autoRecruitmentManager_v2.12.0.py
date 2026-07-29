@@ -11,7 +11,7 @@ Features:
 - Distribute recruitment across multiple buildings (speed-weighted, balanced)
 - Dynamic fetching of build times and costs (server-specific)
 - Priority queue: each order batch has an independent priority level
-- Per-type city include/exclude list (skip chosen cities when assigning work)
+- Per-type city include list (only chosen cities are given recruitment work)
 - Configurable batch size: each order builds N% of a unit type's remaining
 - Resource shortage handling: each idle building places whatever it can afford
 - Busy building detection with smart wait / include options
@@ -20,10 +20,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.11.1
+Version: 2.12.0
 """
 
-MODULE_VERSION = "2.11.1"
+MODULE_VERSION = "2.12.0"
 
 import csv
 import glob
@@ -556,9 +556,14 @@ _DEFAULT_CONFIG = {
     # e.g. 1500 -> 300 -> 240 -> 192 ... which also spreads it across buildings.
     # 0 disables batching (each order uses the max the building can afford).
     "min_batch_pct":            0.20,
-    # Cities the worker must not recruit in, per building type (lists of
-    # city_id). Excluded cities are skipped entirely when assigning work; they
-    # may still act as SOURCES for resource imports.
+    # Cities the worker may recruit in, per building type (lists of city_id).
+    # None / missing = every city is in use (the default). A list means ONLY
+    # those cities are used. Cities not in use are skipped entirely when
+    # assigning work; they may still act as SOURCES for resource imports.
+    "included_cities_units":    None,
+    "included_cities_ships":    None,
+    # Legacy exclude lists (pre-2.12). Still honoured when no include list has
+    # been set, so upgrading does not silently re-enable a disabled city.
     "excluded_cities_units":    [],
     "excluded_cities_ships":    [],
 }
@@ -588,20 +593,20 @@ def delete_config(session):
 
 
 # =============================================================================
-# EXCLUDED CITIES  — cities the worker must not recruit in
+# CITY SELECTION  — which cities the worker may recruit in
 # =============================================================================
+
+def _included_key(is_units):
+    return "included_cities_units" if is_units else "included_cities_ships"
+
 
 def _excluded_key(is_units):
     return "excluded_cities_units" if is_units else "excluded_cities_ships"
 
 
-def get_excluded_city_ids(session, is_units, cfg=None):
-    """Return a set of city_ids excluded from recruitment for this type."""
-    if cfg is None:
-        cfg = load_config(session)
-    raw = cfg.get(_excluded_key(is_units), []) or []
+def _coerce_id_set(raw):
     out = set()
-    for v in raw:
+    for v in raw or []:
         try:
             out.add(int(v))
         except (TypeError, ValueError):
@@ -609,10 +614,44 @@ def get_excluded_city_ids(session, is_units, cfg=None):
     return out
 
 
-def set_excluded_city_ids(session, is_units, city_ids):
+def get_included_city_ids(session, is_units, cfg=None):
+    """
+    Return the set of city_ids the worker may recruit in, or None meaning
+    "every city". A configured list is authoritative even when empty (which
+    means no city is in use).
+    """
+    if cfg is None:
+        cfg = load_config(session)
+    raw = cfg.get(_included_key(is_units), None)
+    if raw is None:
+        return None
+    return _coerce_id_set(raw)
+
+
+def set_included_city_ids(session, is_units, city_ids):
+    """Store the in-use city list. Pass None to mean 'all cities'."""
     cfg = load_config(session)
-    cfg[_excluded_key(is_units)] = sorted(int(c) for c in city_ids)
+    if city_ids is None:
+        cfg[_included_key(is_units)] = None
+    else:
+        cfg[_included_key(is_units)] = sorted(int(c) for c in city_ids)
+    # The include list supersedes any legacy exclude list.
+    cfg[_excluded_key(is_units)] = []
     save_config(session, cfg)
+
+
+def get_excluded_city_ids(session, is_units, cfg=None):
+    """Legacy exclude list (pre-2.12); consulted only when no include list."""
+    if cfg is None:
+        cfg = load_config(session)
+    return _coerce_id_set(cfg.get(_excluded_key(is_units), []))
+
+
+def city_in_use(city_id, included, excluded):
+    """True if this city may be recruited in, given the two filters."""
+    if included is not None:
+        return city_id in included
+    return city_id not in excluded
 
 
 # =============================================================================
@@ -1688,7 +1727,8 @@ def _view_building_status(session, is_units):
         key=lambda r: (r["priority"], r["request_id"]),
     )
 
-    excluded_cities = get_excluded_city_ids(session, is_units)
+    inc_cities = get_included_city_ids(session, is_units)
+    exc_cities = get_excluded_city_ids(session, is_units)
 
     print()
     total_buildings = 0
@@ -1718,12 +1758,12 @@ def _view_building_status(session, is_units):
         if not city_buildings:
             continue
 
-        if cid in excluded_cities:
-            # Excluded: name it, say why nothing happens here, and skip the
+        if not city_in_use(cid, inc_cities, exc_cities):
+            # Not in use: name it, say why nothing happens here, and skip the
             # per-building probing (which would be wasted requests).
             print(f"  {bcolors.BOLD}{city_name}{bcolors.ENDC} "
                   f"({len(city_buildings)} {building_type})  |  "
-                  f"{bcolors.RED}EXCLUDED — no work assigned "
+                  f"{bcolors.RED}NOT IN USE — no work assigned "
                   f"(change in menu option 9){bcolors.ENDC}")
             total_excluded_buildings += len(city_buildings)
             print()
@@ -1771,8 +1811,8 @@ def _view_building_status(session, is_units):
                f"{bcolors.GREEN}{total_idle} idle{bcolors.ENDC}  |  "
                f"{bcolors.WARNING}{total_busy} building{bcolors.ENDC}")
     if total_excluded_buildings:
-        summary += (f"  |  {bcolors.RED}{total_excluded_buildings} in excluded "
-                    f"cities{bcolors.ENDC}")
+        summary += (f"  |  {bcolors.RED}{total_excluded_buildings} in cities "
+                    f"not in use{bcolors.ENDC}")
     print(summary)
     if goals:
         total_rem = sum(g["qty_remaining"] for g in goals)
@@ -1942,23 +1982,31 @@ def _adjust_priority_ui(session, is_units):
 
 def _parse_index_selection(raw, max_n):
     """
-    Parse a flexible index selection into a de-duplicated, ordered list.
+    Parse a flexible index selection into (adds, removes, errors).
 
     Accepts any mix of separators and ranges:
-        "1, 2, 3"      "1 2 3 4"      "1-4, 6-9"      "1-3 7-12"      "5"
+        "1, 2, 3"     "1 2 3 4"     "1-4, 6-9"     "1-3 7-12"     "5"
+    A leading minus removes instead of adds:
+        "-3"          "-1-4"        "1-9 -5"
 
-    Returns (indices, errors). indices are 1-based and validated against
-    max_n; errors is a list of human-readable strings for bad tokens.
+    Indices are 1-based and validated against max_n; errors lists
+    human-readable messages for tokens that could not be used.
     """
-    indices, errors, seen = [], [], set()
-    # Normalise range separators first so spaced forms ("2 - 5", "1 to 3")
-    # survive the whitespace split below.
-    text = re.sub(r'\s*(?:\.\.|\bto\b|-)\s*', '-', str(raw).strip(), flags=re.I)
-    # commas and semicolons are just separators, same as whitespace
+    adds, removes, errors = [], [], []
+    # Normalise the word/dot range forms only. A bare '-' is left alone so a
+    # leading minus stays unambiguous as "remove" (ranges use "1-4", no spaces).
+    text = re.sub(r'\s*(?:\.\.|\bto\b)\s*', '-', str(raw).strip(), flags=re.I)
+
     for tok in re.split(r'[,;\s]+', text):
         if not tok:
             continue
-        m = re.fullmatch(r'(\d+)\s*(?:-|\.\.|to)\s*(\d+)', tok)
+        negate = tok.startswith('-')
+        body = tok[1:] if negate else tok
+        if not body:
+            errors.append(f"{tok} (nothing to remove)")
+            continue
+
+        m = re.fullmatch(r'(\d+)-(\d+)', body)
         if m:
             lo, hi = int(m.group(1)), int(m.group(2))
             if lo > hi:
@@ -1967,8 +2015,8 @@ def _parse_index_selection(raw, max_n):
                 errors.append(f"{tok} (out of range 1-{max_n})")
                 continue
             rng = range(lo, hi + 1)
-        elif tok.isdigit():
-            v = int(tok)
+        elif body.isdigit():
+            v = int(body)
             if v < 1 or v > max_n:
                 errors.append(f"{tok} (out of range 1-{max_n})")
                 continue
@@ -1976,18 +2024,21 @@ def _parse_index_selection(raw, max_n):
         else:
             errors.append(f"{tok} (not a number or range)")
             continue
+
+        target = removes if negate else adds
         for v in rng:
-            if v not in seen:
-                seen.add(v)
-                indices.append(v)
-    return indices, errors
+            if v not in target:
+                target.append(v)
+    return adds, removes, errors
 
 
 def _manage_cities_ui(session, is_units):
     """
-    Include / exclude cities for recruitment. Lists every city that has a
-    building of this type, marks each INCLUDED or EXCLUDED, and lets the user
-    toggle them by number.
+    Choose which cities the worker recruits in (an include list).
+
+    Numbers ACCUMULATE into the in-use list so they can be entered all at once
+    or one at a time; a bare <enter> commits. A leading minus removes.
+    Returns "EXIT" if the user asked to leave the module.
     """
     building_type = "barracks" if is_units else "shipyard"
     kind = "Units" if is_units else "Ships"
@@ -1995,18 +2046,18 @@ def _manage_cities_ui(session, is_units):
     # Prefer the cached building list (fast); fall back to a live scan.
     cached = _load_buildings_cache(session, is_units)
     if not cached:
-        print(f"\n  No building list cached yet — scanning {building_type}s...")
+        print(f"\n  No building list cached yet - scanning {building_type}s...")
         try:
             cids, cits = getIdsOfCities(session)
         except Exception as e:
             print(f"  {bcolors.RED}Could not fetch cities: {e}{bcolors.ENDC}")
-            return
+            return None
         cached = _scan_buildings(session, is_units, list(cids), cits)
         if cached:
             _save_buildings_cache(session, is_units, cached)
     if not cached:
         print(f"  {bcolors.RED}No {building_type} found in any city.{bcolors.ENDC}")
-        return
+        return None
 
     # Collapse to one entry per city, counting buildings
     city_info = {}
@@ -2015,91 +2066,104 @@ def _manage_cities_ui(session, is_units):
         e = city_info.setdefault(cid, {'name': b.get('city_name', str(cid)), 'n': 0})
         e['n'] += 1
     ordered = sorted(city_info.items(), key=lambda kv: kv[1]['name'].lower())
+    all_ids = [cid for cid, _ in ordered]
 
-    note = ""   # feedback line shown after each action
+    # Seed the working set from current config (honouring any legacy exclude
+    # list) so the screen opens showing what is actually in use right now.
+    included = get_included_city_ids(session, is_units)
+    excluded = get_excluded_city_ids(session, is_units)
+    in_use = {cid for cid in all_ids if city_in_use(cid, included, excluded)}
+
+    note = ""
     while True:
-        excluded = get_excluded_city_ids(session, is_units)
         banner()
         print("=" * 60)
-        print(f"  RECRUITMENT CITIES — {kind}")
+        print(f"  RECRUITMENT CITIES - {kind}")
         print("=" * 60)
         print()
-        print(f"  Excluded cities are skipped entirely when assigning work.")
-        print(f"  (They can still supply resources to other cities.)")
+        print("  Only cities marked IN USE are given recruitment work.")
+        print("  (Cities not in use can still supply resources to others.)")
         print()
 
         for i, (cid, info) in enumerate(ordered, start=1):
-            if cid in excluded:
-                state = f"{bcolors.RED}EXCLUDED{bcolors.ENDC}"
+            if cid in in_use:
+                state = f"{bcolors.GREEN}IN USE  {bcolors.ENDC}"
             else:
-                state = f"{bcolors.GREEN}INCLUDED{bcolors.ENDC}"
+                state = f"{bcolors.RED}not used{bcolors.ENDC}"
             print(f"  ({i:>2}) {state}  {info['name']:<20} "
                   f"{info['n']} {building_type}")
 
-        n_inc = len(ordered) - sum(1 for cid, _ in ordered if cid in excluded)
         print()
-        print(f"  {n_inc} of {len(ordered)} cities in use.")
-        if n_inc == 0:
-            print(f"  {bcolors.WARNING}All cities excluded — nothing will be "
-                  f"built until you include at least one.{bcolors.ENDC}")
+        print(f"  {len(in_use)} of {len(ordered)} cities in use.")
+        if not in_use:
+            print(f"  {bcolors.WARNING}No cities selected - nothing will be "
+                  f"built until you add at least one.{bcolors.ENDC}")
         if note:
             print(f"  {note}")
         print()
-        print("  Toggle cities by number — single, list or range:")
-        print(f"     3        1, 2, 3        1 2 3 4        1-4, 6-9        1-3 7-12")
-        print("  Or enter them one at a time (3 <enter>, 5 <enter>, ...).")
+        print("  Add cities by number - single, list or range:")
+        print("     3        1, 2, 3        1 2 3 4        1-4, 6-9        1-3 7-12")
+        print("  Enter them together or one at a time; nothing is saved until")
+        print("  you press <enter> on its own.")
+        print("  Prefix with - to take a city back out, e.g.  -3   or  -1-4")
         print()
-        print("  (a) Include all    (n) Exclude all")
-        print("  (<enter>) Finish and go back    (') Exit the module")
+        print("  (a) Use all    (n) Use none")
+        print("  (<enter>) Save and go back    (') Exit the module")
         print()
 
         raw = read(msg="Select: ", empty=True)
         raw = "" if raw is None else str(raw).strip()
 
         if raw == "'":
-            return "EXIT"          # caller closes the module entirely
+            return "EXIT"                      # leave the module entirely
         if raw == "":
-            return None            # blank enter: done, back to the menu
+            # Commit. All cities selected is stored as None ("every city") so
+            # cities founded later are picked up automatically.
+            if set(in_use) == set(all_ids):
+                set_included_city_ids(session, is_units, None)
+            else:
+                set_included_city_ids(session, is_units, in_use)
+            return None
 
         letter = raw.lower()
         if letter in ("a", "all"):
-            set_excluded_city_ids(session, is_units, [])
-            note = f"{bcolors.GREEN}All cities included.{bcolors.ENDC}"
+            in_use = set(all_ids)
+            note = f"{bcolors.GREEN}All cities selected.{bcolors.ENDC}"
             continue
         if letter in ("n", "none"):
-            set_excluded_city_ids(session, is_units, [cid for cid, _ in ordered])
-            note = f"{bcolors.WARNING}All cities excluded.{bcolors.ENDC}"
+            in_use = set()
+            note = f"{bcolors.WARNING}All cities deselected.{bcolors.ENDC}"
             continue
 
-        picks, errors = _parse_index_selection(raw, len(ordered))
-        if not picks:
+        adds, removes, errors = _parse_index_selection(raw, len(ordered))
+        if not adds and not removes:
             note = (f"{bcolors.RED}Nothing selected: "
                     f"{'; '.join(errors) if errors else 'unrecognised input'}"
                     f"{bcolors.ENDC}")
             continue
 
-        # Toggle each picked city individually
-        turned_off, turned_on = [], []
-        for i in picks:
+        added, dropped = [], []
+        for i in adds:
             cid, info = ordered[i - 1]
-            if cid in excluded:
-                excluded.discard(cid)
-                turned_on.append(info['name'])
-            else:
-                excluded.add(cid)
-                turned_off.append(info['name'])
-        set_excluded_city_ids(session, is_units, excluded)
+            if cid not in in_use:
+                in_use.add(cid)
+                added.append(info['name'])
+        for i in removes:
+            cid, info = ordered[i - 1]
+            if cid in in_use:
+                in_use.discard(cid)
+                dropped.append(info['name'])
 
         parts = []
-        if turned_off:
-            parts.append(f"{bcolors.RED}excluded{bcolors.ENDC} "
-                         + ", ".join(turned_off))
-        if turned_on:
-            parts.append(f"{bcolors.GREEN}included{bcolors.ENDC} "
-                         + ", ".join(turned_on))
-        note = "  |  ".join(parts)
+        if added:
+            parts.append(f"{bcolors.GREEN}added{bcolors.ENDC} " + ", ".join(added))
+        if dropped:
+            parts.append(f"{bcolors.RED}removed{bcolors.ENDC} " + ", ".join(dropped))
+        if not parts:
+            parts.append("no change")
+        note = "  |  ".join(parts) + "   (not saved yet - <enter> to save)"
         if errors:
-            note += f"   {bcolors.RED}(ignored: {'; '.join(errors)}){bcolors.ENDC}"
+            note += f"  {bcolors.RED}ignored: {'; '.join(errors)}{bcolors.ENDC}"
 
 
 # ---------------------------------------------------------------------------
@@ -2183,10 +2247,11 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             batch_pct = 0.20
         batch_pct = max(0.0, min(1.0, batch_pct))
 
-        # Cities the user has excluded from recruiting (re-read each cycle so
-        # changes take effect live). Skipping them in the resource fetch below
-        # also removes their buildings from this cycle's work list.
-        excluded_cities = get_excluded_city_ids(session, is_units, cfg)
+        # Which cities may be recruited in (re-read each cycle so changes take
+        # effect live). Skipping a city in the resource fetch below also removes
+        # its buildings from this cycle's work list.
+        inc_cities = get_included_city_ids(session, is_units, cfg)
+        exc_cities = get_excluded_city_ids(session, is_units, cfg)
 
         # --- Reload goals CSV each cycle ---
         all_rows = recruit_csv_load(session, is_units)
@@ -2216,8 +2281,8 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
         fetch_error = False
 
         for cid in all_city_ids:
-            if cid in excluded_cities:
-                continue  # user-excluded: no work assigned here this cycle
+            if not city_in_use(cid, inc_cities, exc_cities):
+                continue  # not in the user's city list: no work assigned here
             try:
                 html = session.get(city_url + str(cid))
                 city_data = getCity(html)
@@ -2572,11 +2637,12 @@ def _activate_worker(session, event, is_units):
     # Don't start a worker that has nowhere to build.
     _cached = _load_buildings_cache(session, is_units)
     if _cached:
-        _excl = get_excluded_city_ids(session, is_units)
-        if _excl and all(b['city_id'] in _excl for b in _cached):
-            print(f"\n  {bcolors.RED}Every city is excluded — there is nowhere "
+        _inc = get_included_city_ids(session, is_units)
+        _exc = get_excluded_city_ids(session, is_units)
+        if not any(city_in_use(b['city_id'], _inc, _exc) for b in _cached):
+            print(f"\n  {bcolors.RED}No cities are in use — there is nowhere "
                   f"to build.{bcolors.ENDC}")
-            print(f"  Include at least one city using option (9).")
+            print(f"  Select at least one city using option (9).")
             enter()
             return False
 
@@ -2851,14 +2917,22 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 else:
                     print(f"  Batch size: OFF (max affordable per order)")
 
-                _excl = get_excluded_city_ids(session, is_units)
-                if _excl:
-                    _cached = _load_buildings_cache(session, is_units) or []
-                    _names = sorted({b.get('city_name', str(b['city_id']))
-                                     for b in _cached if b['city_id'] in _excl})
-                    _shown = ", ".join(_names[:3]) + ("..." if len(_names) > 3 else "")
-                    print(f"  {bcolors.WARNING}Cities excluded: {len(_excl)}"
-                          f"{(' — ' + _shown) if _names else ''}{bcolors.ENDC}")
+                _inc = get_included_city_ids(session, is_units)
+                _exc = get_excluded_city_ids(session, is_units)
+                _cached = _load_buildings_cache(session, is_units) or []
+                _all_cids = {b['city_id'] for b in _cached}
+                if _all_cids:
+                    _used = {c for c in _all_cids if city_in_use(c, _inc, _exc)}
+                    if len(_used) < len(_all_cids):
+                        _off = sorted({b.get('city_name', str(b['city_id']))
+                                       for b in _cached
+                                       if b['city_id'] not in _used})
+                        _shown = ", ".join(_off[:3]) + ("..." if len(_off) > 3 else "")
+                        print(f"  {bcolors.WARNING}Cities: {len(_used)} of "
+                              f"{len(_all_cids)} in use — skipping {_shown}"
+                              f"{bcolors.ENDC}")
+                    else:
+                        print(f"  Cities: all {len(_all_cids)} in use")
                 print()
 
                 worker_running = _is_worker_running(session, is_units)
@@ -2879,7 +2953,7 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print("  (6) Refresh building list  (rescan after upgrades)")
                 print("  (7) Worker settings  (reports / resource import)")
                 print("  (8) Batch size  (units built per order)")
-                print("  (9) Cities  (include / exclude cities)")
+                print("  (9) Cities  (choose which cities to build in)")
                 print()
                 print("  (') Back to type selection")
                 print()
