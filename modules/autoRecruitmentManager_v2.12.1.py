@@ -20,10 +20,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.12.0
+Version: 2.12.1
 """
 
-MODULE_VERSION = "2.12.0"
+MODULE_VERSION = "2.12.1"
 
 import csv
 import glob
@@ -604,13 +604,30 @@ def _excluded_key(is_units):
     return "excluded_cities_units" if is_units else "excluded_cities_ships"
 
 
+def _cid(value):
+    """
+    Normalise a city id to int, or None if it cannot be parsed.
+
+    Ikabot supplies city ids as STRINGS (they are JSON object keys), while the
+    config round-trips them through JSON as ints. Every comparison must go
+    through this or '9162' != 9162 silently disables every city.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _coerce_id_set(raw):
     out = set()
     for v in raw or []:
-        try:
-            out.add(int(v))
-        except (TypeError, ValueError):
-            continue
+        n = _cid(v)
+        if n is not None:
+            out.add(n)
     return out
 
 
@@ -648,10 +665,19 @@ def get_excluded_city_ids(session, is_units, cfg=None):
 
 
 def city_in_use(city_id, included, excluded):
-    """True if this city may be recruited in, given the two filters."""
+    """
+    True if this city may be recruited in, given the two filters.
+
+    city_id is normalised first because callers pass ikabot's string ids while
+    the filters hold ints loaded from JSON. An unparseable id fails open (city
+    stays in use) so a bad value can never silently halt all recruitment.
+    """
+    cid = _cid(city_id)
+    if cid is None:
+        return True
     if included is not None:
-        return city_id in included
-    return city_id not in excluded
+        return cid in included
+    return cid not in excluded
 
 
 # =============================================================================
@@ -2060,9 +2086,13 @@ def _manage_cities_ui(session, is_units):
         return None
 
     # Collapse to one entry per city, counting buildings
+    # Keys normalised to int so the set maths, the saved list and the reload
+    # comparison all use one consistent type (see _cid).
     city_info = {}
     for b in cached:
-        cid = b['city_id']
+        cid = _cid(b['city_id'])
+        if cid is None:
+            continue
         e = city_info.setdefault(cid, {'name': b.get('city_name', str(cid)), 'n': 0})
         e['n'] += 1
     ordered = sorted(city_info.items(), key=lambda kv: kv[1]['name'].lower())
@@ -2920,13 +2950,13 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 _inc = get_included_city_ids(session, is_units)
                 _exc = get_excluded_city_ids(session, is_units)
                 _cached = _load_buildings_cache(session, is_units) or []
-                _all_cids = {b['city_id'] for b in _cached}
+                _all_cids = {_cid(b['city_id']) for b in _cached} - {None}
                 if _all_cids:
                     _used = {c for c in _all_cids if city_in_use(c, _inc, _exc)}
                     if len(_used) < len(_all_cids):
                         _off = sorted({b.get('city_name', str(b['city_id']))
                                        for b in _cached
-                                       if b['city_id'] not in _used})
+                                       if _cid(b['city_id']) not in _used})
                         _shown = ", ".join(_off[:3]) + ("..." if len(_off) > 3 else "")
                         print(f"  {bcolors.WARNING}Cities: {len(_used)} of "
                               f"{len(_all_cids)} in use — skipping {_shown}"
