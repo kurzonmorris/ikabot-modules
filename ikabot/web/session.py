@@ -39,6 +39,12 @@ class Session:
         self._vault_blackbox = blackbox      # stored blackbox token from vault (may be None)
         self._vault_lobby_token = lobby_token  # stored lobby token from vault (may be None)
         self.logger = getLogger(__name__)
+        # Regional context. These must stay consistent with each other and with
+        # the blackbox token request, otherwise Gameforge rejects the login.
+        self.locale = config.IKABOT_LOCALE
+        self.gf_lang = config.IKABOT_GF_LANG
+        self.timezone_id = config.IKABOT_TIMEZONE_ID
+        self.accept_language = config.build_accept_language(self.locale, self.gf_lang)
         self.requestHistory = deque(maxlen=5)  # keep last 5 requests in history
         # Every Ikariam response embeds a current actionRequest token. Cache the
         # most recent one so POSTs don't each need a separate page fetch to scrape
@@ -163,7 +169,7 @@ class Session:
                 "Host": "lobby.ikariam.gameforge.com",
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate",
                 "DNT": "1",
                 "Connection": "close",
@@ -287,7 +293,7 @@ class Session:
                 "Host": "lobby.ikariam.gameforge.com",
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate",
                 "DNT": "1",
                 "Connection": "close",
@@ -313,7 +319,7 @@ class Session:
             self.headers = {
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate",
                 "DNT": "1",
                 "Connection": "close",
@@ -331,7 +337,7 @@ class Session:
             self.headers = {
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate",
                 "Referer": "https://lobby.ikariam.gameforge.com/",
                 "Origin": "https://lobby.ikariam.gameforge.com",
@@ -350,7 +356,7 @@ class Session:
                     "Host": "pixelzirkus.gameforge.com",
                     "User-Agent": self.user_agent,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
+                    "Accept-Language": self.accept_language,
                     "Accept-Encoding": "gzip, deflate",
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Origin": "https://lobby.ikariam.gameforge.com",
@@ -382,7 +388,7 @@ class Session:
                     "Host": "pixelzirkus.gameforge.com",
                     "User-Agent": self.user_agent,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
+                    "Accept-Language": self.accept_language,
                     "Accept-Encoding": "gzip, deflate",
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Origin": "https://lobby.ikariam.gameforge.com",
@@ -415,7 +421,7 @@ class Session:
             # options req (not really needed)
             self.headers = {
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate, br",
                 "Access-Control-Request-Headers": "content-type,tnt-installation-id",
                 "Access-Control-Request-Method": "POST",
@@ -434,7 +440,7 @@ class Session:
             # send creds
             self.headers = {
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate, br",
                 "Access-Control-Request-Headers": "content-type,tnt-installation-id",
                 "Access-Control-Request-Method": "POST",
@@ -452,8 +458,8 @@ class Session:
             data = {
                 "identity": self.mail,
                 "password": self.password,
-                "locale": "en-GB",
-                "gfLang": "en",
+                "locale": self.locale,
+                "gfLang": self.gf_lang,
                 "gameId": platformGameId,
                 "gameEnvironmentId": gameEnvironmentId,
                 "blackbox": self.blackbox,
@@ -485,7 +491,7 @@ class Session:
                 while _captcha_attempts < _captcha_max:
                     self.headers = {
                         "Accept": "*/*",
-                        "Accept-Language": "en-US,en;q=0.5",
+                        "Accept-Language": self.accept_language,
                         "Accept-Encoding": "gzip, deflate, br",
                         "Access-Control-Request-Headers": "content-type,tnt-installation-id",
                         "Access-Control-Request-Method": "POST",
@@ -503,8 +509,8 @@ class Session:
                     data = {
                             "identity": self.mail,
                             "password": self.password,
-                            "locale": "en-GB",
-                            "gfLang": "en",
+                            "locale": self.locale,
+                            "gfLang": self.gf_lang,
                             "gameId": platformGameId,
                             "gameEnvironmentId": gameEnvironmentId,
                             "blackbox": self.blackbox,
@@ -517,7 +523,7 @@ class Session:
                     self.headers = {
                         "accept": "*/*",
                         "accept-encoding": "gzip, deflate, br",
-                        "accept-language": "en-GB,el;q=0.9",
+                        "accept-language": self.accept_language,
                         "dnt": "1",
                         "origin": "https://lobby.ikariam.gameforge.com",
                         "referer": "https://lobby.ikariam.gameforge.com/",
@@ -544,23 +550,23 @@ class Session:
                         pass
 
                     captcha_time = self.s.get(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB".format(
-                            challenge_id
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}".format(
+                            challenge_id, self.locale
                         )
                     ).json()["lastUpdated"]
                     text_image = self.s.get(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB/text?{}".format(
-                            challenge_id, captcha_time
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}/text?{}".format(
+                            challenge_id, self.locale, captcha_time
                         )
                     ).content
                     drag_icons = self.s.get(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB/drag-icons?{}".format(
-                            challenge_id, captcha_time
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}/drag-icons?{}".format(
+                            challenge_id, self.locale, captcha_time
                         )
                     ).content
                     drop_target = self.s.get(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB/drop-target?{}".format(
-                            challenge_id, captcha_time
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}/drop-target?{}".format(
+                            challenge_id, self.locale, captcha_time
                         )
                     ).content
                     data = {}
@@ -610,8 +616,8 @@ class Session:
                                     continue
                             time.sleep(5)
                     captcha_sent = self.s.post(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB".format(
-                            challenge_id
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}".format(
+                            challenge_id, self.locale
                         ),
                         json=data,
                     ).json()
@@ -619,7 +625,7 @@ class Session:
                     if captcha_sent.get("status") == "solved":
                         self.headers = {
                             "Accept": "*/*",
-                            "Accept-Language": "en-US,en;q=0.5",
+                            "Accept-Language": self.accept_language,
                             "Accept-Encoding": "gzip, deflate, br",
                             "Access-Control-Request-Headers": "content-type,tnt-installation-id",
                             "Access-Control-Request-Method": "POST",
@@ -638,8 +644,8 @@ class Session:
                         data = {
                             "identity": self.mail,
                             "password": self.password,
-                            "locale": "en-GB",
-                            "gfLang": "en",
+                            "locale": self.locale,
+                            "gfLang": self.gf_lang,
                             "gameId": platformGameId,
                             "gameEnvironmentId": gameEnvironmentId,
                             "blackbox": self.blackbox,
@@ -738,9 +744,9 @@ class Session:
             "Host": "lobby.ikariam.gameforge.com",
             "User-Agent": self.user_agent,
             "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Language": self.accept_language,
             "Accept-Encoding": "gzip, deflate",
-            "Referer": "https://lobby.ikariam.gameforge.com/es_AR/hub",
+            "Referer": "https://lobby.ikariam.gameforge.com/{}/hub".format(self.locale.replace("-", "_")),
             "Authorization": "Bearer {}".format(self.s.cookies["gf-token-production"]),
             "DNT": "1",
             "Connection": "close",
@@ -758,9 +764,9 @@ class Session:
             "Host": "lobby.ikariam.gameforge.com",
             "User-Agent": self.user_agent,
             "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Language": self.accept_language,
             "Accept-Encoding": "gzip, deflate",
-            "Referer": "https://lobby.ikariam.gameforge.com/es_AR/hub",
+            "Referer": "https://lobby.ikariam.gameforge.com/{}/hub".format(self.locale.replace("-", "_")),
             "Authorization": "Bearer {}".format(self.s.cookies["gf-token-production"]),
             "DNT": "1",
             "Connection": "close",
@@ -842,7 +848,7 @@ class Session:
             "Host": self.host,
             "User-Agent": self.user_agent,
             "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Language": self.accept_language,
             "Accept-Encoding": "gzip, deflate, br",
             "Referer": "https://{}".format(self.host),
             "X-Requested-With": "XMLHttpRequest",
@@ -900,11 +906,11 @@ class Session:
                 "scheme": "https",
                 "accept": "application/json",
                 "accept-encoding": "gzip, deflate, br",
-                "accept-language": "en-US,en;q=0.9",
+                "accept-language": self.accept_language,
                 "authorization": "Bearer " + self.s.cookies["gf-token-production"],
                 "content-type": "application/json",
                 "origin": "https://lobby.ikariam.gameforge.com",
-                "referer": "https://lobby.ikariam.gameforge.com/en_GB/accounts",
+                "referer": "https://lobby.ikariam.gameforge.com/{}/accounts".format(self.locale.replace("-", "_")),
                 "user-agent": self.user_agent,
             }
             self.s.headers.clear()

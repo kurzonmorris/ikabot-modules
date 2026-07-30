@@ -19,6 +19,26 @@ update_msg = ""
 isWindows = os.name == "nt"
 
 
+# --- Regional context -------------------------------------------------------
+# Gameforge rejects blackbox tokens whose regional context does not match the
+# login request, so the locale, the Gameforge language, the timezone and the
+# Accept-Language header must all agree with each other.  Override these via
+# environment variables (or a .env file) to present a different region.
+IKABOT_LOCALE = os.getenv("IKABOT_LOCALE", "en-GB")
+IKABOT_GF_LANG = os.getenv("IKABOT_GF_LANG", IKABOT_LOCALE.split("-")[0])
+IKABOT_TIMEZONE_ID = os.getenv("IKABOT_TIMEZONE_ID", "Europe/London")
+
+
+def build_accept_language(loc=None, gf_lang=None):
+    """Return an Accept-Language header consistent with the configured locale.
+
+    e.g. locale 'en-GB' + lang 'en' -> 'en-GB,en;q=0.9'
+    """
+    loc = loc or IKABOT_LOCALE
+    gf_lang = gf_lang or IKABOT_GF_LANG
+    return "{},{};q=0.9".format(loc, gf_lang)
+
+
 IKABOT_DATA_DIR = os.getenv("APPDATA", os.path.expanduser("~")) + "\\.ikabot" if isWindows else os.path.expanduser("~/.ikabot")
 IKABOT_SESSIONS_DIR = os.path.join(IKABOT_DATA_DIR, "sessions")
 LOGS_DIRECTORY = os.path.join(IKABOT_DATA_DIR, "logs")
