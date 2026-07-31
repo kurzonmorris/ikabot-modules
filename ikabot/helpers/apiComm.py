@@ -22,12 +22,28 @@ def getNewBlackBoxToken(session):
         blackbox token
     """
     address = getAddress(publicAPIServerDomain) + "/v1/token"
-    response = get(
-        address,
-        params={"user_agent": session.user_agent},
-        verify=do_ssl_verify,
-        timeout=900,
-    )
+    # Send the same regional context the login will use.  Gameforge rejects
+    # tokens generated in a different locale/timezone than the login request,
+    # so these must match session.locale / session.timezone_id exactly.
+    params = {"user_agent": session.user_agent}
+    locale = getattr(session, "locale", None)
+    timezone_id = getattr(session, "timezone_id", None)
+    if locale:
+        params["locale"] = locale
+    if timezone_id:
+        params["timezone_id"] = timezone_id
+
+    response = get(address, params=params, verify=do_ssl_verify, timeout=900)
+
+    # Older API deployments don't know the locale/timezone parameters — retry
+    # with just the user agent so the fork keeps working against them.
+    if response.status_code in (400, 422) and len(params) > 1:
+        response = get(
+            address,
+            params={"user_agent": session.user_agent},
+            verify=do_ssl_verify,
+            timeout=900,
+        )
     if response.status_code == 400 and "Unsupported user_agent" in response.text:
         response = get(address, verify=do_ssl_verify, timeout=900)
     assert response.status_code == 200, (
