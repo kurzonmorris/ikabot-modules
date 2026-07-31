@@ -11,6 +11,8 @@ Features:
 - Distribute recruitment across multiple buildings (speed-weighted, balanced)
 - Dynamic fetching of build times and costs (server-specific)
 - Priority queue: each order batch has an independent priority level
+- Per-type city include list (only chosen cities are given recruitment work)
+- Configurable batch size: each order builds N% of a unit type's remaining
 - Resource shortage handling: each idle building places whatever it can afford
 - Busy building detection with smart wait / include options
 - CSV-backed persistence: survives crashes and restarts
@@ -18,10 +20,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.9.1
+Version: 2.12.1
 """
 
-MODULE_VERSION = "2.9.1"
+MODULE_VERSION = "2.12.1"
 
 import csv
 import glob
@@ -549,6 +551,21 @@ _DEFAULT_CONFIG = {
     "report_group_completed":   False,
     "resource_import_enabled":  False,
     "last_report_time":         0,
+    # Batch size: each production order builds this fraction of the unit type's
+    # CURRENT remaining (0.20 = 20%). A goal steps down over successive orders,
+    # e.g. 1500 -> 300 -> 240 -> 192 ... which also spreads it across buildings.
+    # 0 disables batching (each order uses the max the building can afford).
+    "min_batch_pct":            0.20,
+    # Cities the worker may recruit in, per building type (lists of city_id).
+    # None / missing = every city is in use (the default). A list means ONLY
+    # those cities are used. Cities not in use are skipped entirely when
+    # assigning work; they may still act as SOURCES for resource imports.
+    "included_cities_units":    None,
+    "included_cities_ships":    None,
+    # Legacy exclude lists (pre-2.12). Still honoured when no include list has
+    # been set, so upgrading does not silently re-enable a disabled city.
+    "excluded_cities_units":    [],
+    "excluded_cities_ships":    [],
 }
 
 
@@ -573,6 +590,94 @@ def delete_config(session):
         os.remove(_config_path(session))
     except FileNotFoundError:
         pass
+
+
+# =============================================================================
+# CITY SELECTION  — which cities the worker may recruit in
+# =============================================================================
+
+def _included_key(is_units):
+    return "included_cities_units" if is_units else "included_cities_ships"
+
+
+def _excluded_key(is_units):
+    return "excluded_cities_units" if is_units else "excluded_cities_ships"
+
+
+def _cid(value):
+    """
+    Normalise a city id to int, or None if it cannot be parsed.
+
+    Ikabot supplies city ids as STRINGS (they are JSON object keys), while the
+    config round-trips them through JSON as ints. Every comparison must go
+    through this or '9162' != 9162 silently disables every city.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_id_set(raw):
+    out = set()
+    for v in raw or []:
+        n = _cid(v)
+        if n is not None:
+            out.add(n)
+    return out
+
+
+def get_included_city_ids(session, is_units, cfg=None):
+    """
+    Return the set of city_ids the worker may recruit in, or None meaning
+    "every city". A configured list is authoritative even when empty (which
+    means no city is in use).
+    """
+    if cfg is None:
+        cfg = load_config(session)
+    raw = cfg.get(_included_key(is_units), None)
+    if raw is None:
+        return None
+    return _coerce_id_set(raw)
+
+
+def set_included_city_ids(session, is_units, city_ids):
+    """Store the in-use city list. Pass None to mean 'all cities'."""
+    cfg = load_config(session)
+    if city_ids is None:
+        cfg[_included_key(is_units)] = None
+    else:
+        cfg[_included_key(is_units)] = sorted(int(c) for c in city_ids)
+    # The include list supersedes any legacy exclude list.
+    cfg[_excluded_key(is_units)] = []
+    save_config(session, cfg)
+
+
+def get_excluded_city_ids(session, is_units, cfg=None):
+    """Legacy exclude list (pre-2.12); consulted only when no include list."""
+    if cfg is None:
+        cfg = load_config(session)
+    return _coerce_id_set(cfg.get(_excluded_key(is_units), []))
+
+
+def city_in_use(city_id, included, excluded):
+    """
+    True if this city may be recruited in, given the two filters.
+
+    city_id is normalised first because callers pass ikabot's string ids while
+    the filters hold ints loaded from JSON. An unparseable id fails open (city
+    stays in use) so a bad value can never silently halt all recruitment.
+    """
+    cid = _cid(city_id)
+    if cid is None:
+        return True
+    if included is not None:
+        return cid in included
+    return cid not in excluded
 
 
 # =============================================================================
@@ -650,19 +755,16 @@ def _fetch_citizen_growth(session, city_id):
     try:
         html = session.get(city_url + str(city_id))
 
-        # Free citizens from the city page (same pattern as the main loop)
+        # Free citizens — use getCity's parser rather than a local regex (a
+        # loose fallback used to match a unit COST instead of the real count).
         free = 0
-        for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)', r'"citizens"\s*:\s*(\d+)'):
-            m = re.search(pat, html)
-            if m:
-                free = int(m.group(1).replace(',', ''))
-                break
 
         # Resolve the Town Hall position (it is position 0 in every city, but
         # read it from the city data in case that ever changes).
         th_pos = 0
         try:
             city_data = getCity(html)
+            free = int(city_data.get('freeCitizens', 0) or 0)
             for slot in city_data.get('position', []):
                 if slot.get('building') == 'townHall':
                     th_pos = slot.get('position', 0)
@@ -1438,12 +1540,8 @@ def check_resources(session, distribution, cities):
         if len(avail) < 5:
             avail = avail + [0] * (5 - len(avail))
 
-        available_citizens = 0
-        for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)', r'"citizens"\s*:\s*(\d+)'):
-            m = re.search(pat, html)
-            if m:
-                available_citizens = int(m.group(1).replace(',', ''))
-                break
+        # getCity's parser — not a local regex (see note in the main loop).
+        available_citizens = int(city_data.get('freeCitizens', 0) or 0)
 
         result['available'][cid] = {
             'resources': dict(zip(('wood','wine','marble','crystal','sulfur'), avail)),
@@ -1655,10 +1753,14 @@ def _view_building_status(session, is_units):
         key=lambda r: (r["priority"], r["request_id"]),
     )
 
+    inc_cities = get_included_city_ids(session, is_units)
+    exc_cities = get_excluded_city_ids(session, is_units)
+
     print()
     total_buildings = 0
     total_idle = 0
     total_busy = 0
+    total_excluded_buildings = 0
 
     for cid in cities_ids:
         city_name = cities[cid]['name']
@@ -1680,6 +1782,17 @@ def _view_building_status(session, is_units):
             })
 
         if not city_buildings:
+            continue
+
+        if not city_in_use(cid, inc_cities, exc_cities):
+            # Not in use: name it, say why nothing happens here, and skip the
+            # per-building probing (which would be wasted requests).
+            print(f"  {bcolors.BOLD}{city_name}{bcolors.ENDC} "
+                  f"({len(city_buildings)} {building_type})  |  "
+                  f"{bcolors.RED}NOT IN USE — no work assigned "
+                  f"(change in menu option 9){bcolors.ENDC}")
+            total_excluded_buildings += len(city_buildings)
+            print()
             continue
 
         # Citizen growth diagnostic (read from the Town Hall). Shows whether
@@ -1720,9 +1833,13 @@ def _view_building_status(session, is_units):
 
         print()
 
-    print(f"  Summary: {total_buildings} buildings total  |  "
-          f"{bcolors.GREEN}{total_idle} idle{bcolors.ENDC}  |  "
-          f"{bcolors.WARNING}{total_busy} building{bcolors.ENDC}")
+    summary = (f"  Summary: {total_buildings} buildings in use  |  "
+               f"{bcolors.GREEN}{total_idle} idle{bcolors.ENDC}  |  "
+               f"{bcolors.WARNING}{total_busy} building{bcolors.ENDC}")
+    if total_excluded_buildings:
+        summary += (f"  |  {bcolors.RED}{total_excluded_buildings} in cities "
+                    f"not in use{bcolors.ENDC}")
+    print(summary)
     if goals:
         total_rem = sum(g["qty_remaining"] for g in goals)
         print(f"  Goals remaining: {total_rem:,} units across {len(goals)} goal(s)")
@@ -1889,6 +2006,196 @@ def _adjust_priority_ui(session, is_units):
     print(f"  {bcolors.GREEN}Priority updated to {new_pri}.{bcolors.ENDC}")
 
 
+def _parse_index_selection(raw, max_n):
+    """
+    Parse a flexible index selection into (adds, removes, errors).
+
+    Accepts any mix of separators and ranges:
+        "1, 2, 3"     "1 2 3 4"     "1-4, 6-9"     "1-3 7-12"     "5"
+    A leading minus removes instead of adds:
+        "-3"          "-1-4"        "1-9 -5"
+
+    Indices are 1-based and validated against max_n; errors lists
+    human-readable messages for tokens that could not be used.
+    """
+    adds, removes, errors = [], [], []
+    # Normalise the word/dot range forms only. A bare '-' is left alone so a
+    # leading minus stays unambiguous as "remove" (ranges use "1-4", no spaces).
+    text = re.sub(r'\s*(?:\.\.|\bto\b)\s*', '-', str(raw).strip(), flags=re.I)
+
+    for tok in re.split(r'[,;\s]+', text):
+        if not tok:
+            continue
+        negate = tok.startswith('-')
+        body = tok[1:] if negate else tok
+        if not body:
+            errors.append(f"{tok} (nothing to remove)")
+            continue
+
+        m = re.fullmatch(r'(\d+)-(\d+)', body)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo > hi:
+                lo, hi = hi, lo
+            if lo < 1 or hi > max_n:
+                errors.append(f"{tok} (out of range 1-{max_n})")
+                continue
+            rng = range(lo, hi + 1)
+        elif body.isdigit():
+            v = int(body)
+            if v < 1 or v > max_n:
+                errors.append(f"{tok} (out of range 1-{max_n})")
+                continue
+            rng = (v,)
+        else:
+            errors.append(f"{tok} (not a number or range)")
+            continue
+
+        target = removes if negate else adds
+        for v in rng:
+            if v not in target:
+                target.append(v)
+    return adds, removes, errors
+
+
+def _manage_cities_ui(session, is_units):
+    """
+    Choose which cities the worker recruits in (an include list).
+
+    Numbers ACCUMULATE into the in-use list so they can be entered all at once
+    or one at a time; a bare <enter> commits. A leading minus removes.
+    Returns "EXIT" if the user asked to leave the module.
+    """
+    building_type = "barracks" if is_units else "shipyard"
+    kind = "Units" if is_units else "Ships"
+
+    # Prefer the cached building list (fast); fall back to a live scan.
+    cached = _load_buildings_cache(session, is_units)
+    if not cached:
+        print(f"\n  No building list cached yet - scanning {building_type}s...")
+        try:
+            cids, cits = getIdsOfCities(session)
+        except Exception as e:
+            print(f"  {bcolors.RED}Could not fetch cities: {e}{bcolors.ENDC}")
+            return None
+        cached = _scan_buildings(session, is_units, list(cids), cits)
+        if cached:
+            _save_buildings_cache(session, is_units, cached)
+    if not cached:
+        print(f"  {bcolors.RED}No {building_type} found in any city.{bcolors.ENDC}")
+        return None
+
+    # Collapse to one entry per city, counting buildings
+    # Keys normalised to int so the set maths, the saved list and the reload
+    # comparison all use one consistent type (see _cid).
+    city_info = {}
+    for b in cached:
+        cid = _cid(b['city_id'])
+        if cid is None:
+            continue
+        e = city_info.setdefault(cid, {'name': b.get('city_name', str(cid)), 'n': 0})
+        e['n'] += 1
+    ordered = sorted(city_info.items(), key=lambda kv: kv[1]['name'].lower())
+    all_ids = [cid for cid, _ in ordered]
+
+    # Seed the working set from current config (honouring any legacy exclude
+    # list) so the screen opens showing what is actually in use right now.
+    included = get_included_city_ids(session, is_units)
+    excluded = get_excluded_city_ids(session, is_units)
+    in_use = {cid for cid in all_ids if city_in_use(cid, included, excluded)}
+
+    note = ""
+    while True:
+        banner()
+        print("=" * 60)
+        print(f"  RECRUITMENT CITIES - {kind}")
+        print("=" * 60)
+        print()
+        print("  Only cities marked IN USE are given recruitment work.")
+        print("  (Cities not in use can still supply resources to others.)")
+        print()
+
+        for i, (cid, info) in enumerate(ordered, start=1):
+            if cid in in_use:
+                state = f"{bcolors.GREEN}IN USE  {bcolors.ENDC}"
+            else:
+                state = f"{bcolors.RED}not used{bcolors.ENDC}"
+            print(f"  ({i:>2}) {state}  {info['name']:<20} "
+                  f"{info['n']} {building_type}")
+
+        print()
+        print(f"  {len(in_use)} of {len(ordered)} cities in use.")
+        if not in_use:
+            print(f"  {bcolors.WARNING}No cities selected - nothing will be "
+                  f"built until you add at least one.{bcolors.ENDC}")
+        if note:
+            print(f"  {note}")
+        print()
+        print("  Add cities by number - single, list or range:")
+        print("     3        1, 2, 3        1 2 3 4        1-4, 6-9        1-3 7-12")
+        print("  Enter them together or one at a time; nothing is saved until")
+        print("  you press <enter> on its own.")
+        print("  Prefix with - to take a city back out, e.g.  -3   or  -1-4")
+        print()
+        print("  (a) Use all    (n) Use none")
+        print("  (<enter>) Save and go back    (') Exit the module")
+        print()
+
+        raw = read(msg="Select: ", empty=True)
+        raw = "" if raw is None else str(raw).strip()
+
+        if raw == "'":
+            return "EXIT"                      # leave the module entirely
+        if raw == "":
+            # Commit. All cities selected is stored as None ("every city") so
+            # cities founded later are picked up automatically.
+            if set(in_use) == set(all_ids):
+                set_included_city_ids(session, is_units, None)
+            else:
+                set_included_city_ids(session, is_units, in_use)
+            return None
+
+        letter = raw.lower()
+        if letter in ("a", "all"):
+            in_use = set(all_ids)
+            note = f"{bcolors.GREEN}All cities selected.{bcolors.ENDC}"
+            continue
+        if letter in ("n", "none"):
+            in_use = set()
+            note = f"{bcolors.WARNING}All cities deselected.{bcolors.ENDC}"
+            continue
+
+        adds, removes, errors = _parse_index_selection(raw, len(ordered))
+        if not adds and not removes:
+            note = (f"{bcolors.RED}Nothing selected: "
+                    f"{'; '.join(errors) if errors else 'unrecognised input'}"
+                    f"{bcolors.ENDC}")
+            continue
+
+        added, dropped = [], []
+        for i in adds:
+            cid, info = ordered[i - 1]
+            if cid not in in_use:
+                in_use.add(cid)
+                added.append(info['name'])
+        for i in removes:
+            cid, info = ordered[i - 1]
+            if cid in in_use:
+                in_use.discard(cid)
+                dropped.append(info['name'])
+
+        parts = []
+        if added:
+            parts.append(f"{bcolors.GREEN}added{bcolors.ENDC} " + ", ".join(added))
+        if dropped:
+            parts.append(f"{bcolors.RED}removed{bcolors.ENDC} " + ", ".join(dropped))
+        if not parts:
+            parts.append("no change")
+        note = "  |  ".join(parts) + "   (not saved yet - <enter> to save)"
+        if errors:
+            note += f"  {bcolors.RED}ignored: {'; '.join(errors)}{bcolors.ENDC}"
+
+
 # ---------------------------------------------------------------------------
 # Legacy shim wrappers used by old code paths still in _activate_worker etc.
 # ---------------------------------------------------------------------------
@@ -1961,6 +2268,21 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             session.setStatus("Auto Recruitment Manager: stopped by user")
             break
 
+        # --- Reload config each cycle so settings changes (batch %, reports,
+        #     import) apply live without restarting the worker. ---
+        cfg = load_config(session)
+        try:
+            batch_pct = float(cfg.get("min_batch_pct", 0.20))
+        except (TypeError, ValueError):
+            batch_pct = 0.20
+        batch_pct = max(0.0, min(1.0, batch_pct))
+
+        # Which cities may be recruited in (re-read each cycle so changes take
+        # effect live). Skipping a city in the resource fetch below also removes
+        # its buildings from this cycle's work list.
+        inc_cities = get_included_city_ids(session, is_units, cfg)
+        exc_cities = get_excluded_city_ids(session, is_units, cfg)
+
         # --- Reload goals CSV each cycle ---
         all_rows = recruit_csv_load(session, is_units)
         active_goals = [r for r in all_rows
@@ -1989,6 +2311,8 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
         fetch_error = False
 
         for cid in all_city_ids:
+            if not city_in_use(cid, inc_cities, exc_cities):
+                continue  # not in the user's city list: no work assigned here
             try:
                 html = session.get(city_url + str(cid))
                 city_data = getCity(html)
@@ -1997,13 +2321,12 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                 if len(avail) < 5:
                     avail = avail + [0] * (5 - len(avail))
 
-                citizens = 0
-                for pat in (r'id="js_GlobalMenu_citizens">([0-9,]+)',
-                             r'"citizens"\s*:\s*(\d+)'):
-                    m = re.search(pat, html)
-                    if m:
-                        citizens = int(m.group(1).replace(',', ''))
-                        break
+                # Use getCity's own freeCitizens parser. Do NOT re-parse with a
+                # local regex: the old fallback r'"citizens"\s*:\s*(\d+)' matched
+                # the first "citizens": in the page, which is a unit COST (1-2),
+                # not the free-citizen count — so citizens//cost came out as 1
+                # and only 1-2 troops were ever ordered.
+                citizens = int(city_data.get('freeCitizens', 0) or 0)
 
                 if RRS_AVAILABLE:
                     res_avail = []
@@ -2116,11 +2439,20 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                     continue
                 cand = unit_data[uid]
 
-                # Max affordable, capped by the building's slider max and the goal
+                # Order size = batch_pct of the goal's CURRENT remaining (so the
+                # goal steps down: 1500 -> 300 -> 240 ...), then capped by the
+                # building's slider max, the goal, and what the city can afford.
                 cap = g['qty_remaining']
-                mb = cand.get('max_buildable', 0)
-                if mb > 0:
-                    cap = min(cap, mb)
+                if batch_pct > 0:
+                    batch = max(1, math.ceil(g['qty_remaining'] * batch_pct))
+                    cap = min(cap, batch)
+                # NOTE: deliberately NOT capped by unit_data['max_buildable'].
+                # That is the slider's max at the moment the building was
+                # fetched, i.e. a snapshot of THEN-available resources. Because
+                # unit_data is cached across cycles, a stale low value (taken
+                # when the city was poor) kept throttling every later order.
+                # ikabot's own trainArmy never uses it either — the live
+                # resource maths below is the correct and sufficient limit.
                 for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
                     cost = cand.get(res_key, 0)
                     if cost > 0:
@@ -2160,12 +2492,22 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                         rrs_release(session, rid, MODULE_NAME)
                 continue
 
+            # Match ikabot's canonical trainArmy payload. Barracks and shipyard
+            # use DIFFERENT functions: buildUnits vs buildShips. Sending the
+            # wrong one (the old 'action':'BuildUnits' for both) let troop
+            # orders work but silently no-op'd ship orders — the goal was still
+            # deducted, so ship goals falsely completed within a cycle.
             params = {
-                'action':        'BuildUnits',
-                'actionRequest': action_code,
-                'cityId':        cid,
-                'position':      b['building_position'],
-                str(chosen_uid): max_p,
+                'action':         'CityScreen',
+                'function':       'buildUnits' if is_units else 'buildShips',
+                'actionRequest':  action_code,
+                'cityId':         cid,
+                'position':       b['building_position'],
+                'backgroundView': 'city',
+                'currentCityId':  cid,
+                'templateView':   'barracks' if is_units else 'shipyard',
+                'ajax':           '1',
+                str(chosen_uid):  max_p,
             }
 
             try:
@@ -2322,6 +2664,18 @@ def _activate_worker(session, event, is_units):
         enter()
         return False  # caller stays in menu
 
+    # Don't start a worker that has nowhere to build.
+    _cached = _load_buildings_cache(session, is_units)
+    if _cached:
+        _inc = get_included_city_ids(session, is_units)
+        _exc = get_excluded_city_ids(session, is_units)
+        if not any(city_in_use(b['city_id'], _inc, _exc) for b in _cached):
+            print(f"\n  {bcolors.RED}No cities are in use — there is nowhere "
+                  f"to build.{bcolors.ENDC}")
+            print(f"  Select at least one city using option (9).")
+            enter()
+            return False
+
     wlock = _worker_lock_path(session, is_units)
     if _is_worker_running(session, is_units):
         print(f"\n  {bcolors.WARNING}A worker for {kind} is already running.{bcolors.ENDC}")
@@ -2454,13 +2808,58 @@ def _setup_worker_config(session, is_units):
             print(f"  {bcolors.GREEN}Resource import enabled.{bcolors.ENDC}")
     print()
 
+    # Batch size (preserve any existing value; default 20%)
+    existing_pct = load_config(session).get("min_batch_pct", 0.20)
+    print("Batch size: each order builds this % of a unit type's remaining count")
+    print("(e.g. 20%: 1500 -> 300 -> 240 ...). 0 = build max affordable per order.")
+    pct_raw = read(
+        msg=f"Batch percentage (1-100, 0 to disable, default {existing_pct*100:.0f}): ",
+        min=0, max=100, digit=True, additionalValues=["'", ""]
+    )
+    if pct_raw == "'":
+        return None
+    min_batch_pct = (pct_raw / 100.0) if isinstance(pct_raw, int) else existing_pct
+    print()
+
     return {
         "report_enabled":          report_enabled,
         "report_interval_hours":   report_interval,
         "report_group_completed":  report_group_completed,
         "resource_import_enabled": resource_import_enabled,
+        "min_batch_pct":           min_batch_pct,
         "last_report_time":        0,
     }
+
+
+def _set_batch_pct_ui(session):
+    """Standalone quick-edit for the batch percentage (shared units+ships)."""
+    cfg = load_config(session)
+    current = cfg.get("min_batch_pct", 0.20)
+    print()
+    print("=" * 60)
+    print("  BATCH SIZE")
+    print("=" * 60)
+    if current > 0:
+        print(f"\n  Current: {current*100:.0f}% of each unit type's remaining per order.")
+    else:
+        print("\n  Current: batching OFF (each order builds the max affordable).")
+    print("  Each production order builds this % of what's left for that unit")
+    print("  type, so a goal steps down over successive orders. Example at 20%:")
+    print("    1500 remaining -> order 300 -> 1200 left -> order 240 -> 960 ...")
+    print("  A building that can't afford the full batch builds what it can, so")
+    print("  it never sits idle. Enter 0 to disable batching entirely.")
+    print("  Applies live to a running worker within one cycle.")
+    print()
+    raw = read(msg="  New batch percentage (0-100, or ' to cancel): ",
+               min=0, max=100, digit=True, additionalValues=["'"])
+    if raw == "'":
+        return
+    cfg["min_batch_pct"] = raw / 100.0
+    save_config(session, cfg)
+    if raw == 0:
+        print(f"\n  {bcolors.GREEN}Batching disabled — orders use max affordable.{bcolors.ENDC}")
+    else:
+        print(f"\n  {bcolors.GREEN}Batch size set to {raw}%.{bcolors.ENDC}")
 
 
 def _edit_queue_menu(session, is_units):
@@ -2541,6 +2940,29 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                           f"across {n_goals} active goal(s)")
                 else:
                     print(f"  Goals: empty")
+
+                _batch_pct = load_config(session).get("min_batch_pct", 0.20)
+                if _batch_pct > 0:
+                    print(f"  Batch size: {_batch_pct*100:.0f}% of remaining per order")
+                else:
+                    print(f"  Batch size: OFF (max affordable per order)")
+
+                _inc = get_included_city_ids(session, is_units)
+                _exc = get_excluded_city_ids(session, is_units)
+                _cached = _load_buildings_cache(session, is_units) or []
+                _all_cids = {_cid(b['city_id']) for b in _cached} - {None}
+                if _all_cids:
+                    _used = {c for c in _all_cids if city_in_use(c, _inc, _exc)}
+                    if len(_used) < len(_all_cids):
+                        _off = sorted({b.get('city_name', str(b['city_id']))
+                                       for b in _cached
+                                       if _cid(b['city_id']) not in _used})
+                        _shown = ", ".join(_off[:3]) + ("..." if len(_off) > 3 else "")
+                        print(f"  {bcolors.WARNING}Cities: {len(_used)} of "
+                              f"{len(_all_cids)} in use — skipping {_shown}"
+                              f"{bcolors.ENDC}")
+                    else:
+                        print(f"  Cities: all {len(_all_cids)} in use")
                 print()
 
                 worker_running = _is_worker_running(session, is_units)
@@ -2560,11 +2982,13 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                 print("  (5) Send progress report now")
                 print("  (6) Refresh building list  (rescan after upgrades)")
                 print("  (7) Worker settings  (reports / resource import)")
+                print("  (8) Batch size  (units built per order)")
+                print("  (9) Cities  (choose which cities to build in)")
                 print()
                 print("  (') Back to type selection")
                 print()
 
-                choice = read(msg="Select: ", min=1, max=7, digit=True,
+                choice = read(msg="Select: ", min=1, max=9, digit=True,
                               additionalValues=["'", "s", "S", "o", "O", "r", "R"])
 
                 if isinstance(choice, str):
@@ -2649,9 +3073,17 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
                         save_config(session, new_cfg)
                         print(f"\n  {bcolors.GREEN}Settings saved.{bcolors.ENDC}")
                         if _is_worker_running(session, is_units):
-                            print("  A worker is running — restart it (o then s) "
-                                  "for changes to take effect.")
+                            print("  A running worker applies the new settings "
+                                  "within one cycle — no restart needed.")
                     enter()
+                elif choice == 8:
+                    _set_batch_pct_ui(session)
+                    if _is_worker_running(session, is_units):
+                        print("  A running worker applies this within one cycle.")
+                    enter()
+                elif choice == 9:
+                    if _manage_cities_ui(session, is_units) == "EXIT":
+                        return  # ' on the cities screen closes the module
 
     except KeyboardInterrupt:
         pass

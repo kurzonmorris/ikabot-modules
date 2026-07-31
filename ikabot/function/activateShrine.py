@@ -13,6 +13,7 @@ from ikabot.helpers.resources import *
 from ikabot.helpers.varios import *
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.botComm import *
+from ikabot.helpers.modulePrefs import load_prefs, prompt_use_saved, save_prefs
 
 wait_time = 60 * 60 * 12  # 12 hours, wait_time*6 equals total shrine grace time of 72h
 last_donation_status = ""
@@ -124,11 +125,47 @@ def activateShrine(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
     banner()
+    global selected_gods
     godids = []
+    times = 0
 
-    while True:
-        print(
-            """Which God(s) would you like to activate autonomously? 
+    # --- module memory: reuse the previous run's answers if the user wants ---
+    _MODULE = "activateShrine"
+    _MODE_NAMES = {
+        1: "a specific number of times",
+        2: "autonomously every 70 hours",
+        3: "both",
+    }
+    saved = load_prefs(session, _MODULE)
+    use_saved = False
+    if saved:
+        try:
+            _ids = [int(g) for g in saved["godids"]]
+            _mode = int(saved["mode"])
+            _times = int(saved.get("times", 0))
+            # Validate before offering — a hand-edited or outdated file must
+            # never be replayed blindly.
+            assert _ids and all(1 <= g <= 6 for g in _ids)
+            assert _mode in (1, 2, 3)
+            _summary = [
+                "Gods:  " + ", ".join(gods(g) for g in _ids),
+                "Mode:  " + _MODE_NAMES[_mode],
+            ]
+            if _mode in (1, 3):
+                _summary.append(f"Times: {_times}")
+            use_saved = prompt_use_saved(session, _MODULE, _summary)
+        except Exception:
+            use_saved = False
+
+    if use_saved:
+        godids = [int(g) for g in saved["godids"]]
+        mode = int(saved["mode"])
+        times = int(saved.get("times", 0))
+        selected_gods = ", ".join(gods(godid) for godid in godids)
+    else:
+        while True:
+            print(
+                """Which God(s) would you like to activate autonomously?
     (0) Continue
     (1) Pan (Wood)
     (2) Dionysus (Wine)
@@ -137,36 +174,41 @@ def activateShrine(session, event, stdin_fd, predetermined_input):
     (5) Theia (Crystal)
     (6) Hephaestus (Sulphur)
     """
-        )
-        god = read(min=0, max=6, digit=True)
-        if god == 0:
-            if len(godids) == 0:
-                event.set()
-                return
-            named_gods = [gods(godid) for godid in godids]
-            gods_str = ", ".join(named_gods) if len(named_gods) > 1 else named_gods[0]
-            global selected_gods
-            selected_gods = gods_str
-            break
-        else:
-            godids.append(god)
-            continue
+            )
+            god = read(min=0, max=6, digit=True)
+            if god == 0:
+                if len(godids) == 0:
+                    event.set()
+                    return
+                named_gods = [gods(godid) for godid in godids]
+                gods_str = ", ".join(named_gods) if len(named_gods) > 1 else named_gods[0]
+                selected_gods = gods_str
+                break
+            else:
+                godids.append(god)
+                continue
 
-    print("")
-    print(
-        """Would you like to activate the selected God(s) a specific amount of times or autonomously every 70 hours?
+        print("")
+        print(
+            """Would you like to activate the selected God(s) a specific amount of times or autonomously every 70 hours?
 (1) Specific amount of times in a row
 (2) Autonomously every 70 hours
 (3) Both
 """
-    )
-    mode = read(min=1, max=3, digit=True)
-    if mode == 1 or mode == 3:
-        print("How many times would you like to activate the selected God(s)?")
-        times = read(min=1, max=10, digit=True)
-    if mode == 2:
-        mode = 2
-        times = 0
+        )
+        mode = read(min=1, max=3, digit=True)
+        if mode == 1 or mode == 3:
+            print("How many times would you like to activate the selected God(s)?")
+            times = read(min=1, max=10, digit=True)
+        if mode == 2:
+            mode = 2
+            times = 0
+
+        save_prefs(
+            session,
+            _MODULE,
+            {"godids": [int(g) for g in godids], "mode": int(mode), "times": int(times)},
+        )
 
     set_child_mode(session)
     event.set()

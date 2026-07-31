@@ -3,6 +3,9 @@
 
 MODULE_NAME  = "Sequence Runner"
 MODULE_ENTRY = "sequenceRunner"
+MODULE_VERSION = "1.1.2"
+
+__version__ = MODULE_VERSION
 
 import json
 import os
@@ -10,10 +13,28 @@ import sys
 
 import ikabot.config as config
 from ikabot.config import IKABOT_DATA_DIR
-from ikabot.helpers.gui import banner, bcolors, enter
+from ikabot.helpers.gui import bcolors, enter
 from ikabot.helpers.pedirInfo import read
 
 _SEQUENCES_FILE = os.path.join(IKABOT_DATA_DIR, "sequences.json")
+
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+
+def print_module_banner(page_title=None):
+    bar  = "═" * 58
+    rule = "─" * 58
+    print("\n")
+    print(f"{bcolors.HEADER}╔{bar}╗")
+    title = f"SEQUENCE RUNNER v{MODULE_VERSION}"
+    print(f"║{title:^58}║")
+    print(f"╚{bar}╝{bcolors.ENDC}")
+    if page_title:
+        print(f"\n{bcolors.BOLD}{page_title}{bcolors.ENDC}")
+        print(f"{rule}")
+    print("")
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +100,7 @@ def _run_sequence(seq, predetermined_input, event):
 # ---------------------------------------------------------------------------
 
 def _create_sequence(sequences):
-    banner()
-    print("  Create New Sequence")
-    print("  " + "=" * 40 + "\n")
+    print_module_banner("Create New Sequence")
 
     name = read(msg="Sequence name: ").strip()
     if not name:
@@ -94,7 +113,14 @@ def _create_sequence(sequences):
     print("\n  Enter inputs as comma-separated values.")
     print("  Use 'enter' for an empty/Enter keypress.")
     print("  Numbers are entered as digits, text as words.")
-    print("  Example: 16, enter, 5, 1, 0, 2, 6, 1, y, enter\n")
+    print("  Example: 16, enter, 5, 1, 0, 2, 6, 1, y, enter")
+    print()
+    print("  For External Modules (30): stay in submenu between modules.")
+    print("  Use a single 0 at the end to exit, NOT between each module.")
+    print("  Example: 30, 34, 0, 32, s, 3, 37, 2, 2, 2, 24, 0")
+    print("           ^^  ^^  ^  ^^           ^^                ^")
+    print("           |   RRS |  CM           TM                exit")
+    print("           enter   RRS exits its own menu\n")
 
     raw = read(msg="Inputs: ").strip()
     if not raw:
@@ -117,14 +143,12 @@ def _create_sequence(sequences):
 
 def _delete_sequence(sequences):
     if not sequences:
-        banner()
+        print_module_banner("Delete Sequence")
         print("  No sequences to delete.")
         enter()
         return
 
-    banner()
-    print("  Delete Sequence")
-    print("  " + "=" * 40 + "\n")
+    print_module_banner("Delete Sequence")
     print("  (0) Cancel\n")
     for i, seq in enumerate(sequences, start=1):
         print(f"  ({i}) {seq['name']}")
@@ -140,9 +164,7 @@ def _delete_sequence(sequences):
 
 
 def _preview_sequence(seq):
-    banner()
-    print(f"  Sequence: {seq['name']}")
-    print("  " + "=" * 40)
+    print_module_banner(f"Preview: {seq['name']}")
     if seq.get("description"):
         print(f"  {seq['description']}\n")
     print(f"  Steps ({len(seq['inputs'])}):\n")
@@ -172,9 +194,7 @@ def sequenceRunner(session, event, stdin_fd, predetermined_input):
             sequences = _load_sequences()
             n = len(sequences)
 
-            banner()
-            print("  Sequence Runner")
-            print("  " + "=" * 40 + "\n")
+            print_module_banner()
 
             print("  (0) Back\n")
 
@@ -202,8 +222,7 @@ def sequenceRunner(session, event, stdin_fd, predetermined_input):
             elif sequences and choice == n + 2:
                 _delete_sequence(sequences)
             elif sequences and choice == n + 3:
-                banner()
-                print("  Preview which sequence?\n")
+                print_module_banner("Preview Sequence")
                 print("  (0) Cancel")
                 for i, seq in enumerate(sequences, start=1):
                     print(f"  ({i}) {seq['name']}")

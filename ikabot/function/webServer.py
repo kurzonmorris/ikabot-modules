@@ -42,6 +42,39 @@ else:
     web_cache_file = "/tmp/ikabot.webcache"
 
 
+def get_local_network_ip():
+    """Best-effort LAN IP of this machine (upstream #408).
+
+    Probing a public address makes the kernel resolve the route via the
+    default gateway, which is the interface other devices on the network can
+    actually reach. Probing a private address instead can select a secondary
+    NIC, VPN or host-only adapter. Falls back to a hostname lookup, and
+    rejects loopback/APIPA results either way.
+    """
+    def is_usable_ip(ip):
+        return ip and not ip.startswith(("0.", "127.", "169.254."))
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            # No packet is sent; connect only asks the OS which local address
+            # would be used for this route.
+            s.connect(("1.1.1.1", 80))
+            ip = s.getsockname()[0]
+            if is_usable_ip(ip):
+                return ip
+    except OSError:
+        pass
+
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if is_usable_ip(ip):
+            return ip
+    except OSError:
+        pass
+
+    return None
+
+
 def webServer(session, event, stdin_fd, predetermined_input, port=None):
     """
     Parameters
@@ -333,15 +366,7 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                     break
                 port = str(int(port) + 1)
 
-        # try to get local network ip if possible (PR#408: use UDP routing trick
-        # instead of gethostbyname which returns APIPA/loopback on some systems)
-        local_network_ip = None
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
-                _s.connect(("192.168.0.1", 80))
-                local_network_ip = _s.getsockname()[0]
-        except:
-            pass
+        local_network_ip = get_local_network_ip()
         print(
             f"""Ikabot web server is about to be run on {bcolors.BLUE}http://127.0.0.1:{port}{bcolors.ENDC} {'and ' + bcolors.BLUE + 'http://' + str(local_network_ip) + ':' + port + bcolors.ENDC if local_network_ip else ''}"""
         )

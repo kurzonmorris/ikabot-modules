@@ -9,6 +9,7 @@ from ikabot.config import *
 from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getCity
 from ikabot.helpers.gui import *
+from ikabot.helpers.modulePrefs import load_prefs, prompt_use_saved, save_prefs
 from ikabot.helpers.pedirInfo import *
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
@@ -272,12 +273,33 @@ def activateMiracle(session, event, stdin_fd, predetermined_input):
     try:
         banner()
 
+        # --- module memory: reuse the previous run's answers if the user wants ---
+        _MODULE = "activateMiracle"
+        saved = load_prefs(session, _MODULE)
+        use_saved = False
+        if saved:
+            try:
+                _saved_iterations = int(saved["iterations"])
+                assert saved.get("wonder") is not None
+                assert _saved_iterations >= 1
+                use_saved = prompt_use_saved(
+                    session,
+                    _MODULE,
+                    [
+                        "Miracle:     " + str(saved.get("wonderName", saved["wonder"])),
+                        f"Activations: {_saved_iterations}",
+                    ],
+                )
+            except Exception:
+                use_saved = False
+
         cache = _load_miracle_cache(session)
         use_cache = bool(cache)
-        # Only offer the re-scan choice when a human is at the keyboard.  Under
-        # sequenceRunner (predetermined_input populated) we silently use the
-        # saved list so the recorded keystrokes stay aligned.
-        if cache and not config.predetermined_input:
+        # Only offer the re-scan choice when a human is at the keyboard and is
+        # not replaying saved settings.  Under sequenceRunner
+        # (predetermined_input populated) we silently use the saved list so the
+        # recorded keystrokes stay aligned.
+        if cache and not config.predetermined_input and not use_saved:
             print("A saved temple list exists for this account.")
             print("(1) Use saved list (fast)")
             print("(2) Full re-scan (slower; picks up new or changed temples)")
@@ -297,18 +319,33 @@ def activateMiracle(session, event, stdin_fd, predetermined_input):
             event.set()
             return
 
-        island = chooseIsland(islands)
+        island = None
+        if use_saved:
+            # Match on the wonder id, not a list position: chooseIsland sorts by
+            # level then name, so a saved index would point at a different
+            # miracle as soon as a wonder level changes.
+            island = next(
+                (i for i in islands if str(i.get("wonder")) == str(saved["wonder"])),
+                None,
+            )
+            if island is None:
+                print("The saved miracle is no longer available; please choose again.")
+                use_saved = False
+
+        if island is None:
+            island = chooseIsland(islands)
         if island is None:
             event.set()
             return
 
         if island["available"]:
             print("\nThe miracle {} (level {}) will be activated".format(island["wonderName"], island["wonderActivationLevel"]))
-            print("Proceed? [Y/n]")
-            activate_miracle_input = read(values=["y", "Y", "n", "N", ""])
-            if activate_miracle_input.lower() == "n":
-                event.set()
-                return
+            if not use_saved:
+                print("Proceed? [Y/n]")
+                activate_miracle_input = read(values=["y", "Y", "n", "N", ""])
+                if activate_miracle_input.lower() == "n":
+                    event.set()
+                    return
 
             miracle_activation_result = activateMiracleHttpCall(session, island)
 
@@ -331,83 +368,102 @@ def activateMiracle(session, event, stdin_fd, predetermined_input):
             wait_time = int(float(enddate)) - int(float(currentdate))
 
             print("The miracle {} was activated.".format(island["wonderName"]))
-            enter()
-            banner()
+            if use_saved:
+                iterations = int(saved["iterations"])
+            else:
+                enter()
+                banner()
 
-            while True:
-                print("Do you wish to activate it again when it is finished? [y/N]")
+                while True:
+                    print("Do you wish to activate it again when it is finished? [y/N]")
 
-                reactivate_again_input = read(values=["y", "Y", "n", "N", ""])
-                if reactivate_again_input.lower() != "y":
-                    event.set()
-                    return
+                    reactivate_again_input = read(values=["y", "Y", "n", "N", ""])
+                    if reactivate_again_input.lower() != "y":
+                        event.set()
+                        return
 
-                iterations = read(msg="How many times?: ", digit=True, min=0)
+                    iterations = read(msg="How many times?: ", digit=True, min=0)
 
-                if iterations == 0:
-                    event.set()
-                    return
+                    if iterations == 0:
+                        event.set()
+                        return
 
-                duration = wait_time * iterations
+                    duration = wait_time * iterations
 
-                print("It will finish in:{}".format(daysHoursMinutes(duration)))
+                    print("It will finish in:{}".format(daysHoursMinutes(duration)))
 
-                print("Proceed? [Y/n]")
-                reactivate_again_input = read(values=["y", "Y", "n", "N", ""])
-                if reactivate_again_input.lower() == "n":
-                    banner()
-                    continue
-                break
+                    print("Proceed? [Y/n]")
+                    reactivate_again_input = read(values=["y", "Y", "n", "N", ""])
+                    if reactivate_again_input.lower() == "n":
+                        banner()
+                        continue
+                    break
         else:
             print(
                 "\nThe miracle {} will be activated in {}".format(
                     island["wonderName"], daysHoursMinutes(island["available_in"])
                 )
             )
-            print("Proceed? [Y/n]")
-            user_confirm = read(values=["y", "Y", "n", "N", ""])
-            if user_confirm.lower() == "n":
-                event.set()
-                return
+            if not use_saved:
+                print("Proceed? [Y/n]")
+                user_confirm = read(values=["y", "Y", "n", "N", ""])
+                if user_confirm.lower() == "n":
+                    event.set()
+                    return
             wait_time = island["available_in"]
             iterations = 1
 
             print("\nThe mirable will be activated.")
-            enter()
-            banner()
+            if use_saved:
+                iterations = int(saved["iterations"])
+            else:
+                enter()
+                banner()
 
-            while True:
-                print("Do you wish to activate it again when it is finished? [y/N]")
+                while True:
+                    print("Do you wish to activate it again when it is finished? [y/N]")
 
-                reactivate_again_input = read(values=["y", "Y", "n", "N", ""])
-                again = reactivate_again_input.lower() == "y"
-                if again is True:
-                    try:
-                        iterations = read(msg="How many times?: ", digit=True, min=0)
-                    except KeyboardInterrupt:
-                        iterations = 1
-                        break
+                    reactivate_again_input = read(values=["y", "Y", "n", "N", ""])
+                    again = reactivate_again_input.lower() == "y"
+                    if again is True:
+                        try:
+                            iterations = read(msg="How many times?: ", digit=True, min=0)
+                        except KeyboardInterrupt:
+                            iterations = 1
+                            break
 
-                    if iterations == 0:
-                        iterations = 1
-                        break
+                        if iterations == 0:
+                            iterations = 1
+                            break
 
-                    iterations += 1
-                    duration = wait_time * iterations
-                    print("It is not possible to calculate the time of finalization. (at least: {})".format(daysHoursMinutes(duration)))
-                    print("Proceed? [Y/n]")
+                        iterations += 1
+                        duration = wait_time * iterations
+                        print("It is not possible to calculate the time of finalization. (at least: {})".format(daysHoursMinutes(duration)))
+                        print("Proceed? [Y/n]")
 
-                    try:
-                        activate_input = read(values=["y", "Y", "n", "N", ""])
-                    except KeyboardInterrupt:
-                        iterations = 1
-                        break
+                        try:
+                            activate_input = read(values=["y", "Y", "n", "N", ""])
+                        except KeyboardInterrupt:
+                            iterations = 1
+                            break
 
-                    if activate_input.lower() == "n":
-                        iterations = 1
-                        banner()
-                        continue
-                break
+                        if activate_input.lower() == "n":
+                            iterations = 1
+                            banner()
+                            continue
+                    break
+
+        if not use_saved:
+            # Store the wonder id (stable) rather than the menu position.
+            save_prefs(
+                session,
+                _MODULE,
+                {
+                    "wonder": island.get("wonder"),
+                    "wonderName": island.get("wonderName"),
+                    "iterations": int(iterations),
+                },
+            )
     except KeyboardInterrupt:
         event.set()
         return

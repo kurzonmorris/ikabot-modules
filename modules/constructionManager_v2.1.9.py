@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.1.5"
+__version__ = "2.1.9"
 
 import csv
 import glob
@@ -23,11 +23,14 @@ import time
 import traceback
 from decimal import Decimal
 
+import psutil
+
 from ikabot import config
 from ikabot.config import (
     actionRequest,
     city_url,
     island_url,
+    material_img_hash,
     materials_names,
 )
 from ikabot.helpers.botComm import checkTelegramData, sendToBot, sendToBotDebug
@@ -89,9 +92,44 @@ HARD_LEVEL_CAP = 150
 BUILD_POST_VERIFY_DELAY_SECONDS = 2
 SUPPLIER_LIST_TTL_SECONDS = 120
 
-# Order matches `materials_names_tec` in ikabot.config:
-# ["wood", "wine", "marble", "glass", "sulfur"]
-RESOURCE_FILENAMES = ("wood", "wine", "marble", "glass", "sulfur")
+# slug → ikipedia buildingId, captured from the live game's help grid
+# (every entry uses helpId=1, so the detail URL is fully derivable from this).
+# Keys are lowercased for case-insensitive lookup: city JSON uses camelCase
+# ("townHall") while the construction-dialog scrape may yield lowercase.
+BUILDING_HELP_IDS = {
+    "townhall": 0,
+    "port": 3,
+    "academy": 4,
+    "shipyard": 5,
+    "barracks": 6,
+    "warehouse": 7,
+    "wall": 8,
+    "tavern": 9,
+    "museum": 10,
+    "palace": 11,
+    "embassy": 12,
+    "branchoffice": 13,
+    "workshop": 15,
+    "safehouse": 16,
+    "palacecolony": 17,
+    "stonemason": 19,
+    "glassblowing": 20,
+    "winegrower": 21,
+    "alchemist": 22,
+    "carpentering": 23,
+    "architect": 24,
+    "optician": 25,
+    "vineyard": 26,
+    "fireworker": 27,
+    "temple": 28,
+    "dump": 29,
+    "piratefortress": 30,
+    "blackmarket": 31,
+    "marinechartarchive": 32,
+    "dockyard": 33,
+    "shrineofolympus": 34,
+    "chronosforge": 35,
+}
 
 # ---------------------------------------------------------------------------
 # Path helpers — every persistent file is per (server, username)
@@ -191,7 +229,16 @@ def _lock_acquire(lock_file, timeout, stale_after):
             try:
                 with open(lock_file, "r") as f:
                     data = json.load(f)
-                if time.time() - data.get("timestamp", 0) > stale_after:
+                # A lock whose holder process is dead is stale immediately —
+                # don't make every waiter sit out the stale_after window when
+                # the holder was killed (window closed, Ctrl+C mid-write).
+                holder_pid = data.get("pid")
+                holder_dead = (
+                    isinstance(holder_pid, int)
+                    and holder_pid > 0
+                    and not psutil.pid_exists(holder_pid)
+                )
+                if holder_dead or time.time() - data.get("timestamp", 0) > stale_after:
                     os.remove(lock_file)
                     continue
             except (json.JSONDecodeError, KeyError, IOError):
@@ -232,7 +279,10 @@ class _csv_lock:
         self.path = csv_lock_path(session)
 
     def __enter__(self):
-        if not _lock_acquire(self.path, timeout=30, stale_after=60):
+        # stale_after MUST be < timeout: an orphaned lock (holder died without
+        # cleanup) is then always broken before waiters give up.  CSV holds
+        # last milliseconds, so 20s of staleness is already very generous.
+        if not _lock_acquire(self.path, timeout=30, stale_after=20):
             raise RuntimeError(f"Could not acquire CSV lock at {self.path}")
         return self
 
@@ -590,63 +640,37 @@ def fetch_costs_for_building(session, city, building_slug):
     """Fetch the per-level cost table for *building_slug* from the ikipedia.
 
     Returns dict[int, list[int]] mapping level → [wood, wine, marble, crystal,
-    sulphur].  Returns {} if the building has no ikipedia entry (wonders,
-    palace variants, embassy variants, etc.) so callers can gracefully skip
-    rather than crashing.
+    sulphur].  Returns {} if the building has no BUILDING_HELP_IDS entry so
+    callers can gracefully skip rather than crashing.
 
-    Column-to-resource mapping is derived from the <th> image filenames
+    Column-to-resource mapping is derived from the <th> CDN image hashes
     in the cost table — NOT assumed positional — because many buildings only
     show a subset of the five resources (carpentering = 1 col, barracks = 2,
     town hall = 3, etc.).  A positional assumption would write marble costs
     into the wine slot for a barracks row, which would break cost math and
     over-ship the wrong resources.
     """
-    # Step 1: load ikipedia listing page
-    detail_url = (
-        "view=buildingDetail&buildingId=0&helpId=1&backgroundView=city"
-        "&currentCityId={cid}&templateView=ikipedia"
-        "&actionRequest={ar}&ajax=1"
-    ).format(cid=city["id"], ar=actionRequest)
-    try:
-        resp = session.post(detail_url)
-        building_html = json.loads(resp, strict=False)[1][1][1]
-    except Exception:
+    # Steps 1+2: build the detail URL directly from BUILDING_HELP_IDS.
+    # The old approach scraped the ikipedia listing page for each building's
+    # button, but the listing XHR no longer contains the button_building
+    # icons (they are rendered client-side by JS), so scraping can never
+    # match.  helpId=1 is constant for every building, so slug → buildingId
+    # is all we need.  Unknown slugs return {} so the scheduler's existing
+    # `cost is None → skip` branch handles them cleanly.
+    building_id = BUILDING_HELP_IDS.get(building_slug.lower())
+    if building_id is None:
         sendToBotDebug(
             session,
-            f"fetch_costs_for_building: ikipedia listing fetch failed for "
-            f"city {city.get('id')}:\n{traceback.format_exc()}",
-            True,
-        )
-        return {}
-
-    # Step 2: find the per-building ajaxHandlerCall URL in the ikipedia HTML.
-    # Guard: wonders / palace / museum slugs have no `button_building` entry
-    # here; the regex will return None, and we return {} so the scheduler's
-    # existing `cost is None → skip` branch handles it cleanly.
-    # [^>]* keeps the match inside the opening tag — avoids crossing element
-    # boundaries that re.DOTALL + .*? could cause, which yielded a wrong URL
-    # and sent raw game-rejection JSON to Telegram.
-    pat = (
-        r'<div class="(?:selected)? *button_building '
-        + re.escape(building_slug)
-        + r'"[^>]*onclick="ajaxHandlerCall\(\'\?(.*?)\'\)'
-    )
-    match = re.search(pat, building_html)
-    if match is None:
-        sendToBotDebug(
-            session,
-            f"fetch_costs_for_building: no ikipedia button for slug "
+            f"fetch_costs_for_building: no buildingId mapping for slug "
             f"'{building_slug}' in city {city.get('id')}",
             True,
         )
         return {}
-    # Apply .format only to the suffix we control — match.group(1) may contain
-    # literal braces from the game URL that would confuse str.format.
-    suffix = (
+    cost_url = (
+        "view=buildingDetail&buildingId={bid}&helpId=1"
         "&backgroundView=city&currentCityId={cid}"
         "&templateView=buildingDetail&actionRequest={ar}&ajax=1"
-    ).format(cid=city["id"], ar=actionRequest)
-    cost_url = match.group(1) + suffix
+    ).format(bid=building_id, cid=city["id"], ar=actionRequest)
 
     # Step 3: per-building cost table
     try:
@@ -661,20 +685,24 @@ def fetch_costs_for_building(session, city, building_slug):
         )
         return {}
 
-    # Step 4: derive column → resource-index from th image filename.
-    # RESOURCE_FILENAMES = ("wood","wine","marble","glass","sulfur") matches
-    # materials_names_tec.  We do NOT hash PNG images; the URL filename already
-    # carries the identity (e.g. ".../wood.png" → index 0).
-    th_srcs = re.findall(r'<th class="costs"><img src="(.*?)\.png"', html_costs)
-    # The last th is usually a clock icon for build time — drop it if it
-    # doesn't match any known resource filename.
+    # Step 4: derive column → resource-index from <th> CDN image hashes.
+    # CDN URLs look like //gfN.geo.gfsrv.net/cdn{XX}/{30hex}.png — filenames
+    # are opaque MD5 hashes, not resource names.  Reconstruct the full 32-char
+    # MD5 from the two-char cdn-path prefix + the 30-char filename, then look
+    # it up in material_img_hash (order: wood, wine, marble, crystal, sulfur).
+    # The last <th class="costs"> is always a clock/time icon — drop it with [:-1].
+    th_srcs = re.findall(r'<th class="costs"><img src="(.*?)"', html_costs)
     col_to_res = []
-    for src in th_srcs:
-        fname = src.rstrip("/").split("/")[-1].lower()
-        try:
-            idx = RESOURCE_FILENAMES.index(fname)
-        except ValueError:
-            idx = -1  # unknown (e.g. time icon); values for this col ignored
+    for src in th_srcs[:-1]:  # last th = time icon, skip it
+        cdn_match = re.search(r'/cdn([0-9a-f]{2})/([0-9a-f]+)\.png', src, re.IGNORECASE)
+        if cdn_match:
+            full_hash = cdn_match.group(1) + cdn_match.group(2)
+            try:
+                idx = material_img_hash.index(full_hash)
+            except ValueError:
+                idx = -1
+        else:
+            idx = -1
         col_to_res.append(idx)
 
     # Step 5: research-discount multiplier (shared across all levels in this call)
@@ -1474,6 +1502,47 @@ def _view_queue(session):
 # Edit queue (menu option 3)
 # ---------------------------------------------------------------------------
 
+def _build_slot_groups(rows):
+    """Group pending rows by (city_id, city_name, slot_position, building).
+
+    Returns a list of group dicts, ordered by city_id then min queue_id:
+      {
+        "city_id", "city_name", "slot_position", "building",
+        "next_level": lowest pending target_level,
+        "max_level":  highest pending target_level,
+        "pending_qids": [sorted list of pending queue_ids],
+        "all_qids":     [all queue_ids for this slot, any status],
+      }
+    """
+    from collections import defaultdict
+    key_to_pending = defaultdict(list)
+    key_to_all    = defaultdict(list)
+    for r in sorted(rows, key=lambda x: x["queue_id"]):
+        key = (r["city_id"], r.get("city_name", ""), r["slot_position"], r["building"])
+        key_to_all[key].append(r)
+        if r["status"] == "pending":
+            key_to_pending[key].append(r)
+
+    groups = []
+    for key in sorted(key_to_all.keys(), key=lambda k: (k[0], min(r["queue_id"] for r in key_to_all[k]))):
+        pending = key_to_pending.get(key, [])
+        if not pending:
+            continue
+        cid, cname, slot, building = key
+        levels = [r["target_level"] for r in pending]
+        groups.append({
+            "city_id":    cid,
+            "city_name":  cname,
+            "slot_position": slot,
+            "building":   building,
+            "next_level": min(levels),
+            "max_level":  max(levels),
+            "pending_qids": [r["queue_id"] for r in pending],
+            "all_qids":   [r["queue_id"] for r in key_to_all[key]],
+        })
+    return groups
+
+
 def _edit_queue(session):
     while True:
         banner()
@@ -1483,122 +1552,40 @@ def _edit_queue(session):
             enter()
             return
 
-        # Reuse view to show current state
-        _view_queue(session)
-
-        banner()
-        print("  Edit queue — choose action:\n")
-        print("  (D) Delete row(s)")
-        print("  (M) Modify a row")
-        print("  (R) Reorder rows within a city")
-        print("  (T) Set transport mode for all rows in a city")
-        print("  (B) Back")
-        action = read(values=["D", "d", "M", "m", "R", "r", "T", "t", "B", "b"])
-        action = action.upper()
-
-        if action == "B":
+        # ---- Build and display grouped view --------------------------------
+        groups = _build_slot_groups(rows)
+        if not groups:
+            print("  No pending rows to edit.")
+            enter()
             return
 
-        # ---- Delete -------------------------------------------------------
-        if action == "D":
+        print("  Edit queue — pending buildings by slot:\n")
+        current_city = None
+        for i, g in enumerate(groups, 1):
+            if g["city_id"] != current_city:
+                current_city = g["city_id"]
+                print(f"  {g['city_name']}:")
+            lv_range = (f"lv {g['next_level']}→{g['max_level']}"
+                        if g["next_level"] != g["max_level"]
+                        else f"lv {g['next_level']}")
             print(
-                "\n  Enter queue_id(s) to delete — single number, "
-                "comma-separated list, or range (e.g. 3-7):"
+                f"    ({i}) slot {g['slot_position']:>2}  {g['building']:<20}  "
+                f"{lv_range}  [{len(g['pending_qids'])} row(s)]"
             )
-            raw = read(empty=True).strip()
-            if not raw:
-                continue
-            qids_to_delete = set()
-            for part in raw.split(","):
-                part = part.strip()
-                if "-" in part:
-                    try:
-                        lo, hi = part.split("-", 1)
-                        qids_to_delete.update(range(int(lo.strip()), int(hi.strip()) + 1))
-                    except ValueError:
-                        print(f"  Invalid range: {part}")
-                        continue
-                else:
-                    try:
-                        qids_to_delete.add(int(part))
-                    except ValueError:
-                        print(f"  Invalid id: {part}")
-            valid = {r["queue_id"] for r in rows}
-            bad = qids_to_delete - valid
-            if bad:
-                print(f"  Warning: queue_id(s) not found and skipped: {sorted(bad)}")
-            to_del = qids_to_delete & valid
-            if not to_del:
-                print("  Nothing to delete.")
-                enter()
-                continue
-            print(f"\n  Delete {len(to_del)} row(s): {sorted(to_del)}? [Y/n]")
-            if read(values=["Y", "y", "N", "n", ""], default="Y").lower() != "n":
-                for qid in to_del:
-                    csv_delete(session, qid)
-                print(f"  Deleted {len(to_del)} row(s).")
-            enter()
+        print(f"\n  (R) Reorder  (T) Transport mode  (B) Back")
 
-        # ---- Modify -------------------------------------------------------
-        elif action == "M":
-            print("\n  Enter queue_id to modify:")
-            try:
-                qid = int(read())
-            except (TypeError, ValueError):
-                continue
-            row = next((r for r in rows if r["queue_id"] == qid), None)
-            if row is None:
-                print(f"  queue_id {qid} not found.")
-                enter()
-                continue
-            print(
-                f"\n  Modifying row {qid}: {row['city_name']} · "
-                f"slot {row['slot_position']} · {row['building']} → lv {row['target_level']}\n"
-            )
-            print("  (1) target_level")
-            print("  (2) transport_mode")
-            print("  (3) notes")
-            print("  (B) Cancel")
-            field_choice = read(values=["1", "2", "3", "B", "b"])
-            if field_choice.upper() == "B":
-                continue
-
-            if field_choice == "1":
-                print(f"  Current target_level: {row['target_level']}")
-                print("  New target_level:")
-                try:
-                    new_lv = int(read(min=1, max=HARD_LEVEL_CAP))
-                except (TypeError, ValueError):
-                    continue
-                csv_update(session, qid, target_level=new_lv)
-                print(f"  Updated target_level to {new_lv}.")
-                print(
-                    f"  {bcolors.YELLOW}Note: adjacent rows for this slot may "
-                    f"need manual adjustment if target levels overlap."
-                    f"{bcolors.ENDC}"
-                )
-
-            elif field_choice == "2":
-                print(
-                    f"  Current transport_mode: {row['transport_mode']}\n"
-                    "  (1) jit   (2) bulk   (3) none"
-                )
-                tm_choice = read(min=1, max=3)
-                new_tm = {1: "jit", 2: "bulk", 3: "none"}[tm_choice]
-                csv_update(session, qid, transport_mode=new_tm)
-                print(f"  Updated transport_mode to {new_tm}.")
-
-            elif field_choice == "3":
-                print(f"  Current notes: {row.get('notes', '')}")
-                print("  New notes (Enter to clear):")
-                new_notes = read(empty=True)
-                csv_update(session, qid, notes=new_notes)
-                print("  Updated notes.")
-
-            enter()
+        raw = read(
+            min=1, max=len(groups), digit=True, empty=True,
+            additionalValues=["r", "R", "t", "T", "b", "B"],
+        )
+        if raw in ("", None):
+            continue
+        if isinstance(raw, str) and raw.upper() == "B":
+            return
 
         # ---- Reorder within city ------------------------------------------
-        elif action == "R":
+        if isinstance(raw, str) and raw.upper() == "R":
+            rows = csv_load(session)
             city_ids = sorted({r["city_id"] for r in rows})
             if not city_ids:
                 print("  No cities in queue.")
@@ -1618,34 +1605,27 @@ def _edit_queue(session):
                 print("  Only one row for that city — nothing to reorder.")
                 enter()
                 continue
-
-            print(f"\n  Current order (enter new order as space-separated queue_ids):\n")
+            print(f"\n  Current order:\n")
             for r in city_rows:
-                print(
-                    f"    {r['queue_id']:>5}  {r['building']:<18}  → lv {r['target_level']}"
-                )
+                print(f"    {r['queue_id']:>5}  {r['building']:<18}  → lv {r['target_level']}")
             print(
                 f"\n  New order (queue_ids separated by spaces, "
                 f"e.g. '{' '.join(str(r['queue_id']) for r in reversed(city_rows))}'):"
             )
-            raw = read(empty=True).strip()
-            if not raw:
+            raw2 = read(empty=True).strip()
+            if not raw2:
                 continue
             try:
-                new_order = [int(x) for x in raw.split()]
+                new_order = [int(x) for x in raw2.split()]
             except ValueError:
                 print("  Invalid input — must be space-separated queue_ids.")
                 enter()
                 continue
             existing_qids = [r["queue_id"] for r in city_rows]
             if sorted(new_order) != sorted(existing_qids):
-                print(
-                    f"  Must contain exactly these queue_ids: {sorted(existing_qids)}"
-                )
+                print(f"  Must contain exactly these queue_ids: {sorted(existing_qids)}")
                 enter()
                 continue
-            # Reassign queue_ids in a single atomic lock hold to avoid
-            # intermediate collisions when the new order forms a cycle.
             sorted_pool = sorted(existing_qids)
             qid_map = {new_order[i]: sorted_pool[i] for i in range(len(new_order))}
             def _do_reorder(rows, _m=qid_map):
@@ -1653,11 +1633,13 @@ def _edit_queue(session):
                     if r["queue_id"] in _m:
                         r["queue_id"] = _m[r["queue_id"]]
             _csv_modify(session, _do_reorder)
-            print(f"  Reordered {len(city_rows)} rows for that city.")
+            print(f"  Reordered {len(city_rows)} rows.")
             enter()
+            continue
 
         # ---- Transport mode bulk-set for city ------------------------------
-        elif action == "T":
+        if isinstance(raw, str) and raw.upper() == "T":
+            rows = csv_load(session)
             city_ids = sorted({r["city_id"] for r in rows})
             if not city_ids:
                 print("  No cities in queue.")
@@ -1679,6 +1661,128 @@ def _edit_queue(session):
                     csv_update(session, r["queue_id"], transport_mode=new_tm)
                     count += 1
             print(f"  Set transport_mode={new_tm} on {count} row(s).")
+            enter()
+            continue
+
+        # ---- Group selected — show slot actions ----------------------------
+        g = groups[int(raw) - 1]
+        banner()
+        lv_range = (f"lv {g['next_level']}→{g['max_level']}"
+                    if g["next_level"] != g["max_level"]
+                    else f"lv {g['next_level']}")
+        print(
+            f"  {g['city_name']} · slot {g['slot_position']} · "
+            f"{g['building']} {lv_range}\n"
+        )
+        print("  (1) Delete this entire slot queue")
+        print(f"  (2) Trim — change the target from lv {g['max_level']} to a lower level")
+        print("  (3) Modify a single row")
+        print("  (B) Back")
+        slot_action = read(min=1, max=3, digit=True, additionalValues=["b", "B"])
+        if isinstance(slot_action, str) and slot_action.upper() == "B":
+            continue
+
+        if slot_action == 1:
+            # Delete all pending rows for this slot
+            print(
+                f"\n  Delete all {len(g['pending_qids'])} pending row(s) for "
+                f"{g['building']} slot {g['slot_position']}? [Y/n]"
+            )
+            if read(values=["Y", "y", "N", "n", ""], default="Y").lower() != "n":
+                for qid in g["pending_qids"]:
+                    csv_delete(session, qid)
+                print(f"  Deleted {len(g['pending_qids'])} row(s).")
+            enter()
+
+        elif slot_action == 2:
+            # Trim: keep rows up to the new target, delete the rest
+            print(
+                f"\n  Current target: lv {g['max_level']}. "
+                f"Trim to level (must be ≥ {g['next_level']} and < {g['max_level']}):"
+            )
+            try:
+                new_max = int(read(min=g["next_level"], max=g["max_level"] - 1))
+            except (TypeError, ValueError):
+                continue
+            rows = csv_load(session)
+            # Pending rows for this slot sorted by target_level
+            slot_pending = sorted(
+                [r for r in rows
+                 if r["city_id"] == g["city_id"]
+                 and r["slot_position"] == g["slot_position"]
+                 and r["status"] == "pending"],
+                key=lambda x: x["target_level"],
+            )
+            to_del = [r["queue_id"] for r in slot_pending if r["target_level"] > new_max]
+            if not to_del:
+                print("  Nothing to trim.")
+                enter()
+                continue
+            print(f"  Deleting {len(to_del)} row(s) above lv {new_max}.")
+            for qid in to_del:
+                csv_delete(session, qid)
+            print(f"  Done. Slot now targets lv {g['next_level']}→{new_max}.")
+            enter()
+
+        elif slot_action == 3:
+            # Modify a single row — show the rows in this slot first
+            rows = csv_load(session)
+            slot_rows = sorted(
+                [r for r in rows
+                 if r["city_id"] == g["city_id"]
+                 and r["slot_position"] == g["slot_position"]],
+                key=lambda x: x["queue_id"],
+            )
+            print(f"\n  Rows for this slot:\n")
+            for r in slot_rows:
+                print(
+                    f"    QID {r['queue_id']:>5}  → lv {r['target_level']:>3}  "
+                    f"{r['status']:<10}  mode={r['transport_mode']}"
+                )
+            print("\n  Enter queue_id to modify:")
+            try:
+                qid = int(read())
+            except (TypeError, ValueError):
+                continue
+            row = next((r for r in slot_rows if r["queue_id"] == qid), None)
+            if row is None:
+                print(f"  queue_id {qid} not found in this slot.")
+                enter()
+                continue
+            print(
+                f"\n  Modifying row {qid}: {row['building']} → lv {row['target_level']}\n"
+            )
+            print("  (1) target_level")
+            print("  (2) transport_mode")
+            print("  (3) notes")
+            print("  (B) Cancel")
+            field_choice = read(values=["1", "2", "3", "B", "b"])
+            if field_choice.upper() == "B":
+                continue
+            if field_choice == "1":
+                print(f"  Current target_level: {row['target_level']}")
+                print("  New target_level:")
+                try:
+                    new_lv = int(read(min=1, max=HARD_LEVEL_CAP))
+                except (TypeError, ValueError):
+                    continue
+                csv_update(session, qid, target_level=new_lv)
+                print(f"  Updated target_level to {new_lv}.")
+            elif field_choice == "2":
+                print(
+                    f"  Current transport_mode: {row['transport_mode']}\n"
+                    "  (1) jit   (2) bulk   (3) none"
+                )
+                tm_choice = read(min=1, max=3)
+                new_tm = {1: "jit", 2: "bulk", 3: "none"}[tm_choice]
+                csv_update(session, qid, transport_mode=new_tm)
+                print(f"  Updated transport_mode to {new_tm}.")
+            elif field_choice == "3":
+                print(f"  Current notes: {row.get('notes', '')}")
+                print("  New notes (Enter to clear):")
+                new_notes = read(empty=True)
+                csv_update(session, qid, notes=new_notes)
+                print("  Updated notes.")
             enter()
 
 
@@ -1754,6 +1858,32 @@ def _worker_status_line(session):
 
 
 # ---------------------------------------------------------------------------
+# Cancel all pending (x on main menu)
+# ---------------------------------------------------------------------------
+
+def _cancel_all_pending(session):
+    """Delete every pending row from the CSV across all cities."""
+    rows = csv_load(session)
+    pending = [r for r in rows if r["status"] == "pending"]
+    if not pending:
+        print("  No pending rows to cancel.")
+        enter()
+        return
+    print(f"\n  This will delete all {len(pending)} pending row(s) across all cities.")
+    print(f"  Running/shipping rows are unaffected.")
+    print(f"  Type {bcolors.BOLD}yes{bcolors.ENDC} to confirm:")
+    confirm = read(msg="  > ", empty=True, additionalValues=["yes", "Yes", "YES"])
+    if str(confirm).lower() != "yes":
+        print("  Cancelled.")
+        enter()
+        return
+    for r in pending:
+        csv_delete(session, r["queue_id"])
+    print(f"  Deleted {len(pending)} pending row(s).")
+    enter()
+
+
+# ---------------------------------------------------------------------------
 # Stop worker
 # ---------------------------------------------------------------------------
 
@@ -1807,25 +1937,26 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
                 f"  {pending} pending row(s) across {n_cities} city/cities\n"
             )
             print(f"  {bcolors.BOLD}(s){bcolors.ENDC} Start worker   "
-                  f"{bcolors.BOLD}(o){bcolors.ENDC} Stop worker\n")
+                  f"{bcolors.BOLD}(o){bcolors.ENDC} Stop worker   "
+                  f"{bcolors.BOLD}(x){bcolors.ENDC} Cancel all pending\n")
             print("(1) Add construction(s) to queue        [interactive only]")
             print("(2) View queue")
             print("(3) Edit queue (modify / delete / reorder) [interactive only]")
             print("(') Back")
             choice = read(min=1, max=3,
-                          additionalValues=["'", "s", "S", "o", "O"])
+                          additionalValues=["'", "s", "S", "o", "O", "x", "X"])
 
             if isinstance(choice, str):
                 letter = choice.lower()
                 if letter == "'":
                     break
                 if letter == "s":
-                    # _activate_worker is defined in chunk 5.
-                    # Parent returns after fork; finally block sets event.
                     _activate_worker(session, event)
                     return
                 if letter == "o":
                     _stop_worker(session)
+                elif letter == "x":
+                    _cancel_all_pending(session)
                 continue
 
             if choice in (1, 3) and not interactive:
@@ -2525,7 +2656,20 @@ def scheduler_loop(session, stop_event):
         drain_shortage_events(session, city_state, now)
 
         # Hot-reload the CSV every tick so menu edits take effect immediately.
-        rows = csv_load(session)
+        # A lock-acquisition failure here must NOT kill the worker — log it,
+        # skip this tick, and try again; the lock helpers break stale/orphaned
+        # locks on their own within seconds.
+        try:
+            rows = csv_load(session)
+        except RuntimeError:
+            sendToBotDebug(
+                session,
+                "scheduler: CSV lock busy, skipping this tick:\n"
+                + traceback.format_exc(),
+                True,
+            )
+            stop_event.wait(15)
+            continue
         rows_by_city = {}
         for r in rows:
             rows_by_city.setdefault(r["city_id"], []).append(r)
