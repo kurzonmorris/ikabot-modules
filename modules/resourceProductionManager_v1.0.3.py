@@ -74,7 +74,7 @@ from ikabot.helpers.varios import *
 # The external-module loader reads these two names.
 MODULE_NAME = "Resource Production Manager"
 MODULE_ENTRY = "resourceProductionManager"
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 # Modes offered on the main menu.
 MODE_SCAN = 1
@@ -82,6 +82,7 @@ MODE_WOOD = 2
 MODE_LUXURY = 3
 MODE_WOOD_THEN_LUXURY = 4
 MODE_LUXURY_THEN_WOOD = 5
+MODE_REPEAT = 6  # shown only when a previous run has been saved
 
 # Human-readable label for each mode (used in prompts and notifications).
 MODE_LABELS = {
@@ -666,22 +667,45 @@ def configure_and_run(session, event, memory, mode):
         "luxury_overcharge": luxury_overcharge,
     }
 
-    # Remember these settings so the next visit can be re-run quickly.
-    memory["last_settings"] = {"mode": mode, "plan": plan}
+    return confirm_and_launch(session, event, memory, mode, cities, plan, interval_seconds)
+
+
+# ---------------------------------------------------------------------------
+# Shared launcher — used by both a fresh configuration and "repeat last run"
+# ---------------------------------------------------------------------------
+
+def _print_settings_summary(mode, cities, plan, interval_seconds):
+    """Print the human-readable summary of what a run will do."""
+    print(f"  Mode      : {MODE_LABELS[mode]}")
+    names = ", ".join(c["name"] for c in cities)
+    print(f"  Cities    : {len(cities)}  ({names})")
+    if plan["wood_pct"] is not None:
+        oc = "  (+ overcharge)" if plan.get("wood_overcharge") and plan["wood_pct"] == 100 else ""
+        print(f"  Wood      : {plan['wood_pct']}%{oc}")
+    if plan["luxury_pct"] is not None:
+        oc = "  (+ overcharge)" if plan.get("luxury_overcharge") and plan["luxury_pct"] == 100 else ""
+        print(f"  Luxury    : {plan['luxury_pct']}%{oc}")
+    print(f"  Schedule  : {format_interval(interval_seconds)}")
+
+
+def confirm_and_launch(session, event, memory, mode, cities, plan, interval_seconds):
+    """Save these settings as the 'last run', show a confirmation summary, and
+    (on confirm) hand off to the background and run — repeating on schedule if
+    one was given. Returns True if a background task was launched, False if the
+    user declined."""
+    # Remember EVERYTHING needed to repeat this run with one button next time.
+    memory["last_settings"] = {
+        "mode": mode,
+        "plan": plan,
+        "cities": cities,
+        "interval_seconds": interval_seconds,
+    }
     save_memory(session, memory)
 
     # --- Confirmation summary -------------------------------------------
     banner()
     print("Please confirm — here is what will happen:\n")
-    print(f"  Mode      : {MODE_LABELS[mode]}")
-    print(f"  Cities    : {len(cities)}  ({', '.join(c['name'] for c in cities)})")
-    if wood_pct is not None:
-        oc = "  (+ overcharge)" if wood_overcharge and wood_pct == 100 else ""
-        print(f"  Wood      : {wood_pct}%{oc}")
-    if luxury_pct is not None:
-        oc = "  (+ overcharge)" if luxury_overcharge and luxury_pct == 100 else ""
-        print(f"  Luxury    : {luxury_pct}%{oc}")
-    print(f"  Schedule  : {format_interval(interval_seconds)}")
+    _print_settings_summary(mode, cities, plan, interval_seconds)
     print()
 
     if not _notifications_ready(session):
@@ -747,6 +771,101 @@ def configure_and_run(session, event, memory, mode):
 
 
 # ---------------------------------------------------------------------------
+# Repeat last run — one button reuses the last saved configuration
+# ---------------------------------------------------------------------------
+
+def _validate_saved_settings(saved):
+    """Validate a loaded 'last_settings' blob (it is plain JSON on disk and may
+    be stale or hand-edited). Returns (mode, cities, plan, interval_seconds) or
+    raises ValueError with a friendly reason."""
+    if not isinstance(saved, dict):
+        raise ValueError("no saved run found")
+
+    mode = saved.get("mode")
+    if mode not in MODE_ORDER:
+        raise ValueError("saved run uses an unknown mode")
+
+    plan = saved.get("plan")
+    if not isinstance(plan, dict) or "order" not in plan:
+        raise ValueError("saved run is missing its settings")
+
+    cities = saved.get("cities")
+    if not isinstance(cities, list) or not cities:
+        raise ValueError("saved run has no cities")
+    for c in cities:
+        if not isinstance(c, dict) or "id" not in c or "name" not in c:
+            raise ValueError("saved run has malformed city data")
+
+    interval_seconds = saved.get("interval_seconds")
+    if interval_seconds is not None and not isinstance(interval_seconds, int):
+        raise ValueError("saved run has a bad schedule")
+
+    return mode, cities, plan, interval_seconds
+
+
+def _has_saved_run(memory):
+    """True if memory holds a valid, replayable last run."""
+    try:
+        _validate_saved_settings(memory.get("last_settings"))
+        return True
+    except ValueError:
+        return False
+
+
+def _saved_run_label(memory):
+    """Short one-line description of the saved run for the menu, or ''."""
+    try:
+        mode, cities, plan, interval_seconds = _validate_saved_settings(
+            memory.get("last_settings")
+        )
+    except ValueError:
+        return ""
+    return f"{MODE_LABELS[mode]}, {len(cities)} cities, {format_interval(interval_seconds)}"
+
+
+def repeat_last_run(session, event, memory):
+    """Load the last saved configuration and (after showing it + confirming)
+    launch it in the background. Returns True if launched, False otherwise."""
+    banner()
+    try:
+        mode, cities, plan, interval_seconds = _validate_saved_settings(
+            memory.get("last_settings")
+        )
+    except ValueError as e:
+        print(f"{bcolors.RED}Can't repeat the last run: {e}.{bcolors.ENDC}")
+        print("Configure a run once (options 2-5) and it will be remembered here.")
+        enter()
+        return False
+
+    # Cities can disappear (e.g. a city was lost). Re-check against the live
+    # list and drop any that no longer belong to you.
+    try:
+        live_ids, _ = getIdsOfCities(session)
+        live_ids = set(live_ids)
+        kept = [c for c in cities if c["id"] in live_ids]
+    except Exception:
+        # If we can't verify (network hiccup), fall back to the saved list.
+        kept = cities
+    dropped = [c for c in cities if c not in kept]
+
+    if not kept:
+        print(f"{bcolors.RED}None of the saved cities still belong to you.{bcolors.ENDC}")
+        print("Configure a fresh run with options 2-5.")
+        enter()
+        return False
+
+    banner()
+    print("Repeat last run — these are your last saved settings:\n")
+    _print_settings_summary(mode, kept, plan, interval_seconds)
+    if dropped:
+        names = ", ".join(c["name"] for c in dropped)
+        print(f"\n{bcolors.WARNING}Skipping {len(dropped)} city(ies) no longer yours: {names}{bcolors.ENDC}")
+    print()
+
+    return confirm_and_launch(session, event, memory, mode, kept, plan, interval_seconds)
+
+
+# ---------------------------------------------------------------------------
 # Main menu / entry point
 # ---------------------------------------------------------------------------
 
@@ -777,6 +896,11 @@ def resourceProductionManager(session, event, stdin_fd, predetermined_input):
             print("  (3) Change LUXURY only")
             print("  (4) Change WOOD, then LUXURY  — wood gets first pick of citizens")
             print("  (5) Change LUXURY, then WOOD  — luxury gets first pick of citizens")
+
+            has_saved = _has_saved_run(memory)
+            if has_saved:
+                print(f"  (6) Repeat last run   — reuse your last settings in one press")
+                print(f"                          [{_saved_run_label(memory)}]")
             print()
             print("  Wood and luxury can each be overcharged independently (asked at 100%).")
             print("  Options 2-5 can run once, or repeat in the background on a schedule")
@@ -785,13 +909,20 @@ def resourceProductionManager(session, event, stdin_fd, predetermined_input):
             print("  (') Go back to the ikabot menu")
             print()
 
-            choice = read(min=1, max=5, digit=True, additionalValues=["'"])
+            max_choice = MODE_REPEAT if has_saved else MODE_LUXURY_THEN_WOOD
+            choice = read(min=1, max=max_choice, digit=True, additionalValues=["'"])
             if choice == "'":
                 event.set()
                 return
 
             if choice == MODE_SCAN:
                 run_scan(session, memory)
+                continue
+
+            if choice == MODE_REPEAT:
+                launched = repeat_last_run(session, event, memory)
+                if launched:
+                    return
                 continue
 
             # Change modes 2-5. If a background task was launched, we must
