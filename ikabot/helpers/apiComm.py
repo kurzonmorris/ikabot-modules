@@ -25,7 +25,11 @@ def getNewBlackBoxToken(session):
     # Send the same regional context the login will use.  Gameforge rejects
     # tokens generated in a different locale/timezone than the login request,
     # so these must match session.locale / session.timezone_id exactly.
-    params = {"user_agent": session.user_agent}
+    # Upstream #418: the token must be generated for the user agent the API
+    # knows about, which is not necessarily the one a manual payload set on the
+    # session.  api_user_agent holds the former; fall back to user_agent.
+    user_agent = getattr(session, "api_user_agent", None) or session.user_agent
+    params = {"user_agent": user_agent}
     locale = getattr(session, "locale", None)
     timezone_id = getattr(session, "timezone_id", None)
     if locale:
@@ -40,7 +44,7 @@ def getNewBlackBoxToken(session):
     if response.status_code in (400, 422) and len(params) > 1:
         response = get(
             address,
-            params={"user_agent": session.user_agent},
+            params={"user_agent": user_agent},
             verify=do_ssl_verify,
             timeout=900,
         )
@@ -53,9 +57,15 @@ def getNewBlackBoxToken(session):
         + response.text
     )
     response = response.json()
-    if "status" in response and response["status"] == "error":
-        raise Exception(response["message"])
-    return "tra:" + response
+    # A successful response is the token string.  Anything dict-shaped is an
+    # error envelope — testing `"status" in response` on a str would silently
+    # do a substring match instead.
+    if isinstance(response, dict):
+        if response.get("status") == "error":
+            raise Exception(response["message"])
+        raise Exception("Unexpected API response: " + str(response))
+    # Strip any prefix the API already applied so the result is never "tra:tra:".
+    return "tra:" + response.replace("tra:", "")
 
 
 def getPiratesCaptchaSolution(session, image):

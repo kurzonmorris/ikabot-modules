@@ -40,6 +40,10 @@ class Session:
         self._vault_blackbox = blackbox      # stored blackbox token from vault (may be None)
         self._vault_lobby_token = lobby_token  # stored lobby token from vault (may be None)
         self.logger = getLogger(__name__)
+        # Upstream #418: the user agent the blackbox API was told about, kept
+        # separate from self.user_agent so a manual payload can change the
+        # browser context without desyncing later token requests.
+        self.api_user_agent = None
         # Regional context. These must stay consistent with each other and with
         # the blackbox token request, otherwise Gameforge rejects the login.
         # A per-account region (from the vault) wins over the global defaults;
@@ -207,6 +211,72 @@ class Session:
             return True
         return False
 
+    def __set_manual_blackbox_token(self, manual_value):
+        """Accept a manual blackbox value (upstream #411).
+
+        Takes either a raw token or the full JSON payload the generator page
+        emits.  The JSON carries the browser context the token was minted in —
+        user agent, locale, timezone — and adopting it keeps the login
+        consistent with the token, which is the whole point of #414/#416.
+
+        An explicit environment override always wins: if the user pinned a
+        region in .env, a pasted payload must not silently move them off it.
+        """
+        manual_value = manual_value.strip()
+        token = manual_value
+
+        try:
+            payload = json.loads(manual_value)
+            if not isinstance(payload, dict):
+                raise ValueError("Manual blackbox payload must be an object")
+
+            token = payload.get("blackbox") or payload.get("token")
+            if not token:
+                raise ValueError("Manual blackbox payload is missing blackbox")
+
+            user_agent = payload.get("user_agent") or payload.get("userAgent")
+            if isinstance(user_agent, str) and user_agent:
+                self.user_agent = user_agent
+
+            payload_locale = payload.get("locale")
+            if (not os.environ.get("IKABOT_LOCALE")
+                    and isinstance(payload_locale, str) and payload_locale.strip()):
+                self.locale = payload_locale.strip()
+                if not os.environ.get("IKABOT_GF_LANG"):
+                    self.gf_lang = self.locale.split("-")[0]
+                self.accept_language = config.build_accept_language(
+                    self.locale, self.gf_lang
+                )
+
+            payload_timezone = payload.get("timezone_id") or payload.get("timezoneId")
+            if (not os.environ.get("IKABOT_TIMEZONE_ID")
+                    and isinstance(payload_timezone, str) and payload_timezone.strip()):
+                self.timezone_id = payload_timezone.strip()
+
+        except (json.JSONDecodeError, ValueError):
+            # Not JSON (or not usable JSON) — treat the input as a raw token.
+            token = manual_value
+
+        token = token.strip()
+        self.blackbox = token if token.startswith("tra:") else "tra:" + token
+
+    def __ask_manual_blackbox_payload(self, allow_skip=False):
+        """Prompt for a manual blackbox payload. Returns True if one was given."""
+        print("You can obtain a manual blackbox payload here:")
+        print("https://ikabot-collective.github.io/IkabotAPI/")
+        print("Paste the full JSON payload so Ikabot can reuse the same browser context.")
+        print("Raw blackbox tokens are still accepted for compatibility.")
+        if allow_skip:
+            print("Press Enter to skip this step and use gf-token-production instead.")
+            msg = "Paste the manual blackbox payload or raw blackbox token, or press Enter to skip:"
+        else:
+            msg = "Paste the manual blackbox payload or raw blackbox token (e.g. JVq...):"
+        manual_value = read(msg=msg, empty=allow_skip)
+        if not manual_value or not manual_value.strip():
+            return False
+        self.__set_manual_blackbox_token(manual_value)
+        return True
+
     def __load_new_blackbox_token(self, stored_blackbox: str = None):
         # Fast-path: use a stored token from the vault (no API call needed).
         if stored_blackbox:
@@ -217,6 +287,10 @@ class Session:
             if self.padre:
                 print("Obtaining new blackbox token, please wait...")
             blackbox_token = getNewBlackBoxToken(self)
+            # The API minted the token for api_user_agent; the login must
+            # present that same agent or the two contradict each other.
+            if self.api_user_agent:
+                self.user_agent = self.api_user_agent
             assert any(
                 c.isupper() for c in blackbox_token
             ), "The token must contain uppercase letters."
@@ -234,10 +308,8 @@ class Session:
             print(f'{bcolors.RED}[ERROR]{bcolors.ENDC} Failed to obtain new blackbox token from API: ' + str(e)) # using expired fallback token here so that user can insert cookie manually since blackbox generation failed at this point
             print('Please report this issue to developers on github or the discord server!!')
             print('')
-            print('You will need to obtain the blackbox token MANUALLY:')
-            print('Please obtain the blackbox token at this web location and paste it down below: https://ikabot-collective.github.io/IkabotAPI/')
-            token = read(msg="Paste in the blackbox token (e.g. JVq...):")
-            self.blackbox = 'tra:' + token
+            print('You will need to obtain the manual blackbox payload:')
+            self.__ask_manual_blackbox_payload()
             enter()
 
     def __login(self, retries=0, mail: str = None, password: str = None):
@@ -259,7 +331,9 @@ class Session:
             banner()
 
         #choose one user agent from user_agents list based on provided mail
-        self.user_agent = user_agents[sum(ord(c) for c in self.mail) % len(user_agents)]
+        selected_user_agent = user_agents[sum(ord(c) for c in self.mail) % len(user_agents)]
+        self.api_user_agent = selected_user_agent
+        self.user_agent = selected_user_agent
 
         self.s = requests.Session()
         self.cipher = AESCipher(self.mail, self.password)
@@ -684,14 +758,16 @@ class Session:
                 # challenge). Offer a manual blackbox retry before falling back to
                 # the gf-token-production cookie method (upstream #417/#419).
                 print("")
-                print("You can retry with a MANUAL blackbox token first.")
-                print("Obtain one here: https://ikabot-collective.github.io/IkabotAPI/")
-                print("Paste it below, or press [ENTER] to skip to the cookie method.")
-                manual_token = read(msg="Blackbox token (empty to skip):", empty=True)
-                if manual_token:
-                    manual_token = manual_token.strip()
-                    self.blackbox = manual_token if manual_token.startswith('tra:') else 'tra:' + manual_token
+                print("You can retry with a MANUAL blackbox payload first.")
+                if self.__ask_manual_blackbox_payload(allow_skip=True):
+                    # A JSON payload may have changed the user agent, locale or
+                    # timezone, so rebuild the parts of the request that carry
+                    # them before retrying.
                     data["blackbox"] = self.blackbox
+                    data["locale"] = self.locale
+                    data["gfLang"] = self.gf_lang
+                    self.s.headers.update({"User-Agent": self.user_agent,
+                                           "Accept-Language": self.accept_language})
                     r = self.s.post(
                         "https://spark-web.gameforge.com/api/v2/authProviders/mauth/sessions", json=data
                     )
@@ -1250,10 +1326,19 @@ class Session:
                     if 'lobby.ikariam.gameforge.com' in location:
                         raise AssertionError("Redirect to lobby detected")
                 
-                # modifica processi 404
+                # Upstream #406: only a 404 from Ikariam itself means the
+                # session died. A 404 from a local or external route (the web
+                # server, ikaEasy) must not trigger a re-login loop.
                 if response.status_code == 404:
-                    self.logger.warning(f"404 Not Found received for URL: {url}")
-                    raise AssertionError("404 Not Found - Session likely expired")
+                    if self.host in url:
+                        self.logger.error(f"404 Not Found received from Ikariam: {url}")
+                        # Only expire the session if the main entry point failed.
+                        if "index.php" in url:
+                            raise AssertionError("404 Not Found on index.php - Session likely expired")
+                    else:
+                        # A local web-server or external 404 must not re-login.
+                        self.logger.warning(f"Local/External 404 detected at: {url}. Ignoring.")
+                        return response if fullResponse else html
 
                 if self.__test_server_maintenace(html):
                     self.logger.warning("Ikariam world backup is in progress, waiting 10 mins.")
@@ -1367,11 +1452,16 @@ class Session:
                     if 'lobby.ikariam.gameforge.com' in location:
                         raise AssertionError("Redirect to lobby detected")
                 
-                #  modifica processi 404
+                # Upstream #406: see the matching comment in get().
                 if response.status_code == 404:
-                    self.logger.error(f"404 Not Found received for POST URL: {url}")
-                    self.logger.error(f"HTML received: {response.text[:200]}")
-                    raise AssertionError("404 Not Found - Session likely expired")
+                    # A failed POST to Ikariam really is a session problem.
+                    if self.host in url:
+                        self.logger.error(f"404 Not Found received from Ikariam POST: {url}")
+                        raise AssertionError("404 Not Found - Session likely expired")
+                    else:
+                        # Probably a request to the local web server's invalid route.
+                        self.logger.warning(f"Local 404 detected on POST: {url}. Ignoring.")
+                        return response if fullResponse else resp
 
                 if self.__test_server_maintenace(resp):
                     self.logger.warning("Ikariam world backup is in progress, waiting 10 mins.")
