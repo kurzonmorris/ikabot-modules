@@ -8,7 +8,7 @@ import os
 IKABOT_VERSION = "7.4.0"
 IKABOT_VERSION_TAG = "v" + IKABOT_VERSION
 
-IKABOT_MOD_VERSION = "1.7.3"
+IKABOT_MOD_VERSION = "1.7.4"
 IKABOT_MOD_VERSION_TAG = "modded by kurzon v" + IKABOT_MOD_VERSION
 
 
@@ -158,6 +158,10 @@ SECONDS_IN_HOUR = 60 * 60
 
 # Default values for dynamic settings
 enable_CustomPort = False
+
+# Set True inside a child process launched by auto-start, so modules replay
+# their saved settings instead of prompting.  Never set in the parent.
+autostart_active = False
 
 user_agents = [
     # Chromium-only, well-formed strings.  The public API dropped support for

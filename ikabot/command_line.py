@@ -66,6 +66,9 @@ from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWork
 from ikabot.function.reorganizeCityBuildings import reorganizeCityBuildings
 from ikabot.function.developer import developer
 from ikabot.helpers.pluginLoader import discover_plugins
+from ikabot.helpers.modulePrefs import (
+    is_autostart, set_autostart, list_autostart_modules, list_saved_modules,
+)
 from ikabot.helpers.credentialStore import (
     vault_exists, create_vault, open_vault,
     get_vault_location, set_vault_location,
@@ -73,14 +76,13 @@ from ikabot.helpers.credentialStore import (
 )
 
 
-def menu(session, checkUpdate=True):
+def _menu_actions():
+    """The menu's action table: selection id -> module function.
+
+    Module level so auto-start can resolve module names against the same table
+    the menu dispatches from, rather than a second registry that could drift.
     """
-    Parameters
-    ----------
-    session : ikabot.web.session.Session
-    checkUpdate : bool
-    """
-    menu_actions = {
+    return {
         1: constructionList,
         2: sendResources,
         3: distributeResources,
@@ -124,6 +126,16 @@ def menu(session, checkUpdate=True):
         2303: reorganizeCityBuildings,
         25: sendCulturalTreatyRequests,
     }
+
+
+def menu(session, checkUpdate=True):
+    """
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    checkUpdate : bool
+    """
+    menu_actions = _menu_actions()
 
     while True:
         if checkUpdate:
@@ -298,11 +310,15 @@ def menu(session, checkUpdate=True):
             print("(7) Load custom ikabot module")
             print("(8) Developer Data")
             print("(9) Manage credential vault")
-            selected = read(min=0, max=9, digit=True)
+            print("(10) Auto-start modules")
+            selected = read(min=0, max=10, digit=True)
             if selected == 0:
                 continue
             if selected == 9:
                 _manage_vault_menu(session)
+                continue
+            if selected == 10:
+                _autostart_menu(session)
                 continue
             selected += 2100
 
@@ -492,6 +508,140 @@ def _prompt_vault_login():
             return None, None, None
 
     return creds, vault_session, acct_idx
+
+
+# ---------------------------------------------------------------------------
+# Module auto-start
+# ---------------------------------------------------------------------------
+
+# Longest a single auto-started module may take to hand back before the
+# launcher stops waiting and moves on to the next one.
+_AUTOSTART_EVENT_TIMEOUT = 30.0
+
+
+def _run_autostart_child(target, session, event, stdin_fd, predetermined_input):
+    """Child entry point for an auto-started module.
+
+    Module level (not a closure) because Windows spawns rather than forks, so
+    the target must be picklable and the child does not inherit the parent's
+    globals — which is also why the flag is set here rather than before
+    Process().
+    """
+    config.autostart_active = True
+    target(session, event, stdin_fd, predetermined_input)
+
+
+def _autostart_targets(session):
+    """Return [(module_name, function)] for this account's auto-start modules.
+
+    Names are resolved against the menu's own action table rather than a
+    second hand-maintained registry, so the two can never drift apart.
+    Modules whose name no longer resolves are skipped.
+    """
+    by_name = {fn.__name__: fn for fn in _menu_actions().values()}
+    targets = []
+    for module_name in list_autostart_modules(session):
+        fn = by_name.get(module_name)
+        if fn is not None:
+            targets.append((module_name, fn))
+    return targets
+
+
+def _launch_autostart_modules(session, process_list, announce=True):
+    """Launch every auto-start module for this account. Returns names started.
+
+    Shared by the login path and the "start now" menu option so both behave
+    identically.  Never raises: one failing module must not block login.
+    """
+    # A sequenceRunner run replays a fixed script of menu keystrokes; injecting
+    # extra processes would not match what the script expects.
+    if len(config.predetermined_input) > 0:
+        return []
+
+    running = {p["action"] for p in process_list}
+    started = []
+    for module_name, fn in _autostart_targets(session):
+        if module_name in running:
+            if announce:
+                print(f"  {module_name} — already running, skipped")
+            continue
+        try:
+            event = multiprocessing.Event()
+            process = multiprocessing.Process(
+                target=_run_autostart_child,
+                # Empty predetermined_input: an auto-started module must never
+                # consume input recorded for the interactive menu.
+                args=(fn, session, event, sys.stdin.fileno(), []),
+                name=module_name,
+            )
+            process.start()
+            process_list.append({
+                "pid": process.pid,
+                "action": module_name,
+                "date": time.time(),
+                "status": "started",
+            })
+            # Bounded wait: a module that wrongly prompts under auto-start
+            # would never set the event, and an unbounded wait would hang the
+            # login. Give up waiting and carry on — the child is left running,
+            # but reaching the menu always wins.
+            waited = 0.0
+            while not event.wait(timeout=2):
+                waited += 2
+                if not process.is_alive() or waited >= _AUTOSTART_EVENT_TIMEOUT:
+                    break
+            started.append(module_name)
+            if announce:
+                if waited >= _AUTOSTART_EVENT_TIMEOUT:
+                    print(f"  {module_name} — started (still initialising)")
+                else:
+                    print(f"  {module_name} — started")
+        except Exception as exc:
+            if announce:
+                print(f"  {module_name} — failed to start ({exc})")
+
+    if started:
+        updateProcessList(session, programprocesslist=process_list)
+    return started
+
+
+def _autostart_menu(session):
+    """Review and toggle which modules start automatically at login."""
+    while True:
+        banner()
+        print("Auto-start modules")
+        print("")
+        print("Modules with saved settings can start automatically at login,")
+        print("replaying those settings without asking anything.")
+        print("")
+
+        saved = list_saved_modules(session)
+        if not saved:
+            print("No modules have saved settings for this account yet.")
+            print("Configure a module once, and it will appear here.")
+            enter()
+            return
+
+        for pos, module_name in enumerate(saved, start=1):
+            state = "ON " if is_autostart(session, module_name) else "off"
+            print(f"  ({pos}) [{state}] {module_name}")
+        print("")
+        print("  (0) Back")
+        print("Select a module to toggle.")
+
+        choice = read(min=0, max=len(saved), digit=True)
+        if choice == 0:
+            return
+        module_name = saved[choice - 1]
+        now_on = not is_autostart(session, module_name)
+        if now_on:
+            print(f"\n'{module_name}' will start automatically at every login")
+            print("for this account, using its saved settings.")
+            confirm = read(values=["y", "Y", "n", "N", ""], empty=True,
+                           default="n", msg="\nEnable? [y/N]: ")
+            if confirm.lower() != "y":
+                continue
+        set_autostart(session, module_name, now_on)
 
 
 def _prompt_region(current_locale=None, current_timezone=None):
@@ -862,6 +1012,19 @@ def start():
         if choice.lower() == "y":
             from ikabot.function.notificationSetup import _notification_menu
             _notification_menu(session)
+
+    # Start this account's auto-start modules before handing over to the menu.
+    try:
+        if _autostart_targets(session):
+            banner()
+            print("Starting auto-start modules...\n")
+            started = _launch_autostart_modules(session, updateProcessList(session))
+            if started:
+                print(f"\n{len(started)} module(s) running in the background.")
+            time.sleep(1.2)
+    except Exception:
+        # Auto-start is a convenience; never let it prevent reaching the menu.
+        pass
 
     try:
         menu(session)

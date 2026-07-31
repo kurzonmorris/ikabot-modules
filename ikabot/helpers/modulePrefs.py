@@ -42,13 +42,24 @@ def _safe(s):
     return "".join(c for c in str(s) if c.isalnum() or c in "-_")
 
 
-def prefs_path(session, module_name):
-    """Return the settings file path for this (account, module) pair."""
+# Reserved key: auto-start metadata, not a module setting.  Keys starting with
+# "_" belong to this layer and must be ignored by modules replaying prefs.
+AUTOSTART_KEY = "_autostart"
+
+
+def _account_prefix(session):
+    """Return the filename prefix identifying this account's prefs files."""
     username = _safe(getattr(session, "username", "") or "unknown")
     servidor = _safe(getattr(session, "servidor", "") or "")
     mundo = _safe(str(getattr(session, "mundo", "") or ""))
-    filename = f"{username}_{servidor}{mundo}_{_safe(module_name)}.json"
-    return os.path.join(MODULE_PREFS_DIR, filename)
+    return f"{username}_{servidor}{mundo}_"
+
+
+def prefs_path(session, module_name):
+    """Return the settings file path for this (account, module) pair."""
+    return os.path.join(
+        MODULE_PREFS_DIR, f"{_account_prefix(session)}{_safe(module_name)}.json"
+    )
 
 
 def load_prefs(session, module_name):
@@ -88,6 +99,69 @@ def clear_prefs(session, module_name):
         logger.debug("Could not clear module prefs for %s", module_name, exc_info=True)
 
 
+def is_autostart(session, module_name):
+    """True if this account has auto-start enabled for this module."""
+    prefs = load_prefs(session, module_name)
+    return bool(prefs and prefs.get(AUTOSTART_KEY))
+
+
+def set_autostart(session, module_name, enabled):
+    """Enable or disable auto-start for this account+module.
+
+    No-op when there are no saved settings: auto-start replays saved settings,
+    so enabling it without any is meaningless.  Returns True if the flag was
+    written.
+    """
+    prefs = load_prefs(session, module_name)
+    if not prefs:
+        return False
+    prefs[AUTOSTART_KEY] = bool(enabled)
+    save_prefs(session, module_name, prefs)
+    return True
+
+
+def list_autostart_modules(session):
+    """Return the module names this account has auto-start enabled for.
+
+    Unreadable or malformed prefs files are skipped rather than raising — one
+    bad file must never block login.
+    """
+    names = []
+    prefix = _account_prefix(session)
+    try:
+        filenames = os.listdir(MODULE_PREFS_DIR)
+    except OSError:
+        return names
+    for filename in sorted(filenames):
+        if not filename.startswith(prefix) or not filename.endswith(".json"):
+            continue
+        module_name = filename[len(prefix):-len(".json")]
+        if not module_name:
+            continue
+        try:
+            if is_autostart(session, module_name):
+                names.append(module_name)
+        except Exception:
+            logger.debug("Skipping unreadable prefs file %s", filename, exc_info=True)
+    return names
+
+
+def list_saved_modules(session):
+    """Return every module name this account has saved settings for."""
+    names = []
+    prefix = _account_prefix(session)
+    try:
+        filenames = os.listdir(MODULE_PREFS_DIR)
+    except OSError:
+        return names
+    for filename in sorted(filenames):
+        if filename.startswith(prefix) and filename.endswith(".json"):
+            module_name = filename[len(prefix):-len(".json")]
+            if module_name:
+                names.append(module_name)
+    return names
+
+
 def prompt_use_saved(session, module_name, summary_lines=()):
     """Show the saved settings and ask whether to reuse them.
 
@@ -110,6 +184,12 @@ def prompt_use_saved(session, module_name, summary_lines=()):
             return False
     except Exception:
         pass
+
+    # Auto-start: the module was launched at login with no terminal attached.
+    # Replay the saved settings silently — printing or prompting here would
+    # write into the parent's menu and block waiting for input nobody can give.
+    if getattr(config, "autostart_active", False):
+        return True
 
     print("")
     print(f"{bcolors.GREEN}Saved settings found for this module:{bcolors.ENDC}")

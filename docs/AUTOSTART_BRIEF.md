@@ -2,9 +2,10 @@
 
 Paste this whole file into a chat, then say which module to work on.
 
-**Part A is done once** and builds the shared foundation. **Part B is repeated
-per module.** If Part A is already in the codebase (check for
-`is_autostart` in `ikabot/helpers/modulePrefs.py`), skip straight to Part B.
+**Part A (the shared foundation) is BUILT — shipped in v1.7.4.** Do not
+rebuild it. Section 4 is now a reference for the API you consume.
+
+**Part B is what you do**, once per module.
 
 ---
 
@@ -132,93 +133,46 @@ already follows.
 
 ---
 
-## 4. Part A — the shared foundation (do once)
+## 4. Part A — the foundation (ALREADY BUILT, v1.7.4)
 
-### A1. `ikabot/helpers/modulePrefs.py`
+Consume this; do not reimplement it.
 
-Add the reserved-key constant and three helpers:
-
-```python
-AUTOSTART_KEY = "_autostart"
-
-
-def is_autostart(session, module_name) -> bool:
-    """True if this account has auto-start enabled for this module."""
-
-
-def set_autostart(session, module_name, enabled: bool) -> None:
-    """Enable/disable auto-start. No-op if there are no saved settings —
-    auto-start without settings is meaningless."""
-
-
-def list_autostart_modules(session) -> list:
-    """Module names this account has auto-start enabled for. Reads every
-    prefs file for the account; ignores unreadable or malformed ones."""
-```
-
-`list_autostart_modules` must derive the account's filename prefix from the
-same logic as `prefs_path()` — factor that out rather than duplicating the
-string building (rule 8).
-
-### A2. The auto-start bypass in `prompt_use_saved`
-
-Add, **after** the existing `predetermined_input` guard:
+### `ikabot/helpers/modulePrefs.py`
 
 ```python
-if getattr(config, "autostart_active", False):
-    return True     # replay saved settings, print nothing, ask nothing
+AUTOSTART_KEY = "_autostart"          # reserved; ignore "_"-prefixed keys
+
+is_autostart(session, module_name)            -> bool
+set_autostart(session, module_name, enabled)  -> bool   # False if no saved settings
+list_autostart_modules(session)               -> [name]  # enabled, this account
+list_saved_modules(session)                   -> [name]  # any saved settings
 ```
 
-This is the key design move: every module already calling `prompt_use_saved`
-gains auto-start support with no further change, because the function it
-already uses to decide "replay or ask" now answers "replay" automatically.
+The flag lives inside the module's own prefs file, so `clear_prefs()` removes
+it along with the settings. Absent key means off.
 
-Declare `autostart_active = False` in `ikabot/config.py` next to the other
-runtime defaults.
+### The bypass
 
-### A3. Setting the flag in the child
+`prompt_use_saved()` returns `True` silently when `config.autostart_active`
+is set — checked **after** the `predetermined_input` guard, so a
+`sequenceRunner` run still wins. **A module that already calls
+`prompt_use_saved` therefore auto-starts with no change of its own.**
 
-In `command_line.py` add a small launcher used only for auto-start, which
-sets `config.autostart_active = True` in the child before delegating:
+### `ikabot/command_line.py`
 
 ```python
-def _run_autostart_child(target, session, event, stdin_fd, predetermined_input):
-    config.autostart_active = True
-    target(session, event, stdin_fd, predetermined_input)
+_run_autostart_child(target, session, event, stdin_fd, predetermined_input)
+_autostart_targets(session)   -> [(name, function)]
+_launch_autostart_modules(session, process_list, announce=True) -> [name]
+_autostart_menu(session)      # Options / Settings -> (10)
 ```
 
-It must be a **module-level function**, not a lambda or closure — Windows uses
-spawn, and the target must be picklable. This is why the flag is not simply
-set in the parent: with spawn, the child does not inherit it.
-
-### A4. Launch at login
-
-In `command_line.py`, after the session is created and before `menu()` is
-entered, launch each enabled module. Requirements:
-
-- Reuse the exact spawn shape from `menu()` (Process, args tuple,
-  `process_list` entry, `updateProcessList`, wait on `event`).
-- Target is `_run_autostart_child` with the real function passed as an arg.
-- Pass an **empty** `predetermined_input` — an auto-start module must never
-  consume recorded input.
-- **Skip auto-start entirely when `config.predetermined_input` is non-empty**
-  (a `sequenceRunner` run). Auto-starting during a scripted run would inject
-  processes the script does not expect.
-- **Do not launch a module already in `process_list`** under the same action
-  name.
-- Map module name -> function using the existing `menu_actions` values, keyed
-  by `__name__`. Do not build a second hand-maintained registry (rule 8).
-- Print one line per launched module, and continue to the menu regardless of
-  individual failures. One bad module must never block login.
-
-### A5. A management screen
-
-Under **Options / Settings**, add "Auto-start modules": list every module with
-saved settings for this account and whether auto-start is on, and allow
-toggling. This is the discoverable off-switch — without it a user who enables
-auto-start has no obvious way to find and undo it.
-
----
+`_launch_autostart_modules` is the single shared launcher, called from both
+login and the menu. It skips entirely during a `sequenceRunner` run, skips
+modules already in `process_list`, passes an empty `predetermined_input`,
+resolves names against `_menu_actions()`, and waits at most
+`_AUTOSTART_EVENT_TIMEOUT` (30s) per module so a misbehaving one cannot hang
+login.
 
 ## 5. Part B — enable it for one module (repeat per module)
 
@@ -256,16 +210,15 @@ For most modules this is small, because Part A did the work.
 
 The vault work in this repo was verified this way; match it.
 
-- Round-trip: enable, reload from disk, confirm it persisted.
-- `set_autostart` on a module with **no** saved settings is a no-op.
-- `clear_prefs` removes the auto-start flag with the settings.
-- A prefs file **without** `_autostart` loads and reports `False`.
-- A module replaying prefs **ignores** `_autostart` and any other `_` key.
-- `list_autostart_modules` ignores malformed/unreadable files.
-- With `config.autostart_active = True`, `prompt_use_saved` returns `True`
-  and prints nothing.
-- With `config.predetermined_input` non-empty, `prompt_use_saved` still
-  returns `False` — the guard survives.
+Part A's own behaviour is already covered. For a module you change, test:
+
+- The module replays saved settings with `config.autostart_active = True`
+  and **prints nothing** during the config phase.
+- It **ignores** `_autostart` and any other `_`-prefixed key.
+- Malformed/stale saved settings under auto-start cause a clean exit
+  (`sendToBot` + `event.set()` + return), **never a prompt**.
+- The offer-to-enable prompt is skipped when `predetermined_input` is
+  non-empty.
 
 Test with a monkeypatched prefs directory:
 
