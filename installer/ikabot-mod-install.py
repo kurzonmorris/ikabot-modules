@@ -45,7 +45,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "2.0.0"
+INSTALLER_VERSION = "2.0.1"
 
 GITHUB_API      = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/contents"
@@ -279,23 +279,96 @@ def find_asset(releases: list[dict], pattern: re.Pattern) -> tuple[str, str, str
     return None
 
 
-def download_zip(url: str, dest_dir: Path, label: str = "") -> None:
+def download_zip(url: str, dest_dir: Path, label: str = "", attempts: int = 3) -> None:
+    """Download a zip file and extract it into dest_dir.
+
+    The download is verified as complete (against Content-Length) and
+    confirmed to be a real zip before any extraction is attempted, and
+    failures are retried. Without these checks a connection that drops
+    part-way through leaves a truncated file, which then fails with the
+    misleading error "File is not a zip file" even though the file on
+    GitHub is perfectly valid.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest_dir / "_tmp_download.zip"
-    print(f"  Downloading {label or url} ...")
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": f"ikabot-mod-install/{INSTALLER_VERSION}"},
+    last_problem = "unknown error"
+
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt > 1:
+                print(f"  Retrying — attempt {attempt} of {attempts} ...")
+                time.sleep(2)
+
+            print(f"  Downloading {label or url} ...")
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": f"ikabot-mod-install/{INSTALLER_VERSION}"},
+            )
+
+            written = 0
+            with urllib.request.urlopen(req, timeout=60) as response:
+                raw_len = response.headers.get("Content-Length")
+                expected = int(raw_len) if raw_len and raw_len.isdigit() else None
+                ctype = (response.headers.get("Content-Type") or "").lower()
+
+                MB = 1024 * 1024
+                marker = -1
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        written += len(chunk)
+                        # refresh on each 1% (or each MB when size is unknown)
+                        step = (written * 100 // expected) if expected else (written // MB)
+                        if step != marker:
+                            marker = step
+                            if expected:
+                                print(f"\r    {written / MB:.1f} MB of {expected / MB:.1f} MB"
+                                      f"  ({step}%)  ", end="")
+                            else:
+                                print(f"\r    {written / MB:.1f} MB  ", end="")
+                if marker >= 0:
+                    print()
+
+            # Did we get the whole thing?
+            if expected is not None and written != expected:
+                last_problem = (f"the download was cut short — received "
+                                f"{written:,} bytes but expected {expected:,}")
+                print(f"  {last_problem}")
+                continue
+
+            # Is it actually a zip? (An HTML error page would arrive silently.)
+            if not zipfile.is_zipfile(tmp):
+                with open(tmp, "rb") as f:
+                    head = f.read(64)
+                if b"<html" in head.lower() or "text/html" in ctype:
+                    last_problem = ("the server sent a web page instead of the file — "
+                                    "the release asset may have been removed or renamed")
+                else:
+                    last_problem = (f"the downloaded file is not a zip "
+                                    f"({written:,} bytes, begins with {head[:16]!r})")
+                print(f"  {last_problem}")
+                continue
+
+            print(f"  Extracting to {dest_dir} ...")
+            with zipfile.ZipFile(tmp, "r") as zf:
+                zf.extractall(dest_dir)
+            tmp.unlink(missing_ok=True)
+            return
+
+        except (urllib.error.URLError, zipfile.BadZipFile, OSError) as exc:
+            last_problem = str(exc) or exc.__class__.__name__
+            print(f"  Attempt {attempt} failed: {last_problem}")
+
+    tmp.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"The download failed after {attempts} attempts.\n\n"
+        f"Last problem: {last_problem}\n\n"
+        "Check your internet connection, and confirm the release\n"
+        "is still published on GitHub, then try again."
     )
-    with urllib.request.urlopen(req, timeout=60) as response:
-        with open(tmp, "wb") as f:
-            shutil.copyfileobj(response, f)
-    print(f"  Extracting to {dest_dir} ...")
-    try:
-        with zipfile.ZipFile(tmp, "r") as zf:
-            zf.extractall(dest_dir)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def fetch_repo_folder(folder_path: str) -> list[dict]:
