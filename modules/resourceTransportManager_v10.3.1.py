@@ -47,7 +47,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.3.0"
+MODULE_VERSION = "10.3.1"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -937,11 +937,16 @@ def _lock_acquire(lock_path, timeout=30, stale_after=60):
                             os.remove(tmp)
                         except OSError:
                             pass
-            except (json.JSONDecodeError, IOError, OSError):
+            except Exception:
                 pass
         except Exception:
             pass
-        time.sleep(1)
+        try:
+            time.sleep(1)
+        except Exception:
+            # SystemError can surface here if a lower-level OS call left
+            # the interpreter in a bad state — clear it and keep waiting.
+            pass
     return False
 
 
@@ -4898,10 +4903,45 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
 
 def _is_pid_alive(pid):
+    """Check whether a process is running WITHOUT touching it.
+    CRITICAL: os.kill(pid, 0) must never be used on Windows — there any
+    signal other than CTRL_C/CTRL_BREAK calls TerminateProcess and KILLS
+    the target process. On unexpected errors we assume alive (never steal
+    a lock we are not sure about)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong(0)
+                if kernel32.GetExitCodeProcess(
+                        handle, ctypes.byref(exit_code)):
+                    return exit_code.value == STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
         return False
 
 
@@ -6248,6 +6288,7 @@ def transport_scheduler_loop(session, stop_event):
         "notif_config", {"level": "none", "telegram": False}
     )
     log_path = TRANSPORT_WORKER_PREFS.get("log_path", "")
+    _tick_errors = 0
 
     while not stop_event.is_set():
         if os.path.exists(transport_stop_flag_path(session)):
@@ -6256,93 +6297,121 @@ def transport_scheduler_loop(session, stop_event):
 
         _lock_refresh(transport_worker_lock_path(session))
 
-        now = int(time.time())
-        schedules = transport_csv_load(session)
-        active = [s for s in schedules if s.get("status") == "active"]
+        try:
+            now = int(time.time())
+            schedules = transport_csv_load(session)
+            _tick_errors = 0
+            active = [s for s in schedules if s.get("status") == "active"]
 
-        if not active:
-            session.setStatus("Transport worker: no active schedules, sleeping...")
-            _wait_or_wake(session, stop_event, TICK_BUDGET_SECONDS)
-            continue
-
-        for sched in active:
-            if stop_event.is_set():
-                break
-
-            next_run = sched.get("next_run", "")
-            if isinstance(next_run, int) and next_run > now:
+            if not active:
+                session.setStatus("Transport worker: no active schedules, sleeping...")
+                _wait_or_wake(session, stop_event, TICK_BUDGET_SECONDS)
                 continue
 
-            sid = sched["schedule_id"]
+            for sched in active:
+                if stop_event.is_set():
+                    break
+
+                next_run = sched.get("next_run", "")
+                if isinstance(next_run, int) and next_run > now:
+                    continue
+
+                sid = sched["schedule_id"]
+                try:
+                    cycle_sent = execute_schedule(session, sched, notif_config, log_path)
+                except Exception as exc:
+                    try:
+                        sendToBot(
+                            session,
+                            f"SCHEDULE #{sid} ERROR — WILL RETRY IN 1 HOUR\n"
+                            f"The schedule hit an unexpected problem and "
+                            f"this cycle was skipped. It will automatically "
+                            f"try again in 1 hour.\n"
+                            f"Technical detail: {exc}")
+                    except Exception:
+                        pass
+                    transport_csv_update(
+                        session, sid,
+                        last_run=now, next_run=now + 3600,
+                        status="active",
+                    )
+                    continue
+
+                total = sched.get("total_shipments", 0) + cycle_sent
+                interval = sched.get("interval_hours", 0)
+                run_at = sched.get("run_at_time", "")
+
+                if interval > 0:
+                    if run_at:
+                        next_ts = _next_run_for_time(run_at)
+                    else:
+                        next_ts = now + interval * 3600
+                    transport_csv_update(
+                        session, sid,
+                        last_run=now, next_run=next_ts,
+                        total_shipments=total, status="active",
+                    )
+                else:
+                    transport_csv_delete(session, sid)
+
+            # Auto-cleanup: delete one-time schedules older than 24h
+            schedules = transport_csv_load(session)
+            for s in schedules:
+                if s.get("interval_hours", 0) == 0:
+                    created = s.get("created_at", 0)
+                    if isinstance(created, int) and created > 0:
+                        if now - created > 86400:
+                            transport_csv_delete(session, s.get("schedule_id"))
+
+            schedules = transport_csv_load(session)
+            active = [s for s in schedules if s.get("status") == "active"]
+            now_ts = int(time.time())
+            next_dues = []
+            for s in active:
+                nr = s.get("next_run", "")
+                if isinstance(nr, int) and nr > now_ts:
+                    next_dues.append(nr)
+
+            if next_dues:
+                sleep_for = max(1, min(TICK_BUDGET_SECONDS, min(next_dues) - now_ts))
+            else:
+                sleep_for = TICK_BUDGET_SECONDS
+
             try:
-                cycle_sent = execute_schedule(session, sched, notif_config, log_path)
-            except Exception as exc:
+                session.setStatus(
+                    f"Transport worker: {len(active)} schedule(s), "
+                    f"sleeping {sleep_for}s"
+                )
+            except Exception:
+                pass
+
+            _wait_or_wake(session, stop_event, sleep_for)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            # A transient problem (lock timeout, network, OS hiccup)
+            # must not kill the scheduler — wait a tick and retry.
+            _tick_errors += 1
+            try:
+                session.setStatus(
+                    f"Transport worker: error ({exc}); "
+                    f"retrying in {TICK_BUDGET_SECONDS}s")
+            except Exception:
+                pass
+            if _tick_errors == 3 and should_notify(notif_config, "error"):
                 try:
                     sendToBot(
                         session,
-                        f"SCHEDULE #{sid} ERROR — WILL RETRY IN 1 HOUR\n"
-                        f"The schedule hit an unexpected problem and "
-                        f"this cycle was skipped. It will automatically "
-                        f"try again in 1 hour.\n"
+                        f"TRANSPORT SCHEDULER — TEMPORARY PROBLEM\n"
+                        f"The scheduler hit the same error 3 times in "
+                        f"a row but is still running and will keep "
+                        f"retrying every {TICK_BUDGET_SECONDS}s. No "
+                        f"restart is needed unless this continues for "
+                        f"a long time.\n"
                         f"Technical detail: {exc}")
                 except Exception:
                     pass
-                transport_csv_update(
-                    session, sid,
-                    last_run=now, next_run=now + 3600,
-                    status="active",
-                )
-                continue
-
-            total = sched.get("total_shipments", 0) + cycle_sent
-            interval = sched.get("interval_hours", 0)
-            run_at = sched.get("run_at_time", "")
-
-            if interval > 0:
-                if run_at:
-                    next_ts = _next_run_for_time(run_at)
-                else:
-                    next_ts = now + interval * 3600
-                transport_csv_update(
-                    session, sid,
-                    last_run=now, next_run=next_ts,
-                    total_shipments=total, status="active",
-                )
-            else:
-                transport_csv_delete(session, sid)
-
-        # Auto-cleanup: delete one-time schedules older than 24h
-        schedules = transport_csv_load(session)
-        for s in schedules:
-            if s.get("interval_hours", 0) == 0:
-                created = s.get("created_at", 0)
-                if isinstance(created, int) and created > 0:
-                    if now - created > 86400:
-                        transport_csv_delete(session, s.get("schedule_id"))
-
-        schedules = transport_csv_load(session)
-        active = [s for s in schedules if s.get("status") == "active"]
-        now_ts = int(time.time())
-        next_dues = []
-        for s in active:
-            nr = s.get("next_run", "")
-            if isinstance(nr, int) and nr > now_ts:
-                next_dues.append(nr)
-
-        if next_dues:
-            sleep_for = max(1, min(TICK_BUDGET_SECONDS, min(next_dues) - now_ts))
-        else:
-            sleep_for = TICK_BUDGET_SECONDS
-
-        try:
-            session.setStatus(
-                f"Transport worker: {len(active)} schedule(s), "
-                f"sleeping {sleep_for}s"
-            )
-        except Exception:
-            pass
-
-        _wait_or_wake(session, stop_event, sleep_for)
+            _wait_or_wake(session, stop_event, TICK_BUDGET_SECONDS)
 
     # Cleanup
     _rrs_release_all(session)
