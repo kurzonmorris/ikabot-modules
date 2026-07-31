@@ -14,11 +14,25 @@ from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getCity
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import *
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, prompt_use_saved,
+)
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import *
 
 SATISFACTION_BUFFER = 5
+
+# Per-account, per-flow saved-inputs keys. Two separate files so the
+# "set wine level by hand" flow and the "auto-tune" flow don't stomp
+# on each other's last-inputs — they answer different questions. This
+# is deliberately a second, parallel memory to the CSV task system:
+# the CSV lets you Resume a specific saved task (skips even the confirm
+# and jumps to the loop); these prefs let you skip the CONFIG QUESTIONS
+# next time you re-enter the flow, while still confirming and running
+# a fresh first check.
+_PREFS_SET = "tavernManager.set"
+_PREFS_EQUILIBRIUM = "tavernManager.equilibrium"
 
 # ============================================================================
 #  PERSISTENCE LAYER  — saved task state, lock, stop signal
@@ -1553,27 +1567,159 @@ def tavernManager(session, event, stdin_fd, predetermined_input):
     event.set()
 
 
+def _city_summary_line(cities, missing_count=0):
+    """Human-readable one-liner for a list of city dicts.
+
+    Names first three inline, caps the rest as '+N more'. Appends a
+    note when saved cities were dropped so the user sees why the
+    reused count is smaller than what they last saved.
+    """
+    names = ", ".join(c["name"] for c in cities[:3])
+    if len(cities) > 3:
+        names += f", +{len(cities) - 3} more"
+    line = f"Cities: {len(cities)} ({names})"
+    if missing_count:
+        line += (f"  [note: {missing_count} saved "
+                 f"{'city was' if missing_count == 1 else 'cities were'} "
+                 f"not found on this account and will be skipped]")
+    return line
+
+
+def _try_replay_set_mode(session):
+    """Offer to reuse the last set-mode inputs.
+
+    Returns (cities_list, pct) on acceptance, or (None, None) when
+    there's nothing to offer / saved data is unusable / the user
+    chose to reconfigure. Stale city IDs (sold, wrong account, world
+    reset) are silently dropped — the drop count is surfaced in the
+    summary so the user knows before pressing Enter.
+    """
+    saved = load_prefs(session, _PREFS_SET)
+    if not saved:
+        return None, None
+    try:
+        # Validate the shape defensively. Hand-edited or older-schema
+        # files must fall through to the normal questions, never crash.
+        saved_ids = [str(cid) for cid in saved["city_ids"]]
+        saved_pct = int(saved["pct"])
+        assert saved_ids, "no saved city_ids"
+        assert 0 <= saved_pct <= 100, "pct out of range"
+
+        _all_ids, all_cities = getIdsOfCities(session)
+        resolved = [all_cities[cid] for cid in saved_ids if cid in all_cities]
+        if not resolved:
+            return None, None
+        missing = len(saved_ids) - len(resolved)
+
+        summary = [_city_summary_line(resolved, missing),
+                   f"Wine level: {saved_pct}%"]
+        if prompt_use_saved(session, _PREFS_SET, summary):
+            return resolved, saved_pct
+    except Exception:
+        pass
+    return None, None
+
+
+def _try_replay_equilibrium_mode(session):
+    """Offer to reuse the last auto-tune inputs.
+
+    Returns (notification_mode, cities_ids, cities, run_hours,
+    per_city_intervals) on acceptance, or a 5-tuple of Nones when
+    there's nothing to offer / saved data is unusable / user
+    reconfigures. Stale city IDs disappear silently but the summary
+    flags the count. per_city_intervals is filtered to surviving
+    cities; if the shared schedule was in use (None saved), it stays
+    None.
+    """
+    saved = load_prefs(session, _PREFS_EQUILIBRIUM)
+    if not saved:
+        return None, None, None, None, None
+    try:
+        notif = int(saved["notification_mode"])
+        saved_ids = [str(cid) for cid in saved["city_ids"]]
+        hours = int(saved["run_hours"])
+        assert notif in (1, 2, 3), "notification_mode out of range"
+        assert saved_ids, "no saved city_ids"
+        assert 0 <= hours <= 24, "run_hours out of range"
+
+        _all_ids, all_cities = getIdsOfCities(session)
+        resolved_ids = [cid for cid in saved_ids if cid in all_cities]
+        if not resolved_ids:
+            return None, None, None, None, None
+        # process_equilibrium and _build_rows expect {id: city_dict}
+        # limited to the SELECTED cities — not the account-wide dict.
+        resolved_cities = {cid: all_cities[cid] for cid in resolved_ids}
+        missing = len(saved_ids) - len(resolved_ids)
+
+        # Per-city intervals: filter to surviving cities. If none of
+        # the saved overrides apply anymore (or the field was never
+        # saved), fall back to the shared schedule (None).
+        raw_pci = saved.get("per_city_intervals")
+        pci = None
+        if isinstance(raw_pci, dict):
+            filtered = {
+                str(cid): int(v) for cid, v in raw_pci.items()
+                if str(cid) in resolved_cities and 1 <= int(v) <= 24
+            }
+            pci = filtered or None
+
+        notif_desc = {1: "all events + errors", 2: "errors only", 3: "off"}[notif]
+        if hours == 0:
+            sched_desc = "run once and exit"
+        elif pci and len(set(pci.values())) > 1:
+            lo, hi = min(pci.values()), max(pci.values())
+            sched_desc = (f"per-city schedule ({lo}-{hi} hours apart), "
+                          f"default every {hours}h")
+        else:
+            sched_desc = f"every {hours} hour(s)"
+
+        summary = [
+            _city_summary_line(list(resolved_cities.values()), missing),
+            f"Telegram: {notif_desc}",
+            f"Schedule: {sched_desc}",
+        ]
+        if prompt_use_saved(session, _PREFS_EQUILIBRIUM, summary):
+            return notif, resolved_ids, resolved_cities, hours, pci
+    except Exception:
+        pass
+    return None, None, None, None, None
+
+
 def _run_set_mode(session):
     print("=" * 60)
     print("SET WINE LEVEL BY HAND")
     print("=" * 60)
     print()
     print("Two quick questions: which cities, and what percentage.")
+    print("(Or, if you've run this flow before, press ENTER on the")
+    print("'saved settings' prompt to reuse last time's answers.)")
     print("(This will overwrite any saved task.)")
     print()
 
-    cities_to_process = _select_cities(session)
+    # Try the one-Enter reuse before dropping into questions.
+    cities_to_process, pct = _try_replay_set_mode(session)
     if cities_to_process is None:
-        return
-    if not cities_to_process:
-        print("No cities chosen — nothing to do.")
-        print()
-        enter()
-        return
+        cities_to_process = _select_cities(session)
+        if cities_to_process is None:
+            return
+        if not cities_to_process:
+            print("No cities chosen — nothing to do.")
+            print()
+            enter()
+            return
 
-    pct = _select_percentage()
-    if pct is None:
-        return
+        pct = _select_percentage()
+        if pct is None:
+            return
+
+        # Persist the answers so next launch can offer one-Enter reuse.
+        # This is separate from the CSV task (which _save_task writes
+        # below on confirm): the CSV drives Resume; this drives the
+        # reuse prompt when re-entering this flow. Best-effort.
+        save_prefs(session, _PREFS_SET, {
+            "city_ids": [str(c["id"]) for c in cities_to_process],
+            "pct": int(pct),
+        })
 
     print()
     city_word = "city" if len(cities_to_process) == 1 else "cities"
@@ -1726,97 +1872,123 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     print()
     print("Four quick questions: Telegram alerts, which cities, schedule,")
     print("and (only if you pick specific cities) per-city schedule.")
-    print()
-    print("-" * 60)
-    print("Question 1: Telegram alerts")
-    print("-" * 60)
-    print()
-    print("Should the bot text you on Telegram?")
-    print("(Needs Telegram set up in ikabot already — otherwise just")
-    print("pick option 3.)")
-    print()
-    print("  (1) Every wine change AND every error")
-    print("      Most notifications. Good when you're tuning settings.")
-    print("  (2) Only when something goes wrong")
-    print("      Quiet most of the time; pings you if a city errors.")
-    print("  (3) Don't text me")
-    print()
-    print("  (') Go back")
-    print()
-    notification_mode = read(msg="Pick 1, 2, or 3: ", min=1, max=3, digit=True, additionalValues=["'"])
-
-    if notification_mode == "'":
-        return
-
-    print()
-    print("-" * 60)
-    print("Question 2: Which cities")
-    print("-" * 60)
-    print()
-    print("Which cities should auto-tune?")
-    print()
-    print("  (1) Choose a subset")
-    print("      Start with every city, then remove the ones you don't")
-    print("      want auto-tuned. (This is the only path that lets you")
-    print("      set per-city schedules later.)")
-    print("  (2) Every city I own")
-    print()
-    print("  (') Go back")
-    print()
-    city_choice = read(msg="Pick 1 or 2: ", min=1, max=2, digit=True, additionalValues=["'"])
-
-    if city_choice == "'":
-        return
-
+    print("(Or press ENTER on the 'saved settings' prompt to reuse last")
+    print("time's answers — the CSV Resume in the main menu skips the")
+    print("first-run and confirm too; this reuse still does both.)")
     print()
 
-    if city_choice == 1:
-        cities_ids, cities = ignoreCities(
-            session,
-            msg="Type a number to remove that city, then 0 when you're done:",
-        )
-        is_subset = True
+    (notification_mode, cities_ids, cities,
+     run_hours, per_city_intervals) = _try_replay_equilibrium_mode(session)
+    if notification_mode is not None:
+        # Replay path: skip every question. Derive the pieces the rest
+        # of the function needs from the resolved cities dict.
+        cities_to_process = [cities[cid] for cid in cities_ids]
     else:
-        cities_ids, cities = getIdsOfCities(session)
-        is_subset = False
+        print("-" * 60)
+        print("Question 1: Telegram alerts")
+        print("-" * 60)
+        print()
+        print("Should the bot text you on Telegram?")
+        print("(Needs Telegram set up in ikabot already — otherwise just")
+        print("pick option 3.)")
+        print()
+        print("  (1) Every wine change AND every error")
+        print("      Most notifications. Good when you're tuning settings.")
+        print("  (2) Only when something goes wrong")
+        print("      Quiet most of the time; pings you if a city errors.")
+        print("  (3) Don't text me")
+        print()
+        print("  (') Go back")
+        print()
+        notification_mode = read(msg="Pick 1, 2, or 3: ", min=1, max=3, digit=True, additionalValues=["'"])
 
-    if not cities_ids:
-        print("No cities selected — nothing to do.")
-        enter()
-        return
+        if notification_mode == "'":
+            return
 
-    cities_to_process = [cities[cid] for cid in cities_ids]
-
-    print()
-    print("-" * 60)
-    print("Question 3: Schedule")
-    print("-" * 60)
-    print()
-    print("Run once now, or keep running on a schedule?")
-    print()
-    print("    0     Run a single check right now, then exit")
-    print("  1-24    Run continuously in the background, checking")
-    print("          every N hours")
-    print()
-    print("  (') Go back")
-    print()
-    run_hours = read(
-        msg="Enter a number from 0 to 24: ",
-        min=0, max=24, digit=True, additionalValues=["'"]
-    )
-
-    if run_hours == "'":
-        return
-
-    # Question 4 (only when the user picked specific cities AND has more
-    # than one of them AND is on a real schedule): per-city intervals.
-    per_city_intervals = None
-    if is_subset and len(cities_to_process) > 1 and run_hours > 0:
         print()
         print("-" * 60)
-        print("Question 4: Per-city schedule (optional)")
+        print("Question 2: Which cities")
         print("-" * 60)
-        per_city_intervals = _per_city_interval_prompt(cities_to_process, run_hours)
+        print()
+        print("Which cities should auto-tune?")
+        print()
+        print("  (1) Choose a subset")
+        print("      Start with every city, then remove the ones you don't")
+        print("      want auto-tuned. (This is the only path that lets you")
+        print("      set per-city schedules later.)")
+        print("  (2) Every city I own")
+        print()
+        print("  (') Go back")
+        print()
+        city_choice = read(msg="Pick 1 or 2: ", min=1, max=2, digit=True, additionalValues=["'"])
+
+        if city_choice == "'":
+            return
+
+        print()
+
+        if city_choice == 1:
+            cities_ids, cities = ignoreCities(
+                session,
+                msg="Type a number to remove that city, then 0 when you're done:",
+            )
+            is_subset = True
+        else:
+            cities_ids, cities = getIdsOfCities(session)
+            is_subset = False
+
+        if not cities_ids:
+            print("No cities selected — nothing to do.")
+            enter()
+            return
+
+        cities_to_process = [cities[cid] for cid in cities_ids]
+
+        print()
+        print("-" * 60)
+        print("Question 3: Schedule")
+        print("-" * 60)
+        print()
+        print("Run once now, or keep running on a schedule?")
+        print()
+        print("    0     Run a single check right now, then exit")
+        print("  1-24    Run continuously in the background, checking")
+        print("          every N hours")
+        print()
+        print("  (') Go back")
+        print()
+        run_hours = read(
+            msg="Enter a number from 0 to 24: ",
+            min=0, max=24, digit=True, additionalValues=["'"]
+        )
+
+        if run_hours == "'":
+            return
+
+        # Question 4 (only when the user picked specific cities AND has more
+        # than one of them AND is on a real schedule): per-city intervals.
+        per_city_intervals = None
+        if is_subset and len(cities_to_process) > 1 and run_hours > 0:
+            print()
+            print("-" * 60)
+            print("Question 4: Per-city schedule (optional)")
+            print("-" * 60)
+            per_city_intervals = _per_city_interval_prompt(cities_to_process, run_hours)
+
+        # Persist the four answers so next launch can offer one-Enter
+        # reuse. Save happens BEFORE the confirm+first-run so a Ctrl+C
+        # from here on still leaves valid last-inputs for next time.
+        # This is separate from _save_task below (which only fires on
+        # 'Go ahead? [Y/n]' -> yes).
+        save_prefs(session, _PREFS_EQUILIBRIUM, {
+            "notification_mode": int(notification_mode),
+            "city_ids": [str(cid) for cid in cities_ids],
+            "run_hours": int(run_hours),
+            "per_city_intervals": (
+                {str(k): int(v) for k, v in per_city_intervals.items()}
+                if per_city_intervals else None
+            ),
+        })
 
     print()
     if per_city_intervals:
