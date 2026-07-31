@@ -10,11 +10,20 @@ from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getCity
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import *
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, prompt_use_saved,
+)
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import *
 
 SATISFACTION_BUFFER = 5
+
+# Per-account, per-flow saved-inputs keys. Two separate files so the
+# "set wine level by hand" flow and the "auto-tune" flow don't stomp on
+# each other's last-inputs — they answer different questions.
+_PREFS_SET = "tavernManager.set"
+_PREFS_EQUILIBRIUM = "tavernManager.equilibrium"
 
 
 class _StaleCacheError(Exception):
@@ -837,26 +846,100 @@ def tavernManager(session, event, stdin_fd, predetermined_input):
     event.set()
 
 
+def _try_replay_set_mode(session):
+    """Offer to reuse last cycle's set-mode inputs.
+
+    Returns (cities_list, pct) if the user accepted the offer, or
+    (None, None) if there was nothing to offer, the saved data was
+    unusable, or the user chose to reconfigure. On acceptance, cities
+    whose IDs no longer belong to this account are silently dropped —
+    the summary shown to the user calls the drop out explicitly so
+    they know what's happening before they press Enter.
+    """
+    saved = load_prefs(session, _PREFS_SET)
+    if not saved:
+        return None, None
+    try:
+        # Validate the shape before touching anything else — a hand-
+        # edited or older-version file must never blow up the module.
+        saved_ids = [str(cid) for cid in saved["city_ids"]]
+        saved_pct = int(saved["pct"])
+        assert saved_ids, "no saved city_ids"
+        assert 0 <= saved_pct <= 100, "pct out of range"
+
+        # Resolve saved IDs against the account's current cities;
+        # anything gone (sold, world reset, wrong account) is dropped.
+        _all_ids, all_cities = getIdsOfCities(session)
+        resolved = [all_cities[cid] for cid in saved_ids if cid in all_cities]
+        if not resolved:
+            return None, None
+        missing = len(saved_ids) - len(resolved)
+
+        summary = [_city_summary_line(resolved, missing),
+                   f"Wine level: {saved_pct}%"]
+        if prompt_use_saved(session, _PREFS_SET, summary):
+            return resolved, saved_pct
+    except Exception:
+        # Malformed / older-schema file — fall through to the
+        # normal prompts. Silent by design: this is a UX shortcut,
+        # not a critical path.
+        pass
+    return None, None
+
+
+def _city_summary_line(cities, missing_count=0):
+    """One short human-readable summary line for a city list.
+
+    Names first three cities inline; caps the rest with a '+N more'.
+    Appends a note when saved cities were dropped so users see why
+    the reused count is less than what they saved.
+    """
+    names = ", ".join(c["name"] for c in cities[:3])
+    if len(cities) > 3:
+        names += f", +{len(cities) - 3} more"
+    line = f"Cities: {len(cities)} ({names})"
+    if missing_count:
+        line += (f"  [note: {missing_count} saved "
+                 f"{'city was' if missing_count == 1 else 'cities were'} "
+                 f"not found on this account and will be skipped]")
+    return line
+
+
 def _run_set_mode(session):
     print("=" * 60)
     print("SET WINE LEVEL BY HAND")
     print("=" * 60)
     print()
     print("Two quick questions: which cities, and what percentage.")
+    print("(Or press ENTER on the saved-settings prompt to reuse last time's.)")
     print()
 
-    cities_to_process = _select_cities(session)
+    cities_to_process, pct = _try_replay_set_mode(session)
     if cities_to_process is None:
-        return
-    if not cities_to_process:
-        print("No cities chosen — nothing to do.")
-        print()
-        enter()
-        return
+        # No saved settings, replay rejected, or saved data was stale
+        # beyond repair — fall through to the interactive questions.
+        cities_to_process = _select_cities(session)
+        if cities_to_process is None:
+            return
+        if not cities_to_process:
+            print("No cities chosen — nothing to do.")
+            print()
+            enter()
+            return
 
-    pct = _select_percentage()
-    if pct is None:
-        return
+        pct = _select_percentage()
+        if pct is None:
+            return
+
+        # Persist so next launch can offer one-Enter reuse. Store city
+        # IDs (strings — matches the format getIdsOfCities returns) so
+        # a rename in-game doesn't invalidate the entry, and cap the
+        # dict to the two fields we actually read on replay. Best-
+        # effort: save_prefs never raises.
+        save_prefs(session, _PREFS_SET, {
+            "city_ids": [str(c["id"]) for c in cities_to_process],
+            "pct": int(pct),
+        })
 
     print()
     city_word = "city" if len(cities_to_process) == 1 else "cities"
@@ -964,6 +1047,51 @@ def _select_percentage():
     return pct_options[choice - 1]
 
 
+def _try_replay_equilibrium_mode(session):
+    """Offer to reuse last cycle's auto-tune inputs.
+
+    Returns a 4-tuple (notification_mode, cities_ids, cities, run_hours)
+    on acceptance, or (None, None, None, None) if nothing to offer /
+    saved data unusable / user reconfigures. Same city-drop behaviour
+    as _try_replay_set_mode: stale IDs disappear silently but the
+    summary flags the count.
+    """
+    saved = load_prefs(session, _PREFS_EQUILIBRIUM)
+    if not saved:
+        return None, None, None, None
+    try:
+        notif = int(saved["notification_mode"])
+        saved_ids = [str(cid) for cid in saved["city_ids"]]
+        hours = int(saved["run_hours"])
+        assert notif in (1, 2, 3), "notification_mode out of range"
+        assert saved_ids, "no saved city_ids"
+        assert 0 <= hours <= 24, "run_hours out of range"
+
+        _all_ids, all_cities = getIdsOfCities(session)
+        resolved_ids = [cid for cid in saved_ids if cid in all_cities]
+        if not resolved_ids:
+            return None, None, None, None
+        # process_equilibrium expects a matching {id: city_dict} — the
+        # slice, not the full owned-cities dict, so unselected cities
+        # don't creep into the run.
+        resolved_cities = {cid: all_cities[cid] for cid in resolved_ids}
+        missing = len(saved_ids) - len(resolved_ids)
+
+        notif_desc = {1: "all events + errors", 2: "errors only", 3: "off"}[notif]
+        sched_desc = ("run once and exit" if hours == 0
+                      else f"every {hours} hour(s)")
+        summary = [
+            _city_summary_line(list(resolved_cities.values()), missing),
+            f"Telegram: {notif_desc}",
+            f"Schedule: {sched_desc}",
+        ]
+        if prompt_use_saved(session, _PREFS_EQUILIBRIUM, summary):
+            return notif, resolved_ids, resolved_cities, hours
+    except Exception:
+        pass
+    return None, None, None, None
+
+
 def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     print("=" * 60)
     print("AUTO-TUNE WINE")
@@ -980,77 +1108,93 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     print("    wine alone and flag the city so you can investigate.")
     print()
     print("Three quick questions: Telegram alerts, which cities, schedule.")
-    print()
-    print("-" * 60)
-    print("Question 1 of 3: Telegram alerts")
-    print("-" * 60)
-    print()
-    print("Should the bot text you on Telegram?")
-    print("(Needs Telegram set up in ikabot already — otherwise just")
-    print("pick option 3.)")
-    print()
-    print("  (1) Every wine change AND every error")
-    print("      Most notifications. Good when you're tuning settings.")
-    print("  (2) Only when something goes wrong")
-    print("      Quiet most of the time; pings you if a city errors.")
-    print("  (3) Don't text me")
-    print()
-    print("  (') Go back")
-    print()
-    notification_mode = read(msg="Pick 1, 2, or 3: ", min=1, max=3, digit=True, additionalValues=["'"])
-
-    if notification_mode == "'":
-        return
-
-    print()
-    print("-" * 60)
-    print("Question 2 of 3: Which cities")
-    print("-" * 60)
-    print()
-    print("Which cities should auto-tune?")
-    print()
-    print("  (1) Choose a subset")
-    print("      Start with every city, then remove the ones you don't")
-    print("      want auto-tuned.")
-    print("  (2) Every city I own")
-    print()
-    print("  (') Go back")
-    print()
-    city_choice = read(msg="Pick 1 or 2: ", min=1, max=2, digit=True, additionalValues=["'"])
-
-    if city_choice == "'":
-        return
-
+    print("(Or press ENTER on the saved-settings prompt to reuse last time's.)")
     print()
 
-    if city_choice == 1:
-        cities_ids, cities = ignoreCities(
-            session,
-            msg="Type a number to remove that city, then 0 when you're done:",
+    (notification_mode, cities_ids, cities,
+     run_hours) = _try_replay_equilibrium_mode(session)
+    if notification_mode is None:
+        # No saved settings, replay rejected, or nothing survived
+        # validation — ask the normal three questions.
+        print("-" * 60)
+        print("Question 1 of 3: Telegram alerts")
+        print("-" * 60)
+        print()
+        print("Should the bot text you on Telegram?")
+        print("(Needs Telegram set up in ikabot already — otherwise just")
+        print("pick option 3.)")
+        print()
+        print("  (1) Every wine change AND every error")
+        print("      Most notifications. Good when you're tuning settings.")
+        print("  (2) Only when something goes wrong")
+        print("      Quiet most of the time; pings you if a city errors.")
+        print("  (3) Don't text me")
+        print()
+        print("  (') Go back")
+        print()
+        notification_mode = read(msg="Pick 1, 2, or 3: ", min=1, max=3, digit=True, additionalValues=["'"])
+
+        if notification_mode == "'":
+            return
+
+        print()
+        print("-" * 60)
+        print("Question 2 of 3: Which cities")
+        print("-" * 60)
+        print()
+        print("Which cities should auto-tune?")
+        print()
+        print("  (1) Choose a subset")
+        print("      Start with every city, then remove the ones you don't")
+        print("      want auto-tuned.")
+        print("  (2) Every city I own")
+        print()
+        print("  (') Go back")
+        print()
+        city_choice = read(msg="Pick 1 or 2: ", min=1, max=2, digit=True, additionalValues=["'"])
+
+        if city_choice == "'":
+            return
+
+        print()
+
+        if city_choice == 1:
+            cities_ids, cities = ignoreCities(
+                session,
+                msg="Type a number to remove that city, then 0 when you're done:",
+            )
+        else:
+            cities_ids, cities = getIdsOfCities(session)
+
+        print()
+        print("-" * 60)
+        print("Question 3 of 3: Schedule")
+        print("-" * 60)
+        print()
+        print("Run once now, or keep running on a schedule?")
+        print()
+        print("    0     Run a single check right now, then exit")
+        print("  1-24    Run continuously in the background, checking")
+        print("          every N hours")
+        print()
+        print("  (') Go back")
+        print()
+        run_hours = read(
+            msg="Enter a number from 0 to 24: ",
+            min=0, max=24, digit=True, additionalValues=["'"]
         )
-    else:
-        cities_ids, cities = getIdsOfCities(session)
 
-    print()
-    print("-" * 60)
-    print("Question 3 of 3: Schedule")
-    print("-" * 60)
-    print()
-    print("Run once now, or keep running on a schedule?")
-    print()
-    print("    0     Run a single check right now, then exit")
-    print("  1-24    Run continuously in the background, checking")
-    print("          every N hours")
-    print()
-    print("  (') Go back")
-    print()
-    run_hours = read(
-        msg="Enter a number from 0 to 24: ",
-        min=0, max=24, digit=True, additionalValues=["'"]
-    )
+        if run_hours == "'":
+            return
 
-    if run_hours == "'":
-        return
+        # Persist the answers so next launch can offer one-Enter reuse.
+        # Save happens BEFORE the long-running loop so a Ctrl+C during
+        # the loop still leaves valid last-inputs for next time.
+        save_prefs(session, _PREFS_EQUILIBRIUM, {
+            "notification_mode": int(notification_mode),
+            "city_ids": [str(cid) for cid in cities_ids],
+            "run_hours": int(run_hours),
+        })
 
     print()
 
