@@ -341,13 +341,21 @@ class VaultSession:
         password: str,
         blackbox: str = None,
         lobby_token: str = None,
+        locale: str = None,
+        timezone_id: str = None,
     ) -> None:
-        """Encrypt and append a new account, then save."""
+        """Encrypt and append a new account, then save.
+
+        *locale* and *timezone_id* are the account's regional fingerprint. When
+        omitted the global config defaults apply at login time.
+        """
         payload = {
             "email": email,
             "password": password,
             "blackbox": blackbox,
             "lobby_token": lobby_token,
+            "locale": locale,
+            "timezone_id": timezone_id,
         }
         encrypted = _encrypt(self._key, payload)
         self._data["accounts"].append({"label": label, "encrypted": encrypted})
@@ -372,6 +380,36 @@ class VaultSession:
             creds["blackbox"] = blackbox
         if lobby_token is not None:
             creds["lobby_token"] = lobby_token
+        entries[index]["encrypted"] = _encrypt(self._key, creds)
+        self._save()
+
+    def get_region(self, index: int) -> tuple:
+        """Return (locale, timezone_id) for *index*; either may be None.
+
+        None means the account has no explicit region and falls back to the
+        global config defaults at login time.
+        """
+        creds = self.get_credentials(index)
+        return creds.get("locale"), creds.get("timezone_id")
+
+    def set_region(self, index: int, locale: str, timezone_id: str) -> None:
+        """Set the regional fingerprint for *index* and save.
+
+        The stored blackbox token is generated for a specific locale/timezone
+        and is sent to Gameforge alongside them, so a cached token from the old
+        region would contradict the new one — exactly the mismatch that gets
+        logins rejected.  Clear it and let the next login mint a fresh token.
+        """
+        entries = self._data["accounts"]
+        if index < 0 or index >= len(entries):
+            return
+        creds = _decrypt(self._key, entries[index]["encrypted"])
+        changed = (creds.get("locale") != locale
+                   or creds.get("timezone_id") != timezone_id)
+        creds["locale"] = locale
+        creds["timezone_id"] = timezone_id
+        if changed:
+            creds["blackbox"] = None
         entries[index]["encrypted"] = _encrypt(self._key, creds)
         self._save()
 

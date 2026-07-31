@@ -494,6 +494,30 @@ def _prompt_vault_login():
     return creds, vault_session, acct_idx
 
 
+def _prompt_region(current_locale=None, current_timezone=None):
+    """Show the region preset picker. Returns (locale, timezone_id) or None.
+
+    None means "leave unchanged / use the global default". Regions are picked
+    as whole presets so the locale and timezone can never disagree.
+    """
+    current = config.region_label(
+        current_locale or config.IKABOT_LOCALE,
+        current_timezone or config.IKABOT_TIMEZONE_ID,
+    )
+    print("\nAccount region — sets the language, locale and timezone that this")
+    print("account presents when logging in. Pick the one matching the server")
+    print("you play on.")
+    print(f"\nCurrent: {current}")
+    print("\n  (0) Leave unchanged")
+    for pos, (name, loc, tz) in enumerate(config.REGION_PRESETS, start=1):
+        print(f"  ({pos}) {name}  [{loc}, {tz}]")
+    choice = read(min=0, max=len(config.REGION_PRESETS), digit=True)
+    if choice == 0:
+        return None
+    _, loc, tz = config.REGION_PRESETS[choice - 1]
+    return loc, tz
+
+
 def _offer_save_to_vault(session):
     """After a manual login, offer to save credentials + tokens to the vault."""
     if not session.padre:
@@ -537,12 +561,25 @@ def _offer_save_to_vault(session):
                        msg=f"Account label (default: '{default_label}'): ")
     label = label_input if label_input else default_label
 
+    # The session just logged in successfully with its current region, so store
+    # that as the account's region rather than re-prompting for one.
+    region = _prompt_region(session.locale, session.timezone_id)
+    if region is None:
+        acct_locale, acct_timezone = session.locale, session.timezone_id
+    else:
+        acct_locale, acct_timezone = region
+
     vault_session.add_account(
         label,
         session.mail,
         session.password,
-        blackbox=session.current_blackbox,
+        # A region other than the one this session used invalidates the token.
+        blackbox=(session.current_blackbox
+                  if acct_locale == session.locale
+                  and acct_timezone == session.timezone_id else None),
         lobby_token=session.current_lobby_token,
+        locale=acct_locale,
+        timezone_id=acct_timezone,
     )
     print(f"\nCredentials saved to vault as '{label}'.")
     enter()
@@ -560,8 +597,9 @@ def _manage_vault_menu(session):
         print("(4) Change master password")
         print("(5) Rename an account")
         print("(6) Change vault location")
+        print("(7) Change an account's region")
 
-        choice = read(min=0, max=6, digit=True)
+        choice = read(min=0, max=7, digit=True)
         if choice == 0:
             return
         elif choice == 1:
@@ -576,6 +614,8 @@ def _manage_vault_menu(session):
             _vault_rename_account()
         elif choice == 6:
             _vault_change_location()
+        elif choice == 7:
+            _vault_change_region()
 
 
 def _vault_list_accounts():
@@ -664,6 +704,69 @@ def _vault_rename_account():
     enter()
 
 
+def _vault_change_region():
+    if not vault_exists():
+        print("No vault found.")
+        enter()
+        return
+    master_pw = getpass.getpass("Master password: ").rstrip("\r\n")
+    try:
+        vs = open_vault(master_pw)
+    except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
+        print(f"Could not open vault: {exc}")
+        enter()
+        return
+    accounts = vs.list_accounts()
+    if not accounts:
+        print("Vault is empty.")
+        enter()
+        return
+    print("\nSelect account:")
+    print("  (0) Cancel")
+    for pos, (idx, label) in enumerate(accounts, start=1):
+        loc, tz = vs.get_region(idx)
+        if loc is None and tz is None:
+            region = "default"
+        else:
+            region = config.region_label(loc or config.IKABOT_LOCALE,
+                                         tz or config.IKABOT_TIMEZONE_ID)
+        print(f"  ({pos}) {label}  —  {region}")
+    choice = read(min=0, max=len(accounts), digit=True)
+    if choice == 0:
+        return
+
+    acct_idx, acct_label = accounts[choice - 1]
+    cur_locale, cur_timezone = vs.get_region(acct_idx)
+    region = _prompt_region(cur_locale, cur_timezone)
+    if region is None:
+        print("Region unchanged.")
+        enter()
+        return
+    new_locale, new_timezone = region
+    if new_locale == cur_locale and new_timezone == cur_timezone:
+        print("Region unchanged.")
+        enter()
+        return
+
+    print(f"\nChange '{acct_label}' to "
+          f"{config.region_label(new_locale, new_timezone)}?")
+    print("\nThis changes the fingerprint the account presents to Gameforge,")
+    print("so the next login will look like a new browser and may ask for a")
+    print("captcha or an email confirmation. The stored blackbox token will be")
+    print("discarded and regenerated for the new region.")
+    confirm = read(values=["y", "Y", "n", "N", ""], empty=True, default="n",
+                   msg="\nApply? [y/N]: ")
+    if confirm.lower() != "y":
+        print("Region unchanged.")
+        enter()
+        return
+
+    vs.set_region(acct_idx, new_locale, new_timezone)
+    print(f"\n'{acct_label}' is now "
+          f"{config.region_label(new_locale, new_timezone)}.")
+    enter()
+
+
 def _vault_change_master_password():
     if not vault_exists():
         print("No vault found.")
@@ -735,6 +838,8 @@ def start():
             password=creds["password"],
             blackbox=creds.get("blackbox"),
             lobby_token=creds.get("lobby_token"),
+            locale=creds.get("locale"),
+            timezone_id=creds.get("timezone_id"),
         )
         # Refresh stored tokens with the ones actually used / generated during login.
         if vault_session is not None:

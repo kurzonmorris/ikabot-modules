@@ -29,6 +29,36 @@ IKABOT_GF_LANG = os.getenv("IKABOT_GF_LANG", IKABOT_LOCALE.split("-")[0])
 IKABOT_TIMEZONE_ID = os.getenv("IKABOT_TIMEZONE_ID", "Europe/London")
 
 
+# Curated locale/timezone pairs.  Regions are offered as whole presets rather
+# than free text so a coherent fingerprint is the only thing representable —
+# a locale and a timezone that disagree are worse than any single wrong value.
+REGION_PRESETS = [
+    ("United Kingdom", "en-GB", "Europe/London"),
+    ("United States", "en-US", "America/New_York"),
+    ("Germany", "de-DE", "Europe/Berlin"),
+    ("France", "fr-FR", "Europe/Paris"),
+    ("Spain", "es-ES", "Europe/Madrid"),
+    ("Italy", "it-IT", "Europe/Rome"),
+    ("Greece", "el-GR", "Europe/Athens"),
+    ("Netherlands", "nl-NL", "Europe/Amsterdam"),
+    ("Poland", "pl-PL", "Europe/Warsaw"),
+    ("Portugal", "pt-PT", "Europe/Lisbon"),
+    ("Russia", "ru-RU", "Europe/Moscow"),
+    ("Turkey", "tr-TR", "Europe/Istanbul"),
+    ("Brazil", "pt-BR", "America/Sao_Paulo"),
+    ("Argentina", "es-AR", "America/Argentina/Buenos_Aires"),
+    ("Mexico", "es-MX", "America/Mexico_City"),
+]
+
+
+def region_label(loc, timezone_id):
+    """Return the friendly name of a locale/timezone pair, or a fallback."""
+    for name, preset_locale, preset_tz in REGION_PRESETS:
+        if preset_locale == loc and preset_tz == timezone_id:
+            return name
+    return "{} / {}".format(loc, timezone_id)
+
+
 def build_accept_language(loc=None, gf_lang=None):
     """Return an Accept-Language header consistent with the configured locale.
 

@@ -32,7 +32,8 @@ from ikabot.helpers.lobbyDecaptcha import break_interactive_captcha
 
 class Session:
     def __init__(self, mail: str = None, password: str = None,
-                 blackbox: str = None, lobby_token: str = None):
+                 blackbox: str = None, lobby_token: str = None,
+                 locale: str = None, timezone_id: str = None):
         self.padre = True
         self.logged = False
         self.blackbox = None
@@ -41,9 +42,11 @@ class Session:
         self.logger = getLogger(__name__)
         # Regional context. These must stay consistent with each other and with
         # the blackbox token request, otherwise Gameforge rejects the login.
-        self.locale = config.IKABOT_LOCALE
-        self.gf_lang = config.IKABOT_GF_LANG
-        self.timezone_id = config.IKABOT_TIMEZONE_ID
+        # A per-account region (from the vault) wins over the global defaults;
+        # gf_lang is always derived from the locale so the two cannot disagree.
+        self.locale = locale or config.IKABOT_LOCALE
+        self.gf_lang = self.locale.split("-")[0]
+        self.timezone_id = timezone_id or config.IKABOT_TIMEZONE_ID
         self.accept_language = config.build_accept_language(self.locale, self.gf_lang)
         self.requestHistory = deque(maxlen=5)  # keep last 5 requests in history
         # Every Ikariam response embeds a current actionRequest token. Cache the
