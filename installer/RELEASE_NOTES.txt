@@ -17,10 +17,15 @@ Changes in 2.0.1
   removes the retired ikabot_manager shortcut if it is still present
 - Close all (PowerShell) now closes the PowerShell windows too, not
   just the ikabot processes running inside them
-- build-ikabot.bat added: builds ikabot and names the release zip
-  ikabot-v{version}-mod-v{mod version}.zip read from ikabot\config.py
-- Renamed build.bat to "installer build.bat" to make it clear which
-  of the two build scripts builds the installer
+- Build scripts tidied to one per target:
+    "installer build.bat"  builds the installer
+    "ikabot build.bat"     builds ikabot itself
+  The old ikabot build script was removed - it named the zip
+  ikabot_v{mod version}.zip, which the installer cannot find, and
+  nested the files inside an extra ikabot\ folder. The replacement
+  reads both versions from ikabot\config.py and names the zip
+  ikabot-v{version}-mod-v{mod version}.zip with ikabot.exe and
+  _internal at the zip root.
 - Installer is now built as a single self-contained exe, so it can no
   longer fail with "No module named 'encodings'" if separated from
   its _internal folder
