@@ -1,7 +1,27 @@
-Version: 2.0.0
+Version: 2.0.1
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 2.0.1
+-----------------
+- Fixed "File is not a zip file" when downloading ikabot. A dropped
+  connection left a partly-written file that was then extracted as if
+  it were complete. Downloads are now checked against the expected
+  size and confirmed to be a real zip before extracting.
+- Failed downloads are retried automatically (3 attempts)
+- Download progress is now shown (MB downloaded and percentage)
+- Clearer errors: an incomplete download, a damaged zip, and a server
+  returning a web page instead of a file are now reported separately
+- Open all instances only launches numbered instance shortcuts, and
+  removes the retired ikabot_manager shortcut if it is still present
+- Close all (PowerShell) now closes the PowerShell windows too, not
+  just the ikabot processes running inside them
+- build-ikabot.bat added: builds ikabot and names the release zip
+  ikabot-v{version}-mod-v{mod version}.zip read from ikabot\config.py
+- Installer is now built as a single self-contained exe, so it can no
+  longer fail with "No module named 'encodings'" if separated from
+  its _internal folder
 
 Changes in 2.0.0
 -----------------

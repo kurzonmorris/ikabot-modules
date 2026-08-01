@@ -46,7 +46,9 @@ echo ============================================================
 echo.
 
 rem ── Build with PyInstaller ────────────────────────────────────
-python -m PyInstaller --clean installer\ikabot.spec
+rem --noconfirm  auto-accepts wiping the existing dist\ikabot folder
+rem --clean      clears the PyInstaller cache and build temp files
+python -m PyInstaller --clean --noconfirm installer\ikabot.spec
 if errorlevel 1 (
     echo.
     echo BUILD FAILED
@@ -74,7 +76,8 @@ set ZIPFILE=releases\ikabot-v%IKVER%-mod-v%MODVER%.zip
 
 echo.
 echo Zipping dist\ikabot to %ZIPFILE% ...
-if exist "%ZIPFILE%" del "%ZIPFILE%"
+rem /F /Q - force delete read-only files, no "are you sure?" prompt
+if exist "%ZIPFILE%" del /F /Q "%ZIPFILE%"
 
 rem 'dist\ikabot\*' puts ikabot.exe and _internal at the ZIP ROOT,
 rem which is what the installer expects when it extracts the release.
