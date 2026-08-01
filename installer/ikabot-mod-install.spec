@@ -4,7 +4,8 @@
 # Build command (run from the installer/ folder):
 #   python -m PyInstaller --clean ikabot-mod-install.spec
 #
-# Or use build.bat which reads the version automatically and zips the output.
+# Or use "installer build.bat" which reads the version automatically
+# and zips the output.
 #
 # Output: dist/ikabot-mod-install.exe   <- single self-contained file
 #
