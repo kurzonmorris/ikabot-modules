@@ -11,7 +11,8 @@ Install flow:
   5. Optional modules download (from GitHub repo — no release zip needed)
   6. Instance count prompt
   7. Sync ikariam folders from template
-  8. Create numbered shortcuts (+ installer shortcut when frozen)
+  8. Create numbered shortcuts, and install a copy of the installer
+     into the 'ikabot installer' folder with a shortcut to it
   9. Shortcut destination prompt (folder picker)
  10. Summary screen
 
@@ -1684,13 +1685,35 @@ def main() -> None:
                 "You can create the shortcuts manually later."
             )
 
-    # Installer shortcut — points to the currently-running exe when frozen
+    # Install a copy of the installer into the install folder, and point the
+    # shortcut at that copy — not at wherever this exe was run from. Otherwise
+    # the shortcut breaks as soon as the downloaded installer is moved,
+    # renamed or deleted.
     if getattr(sys, "frozen", False):
         try:
-            create_shortcut(Path(sys.executable), shortcuts_dir / "ikabot-mod-install.lnk")
+            running_exe   = Path(sys.executable).resolve()
+            installed_exe = (installer_dir / "ikabot-mod-install.exe").resolve()
+
+            # Skip the copy when the installer is already the installed one
+            # (re-running it from the install folder) — Windows will not let
+            # a running exe be overwritten.
+            if str(running_exe).lower() != str(installed_exe).lower():
+                shutil.copy2(running_exe, installed_exe)
+                print(f"  Installer copied to {installed_exe}")
+
+            write_version(installer_dir, INSTALLER_VERSION)
+
+            create_shortcut(installed_exe, shortcuts_dir / "ikabot-mod-install.lnk")
             print("  ikabot-mod-install.lnk")
         except Exception as exc:
-            print(f"  Warning: could not create installer shortcut: {exc}")
+            print(f"  Warning: could not install a copy of the installer: {exc}")
+            # Fall back to a shortcut to the running exe so there is still one
+            try:
+                create_shortcut(Path(sys.executable),
+                                shortcuts_dir / "ikabot-mod-install.lnk")
+                print("  ikabot-mod-install.lnk (pointing at the original file)")
+            except Exception as exc2:
+                print(f"  Warning: could not create installer shortcut: {exc2}")
 
     # Copy open-all-instances.ps1 into shortcuts folder if bundled
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))

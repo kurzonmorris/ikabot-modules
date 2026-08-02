@@ -15,6 +15,10 @@ Changes in 2.0.2
 - Update Installer no longer deletes anything until it knows the
   download succeeded, so a failed update can no longer leave the
   installer folder empty
+- First-time install now places a copy of the installer in the
+  'ikabot installer' folder and points the shortcut at that copy.
+  Previously the shortcut pointed at wherever the installer had been
+  run from, so it broke as soon as that download was moved or deleted.
 - Downloads now fall back to Windows' built-in curl if Python's own
   downloader fails. On some machines Python's downloader returns a
   truncated file while curl fetches the same URL perfectly, which
