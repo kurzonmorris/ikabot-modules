@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -46,7 +47,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "2.1.0"
+INSTALLER_VERSION = "2.1.1"
 
 GITHUB_API      = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/contents"
@@ -64,6 +65,7 @@ MODULES_TEMPLATE = "Ikabot Modules template"
 
 STATE_FILE  = Path(tempfile.gettempdir()) / "ikabot_install_state.json"
 CONFIG_FILE = Path.home() / "AppData" / "Local" / "ikabot" / "installer_config.json"
+ERROR_LOG   = Path.home() / "AppData" / "Local" / "ikabot" / "last_error.txt"
 
 # ── Tkinter helpers ───────────────────────────────────────────────────────────
 
@@ -205,10 +207,15 @@ def ask_count_or_skip(title: str, message: str, initial: str = "") -> str | None
 
 # ── Version helpers ───────────────────────────────────────────────────────────
 
-def ver_tuple(v: str) -> tuple[int, ...]:
-    v = v.strip().lstrip("vV")
+def ver_tuple(v) -> tuple[int, ...]:
+    """Parse a version into comparable numbers. Never raises.
+
+    Accepts anything — a version.json written by hand may hold a number
+    rather than a string, and a crash here would take the whole app down.
+    """
     try:
-        return tuple(int(x) for x in re.split(r"[.\-_]", v) if x.isdigit())
+        return tuple(int(x) for x in re.split(r"[.\-_]", str(v).strip().lstrip("vV"))
+                     if x.isdigit())
     except Exception:
         return (0,)
 
@@ -762,21 +769,28 @@ def check_versions(install_dir: Path) -> dict:
 
     try:
         releases = fetch_releases()
+        # A rate-limit or error payload comes back as a dict, not a list
+        if not isinstance(releases, list):
+            raise ValueError(
+                releases.get("message", "unexpected reply from GitHub")
+                if isinstance(releases, dict) else "unexpected reply from GitHub")
+
+        installer_asset = find_asset(releases, ASSET_INSTALLER_RE)
+        if installer_asset:
+            result["installer"]["remote"] = installer_asset[2]
+
+        ikabot_asset = find_ikabot_asset(releases)
+        if ikabot_asset:
+            _, ik_ver, mod_ver = ikabot_asset
+            result["ikabot"]["remote"] = ik_ver
+            result["mod"]["remote"]    = mod_ver
+
+        result["online"] = True
     except Exception as exc:
+        # Never let a version check stop the manager from opening
         result["error"] = str(exc)
+        print(f"  Could not check versions: {exc}")
         return result
-
-    result["online"] = True
-
-    installer_asset = find_asset(releases, ASSET_INSTALLER_RE)
-    if installer_asset:
-        result["installer"]["remote"] = installer_asset[2]
-
-    ikabot_asset = find_ikabot_asset(releases)
-    if ikabot_asset:
-        _, ik_ver, mod_ver = ikabot_asset
-        result["ikabot"]["remote"] = ik_ver
-        result["mod"]["remote"]    = mod_ver
 
     for key in ("installer", "ikabot", "mod"):
         info = result[key]
@@ -1890,4 +1904,33 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise                       # sys.exit() during self-update is not an error
+    except Exception:
+        # Without this the console window closes instantly on any crash and
+        # the error is impossible to read.
+        details = traceback.format_exc()
+        print("\n" + "=" * 60)
+        print("The installer hit an unexpected error:\n")
+        print(details)
+        print("=" * 60)
+        try:
+            show_error(
+                "The installer hit an unexpected error and has to stop.\n\n"
+                f"{details.strip().splitlines()[-1]}\n\n"
+                "The full details are in the console window behind this\n"
+                "message, and have been saved to:\n"
+                f"  {ERROR_LOG}",
+                "ikabot Installer — Unexpected Error",
+            )
+        except Exception:
+            pass
+        try:
+            ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+            ERROR_LOG.write_text(details)
+        except Exception:
+            pass
+        input("Press Enter to close ...")
+        sys.exit(1)

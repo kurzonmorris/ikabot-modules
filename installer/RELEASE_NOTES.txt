@@ -1,7 +1,21 @@
-Version: 2.1.0
+Version: 2.1.1
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 2.1.1
+-----------------
+- Crashes are no longer invisible. Any unexpected error now prints the
+  full details to the console, shows them in a dialog, saves them to
+  AppData\Local\ikabot\last_error.txt, and waits for a keypress
+  instead of the window vanishing before it can be read.
+- Fixed a crash when opening Maintenance if version.json held a
+  number instead of a string - the version parser now accepts any
+  value rather than raising
+- The version check can no longer stop the manager from opening. A
+  GitHub rate-limit reply, an unreadable response or a malformed
+  release entry are all reported as "could not check" instead of
+  ending the program.
 
 Changes in 2.1.0
 -----------------
