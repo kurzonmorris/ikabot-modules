@@ -1,0 +1,11 @@
+{
+  "name": "vinted-shopify-sync",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension keeping a Vinted wardrobe and a Shopify clothing store in parity.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "//": "There is no build step — Chrome loads this folder as-is. package.json exists only so `node --test` treats src/lib/*.js as ES modules."
+}

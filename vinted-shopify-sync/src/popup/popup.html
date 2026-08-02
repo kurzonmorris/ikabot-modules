@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Vinted ↔ Shopify Sync</title>
+  <link rel="stylesheet" href="../shared.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body class="popup">
+  <header>
+    <h1>Vinted <span class="arrows">↔</span> Shopify</h1>
+    <a id="open-options" href="#" class="link">Settings</a>
+  </header>
+
+  <section class="connections">
+    <div class="conn" id="conn-vinted">
+      <span class="dot" data-state="unknown"></span>
+      <div>
+        <strong>Vinted</strong>
+        <small class="detail">not checked</small>
+      </div>
+      <button class="ghost" data-test="vinted">Test</button>
+    </div>
+    <div class="conn" id="conn-shopify">
+      <span class="dot" data-state="unknown"></span>
+      <div>
+        <strong>Shopify</strong>
+        <small class="detail">not checked</small>
+      </div>
+      <button class="ghost" data-test="shopify">Test</button>
+    </div>
+  </section>
+
+  <section class="run">
+    <label class="toggle">
+      <input type="checkbox" id="dry-run" checked>
+      <span>Dry run — show changes without writing</span>
+    </label>
+    <div class="buttons">
+      <button id="run" class="primary">Run sync</button>
+      <button id="cancel" class="ghost" disabled>Cancel</button>
+    </div>
+    <p id="status" class="status">Idle</p>
+  </section>
+
+  <section class="summary">
+    <h2>Last run</h2>
+    <div id="last-run" class="muted">No runs yet.</div>
+  </section>
+
+  <section class="activity">
+    <h2>
+      Activity
+      <span class="spacer"></span>
+      <button id="export" class="ghost small">Export report</button>
+      <button id="clear-logs" class="ghost small">Clear</button>
+    </h2>
+    <ul id="log" class="log"></ul>
+  </section>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

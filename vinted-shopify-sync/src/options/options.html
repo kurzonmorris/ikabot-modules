@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Vinted ↔ Shopify Sync — Settings</title>
+  <link rel="stylesheet" href="../shared.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body class="options">
+  <main>
+    <h1>Vinted <span class="arrows">↔</span> Shopify Sync</h1>
+    <p class="muted intro">
+      Settings are stored on this computer only. The Shopify access token never
+      leaves this machine and is redacted from exported reports.
+    </p>
+
+    <section>
+      <h2>Shopify</h2>
+      <label>
+        Store domain
+        <input type="text" id="shop-domain" placeholder="my-store.myshopify.com" autocomplete="off">
+        <small>The permanent <code>.myshopify.com</code> domain, not a custom domain.</small>
+      </label>
+      <label>
+        Admin API access token
+        <input type="password" id="shop-token" placeholder="shpat_…" autocomplete="off">
+        <small>
+          Settings → Apps and sales channels → Develop apps → create an app with
+          <code>read_products</code>, <code>write_products</code>,
+          <code>read_inventory</code>, <code>write_inventory</code>.
+        </small>
+      </label>
+      <div class="row">
+        <label>
+          API version
+          <input type="text" id="shop-version" placeholder="2025-01">
+        </label>
+        <label>
+          Inventory location
+          <select id="shop-location"><option value="">(set on first connect)</option></select>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="test-shopify" class="ghost">Test connection</button>
+        <span id="shopify-result" class="result"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Vinted</h2>
+      <label>
+        Domain
+        <select id="vinted-domain">
+          <option value="www.vinted.co.uk">www.vinted.co.uk</option>
+          <option value="www.vinted.com">www.vinted.com</option>
+          <option value="www.vinted.fr">www.vinted.fr</option>
+          <option value="www.vinted.de">www.vinted.de</option>
+          <option value="www.vinted.es">www.vinted.es</option>
+          <option value="www.vinted.it">www.vinted.it</option>
+          <option value="www.vinted.nl">www.vinted.nl</option>
+          <option value="www.vinted.pl">www.vinted.pl</option>
+        </select>
+      </label>
+      <label>
+        Username <span class="muted">(optional)</span>
+        <input type="text" id="vinted-username" placeholder="your Vinted username" autocomplete="off">
+        <small>Only used as a safety check that the signed-in tab is the right account.</small>
+      </label>
+      <div class="actions">
+        <button id="test-vinted" class="ghost">Test connection</button>
+        <span id="vinted-result" class="result"></span>
+      </div>
+      <p class="note">
+        Reading Vinted needs a signed-in Vinted tab; the extension uses that session
+        and never handles your password.
+      </p>
+    </section>
+
+    <section>
+      <h2>What syncs, and which way</h2>
+      <div class="row">
+        <label>
+          Stock &amp; sold status
+          <select id="rule-inventory" data-rule></select>
+        </label>
+        <label>
+          Price
+          <select id="rule-price" data-rule></select>
+        </label>
+        <label>
+          Title, description, attributes
+          <select id="rule-content" data-rule></select>
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="archive-sold">
+        Archive the other side when an item sells
+      </label>
+      <label class="check">
+        <input type="checkbox" id="create-missing">
+        Create listings that exist on one side only <span class="muted">(phase 2 — not yet implemented)</span>
+      </label>
+    </section>
+
+    <section>
+      <h2>Matching</h2>
+      <p class="note">
+        Items are paired by SKU. Shopify variants carry a SKU field; Vinted has none,
+        so put the same code in the Vinted listing description as
+        <code>SKU: ABC-123</code> or <code>[ABC-123]</code>. Listings without a SKU
+        fall back to matching on title + size, which is reported but never written to.
+      </p>
+    </section>
+
+    <section>
+      <h2>Running</h2>
+      <label class="check">
+        <input type="checkbox" id="dry-run">
+        <b>Dry run</b> — report what would change, write nothing
+      </label>
+      <div class="row">
+        <label>
+          Automatic sync every
+          <select id="interval">
+            <option value="0">manual only</option>
+            <option value="15">15 minutes</option>
+            <option value="30">30 minutes</option>
+            <option value="60">hour</option>
+            <option value="240">4 hours</option>
+            <option value="1440">day</option>
+          </select>
+        </label>
+        <label>
+          Activity log size
+          <input type="number" id="max-logs" min="50" max="5000" step="50">
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="verbose">
+        Verbose logging
+      </label>
+    </section>
+
+    <footer>
+      <button id="save" class="primary">Save settings</button>
+      <span id="save-result" class="result"></span>
+    </footer>
+  </main>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

@@ -1,0 +1,92 @@
+:root {
+  --bg: #ffffff;
+  --panel: #f6f7f9;
+  --border: #e2e5ea;
+  --text: #1b1d22;
+  --muted: #6b7280;
+  --accent: #0b7285;
+  --accent-text: #ffffff;
+  --ok: #16a34a;
+  --warn: #d97706;
+  --error: #dc2626;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --panel: #1e2128;
+    --border: #2c313a;
+    --text: #e7e9ee;
+    --muted: #9aa2b1;
+    --accent: #2aa1b8;
+    --accent-text: #06222a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+h1 { font-size: 14px; margin: 0; }
+h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.spacer { flex: 1; }
+.muted { color: var(--muted); }
+.link { color: var(--accent); text-decoration: none; font-size: 12px; }
+.link:hover { text-decoration: underline; }
+
+button {
+  font: inherit;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: transparent;
+  font-weight: 600;
+}
+button.small { padding: 3px 8px; font-size: 11px; }
+
+input[type="text"], input[type="password"], input[type="number"], select {
+  font: inherit;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+.dot[data-state="ok"] { background: var(--ok); }
+.dot[data-state="error"] { background: var(--error); }
+.dot[data-state="busy"] { background: var(--warn); }
