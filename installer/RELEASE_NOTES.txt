@@ -26,6 +26,10 @@ Changes in 2.0.1
   reads both versions from ikabot\config.py and names the zip
   ikabot-v{version}-mod-v{mod version}.zip with ikabot.exe and
   _internal at the zip root.
+- Both build scripts now write their zip into the releases folder,
+  run from any working directory, and auto-confirm PyInstaller's
+  "output directory will be REMOVED - continue?" prompt so a build
+  never stops waiting for a keypress
 - Installer is now built as a single self-contained exe, so it can no
   longer fail with "No module named 'encodings'" if separated from
   its _internal folder
