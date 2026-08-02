@@ -279,6 +279,30 @@ def find_asset(releases: list[dict], pattern: re.Pattern) -> tuple[str, str, str
     return None
 
 
+def _curl_available() -> bool:
+    """Windows 10 build 1803 and later ship curl.exe."""
+    return shutil.which("curl.exe") is not None or shutil.which("curl") is not None
+
+
+def _download_with_curl(url: str, tmp: Path) -> tuple[int, str]:
+    """Download using Windows' built-in curl.exe.
+
+    Used as a fallback when Python's own downloader fails — curl handles
+    proxies, TLS and redirects independently, and fails loudly on a
+    partial transfer instead of leaving a truncated file behind.
+    Returns (bytes_written, content_type).
+    """
+    exe = shutil.which("curl.exe") or shutil.which("curl")
+    print("  Falling back to curl ...")
+    subprocess.run(
+        [exe, "-L", "--fail", "--retry", "2", "-#",
+         "-A", f"ikabot-mod-install/{INSTALLER_VERSION}",
+         "-o", str(tmp), url],
+        check=True,
+    )
+    return (tmp.stat().st_size if tmp.exists() else 0), ""
+
+
 def download_zip(url: str, dest_dir: Path, label: str = "", attempts: int = 3) -> None:
     """Download a zip file and extract it into dest_dir.
 
@@ -288,6 +312,9 @@ def download_zip(url: str, dest_dir: Path, label: str = "", attempts: int = 3) -
     part-way through leaves a truncated file, which then fails with the
     misleading error "File is not a zip file" even though the file on
     GitHub is perfectly valid.
+
+    The first attempt uses Python's downloader; later attempts fall back
+    to curl.exe, which succeeds on some machines where Python's does not.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest_dir / "_tmp_download.zip"
@@ -300,65 +327,20 @@ def download_zip(url: str, dest_dir: Path, label: str = "", attempts: int = 3) -
                 time.sleep(2)
 
             print(f"  Downloading {label or url} ...")
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": f"ikabot-mod-install/{INSTALLER_VERSION}"},
-            )
 
-            written = 0
-            with urllib.request.urlopen(req, timeout=60) as response:
-                raw_len = response.headers.get("Content-Length")
-                expected = int(raw_len) if raw_len and raw_len.isdigit() else None
-                ctype = (response.headers.get("Content-Type") or "").lower()
+            # After the first failure, switch transport to curl if we have it
+            if attempt > 1 and _curl_available():
+                written, ctype = _download_with_curl(url, tmp)
+                expected = None          # curl already fails on a partial transfer
+            else:
+                written, expected, ctype = _download_with_urllib(url, tmp)
 
-                MB = 1024 * 1024
-                marker = -1
-                with open(tmp, "wb") as f:
-                    while True:
-                        chunk = response.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        written += len(chunk)
-                        # refresh on each 1% (or each MB when size is unknown)
-                        step = (written * 100 // expected) if expected else (written // MB)
-                        if step != marker:
-                            marker = step
-                            if expected:
-                                print(f"\r    {written / MB:.1f} MB of {expected / MB:.1f} MB"
-                                      f"  ({step}%)  ", end="")
-                            else:
-                                print(f"\r    {written / MB:.1f} MB  ", end="")
-                if marker >= 0:
-                    print()
-
-            # Did we get the whole thing?
-            if expected is not None and written != expected:
-                last_problem = (f"the download was cut short — received "
-                                f"{written:,} bytes but expected {expected:,}")
-                print(f"  {last_problem}")
-                continue
-
-            # Is it actually a zip? (An HTML error page would arrive silently.)
-            if not zipfile.is_zipfile(tmp):
-                with open(tmp, "rb") as f:
-                    head = f.read(64)
-                if b"<html" in head.lower() or "text/html" in ctype:
-                    last_problem = ("the server sent a web page instead of the file — "
-                                    "the release asset may have been removed or renamed")
-                else:
-                    last_problem = (f"the downloaded file is not a zip "
-                                    f"({written:,} bytes, begins with {head[:16]!r})")
-                print(f"  {last_problem}")
-                continue
-
-            print(f"  Extracting to {dest_dir} ...")
-            with zipfile.ZipFile(tmp, "r") as zf:
-                zf.extractall(dest_dir)
+            _verify_and_extract(tmp, dest_dir, written, expected, ctype)
             tmp.unlink(missing_ok=True)
             return
 
-        except (urllib.error.URLError, zipfile.BadZipFile, OSError) as exc:
+        except (urllib.error.URLError, zipfile.BadZipFile, OSError,
+                subprocess.CalledProcessError, ValueError) as exc:
             last_problem = str(exc) or exc.__class__.__name__
             print(f"  Attempt {attempt} failed: {last_problem}")
 
@@ -369,6 +351,70 @@ def download_zip(url: str, dest_dir: Path, label: str = "", attempts: int = 3) -
         "Check your internet connection, and confirm the release\n"
         "is still published on GitHub, then try again."
     )
+
+
+def _download_with_urllib(url: str, tmp: Path) -> tuple[int, int | None, str]:
+    """Download with Python's urllib. Returns (bytes_written, expected, content_type)."""
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": f"ikabot-mod-install/{INSTALLER_VERSION}"},
+    )
+
+    written = 0
+    with urllib.request.urlopen(req, timeout=60) as response:
+        raw_len = response.headers.get("Content-Length")
+        expected = int(raw_len) if raw_len and raw_len.isdigit() else None
+        ctype = (response.headers.get("Content-Type") or "").lower()
+
+        MB = 1024 * 1024
+        marker = -1
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                written += len(chunk)
+                # refresh on each 1% (or each MB when size is unknown)
+                step = (written * 100 // expected) if expected else (written // MB)
+                if step != marker:
+                    marker = step
+                    if expected:
+                        print(f"\r    {written / MB:.1f} MB of {expected / MB:.1f} MB"
+                              f"  ({step}%)  ", end="")
+                    else:
+                        print(f"\r    {written / MB:.1f} MB  ", end="")
+        if marker >= 0:
+            print()
+
+    return written, expected, ctype
+
+
+def _verify_and_extract(tmp: Path, dest_dir: Path, written: int,
+                        expected: int | None, ctype: str) -> None:
+    """Confirm the download is complete and a real zip, then extract it.
+
+    Raises ValueError with a plain-language reason if it is not usable,
+    so the caller can retry on another transport.
+    """
+    # Did we get the whole thing?
+    if expected is not None and written != expected:
+        raise ValueError(f"the download was cut short — received "
+                         f"{written:,} bytes but expected {expected:,}")
+
+    # Is it actually a zip? (An HTML error page would arrive silently.)
+    if not zipfile.is_zipfile(tmp):
+        with open(tmp, "rb") as f:
+            head = f.read(64)
+        if b"<html" in head.lower() or "text/html" in ctype:
+            raise ValueError("the server sent a web page instead of the file — "
+                             "the release asset may have been removed or renamed")
+        raise ValueError(f"the downloaded file is not a zip "
+                         f"({written:,} bytes, begins with {head[:16]!r})")
+
+    print(f"  Extracting to {dest_dir} ...")
+    with zipfile.ZipFile(tmp, "r") as zf:
+        zf.extractall(dest_dir)
 
 
 def fetch_repo_folder(folder_path: str) -> list[dict]:
