@@ -45,7 +45,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "2.0.1"
+INSTALLER_VERSION = "2.0.2"
 
 GITHUB_API      = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/contents"
@@ -794,24 +794,93 @@ def maint_update_installer(install_dir: Path) -> None:
         ):
             return
 
+    # Download into a staging folder first. The installer is usually run
+    # FROM installer_dir, and Windows will not let a running .exe be
+    # deleted or overwritten — so nothing in installer_dir is touched
+    # until we know exactly what we are replacing.
+    staging = installer_dir / "_new_version"
     try:
-        installer_dir.mkdir(exist_ok=True)
-        for item in installer_dir.iterdir():
-            if item.name.startswith("version"):
-                continue
-            shutil.rmtree(item) if item.is_dir() else item.unlink()
-        download_zip(url, installer_dir, f"installer v{remote_ver}")
-        write_version(installer_dir, remote_ver)
+        installer_dir.mkdir(parents=True, exist_ok=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        download_zip(url, staging, f"installer v{remote_ver}")
     except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
         show_error(f"Failed to download installer:\n\n{exc}")
         return
 
-    if ask_yes_no(
-        f"Installer v{remote_ver} downloaded to:\n  {installer_dir}\n\n"
-        "Create a shortcut to it in your shortcuts folder now?",
-        "Create Installer Shortcut?",
-    ):
-        maint_update_installer_shortcut(install_dir)
+    # The zip may be a single exe or a onedir bundle — find the exe either way
+    new_exe = next(staging.rglob("ikabot-mod-install.exe"), None)
+    if new_exe is None:
+        shutil.rmtree(staging, ignore_errors=True)
+        show_error(
+            "The downloaded file did not contain ikabot-mod-install.exe.\n\n"
+            "The release asset may have been packaged incorrectly."
+        )
+        return
+
+    target = installer_dir / "ikabot-mod-install.exe"
+    running = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
+    replacing_self = running is not None and str(running).lower() == str(target.resolve()).lower()
+
+    write_version(installer_dir, remote_ver)
+
+    if not replacing_self:
+        # Safe to swap in directly
+        try:
+            if target.exists():
+                target.unlink()
+            shutil.move(str(new_exe), str(target))
+            shutil.rmtree(staging, ignore_errors=True)
+        except Exception as exc:
+            show_error(f"Could not put the new installer in place:\n\n{exc}")
+            return
+
+        if ask_yes_no(
+            f"Installer v{remote_ver} is ready at:\n  {target}\n\n"
+            "Create a shortcut to it in your shortcuts folder now?",
+            "Create Installer Shortcut?",
+        ):
+            maint_update_installer_shortcut(install_dir)
+        return
+
+    # We are replacing the exe that is currently running. Windows keeps it
+    # locked until this process exits, so hand the swap to a small batch
+    # file that waits for us to close, moves the new exe in, and starts it.
+    swapper = installer_dir / "_finish_update.bat"
+    swapper.write_text(
+        "@echo off\r\n"
+        "setlocal\r\n"
+        "set /a tries=0\r\n"
+        ":retry\r\n"
+        f'move /Y "{new_exe}" "{target}" >nul 2>&1\r\n'
+        "if not errorlevel 1 goto done\r\n"
+        "set /a tries+=1\r\n"
+        "if %tries% GEQ 30 goto failed\r\n"
+        "ping -n 2 127.0.0.1 >nul\r\n"
+        "goto retry\r\n"
+        ":done\r\n"
+        f'rmdir /s /q "{staging}" 2>nul\r\n'
+        f'start "" "{target}"\r\n'
+        'goto cleanup\r\n'
+        ":failed\r\n"
+        "echo Could not replace the installer - it is still in use.\r\n"
+        f'echo The new version is here: "{new_exe}"\r\n'
+        "pause\r\n"
+        ":cleanup\r\n"
+        '(goto) 2>nul & del "%~f0"\r\n'
+    )
+
+    show_info(
+        f"Installer v{remote_ver} has been downloaded.\n\n"
+        "This installer will now close so the new version can replace it,\n"
+        "then the new version will start automatically.",
+        "Finishing Update",
+    )
+    subprocess.Popen(["cmd", "/c", str(swapper)],
+                     cwd=str(installer_dir),
+                     creationflags=subprocess.CREATE_NEW_CONSOLE)
+    sys.exit(0)
 
 
 def maint_update_ikabot(install_dir: Path) -> None:

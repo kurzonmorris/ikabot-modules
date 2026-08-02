@@ -1,7 +1,20 @@
-Version: 2.0.1
+Version: 2.0.2
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 2.0.2
+-----------------
+- Fixed "Update Installer" being unable to update the installer. It
+  wiped the folder it was running from and then extracted a new
+  ikabot-mod-install.exe over itself, which Windows does not allow
+  while the exe is running. The new version is now downloaded to a
+  staging folder first, and when it would replace the running exe a
+  small helper waits for this one to close, swaps it in, and starts
+  the new version automatically.
+- Update Installer no longer deletes anything until it knows the
+  download succeeded, so a failed update can no longer leave the
+  installer folder empty
 
 Changes in 2.0.1
 -----------------
