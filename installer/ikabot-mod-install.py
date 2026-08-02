@@ -47,7 +47,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "2.1.1"
+INSTALLER_VERSION = "2.1.2"
 
 GITHUB_API      = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/contents"
@@ -1325,12 +1325,12 @@ def _maintenance_menu(vers: dict | None = None) -> str | None:
     dlg.attributes("-topmost", True)
 
     tk.Label(dlg, text="ikabot Manager", justify="left", anchor="w",
-             font=("", 11, "bold"), padx=24, pady=(12, 4)).pack(fill="x")
+             font=("", 11, "bold"), padx=24).pack(fill="x", pady=(12, 4))
 
     # ── Installed versions, coloured by whether they are current ──────────
     if vers:
-        panel = tk.Frame(dlg, padx=24, pady=(0, 4))
-        panel.pack(fill="x")
+        panel = tk.Frame(dlg, padx=24)
+        panel.pack(fill="x", pady=(0, 4))
 
         for r, (label, key) in enumerate((("Installer", "installer"),
                                           ("ikabot", "ikabot"),
@@ -1357,10 +1357,10 @@ def _maintenance_menu(vers: dict | None = None) -> str | None:
                 if not vers.get("online") else
                 "Green = up to date    Red = update available")
         tk.Label(dlg, text=note, anchor="w", fg=GREY, font=("", 8),
-                 padx=24, pady=(2, 6)).pack(fill="x")
+                 padx=24).pack(fill="x", pady=(2, 6))
 
     tk.Label(dlg, text="Select an action:", justify="left", anchor="w",
-             padx=24, pady=(0, 6)).pack(fill="x")
+             padx=24).pack(fill="x", pady=(0, 6))
 
     frm = tk.Frame(dlg, padx=24, pady=4)
     frm.pack()

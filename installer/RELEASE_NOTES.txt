@@ -1,7 +1,14 @@
-Version: 2.1.1
+Version: 2.1.2
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 2.1.2
+-----------------
+- Fixed the manager screen failing to open with
+  'bad screen distance "12 4"'. The new version panel passed a pair of
+  padding values to widgets that only accept a single value - valid
+  for pack() and grid(), but not on the widget itself.
 
 Changes in 2.1.1
 -----------------
