@@ -1,10 +1,20 @@
-Version: 2.0.2
+Version: 2.1.0
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
 
-Changes in 2.0.2
+Changes in 2.1.0
 -----------------
+- The manager screen now shows the installed Installer, ikabot and
+  ikabot mod versions, checked against GitHub each time it opens.
+  Versions are green when up to date and red when an update is
+  available, showing what you have and what is on offer, e.g.
+  v1.6.9 -> v1.7.5. If GitHub cannot be reached the versions are
+  shown in grey rather than blocking the manager from opening.
+- Status re-runs that check, so the manager screen behind it updates
+  too, and Status now reports whether each component is current
+- The check also re-runs after Update Installer and Update Ikabot, so
+  the colours turn green as soon as an update completes
 - Fixed "Update Installer" being unable to update the installer. It
   wiped the folder it was running from and then extracted a new
   ikabot-mod-install.exe over itself, which Windows does not allow

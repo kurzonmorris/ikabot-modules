@@ -46,7 +46,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "2.0.2"
+INSTALLER_VERSION = "2.1.0"
 
 GITHUB_API      = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/contents"
@@ -741,7 +741,57 @@ def find_ikabot_asset(releases: list[dict]) -> tuple[str, str, str] | None:
     return None
 
 
-def maint_show_status(install_dir: Path) -> None:
+def check_versions(install_dir: Path) -> dict:
+    """Compare what is installed against the latest on GitHub.
+
+    Returns a dict with an entry per component:
+        {"local": str|None, "remote": str|None, "ok": bool}
+    plus "online" (False when GitHub could not be reached) and "error".
+    Never raises — being offline must not stop the manager from opening.
+    """
+    template_dir = install_dir / "ikabot template"
+
+    result = {
+        "installer": {"local": INSTALLER_VERSION, "remote": None, "ok": False},
+        "ikabot":    {"local": read_version_key(template_dir, "ikabot_version"),
+                      "remote": None, "ok": False},
+        "mod":       {"local": read_version(template_dir), "remote": None, "ok": False},
+        "online": False,
+        "error": None,
+    }
+
+    try:
+        releases = fetch_releases()
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    result["online"] = True
+
+    installer_asset = find_asset(releases, ASSET_INSTALLER_RE)
+    if installer_asset:
+        result["installer"]["remote"] = installer_asset[2]
+
+    ikabot_asset = find_ikabot_asset(releases)
+    if ikabot_asset:
+        _, ik_ver, mod_ver = ikabot_asset
+        result["ikabot"]["remote"] = ik_ver
+        result["mod"]["remote"]    = mod_ver
+
+    for key in ("installer", "ikabot", "mod"):
+        info = result[key]
+        if info["remote"] is None:
+            # Nothing published to compare against — treat as up to date
+            info["ok"] = info["local"] is not None
+        elif info["local"] is None:
+            info["ok"] = False          # not installed, or version not recorded
+        else:
+            info["ok"] = ver_tuple(info["local"]) >= ver_tuple(info["remote"])
+
+    return result
+
+
+def maint_show_status(install_dir: Path, vers: dict | None = None) -> None:
     template_dir     = install_dir / "ikabot template"
     ikabot_dir       = install_dir / "ikabot"
     modules_dir      = install_dir / "modules"
@@ -749,6 +799,14 @@ def maint_show_status(install_dir: Path) -> None:
 
     mod_ver    = read_version(template_dir) or "not installed"
     ikabot_ver = read_version_key(template_dir, "ikabot_version") or "unknown"
+
+    def _latest(key: str) -> str:
+        if not vers or not vers.get("online"):
+            return "  (could not check GitHub)"
+        info = vers[key]
+        if info["remote"] is None:
+            return "  (nothing published)"
+        return "  — up to date" if info["ok"] else f"  — UPDATE AVAILABLE: v{info['remote']}"
 
     inst_count = 0
     if ikabot_dir.exists():
@@ -781,9 +839,9 @@ def maint_show_status(install_dir: Path) -> None:
     show_info(
         "ikabot Status\n\n"
         f"  Install folder    : {install_dir}\n"
-        f"  ikabot version    : {ikabot_ver}\n"
-        f"  mod version       : {mod_ver}\n"
-        f"  Installer version : v{INSTALLER_VERSION}\n"
+        f"  ikabot version    : {ikabot_ver}{_latest('ikabot')}\n"
+        f"  mod version       : {mod_ver}{_latest('mod')}\n"
+        f"  Installer version : v{INSTALLER_VERSION}{_latest('installer')}\n"
         f"  Instances         : {inst_count}\n"
         f"  Modules installed : {py_count} .py file(s)  (last updated: {modules_updated})\n\n"
         "  Installed modules and extra files:\n"
@@ -1234,9 +1292,15 @@ def maint_update_installer_shortcut(install_dir: Path) -> None:
         show_error(f"Could not create installer shortcut:\n\n{exc}")
 
 
-def _maintenance_menu() -> str | None:
-    """Two-column maintenance menu: Standard (cmd) | PowerShell."""
+def _maintenance_menu(vers: dict | None = None) -> str | None:
+    """Two-column maintenance menu: Standard (cmd) | PowerShell.
+
+    vers is the result of check_versions(): installed versions are shown
+    green when they match GitHub and red when an update is available.
+    """
     result: list[str | None] = [None]
+
+    GREEN, RED, GREY = "#0a7d0a", "#c00000", "#666666"
 
     win = tk.Tk()
     win.withdraw()
@@ -1246,8 +1310,43 @@ def _maintenance_menu() -> str | None:
     dlg.resizable(False, False)
     dlg.attributes("-topmost", True)
 
-    tk.Label(dlg, text="ikabot Manager\n\nSelect an action:",
-             justify="left", padx=24, pady=12, wraplength=420).pack(fill="x")
+    tk.Label(dlg, text="ikabot Manager", justify="left", anchor="w",
+             font=("", 11, "bold"), padx=24, pady=(12, 4)).pack(fill="x")
+
+    # ── Installed versions, coloured by whether they are current ──────────
+    if vers:
+        panel = tk.Frame(dlg, padx=24, pady=(0, 4))
+        panel.pack(fill="x")
+
+        for r, (label, key) in enumerate((("Installer", "installer"),
+                                          ("ikabot", "ikabot"),
+                                          ("ikabot mod", "mod"))):
+            info = vers[key]
+            tk.Label(panel, text=label, anchor="w", width=12).grid(
+                row=r, column=0, sticky="w")
+
+            if not vers.get("online"):
+                colour = GREY
+                text = f"v{info['local']}" if info["local"] else "unknown"
+            elif info["ok"]:
+                colour = GREEN
+                text = f"v{info['local']}" if info["local"] else "up to date"
+            else:
+                colour = RED
+                local = f"v{info['local']}" if info["local"] else "not installed"
+                text = f"{local}  →  v{info['remote']}" if info["remote"] else local
+
+            tk.Label(panel, text=text, anchor="w", fg=colour,
+                     font=("", 9, "bold")).grid(row=r, column=1, sticky="w")
+
+        note = ("Could not reach GitHub - versions not checked"
+                if not vers.get("online") else
+                "Green = up to date    Red = update available")
+        tk.Label(dlg, text=note, anchor="w", fg=GREY, font=("", 8),
+                 padx=24, pady=(2, 6)).pack(fill="x")
+
+    tk.Label(dlg, text="Select an action:", justify="left", anchor="w",
+             padx=24, pady=(0, 6)).pack(fill="x")
 
     frm = tk.Frame(dlg, padx=24, pady=4)
     frm.pack()
@@ -1292,8 +1391,12 @@ def _maintenance_menu() -> str | None:
 
 
 def maintenance_mode(install_dir: Path) -> None:
+    # Check versions against GitHub when the manager opens
+    print("Checking versions ...")
+    vers = check_versions(install_dir)
+
     while True:
-        choice = _maintenance_menu()
+        choice = _maintenance_menu(vers)
         if choice is None or choice == "Exit":
             return
         elif choice == "Open all instances":
@@ -1306,12 +1409,16 @@ def maintenance_mode(install_dir: Path) -> None:
             maint_close_all_ps()
         elif choice == "Update Installer":
             maint_update_installer(install_dir)
+            vers = check_versions(install_dir)      # reflect the new state
         elif choice == "Update Ikabot":
             maint_update_ikabot(install_dir)
+            vers = check_versions(install_dir)
         elif choice == "Modules":
             maint_modules_menu(install_dir)
         elif choice == "Status":
-            maint_show_status(install_dir)
+            # Status re-runs the check, so the menu behind it updates too
+            vers = check_versions(install_dir)
+            maint_show_status(install_dir, vers)
 
 # ── ikariam folder management ─────────────────────────────────────────────────
 
