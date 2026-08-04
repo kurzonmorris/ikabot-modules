@@ -40,11 +40,15 @@
 
 - File names should be **descriptive and self-explanatory** — the name alone should tell you what the file does. Examples: `resourceTransportManager`, `constructionManager`, `tavernManager`.
 - Use **camelCase** for multi-word names.
-- Version numbers go **after the file extension**, separated by `_v`:
+- Version numbers go **before the file extension**, separated by `_v`:
   ```
-  resourceTransportManager.py_v1.0.0
-  constructionManager.py_v2.1.3
+  resourceTransportManager_v10.3.1.py
+  constructionManager_v2.1.9.py
   ```
+  This exact form matters — the installer parses `_vX.Y.Z` out of the stem to
+  show installed-vs-available versions, and strips it when copying the file
+  into the user's modules folder. See section 11 of
+  `Explained-ikariam_ikabot.md` for why the stripping is load-bearing.
 - Version number format: `MAJOR.MINOR.PATCH`
   - **MAJOR** — significant/breaking update
   - **MINOR** — new feature or meaningful improvement
@@ -177,13 +181,17 @@ All modules — internal and external — must look and behave the same way.
 
 | Module | File | What it does |
 |--------|------|--------------|
-| Resource Transport Manager | `modules/resourceTransportManager_v9.4.0.py` | Automates resource movement between cities, ship routing, notifications |
-| Resource Reservation System | `modules/resourceReservationSystem_v1.0.0.py` | Reserves resources across cities to prevent over-spending |
-| Construction Manager | `modules/constructionManager_v2.1.3.py` | CSV-backed multi-city building upgrade queue |
+| Resource Transport Manager | `modules/resourceTransportManager_v10.3.1.py` | Automates resource movement between cities, ship routing, notifications |
+| Resource Reservation System | `modules/resourceReservationSystem_v1.0.0.py` | Reserves resources across cities to prevent over-spending. See `RRS_INTEGRATION_GUIDE.md` |
+| Resource Production Manager | `modules/resourceProductionManager_v1.0.3.py` | Manages production assignment across cities |
+| Construction Manager | `modules/constructionManager_v2.1.9.py` | CSV-backed multi-city building upgrade queue |
 | Tavern Manager | `modules/tavernManager_v2.0.1.py` | Monitors wine and satisfaction, auto-adjusts tavern settings |
-| Auto Recruitment Manager | `modules/autoRecruitmentManager_v2.2.0.py` | Automates unit and ship training across barracks/shipyards |
+| Auto Recruitment Manager | `modules/autoRecruitmentManager_v2.12.1.py` | Automates unit and ship training across barracks/shipyards |
 | Island Colonize Monitor | `modules/islandColonizeMonitor_v1.5.0.py` | Monitors islands for colonisation opportunities |
-| Sequence Runner | `modules/sequenceRunner.py` | Stores named input sequences to automate daily routines (WIP) |
+| Sequence Runner | `modules/sequenceRunner_v1.1.2.py` | Stores named input sequences to automate daily routines |
+
+**Filenames drift.** Always `ls modules/` rather than trusting this table — the
+versions move faster than the docs.
 
 ---
 
@@ -209,4 +217,4 @@ ikabot-modules/
 
 ---
 
-*Last updated: 2026-05-30. Reflects ikabot 7.3.3 / mod v0.9.4.*
+*Last updated: 2026-08-02. Reflects ikabot 7.4.5 / mod v1.7.6.*

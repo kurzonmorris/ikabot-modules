@@ -103,18 +103,24 @@ Ikabot is an open-source Python automation bot for Ikariam, maintained by the Ik
 ## 3. Version Numbers
 
 ### ikabot Base Version (`IKABOT_VERSION` in `config.py`)
-Tracks the upstream ikabot version this mod is based on. Currently `7.3.3`.
+Tracks the upstream ikabot version this mod is based on. Currently `7.4.5`.
+Read the live value from `ikabot/config.py` rather than trusting this line.
 
 ### Mod Version (`IKABOT_MOD_VERSION` in `config.py`)
-Tracks changes made in this fork. Currently `0.9.4`. Banner displays `modded by kurzon v0.9.4`.
+Tracks changes made in this fork. Currently `1.7.6`. Banner displays
+`modded by kurzon v1.7.6`. Read the live value from `ikabot/config.py`.
 
 ### External Module Version (filename suffix — REMOVED at load time)
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
-resourceTransportManager_v8.1.1.py
+resourceTransportManager_v10.3.1.py
 constructionManager.py          ← no version = internal/dev
 ```
-The version suffix is stripped when the module is loaded — it is NOT present in code. The `MODULE_NAME` inside the file is the display name shown in the menu. The `MODULE_ENTRY` is the function name ikabot calls. Filename version exists purely for the user to track releases and manage file history in their folder.
+The suffix is stripped by the **installer** when it copies the file into the
+user's modules folder — *not* by the module loader. `MODULE_NAME` is the display
+name shown in the menu; `MODULE_ENTRY` is the function ikabot calls. The version
+also drives the manager's installed-vs-available display. See section 11 for the
+full pipeline and why the stripping is load-bearing.
 
 **Rule:** Every external module file must have a version in its filename. Internal modules (inside `ikabot/function/`) do not use filename versions.
 
@@ -147,7 +153,7 @@ ikabot-modules/
 │   │   └── varios.py              ← wait(), addThousandSeparator(), getDateTime()
 │   └── web/
 │       └── session.py             ← Session class — all HTTP calls go through here
-├── resourceTransportManager_v8.1.1.py  ← External module
+├── resourceTransportManager_v10.3.1.py ← External module
 ├── constructionManager.py              ← External module
 ├── tavernManager.py                    ← External module
 ├── autoRecruitment.py                  ← External module
@@ -458,25 +464,92 @@ External modules are `.py` files dropped into a configured folder (global or per
 
 ### File naming convention
 ```
-myModule_v1.2.3.py     ← version in filename, stripped at load time
+myModule_v1.2.3.py     ← version goes BEFORE .py, never after
 ```
+The version suffix is **not** removed by the module loader. It is removed by the
+installer when it copies the file into the user's modules folder. That
+distinction matters — see "The version suffix is load-bearing" below.
 
 ### Required module metadata
 ```python
-MODULE_NAME  = "My Module"       # display name shown in menu
+MODULE_NAME  = "My Module"       # display name shown in the menu
 MODULE_ENTRY = "myModuleEntry"   # name of the entry function in this file
 ```
 
-### Entry function signature (identical to built-in functions)
+### ⚠ Always declare `MODULE_ENTRY`
+
+The loader resolves the entry function like this:
+
 ```python
-def myModuleEntry(session, event, stdin_fd, predetermined_input):
-    sys.stdin = os.fdopen(stdin_fd)
-    config.predetermined_input = predetermined_input
-    # ... same pattern as section 8 ...
+name    = os.path.basename(path).replace(".py", "")   # filename stem
+fn_name = getattr(module, "MODULE_ENTRY", None) or name
+fn      = getattr(module, fn_name)                    # AttributeError if wrong
 ```
 
-### How they are loaded
-`externalModules.py` uses `importlib.util.spec_from_file_location` to load the file dynamically. The function named by `MODULE_ENTRY` is called with `(session, event, stdin_fd, predetermined_input)`. The version suffix in the filename is ignored entirely by the loader.
+If `MODULE_ENTRY` is missing it falls back to the **filename stem**, so the file
+name and the function name must match exactly. With a version still in the name
+that fallback resolves to nonsense:
+
+```
+resourceTransportManager_v10.3.1.py  ->  looks for  resourceTransportManager_v10.3.1()  ✗
+resourceTransportManager.py          ->  looks for  resourceTransportManager()          ✓
+```
+
+Five of the eight current modules omit `MODULE_ENTRY` and depend entirely on the
+installer having stripped the version first. A user who copies a versioned file
+into their modules folder by hand gets an `AttributeError` on launch.
+
+**Declaring `MODULE_ENTRY` makes the module immune to this** — the filename then
+does not matter at all. Do it in every new module.
+
+### The version suffix is load-bearing
+
+`_vX.Y.Z` in the filename is not decoration. The installer parses it with
+`^(.*?)_v(.+)$` against the stem to drive the Modules screen:
+
+| Filename in repo `modules/` | base | version |
+|---|---|---|
+| `resourceTransportManager_v10.3.1.py` | `resourceTransportManager.py` | `10.3.1` |
+| `noVersion.py` | `noVersion.py` | *(none)* |
+
+A module without the suffix still installs, but shows "no version" in the
+manager and can never display an update-available state.
+
+### How modules reach users
+
+There is **no release or zip step** — the installer reads the repo directly via
+the GitHub Contents API:
+
+```
+repo modules/  and  repo config-examples/          (versioned filenames)
+        │  GitHub Contents API — no release needed
+        ▼
+<install>/Ikabot Modules template/                 (versions KEPT, for reference)
+        │  copy, stripping _vX.Y.Z
+        ▼
+<install>/modules/                                 (versions REMOVED — what ikabot loads)
+```
+
+Consequences for a module author:
+
+- **Committing to `modules/` on `main` publishes it.** Users see it on their next
+  Modules refresh. No release, no zip, no version bump of ikabot itself.
+- Bump the filename version when you want users to see an update is available.
+- Old versions are deleted from both folders on update, matched by base name —
+  so renaming the base of a module orphans the old file rather than replacing it.
+- The template folder is where the manager reads installed versions from, which
+  is why Status can list every module with its version.
+
+### CSV and config files
+
+- Files in `config-examples/` are downloaded alongside modules into the same
+  modules folder.
+- **CSVs are never version-stripped or renamed.** A module expecting
+  `bulkdistribution.csv` gets exactly that name.
+- `bulkdistribution.csv` is treated as user data: the installer asks before
+  overwriting it, because it holds hand-entered settings. If your module ships a
+  CSV that users edit, expect the same treatment and never assume yours was
+  freshly overwritten.
 
 ### Storage location for module data
 External modules should store their data files in `IKABOT_DATA_DIR`:
@@ -484,7 +557,9 @@ External modules should store their data files in `IKABOT_DATA_DIR`:
 from ikabot.config import IKABOT_DATA_DIR
 MY_DATA_FILE = os.path.join(IKABOT_DATA_DIR, "my_module_data.json")
 ```
-This puts data at `%APPDATA%\.ikabot\` (Windows) or `~/.ikabot/` (Linux), alongside sessions, logs, and the vault.
+This puts data at `%APPDATA%\.ikabot\` (Windows) or `~/.ikabot/` (Linux),
+alongside sessions, logs, and the vault. Never write data next to the module
+file — the installer deletes and replaces files there on update.
 
 ---
 
@@ -524,23 +599,23 @@ from ikabot.helpers.getJson import getCity
 
 ## 13. Existing External Modules (Kurzon's)
 
-### Resource Transport Manager (`resourceTransportManager_v8.1.1.py`)
+### Resource Transport Manager (`resourceTransportManager_v10.3.1.py`)
 Automates moving resources between cities. Handles ship routing, multiple legs, partial loads, retry on failure, Telegram notifications per shipment. Has configurable notification levels (partial/all/errors-only). Uses `executeRoutes()` internally.
 
 **Key exports used by other modules:** transport logic can be re-invoked by directly calling `executeRoutes()` from `ikabot.helpers.planRoutes`.
 
-### Construction Manager (`constructionManager.py`)
+### Construction Manager (`constructionManager_v2.1.9.py`)
 CSV-backed multi-city construction queue. Reads a CSV file specifying which buildings to upgrade in which cities. Polls periodically, triggers upgrades, handles resource shortages by waiting or requesting transport.
 
-### Tavern Manager (`tavernManager.py`)
+### Tavern Manager (`tavernManager_v2.0.1.py`)
 Monitors wine consumption and satisfaction across all cities. Adjusts tavern settings automatically to keep satisfaction at target level.
 
-### Auto Recruitment (`autoRecruitment.py`)
+### Auto Recruitment Manager (`autoRecruitmentManager_v2.12.1.py`)
 Automates training units and ships across multiple barracks/shipyards. Distributes recruitment for synchronised completion times. Handles resource shortages with retry logic.
 
 Version noted in docstring: `1.08`.
 
-### Sequence Runner (`sequenceRunner.py`) — WIP
+### Sequence Runner (`sequenceRunner_v1.1.2.py`)
 Stores named input sequences in `~/.ikabot/sequences.json`. When a sequence is run, it pre-loads `predetermined_input` with the stored values and triggers `event.set()`, causing the main menu loop to consume them automatically. This replaces AutoHotkey scripts.
 
 ---
@@ -842,4 +917,4 @@ def _do_it(session, choice):
 
 ---
 
-*Last updated: 2026-05-24. Reflects ikabot 7.3.3 / mod v0.9.4.*
+*Last updated: 2026-08-02. Reflects ikabot 7.4.5 / mod v1.7.6.*
