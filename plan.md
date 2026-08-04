@@ -1,7 +1,8 @@
 # Messaging Hub — Build Plan
 
 > Module: `modules/messagingHub_v<X.Y.Z>.py` (external module, installs as `messagingHub.py`)
-> Status: **Phase 1 not started.** This file is the working spec across sessions.
+> Status: **Phase 1 shipped — `messagingHub_v1.0.0.py`.** Next: Phase 2.
+> This file is the working spec across sessions.
 > Read `Explained-ikariam_ikabot.md` and `Explained-user_kurzon.md` before touching it.
 
 ---
@@ -32,6 +33,12 @@ A single external module that turns ikabot into a **messaging hub**:
 | Discord transport | **Webhook URL per channel** (no bot to host) |
 | In-game read state | **Never touched** — the hub only reads; dedupe is local |
 | Phase 1 scope | Core hub + message forwarding + per-type routing |
+| File naming | Every hub file carries `{username}_{servidor}{mundo}` — multiple instances never collide |
+| Storage location | Default `IKABOT_DATA_DIR`, user-settable; a `messaging_hub/` folder is created inside whichever base is chosen |
+| Combat reports | **Summary** by default, full report toggleable |
+| Alliance messages | Own event type, **routed to the player-mail destination** by default, can be pointed anywhere |
+| Multi-account | A **global config** shared by every instance pointing at the same folder; each account chooses global or its own, per section |
+| Message body | **Full, truncated at 900 characters**, limit configurable |
 
 ---
 
@@ -71,13 +78,24 @@ ikabot versions.
 
 ## 3. Files on disk
 
+The base folder defaults to `IKABOT_DATA_DIR` and is changeable at
+**(7) Storage & global configuration**. Whichever base is chosen, a
+`messaging_hub/` folder is created inside it. The chosen path is kept in the
+account's session data (`messagingHubDir`), so it is per account and no two
+instances fight over a pointer file.
+
 ```
-IKABOT_DATA_DIR/messaging_hub/
-├── {username}_{servidor}{mundo}.json         ← config: destinations, routes, rules
-├── {username}_{servidor}{mundo}_state.json   ← state: seen ids, cooldowns, counters
-└── capture/                                  ← diagnostics dumps (Phase 1 §9)
-    └── capture_YYYYMMDD_HHMMSS.txt
+<base>/messaging_hub/
+├── {username}_{servidor}{mundo}_config.json   ← this account's config
+├── {username}_{servidor}{mundo}_state.json    ← seen ids, counters, cooldowns
+├── global_config.json                         ← shared by every account using this folder
+└── capture/
+    └── {username}_{servidor}{mundo}_capture_YYYYMMDD_HHMMSS.txt
 ```
+
+Every file carries the account key so several instances can share one folder
+without collisions. **`global_config.json` is the one deliberate exception** —
+being shared is its entire purpose (§4.1).
 
 Config and state are **separate files on purpose**: state churns every poll, config
 holds hand-entered webhook URLs. A corrupt state file must never cost the config.
@@ -98,6 +116,7 @@ record — purely so `set_autostart()` has a file to flag and the mod's
 ```jsonc
 {
   "config_version": 1,
+  "use_global": { "routing": false, "formatting": false },
   "destinations": [
     {
       "id": "d1",
@@ -135,7 +154,8 @@ record — purely so `set_autostart()` has a file to flag and the mod's
   "formatting": {
     "include_body": true,
     "body_max_chars": 900,
-    "batch_window_seconds": 0,
+    "combat_full_report": false,      // false = summary line only
+    "mutes": [],
     "quiet_hours": { "enabled": false, "from": "23:00", "to": "07:00", "types": [] }
   },
   "classification_overrides": [
@@ -148,6 +168,24 @@ record — purely so `set_autostart()` has a file to flag and the mod's
 `routes` maps **event type → list of destination ids** (fan-out is allowed: one
 type can go to several places). A missing or empty list means that type is not
 forwarded. Destination **ids**, never list positions — see §23 of the Explained doc.
+Ids that no longer resolve are skipped and shown in red on the routing screen
+rather than silently dropping messages into nowhere.
+
+### 4.1 Global vs individual configuration
+
+Point several accounts at the same storage folder and they share
+`global_config.json`. Each account then decides, **per section**, whether to use
+it — so the throwaway accounts can run one shared setup while the main account
+keeps its own:
+
+| Section | Covers | Why grouped |
+|---|---|---|
+| `routing` | `destinations` + `routes` + `type_enabled` | routes hold destination ids; splitting them would leave dangling references |
+| `formatting` | body limits, combat detail, quiet hours, mutes | independent of ids, safe to share alone |
+
+`(7) Storage & global configuration` also copies an account's settings **into**
+the global file, and the global file back **into** an account — so a working
+setup on the main account becomes the shared baseline in one keypress.
 
 ---
 
@@ -300,14 +338,19 @@ Every screen: `banner()`, double-line box header, `(0) Back` first, `read()` wit
 Messaging Hub
  (0) Back
  (1) Start hub                  — launch the background watchers
- (2) Destinations               — add / edit / test / delete / rename
- (3) Message forwarding         — enable, interval, per-type routing, first-run behaviour
- (4) Resource monitor           — rules list, add / edit / delete, interval
- (5) Formatting & filters       — body length, batching, quiet hours, mutes
- (6) Diagnostics                — test all destinations, capture raw messages,
-                                  show state, reset seen ids, delivery counters
- (7) Import / export config     — move a working setup between accounts
+ (2) Destinations               — add / rename / enable / test / delete
+ (3) Message forwarding & routing — enable, interval, first-run behaviour, per-type routing
+ (4) Resource monitor           — reserved for Phase 3
+ (5) Formatting & filters       — body limit, combat detail, quiet hours, mutes
+ (6) Diagnostics                — test destinations, dry-run scan, capture raw
+                                  messages, reset seen ids, counters
+ (7) Storage & global configuration — folder, global/individual per section
+ (8) Import / export config     — move a working setup between accounts
 ```
+
+**Menu numbers are frozen.** Slot 4 is held empty for the resource monitor rather
+than renumbering later — `sequenceRunner` replays recorded keystrokes, so a
+shifting menu would silently break saved sequences.
 
 **Per-type routing screen** — the core of the module. Lists every event type with
 its current destinations, on/off state, and lets one type be pointed at any set
@@ -358,7 +401,7 @@ earliest — the same shape as `alertMessages.do_it()`. Every iteration ends in 
 
 | Phase | Version | Contents |
 |---|---|---|
-| **1** | `1.0.0` | Skeleton, config + state store, destination book, all four transports, bundled scraper, classification v1 (source + keywords), per-type routing, dedupe, hub loop, diagnostics + **capture** |
+| **1** ✅ | `1.0.0` | Skeleton, config + state store, destination book, all four transports, bundled scraper, classification v1 (source + keywords), per-type routing, dedupe, hub loop, diagnostics + **capture**, global/individual config |
 | **2** | `1.1.0` | Classification refinement from captured data: icon/CSS map, per-language keyword tables, user-taught overrides UI, per-type test fixtures |
 | **3** | `1.2.0` | Resource monitor: rules CRUD, three modes, hysteresis + cooldown, recovery notices, global rules |
 | **4** | `1.3.0` | Formatting: Discord embeds + colours, templates, batching, quiet hours, mutes, delivery counters, rate-limited failure reporting |
@@ -403,19 +446,26 @@ ships.
 
 ---
 
-## 14. Open questions for Kurzon
+## 14. Answered — Phase 1 behaviour
 
-Not blocking — Phase 1 proceeds with the stated default.
+1. **Combat detail** — summary by default; `formatting.combat_full_report`
+   switches to the full battle export excerpt (costs extra requests per report).
+2. **Alliance circulars** — their own event type, so they can be split out, but
+   pointed at the player-mail destination by default.
+3. **Multi-account** — shared `global_config.json` plus a per-section
+   global/individual switch per account (§4.1), on top of file export/import.
+4. **Message body** — full text, truncated at 900 characters, limit configurable
+   and body suppressible entirely.
 
-1. **Combat detail** — forward the full battlefield breakdown (`alertMessages`'
-   enrich step, extra requests per report) or just the summary line?
-   *Default: summary, detail toggleable per route.*
-2. **Alliance circulars** — separate type from player mail, or folded in?
-   *Default: separate type, routed to the same destination until told otherwise.*
-3. **Multi-account** — config is per account (username + server + world). Should
-   `(7) Import/export` be able to copy one account's setup to all others in one
-   step, given you run several instances?
-   *Default: export/import one at a time in Phase 1.*
-4. **Message body** — forward the full text, or subject + sender only for
-   privacy/noise reasons on some types?
-   *Default: full body, truncated at 900 chars, per-type toggle in Phase 4.*
+## 15. Testing
+
+Phase 1 logic is covered by an offline harness that stubs every ikabot import
+(so it also proves the vanilla-ikabot fallback path loads): storage paths and
+account-key naming, config normalisation of hand-edited files, global/individual
+merging, routing including disabled and dangling destinations, classification for
+every type, row parsing, formatting limits, quiet hours, seen-id pruning and the
+hard cap, delivery success/failure/retry, redaction, and the full poll pipeline
+(first-run suppression, dedupe, `notify_existing`, dead server).
+
+Keep it running against future phases — the pipeline tests are what stop a
+refactor silently losing messages.
