@@ -2,6 +2,19 @@
 
 > **Purpose:** Read this file at the start of every session. After reading it you need no further context about Ikariam, ikabot, or how the user (Kurzon) operates. Just ask what needs to be built.
 
+### Companion documents
+
+Read this file first. Open the others only when the task touches them.
+
+| File | When you need it |
+|---|---|
+| `Explained-user_kurzon.md` | How Kurzon works, branch naming, what he expects back |
+| `docs/UPSTREAM_PARITY.md` | **Before any upstream sync.** Which upstream PRs are in, which were deliberately adapted, and what a port must never remove |
+| `docs/AUTOSTART_BRIEF.md` | Making a module start automatically at login (§24) |
+| `RRS_INTEGRATION_GUIDE.md` | Any module that reserves or spends resources (§26) |
+| `MIGRATION_GUIDE.md` | Applying the fork's changes onto a fresh upstream tree |
+| `GUIDE.md` | End-user setup — not needed for coding |
+
 ---
 
 ## 1. The Game — Ikariam
@@ -103,18 +116,21 @@ Ikabot is an open-source Python automation bot for Ikariam, maintained by the Ik
 ## 3. Version Numbers
 
 ### ikabot Base Version (`IKABOT_VERSION` in `config.py`)
-Tracks the upstream ikabot version this mod is based on. Currently `7.4.5`.
+Tracks the upstream ikabot version this mod is based on. Currently `7.4.5`;
+the fork is at **full parity** with upstream 7.4.5 (see `docs/UPSTREAM_PARITY.md`).
 Read the live value from `ikabot/config.py` rather than trusting this line.
 
 ### Mod Version (`IKABOT_MOD_VERSION` in `config.py`)
 Tracks changes made in this fork. Currently `1.7.6`. Banner displays
 `modded by kurzon v1.7.6`. Read the live value from `ikabot/config.py`.
 
+**Bump it on every change you ship.** Patch for fixes, minor for new features.
+
 ### External Module Version (filename suffix — REMOVED at load time)
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
 resourceTransportManager_v10.3.1.py
-constructionManager.py          ← no version = internal/dev
+constructionManager_v2.1.9.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
 user's modules folder — *not* by the module loader. `MODULE_NAME` is the display
@@ -599,24 +615,22 @@ from ikabot.helpers.getJson import getCity
 
 ## 13. Existing External Modules (Kurzon's)
 
-### Resource Transport Manager (`resourceTransportManager_v10.3.1.py`)
-Automates moving resources between cities. Handles ship routing, multiple legs, partial loads, retry on failure, Telegram notifications per shipment. Has configurable notification levels (partial/all/errors-only). Uses `executeRoutes()` internally.
+Current files in `modules/`. **Check the directory for the live version — the
+numbers below drift.**
 
-**Key exports used by other modules:** transport logic can be re-invoked by directly calling `executeRoutes()` from `ikabot.helpers.planRoutes`.
+| Module | Does |
+|---|---|
+| `resourceTransportManager_v10.3.1.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
+| `constructionManager_v2.1.9.py` | CSV-backed multi-city construction queue. Polls, triggers upgrades, handles shortages by waiting or requesting transport. |
+| `autoRecruitmentManager_v2.12.1.py` | Trains units/ships across barracks and shipyards, synchronised completion, retry on shortage. **The working RRS integration example.** |
+| `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
+| `resourceProductionManager_v1.0.3.py` | Manages production/luxury assignment per city. Own persistence, predates `modulePrefs`. |
+| `islandColonizeMonitor_v1.5.0.py` | Watches islands for free colonisation slots. |
+| `resourceReservationSystem_v1.0.0.py` | Shared reservation data layer, not a user-facing module. See §26. |
+| `sequenceRunner_v1.1.2.py` | Stores named input sequences and replays them through `predetermined_input` (§9). Replaces the AutoHotkey scripts. |
 
-### Construction Manager (`constructionManager_v2.1.9.py`)
-CSV-backed multi-city construction queue. Reads a CSV file specifying which buildings to upgrade in which cities. Polls periodically, triggers upgrades, handles resource shortages by waiting or requesting transport.
-
-### Tavern Manager (`tavernManager_v2.0.1.py`)
-Monitors wine consumption and satisfaction across all cities. Adjusts tavern settings automatically to keep satisfaction at target level.
-
-### Auto Recruitment Manager (`autoRecruitmentManager_v2.12.1.py`)
-Automates training units and ships across multiple barracks/shipyards. Distributes recruitment for synchronised completion times. Handles resource shortages with retry logic.
-
-Version noted in docstring: `1.08`.
-
-### Sequence Runner (`sequenceRunner_v1.1.2.py`)
-Stores named input sequences in `~/.ikabot/sequences.json`. When a sequence is run, it pre-loads `predetermined_input` with the stored values and triggers `event.set()`, causing the main menu loop to consume them automatically. This replaces AutoHotkey scripts.
+**Before writing a new module, check whether one of these already does part of
+the job** — §12's rule against duplicating logic applies to modules too.
 
 ---
 
@@ -769,6 +783,22 @@ wait(3600, maxrandom=300)  # wait 1 hour + up to 5 random minutes (anti-detectio
 - **Not catching exceptions** in long-running loops — one error kills the whole task.
 - **Endless loops without `wait()`** — hammers the server and risks ban. Always wait between iterations.
 - **Assuming resources are available** — always check before attempting transport or building.
+- **Saving a menu index instead of an id** — lists get re-sorted; the saved
+  position silently points at something else next run (§23).
+- **Replaying saved settings without validating them** — the file is editable
+  JSON on disk. Wrap the load in `try/except` and fall back to asking.
+- **Iterating all saved keys / `**saved`** — `_`-prefixed keys belong to the
+  prefs layer (`_autostart`) and will break you. Read named keys only.
+- **Prompting when `config.autostart_active` is set** — there is no terminal;
+  the module hangs. Notify, `event.set()`, return (§24).
+- **Prompting when `config.predetermined_input` is non-empty** — it swallows a
+  recorded keystroke and desyncs the whole `sequenceRunner` sequence.
+- **Hardcoding `Accept-Language` or a locale** — it must match the session's
+  region or Gameforge rejects the login. Use `session.accept_language` (§25).
+- **Relying on a 404 to raise** — since mod 1.7.5 only Ikariam-host 404s do
+  (§25).
+- **Writing to `~/.ikabot` in tests** — monkeypatch
+  `modulePrefs.MODULE_PREFS_DIR` to a temp dir instead.
 
 ---
 
@@ -870,6 +900,9 @@ from ikabot.helpers.botComm import sendToBot, notificationDataIsValid
 from ikabot.helpers.getJson import getCity
 from ikabot.helpers.gui import banner, enter, bcolors
 from ikabot.helpers.pedirInfo import read, chooseCity, getIdsOfCities
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, prompt_use_saved, is_autostart, set_autostart,
+)
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import wait, addThousandSeparator, getDateTime
@@ -881,17 +914,46 @@ def myFeature(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
 
+    _MODULE = "myFeature"          # prefs key; namespace per flow if needed
+
     try:
         banner()
-        # --- interactive configuration ---
-        print("(0) Back")
-        print("(1) Option A")
-        choice = read(min=0, max=1, digit=True)
-        if choice == 0:
+
+        # --- settings memory: offer to replay the last run (see section 23) ---
+        saved = load_prefs(session, _MODULE)
+        use_saved = False
+        if saved:
+            try:
+                choice = int(saved["choice"])          # validate before trusting
+                assert choice in (1,)
+                use_saved = prompt_use_saved(session, _MODULE, [f"Option: {choice}"])
+            except Exception:
+                use_saved = False
+
+        # Auto-start has no terminal — never fall through to the questions.
+        if config.autostart_active and not use_saved:
+            sendToBot(session, f"{_MODULE}: saved settings invalid, auto-start aborted.")
             event.set()
             return
 
-        enter()
+        if not use_saved:
+            # --- interactive configuration ---
+            print("(0) Back")
+            print("(1) Option A")
+            choice = read(min=0, max=1, digit=True)
+            if choice == 0:
+                event.set()
+                return
+
+            save_prefs(session, _MODULE, {"choice": int(choice)})
+
+            if len(config.predetermined_input) == 0 and not is_autostart(session, _MODULE):
+                print("\nRun this automatically at login from now on?")
+                if read(values=["y", "Y", "n", "N", ""], empty=True,
+                        default="n", msg="[y/N]: ").lower() == "y":
+                    set_autostart(session, _MODULE, True)
+
+            enter()
     except KeyboardInterrupt:
         event.set()
         return
@@ -914,6 +976,156 @@ def _do_it(session, choice):
         # ... actual work ...
         wait(3600, maxrandom=300)
 ```
+
+---
+
+## 23. Settings Memory — "repeat last run"
+
+**Kurzon asks for this in almost every module. Build it in from the start.**
+
+`ikabot/helpers/modulePrefs.py` stores a module's last answers per account, so
+a repeat run is one keypress instead of re-answering every prompt.
+
+```python
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, clear_prefs, prompt_use_saved,
+)
+
+load_prefs(session, name)                 -> dict | None
+save_prefs(session, name, prefs)          -> None   # best-effort, never raises
+clear_prefs(session, name)                -> None
+prompt_use_saved(session, name, lines)    -> bool   # True = replay, False = ask
+```
+
+One JSON file per (account, module) at
+`IKABOT_DATA_DIR/module_prefs/{username}_{servidor}{mundo}_{name}.json`, so
+settings never leak between accounts or worlds.
+
+`prompt_use_saved` prints the summary lines you pass and offers:
+
+```
+(1) Use these settings   [just press ENTER]
+(2) Reconfigure
+(3) Delete saved settings and reconfigure
+```
+
+### The rules
+
+1. **Store ids, never list positions.** Menus get re-sorted; a saved index
+   silently points at the wrong thing later.
+2. **Validate before replaying.** The file is plain JSON on disk and may be
+   hand-edited, stale, or from an older version of your module. Wrap the whole
+   load in `try/except` and fall back to asking.
+3. **Re-resolve against the live account.** Cities get sold, miracles change
+   level. Drop what no longer exists, and *tell the user* in the summary.
+4. **Never store live game objects** — save an id, re-fetch on replay.
+5. **Keys starting with `_` are reserved** by this layer (`_autostart`). Read
+   named keys only — never `**saved` or iterate all keys.
+6. **Namespace per flow** when a module asks different questions in different
+   modes, so one flow's answers do not clobber the other's:
+   ```python
+   _PREFS_SET         = "tavernManager.set"
+   _PREFS_EQUILIBRIUM = "tavernManager.equilibrium"
+   ```
+
+### Reference implementations
+
+- `modules/tavernManager_v2.0.1.py` — **best example.** Namespaced per flow,
+  validates shape, resolves saved city ids against the account and reports
+  how many were dropped.
+- `ikabot/function/activateShrine.py` — the built-in equivalent.
+- `ikabot/function/activateMiracle.py` — shows schema migration: it reads both
+  the old singular `wonder` key and the current `wonders` list.
+
+> `modules/resourceProductionManager_*.py` and `autoRecruitmentManager_*.py`
+> predate this helper and roll their own persistence. Do not copy them for new
+> work — use `modulePrefs`.
+
+---
+
+## 24. Auto-start — running at login
+
+A module with saved settings can be flagged to launch automatically at login,
+replaying those settings silently. Toggled at
+**Options / Settings → (10) Auto-start modules**.
+
+**If your module already calls `prompt_use_saved`, it auto-starts for free.**
+`prompt_use_saved` returns `True` silently when `config.autostart_active` is
+set, so no extra work is needed for the happy path.
+
+Two things you must handle:
+
+```python
+# 1. Auto-start has NO TERMINAL. Never fall through to prompts.
+if config.autostart_active and not use_saved:
+    sendToBot(session, f"{_MODULE}: saved settings invalid, auto-start aborted.")
+    event.set()          # mandatory, or the parent waits the full 30s
+    return
+
+# 2. Only offer to enable it in the interactive path.
+if len(config.predetermined_input) == 0 and not is_autostart(session, _MODULE):
+    ...ask, then set_autostart(session, _MODULE, True)
+```
+
+Nothing may prompt after `event.set()` — including inside your work loop. A
+module that asks questions mid-run cannot auto-start; say so rather than
+working around it.
+
+Full details, API and testing recipe: **`docs/AUTOSTART_BRIEF.md`**.
+
+---
+
+## 25. Session Internals a Module Should Know
+
+Behaviour that is easy to get wrong because it is invisible from the call site.
+
+### 404s are no longer always fatal *(upstream #406, mod 1.7.5)*
+
+`session.get()` / `session.post()` only treat a 404 as an expired session when
+it comes from the Ikariam host — and in `get()`, only on `index.php`. A 404
+from the local web server or an external URL is returned normally. Do not
+write code that relies on any 404 raising.
+
+### actionRequest token caching
+
+`Session` caches the `actionRequest` token scraped from the last response
+(`_cached_token`), so a POST does not need a separate page fetch. It is
+invalidated automatically when the server reports a wrong token. Just use
+`actionRequest` from config as normal — but know that a POST may be using a
+token from an earlier page.
+
+### Regional context — do not hardcode locale
+
+`session.locale`, `session.gf_lang`, `session.timezone_id` and
+`session.accept_language` must stay mutually consistent, or Gameforge rejects
+the login. They come from `.env` / `config.IKABOT_LOCALE` or a per-account
+region in the vault.
+
+**Never hardcode `Accept-Language` or a locale in a module.** If you build
+headers by hand, use `session.accept_language`.
+
+### The vault
+
+Accounts can be stored encrypted with per-account blackbox/lobby tokens and a
+per-account region. Relevant to a module only in that `session.mail` and
+friends may come from there — never write credentials to your own files.
+
+---
+
+## 26. Resource Reservation System (RRS)
+
+If your module **spends or reserves resources**, integrate RRS so modules do
+not double-spend the same wood.
+
+`modules/resourceReservationSystem_v1.0.0.py` is a shared data layer: a
+per-account CSV with cross-process locking that tracks which resources in
+which cities are reserved by which module.
+
+It **does not** ship resources, retry, sleep, or schedule — all of that stays
+in your module.
+
+`autoRecruitmentManager` is the working integration example. Full contract:
+**`RRS_INTEGRATION_GUIDE.md`**.
 
 ---
 
