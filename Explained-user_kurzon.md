@@ -19,6 +19,11 @@
   - Work on the tavern manager → branch contains `tavern-manager`
   - A bug fix for transport routing → branch contains `transport-routing-fix`
 - Use hyphens to separate words, all lowercase.
+- **An explicitly requested branch name always wins over this rule.** Kurzon
+  sometimes asks for a specific name (e.g. `ikabot-modified-<random letters>`);
+  use exactly what he asked for and do not "correct" it to a topic name.
+- Once a branch is named, keep using it until told otherwise — do not push to
+  `main` or to a previous branch without being asked.
 
 ---
 
