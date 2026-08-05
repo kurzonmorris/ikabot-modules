@@ -23,7 +23,13 @@ mod("ikabot.helpers.gui", banner=lambda: None, bcolors=bcolors, enter=lambda: No
 mod("ikabot.helpers.pedirInfo", read=lambda **k: 0, getIdsOfCities=lambda s: ([], {}))
 mod("ikabot.helpers.process", set_child_mode=lambda s: None)
 mod("ikabot.helpers.signals", setInfoSignal=lambda s, i: None)
-mod("ikabot.helpers.varios", wait=lambda *a, **k: None)
+mod("ikabot.helpers.varios",
+    wait=lambda *a, **k: None,
+    addThousandSeparator=lambda n: "{:,}".format(int(n)).replace(",", "."),
+    daysHoursMinutes=lambda s: "{}H {}M".format(int(s) // 3600, (int(s) % 3600) // 60),
+    getDateTime=lambda: "2026-08-05 12:00:00")
+mod("ikabot.helpers.getJson", getCity=lambda html: {})
+cfgmod.city_url = "view=city&cityId="
 mod("ikabot.helpers.logging", getLogger=lambda n: __import__("logging").getLogger(n))
 # modulePrefs deliberately absent -> exercises the vanilla fallback path
 
@@ -510,6 +516,212 @@ print()
 if fails:
     print("{} FAILED: {}".format(len(fails), fails)); sys.exit(1)
 print("all checks passed")
+
+print("\n-- resource rules: reading a city --")
+import re as _re
+
+def city_html(res, capacity=10000, wine_spend=0, wine_prod=0):
+    parts = [r"""maxResources: JSON.parse('{\"resource\":%d,""" % capacity,
+             "wineSpendings: %d" % wine_spend]
+    if wine_prod:
+        parts.append('<td id="js_GlobalMenu_production_wine" class="c">%d</td>' % wine_prod)
+    return "\n".join(parts)
+
+def rule(**kw):
+    base = {"id": "r1", "enabled": True, "scope": "global", "city_id": None,
+            "resource": "wine", "mode": "absolute", "direction": "below",
+            "threshold": 5000, "destinations": [], "cooldown_minutes": 0,
+            "rearm_margin_percent": 10, "notify_on_recovery": False}
+    base.update(kw); return base
+
+city = {"name": "Athens", "availableResources": [1000, 4000, 3000, 2000, 100]}
+h = city_html(None, capacity=10000, wine_spend=100)
+check("warehouse capacity parsed", hub._warehouse_capacity(h) == 10000)
+check("wine consumption parsed", hub._wine_consumption_per_hour(h) == 100)
+check("wine production absent is 0", hub._wine_production_per_hour(h) == 0)
+check("wine production parsed",
+      hub._wine_production_per_hour(city_html(None, wine_prod=1234)) == 1234)
+
+v, u = hub._rule_reading(rule(mode="absolute"), city, h)
+check("absolute reading", v == 4000 and u == "")
+v, u = hub._rule_reading(rule(mode="percent"), city, h)
+check("percent reading", abs(v - 40.0) < 0.01 and u == "%")
+v, u = hub._rule_reading(rule(mode="hours_left"), city, h)
+check("hours-left reading", abs(v - 40.0) < 0.01 and u == "h")
+v, _ = hub._rule_reading(rule(mode="hours_left"), city,
+                         city_html(None, wine_spend=100, wine_prod=100))
+check("wine not draining is not measurable", v is None)
+v, _ = hub._rule_reading(rule(mode="hours_left", resource="wood"), city, h)
+check("hours-left on non-wine is not measurable", v is None)
+v, _ = hub._rule_reading(rule(mode="percent"), city, "no capacity here")
+check("percent without capacity is not measurable", v is None)
+
+print("\n-- resource rules: thresholds and re-arm --")
+check("below breaches", hub._is_breach(rule(direction="below", threshold=5000), 4000))
+check("below does not breach when above", not hub._is_breach(rule(direction="below", threshold=5000), 6000))
+check("above breaches", hub._is_breach(rule(direction="above", threshold=5000), 6000))
+r10 = rule(direction="below", threshold=5000, rearm_margin_percent=10)
+check("not recovered inside the margin", not hub._has_recovered(r10, 5200))
+check("recovered past the margin", hub._has_recovered(r10, 5600))
+r10up = rule(direction="above", threshold=5000, rearm_margin_percent=10)
+check("above-rule not recovered inside margin", not hub._has_recovered(r10up, 4800))
+check("above-rule recovered past margin", hub._has_recovered(r10up, 4000))
+check("zero threshold still gets slack",
+      not hub._has_recovered(rule(threshold=0, rearm_margin_percent=10), 0))
+
+print("\n-- resource rules: the anti-spam cycle --")
+pedir = sys.modules["ikabot.helpers.pedirInfo"]
+getjson = sys.modules["ikabot.helpers.getJson"]
+WINE = {"v": 4000}
+pedir.getIdsOfCities = lambda s: (["111"], {"111": {"name": "Athens"}})
+getjson.getCity = lambda html: {"name": "Athens",
+                                "availableResources": [0, WINE["v"], 0, 0, 0]}
+
+class ResSession(Session):
+    def get(self, url=None, **kw):
+        if url is None: raise AssertionError("bare session.get()")
+        return city_html(None, capacity=10000, wine_spend=100)
+    def post(self, url=None, **kw): return ""
+    def setStatus(self, s): pass
+    def logout(self): pass
+
+rs = ResSession()
+rcfg = hub._default_config()
+rcfg["destinations"] = [{"id": "d1", "name": "phone", "kind": "ntfy",
+                         "ntfy": {"topic": "a"}, "enabled": True}]
+rcfg["routes"]["resource_alert"] = ["d1"]
+rcfg["watchers"]["resources"] = {"enabled": True, "interval_minutes": 30}
+rcfg["resource_rules"] = [rule(id="r1", threshold=5000, cooldown_minutes=0,
+                               notify_on_recovery=True)]
+rstate = {"seen_ids": {}, "delivered": 0, "failed": 0, "resource_breaches": {}}
+
+ev, checked = hub._check_resources(rs, rcfg, rstate)
+check("breach fires once", len(ev) == 1 and checked == 1)
+check("alert names the city and resource",
+      "Athens" in ev[0]["title"] and ev[0]["type"] == "resource_alert")
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("still breached does NOT fire again", ev == [])
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("and does not fire on the third poll either", ev == [])
+
+WINE["v"] = 5200                      # back over the line but inside the margin
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("recovery inside the margin does not re-arm", ev == [])
+check("rule still flagged as breached",
+      rstate["resource_breaches"]["r1:111"]["breached"] is True)
+WINE["v"] = 4000                      # dips again — must NOT re-alert
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("flapping across the line sends nothing", ev == [])
+
+WINE["v"] = 6000                      # clearly recovered
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("clear recovery re-arms and reports", len(ev) == 1 and "recovered" in ev[0]["title"])
+check("rule re-armed", rstate["resource_breaches"]["r1:111"]["breached"] is False)
+WINE["v"] = 4000
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("breaching again after re-arm fires", len(ev) == 1 and "recovered" not in ev[0]["title"])
+
+print("\n-- resource rules: cooldown gates the re-arm --")
+WINE["v"] = 4000
+rcfg["resource_rules"] = [rule(id="r2", threshold=5000, cooldown_minutes=60)]
+rstate["resource_breaches"] = {}
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("cooldown rule breaches", len(ev) == 1)
+WINE["v"] = 9000
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("recovered but inside cooldown stays armed-off", ev == [] and
+      rstate["resource_breaches"]["r2:111"]["breached"] is True)
+rstate["resource_breaches"]["r2:111"]["fired_at"] = _t.time() - 3601
+ev, _ = hub._check_resources(rs, rcfg, rstate)
+check("after the cooldown it re-arms",
+      rstate["resource_breaches"]["r2:111"]["breached"] is False)
+
+print("\n-- resource rules: scope --")
+pedir.getIdsOfCities = lambda s: (["111", "222"],
+                                  {"111": {"name": "Athens"}, "222": {"name": "Sparta"}})
+names = {"111": "Athens", "222": "Sparta"}
+current = {"id": "111"}
+class TwoCitySession(ResSession):
+    def get(self, url=None, **kw):
+        if url is None: raise AssertionError("bare session.get()")
+        m = _re.search(r"cityId=(\d+)", url or "")
+        if m: current["id"] = m.group(1)
+        return city_html(None, capacity=10000, wine_spend=100)
+getjson.getCity = lambda html: {"name": names[current["id"]],
+                                "availableResources": [0, 4000, 0, 0, 0]}
+tc = TwoCitySession()
+rstate["resource_breaches"] = {}
+rcfg["resource_rules"] = [rule(id="r3", scope="global", threshold=5000)]
+ev, checked = hub._check_resources(tc, rcfg, rstate)
+check("global rule covers every city", len(ev) == 2 and checked == 2)
+rstate["resource_breaches"] = {}
+rcfg["resource_rules"] = [rule(id="r4", scope="city", city_id="222",
+                               city_name="Sparta", threshold=5000)]
+ev, checked = hub._check_resources(tc, rcfg, rstate)
+check("city rule covers only its city", len(ev) == 1 and ev[0]["city"] == "Sparta")
+check("cities with no applicable rule are not fetched", checked == 1)
+
+print("\n-- resource rules: routing and housekeeping --")
+rcfg["resource_rules"] = [rule(id="r5", scope="global", threshold=5000,
+                               destinations=["d2"])]
+rcfg["destinations"].append({"id": "d2", "name": "loud", "kind": "ntfy",
+                             "ntfy": {"topic": "b"}, "enabled": True})
+rstate["resource_breaches"] = {}
+ev, _ = hub._check_resources(tc, rcfg, rstate)
+sent_log.clear()
+hub._requests = lambda: FakeRequests()
+hub._send_events(tc, rcfg, ev, rstate)
+check("a rule's own destination overrides the route",
+      all("/b" in u for u, _ in sent_log) and sent_log)
+check("breach state recorded for both cities",
+      len(rstate["resource_breaches"]) == 2)
+rcfg["resource_rules"] = []
+ev, _ = hub._check_resources(tc, rcfg, rstate)
+check("no rules means no work", ev == [])
+rcfg["resource_rules"] = [rule(id="r5", scope="city", city_id="111", threshold=5000)]
+hub._check_resources(tc, rcfg, rstate)
+check("stale breach keys are pruned",
+      list(rstate["resource_breaches"]) == ["r5:111"])
+
+print("\n-- resource rules: breach state survives a restart --")
+rstate["resource_breaches"] = {}
+hub._check_resources(tc, rcfg, rstate)
+hub._save_state(tc, rstate)
+reloaded = hub._load_state(tc)
+ev, _ = hub._check_resources(tc, rcfg, reloaded)
+check("a restart does not re-alert an already-known breach", ev == [])
+
+print("\n-- resource rules: a dead city does not stop the sweep --")
+class HalfDeadSession(TwoCitySession):
+    def get(self, url=None, **kw):
+        if url is None: raise AssertionError("bare session.get()")
+        m = _re.search(r"cityId=(\d+)", url or "")
+        if m and m.group(1) == "111": raise RuntimeError("timeout")
+        if m: current["id"] = m.group(1)
+        return city_html(None, capacity=10000, wine_spend=100)
+rcfg["resource_rules"] = [rule(id="r6", scope="global", threshold=5000)]
+rstate["resource_breaches"] = {}
+ev, checked = hub._check_resources(HalfDeadSession(), rcfg, rstate)
+check("one unreadable city does not abort the others", checked == 1 and len(ev) == 1)
+
+print("\n-- resource rules: config validation --")
+bad = hub._normalise_config({"resource_rules": [
+    {"id": "ok", "resource": "wine", "threshold": 10},
+    {"id": "bad-res", "resource": "gold", "threshold": 10},
+    {"id": "bad-num", "resource": "wood", "threshold": "lots"},
+    {"id": "fixed", "resource": "wood", "threshold": 5, "mode": "nonsense",
+     "direction": "sideways", "scope": "galaxy"},
+    "not even a dict",
+]})
+kept = {r["id"] for r in bad["resource_rules"]}
+check("valid rule kept", "ok" in kept)
+check("unknown resource dropped", "bad-res" not in kept)
+check("non-numeric threshold dropped", "bad-num" not in kept)
+check("garbage entry dropped", len(bad["resource_rules"]) == 2)
+fixed = [r for r in bad["resource_rules"] if r["id"] == "fixed"][0]
+check("bad mode/direction/scope repaired",
+      fixed["mode"] == "absolute" and fixed["direction"] == "below"
+      and fixed["scope"] == "global")
 
 print("\n-- a lock problem never stops message forwarding --")
 # The shared config becoming unreachable must degrade to "cannot save edits",

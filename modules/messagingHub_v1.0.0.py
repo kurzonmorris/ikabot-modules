@@ -27,7 +27,12 @@ from ikabot.helpers.gui import banner, bcolors, enter
 from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
-from ikabot.helpers.varios import wait
+from ikabot.helpers.varios import (
+    addThousandSeparator,
+    daysHoursMinutes,
+    getDateTime,
+    wait,
+)
 
 # Vanilla ikabot has neither of these — the hub must run on both trees.
 try:
@@ -64,7 +69,26 @@ PREFS_NAME = "messagingHub"
 
 DEFAULT_MESSAGE_INTERVAL = 10
 MIN_MESSAGE_INTERVAL = 1
+DEFAULT_RESOURCE_INTERVAL = 30
+MIN_RESOURCE_INTERVAL = 5
+DEFAULT_COOLDOWN_MINUTES = 120
+DEFAULT_REARM_MARGIN = 10
 DEFAULT_BODY_MAX = 900
+
+RESOURCES = ("wood", "wine", "marble", "crystal", "sulfur")
+RESOURCE_LABELS = {
+    "wood": "Wood",
+    "wine": "Wine",
+    "marble": "Marble",
+    "crystal": "Crystal",
+    "sulfur": "Sulfur",
+}
+RESOURCE_MODES = ("absolute", "percent", "hours_left")
+MODE_LABELS = {
+    "absolute": "amount",
+    "percent": "% of warehouse",
+    "hours_left": "hours left",
+}
 SEEN_HARD_CAP = 5000
 FAILURE_REPORT_COOLDOWN = 3600
 
@@ -75,7 +99,13 @@ FAILURE_REPORT_COOLDOWN = 3600
 LOCK_STALE_SECONDS = 45
 LOCK_TIMEOUT = 20
 LOCK_MAX_HOLD = 60
-SHARED_SECTIONS = ("destinations", "routes", "type_enabled", "formatting")
+SHARED_SECTIONS = (
+    "destinations",
+    "routes",
+    "type_enabled",
+    "formatting",
+    "resource_rules",
+)
 SNAPSHOT_KEY = "_snapshot"
 
 DISCORD_WEBHOOK_PREFIXES = (
@@ -607,7 +637,7 @@ class _global_lock:
 def _default_config():
     return {
         "config_version": CONFIG_VERSION,
-        "use_global": {"routing": False, "formatting": False},
+        "use_global": {"routing": False, "formatting": False, "resources": False},
         "destinations": [],
         "routes": {t: [] for t in EVENT_TYPES},
         "type_enabled": {t: True for t in EVENT_TYPES},
@@ -616,8 +646,13 @@ def _default_config():
                 "enabled": True,
                 "interval_minutes": DEFAULT_MESSAGE_INTERVAL,
                 "notify_existing": False,
-            }
+            },
+            "resources": {
+                "enabled": False,
+                "interval_minutes": DEFAULT_RESOURCE_INTERVAL,
+            },
         },
+        "resource_rules": [],
         "formatting": {
             "include_body": True,
             "body_max_chars": DEFAULT_BODY_MAX,
@@ -678,6 +713,27 @@ def _normalise_config(cfg):
         merged["destinations"] = []
     if not isinstance(merged.get("classification_overrides"), list):
         merged["classification_overrides"] = []
+
+    rules = []
+    for rule in merged.get("resource_rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("resource") not in RESOURCES:
+            continue
+        if rule.get("mode") not in RESOURCE_MODES:
+            rule["mode"] = "absolute"
+        if rule.get("direction") not in ("below", "above"):
+            rule["direction"] = "below"
+        if rule.get("scope") not in ("city", "global"):
+            rule["scope"] = "global"
+        try:
+            rule["threshold"] = float(rule.get("threshold", 0))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(rule.get("destinations"), list):
+            rule["destinations"] = []
+        rules.append(rule)
+    merged["resource_rules"] = rules
 
     return merged
 
@@ -775,7 +831,9 @@ def _effective_config(session):
     """Account config with whole sections swapped for the global ones."""
     cfg = _load_account_config(session)
     use_global = cfg.get("use_global", {})
-    if not (use_global.get("routing") or use_global.get("formatting")):
+    if not any(
+        use_global.get(k) for k in ("routing", "formatting", "resources")
+    ):
         return cfg
 
     shared = _load_global_config(session)
@@ -790,6 +848,8 @@ def _effective_config(session):
         cfg["type_enabled"] = shared["type_enabled"]
     if use_global.get("formatting"):
         cfg["formatting"] = shared["formatting"]
+    if use_global.get("resources"):
+        cfg["resource_rules"] = shared["resource_rules"]
     return cfg
 
 
@@ -1652,10 +1712,11 @@ def _to_event(message, event_type):
     }
 
 
-def _destinations_for(cfg, event_type):
+def _destinations_for(cfg, event_type, override=None):
+    """Resolve destination ids for a type. A rule's own list wins over the route."""
     if not cfg["type_enabled"].get(event_type, True):
         return []
-    wanted = cfg["routes"].get(event_type) or []
+    wanted = override if override else (cfg["routes"].get(event_type) or [])
     by_id = {d.get("id"): d for d in cfg["destinations"] if d.get("enabled", True)}
     return [by_id[i] for i in wanted if i in by_id]
 
@@ -1669,7 +1730,7 @@ def _send_events(session, cfg, events, state):
     for event in events:
         if _is_muted(fmt, event) or _in_quiet_hours(fmt, event["type"]):
             continue
-        for dest in _destinations_for(cfg, event["type"]):
+        for dest in _destinations_for(cfg, event["type"], event.get("destinations")):
             by_dest.setdefault(dest["id"], (dest, []))[1].append(event)
 
     sent = 0
@@ -1755,6 +1816,224 @@ def _poll_messages(session, cfg, state, own_cities, session_langs):
     return sent, failed, len(new_messages)
 
 
+# ---------------------------------------------------------------------------
+# Resource monitor
+# ---------------------------------------------------------------------------
+
+
+def _warehouse_capacity(page_html):
+    match = re.search(
+        r"maxResources:\s*JSON\.parse\('{\\\"resource\\\":(\d+),", str(page_html)
+    )
+    return int(match.group(1)) if match else 0
+
+
+def _wine_consumption_per_hour(page_html):
+    match = re.search(r"wineSpendings:\s(\d+)", str(page_html))
+    return int(match.group(1)) if match else 0
+
+
+def _wine_production_per_hour(page_html):
+    """Wine produced here, or 0 — only wine islands have the counter."""
+    match = re.search(
+        r'<td id="js_GlobalMenu_production_wine"[^>]*>\s*([\d,.\s]+)\s*</td>',
+        str(page_html),
+    )
+    if not match:
+        return 0
+    digits = re.sub(r"[^\d]", "", match.group(1))
+    return int(digits) if digits else 0
+
+
+def _rule_reading(rule, city, page_html):
+    """Return (value, unit) for this rule against this city, or (None, '')."""
+    index = RESOURCES.index(rule["resource"])
+    try:
+        amount = float(city.get("availableResources", [])[index])
+    except (IndexError, TypeError, ValueError):
+        return None, ""
+
+    mode = rule.get("mode", "absolute")
+    if mode == "absolute":
+        return amount, ""
+
+    if mode == "percent":
+        capacity = _warehouse_capacity(page_html)
+        if capacity <= 0:
+            return None, ""
+        return amount / capacity * 100.0, "%"
+
+    # hours_left — wine only, and only meaningful while it is actually draining
+    if rule["resource"] != "wine":
+        return None, ""
+    net_drain = _wine_consumption_per_hour(page_html) - _wine_production_per_hour(
+        page_html
+    )
+    if net_drain <= 0:
+        return None, ""
+    return amount / net_drain, "h"
+
+
+def _format_reading(value, unit):
+    if unit == "%":
+        return "{:.0f}%".format(value)
+    if unit == "h":
+        return daysHoursMinutes(int(value * 3600))
+    return addThousandSeparator(int(value))
+
+
+def _is_breach(rule, value):
+    if rule["direction"] == "below":
+        return value < rule["threshold"]
+    return value > rule["threshold"]
+
+
+def _has_recovered(rule, value):
+    """Recovery needs a margin beyond the threshold, so a value sitting on the
+    line cannot flip the rule back and forth every poll."""
+    margin = float(rule.get("rearm_margin_percent", DEFAULT_REARM_MARGIN)) / 100.0
+    threshold = float(rule["threshold"])
+    slack = abs(threshold) * margin
+    if slack == 0:
+        slack = margin
+    if rule["direction"] == "below":
+        return value >= threshold + slack
+    return value <= threshold - slack
+
+
+def _rule_label(cfg, rule, city_name=None):
+    where = city_name or (
+        rule.get("city_name", "?") if rule.get("scope") == "city" else "every city"
+    )
+    threshold = rule["threshold"]
+    if rule.get("mode") == "percent":
+        limit = "{:.0f}%".format(threshold)
+    elif rule.get("mode") == "hours_left":
+        limit = "{:.0f}h".format(threshold)
+    else:
+        limit = addThousandSeparator(int(threshold))
+    return "{} in {} {} {}".format(
+        RESOURCE_LABELS.get(rule["resource"], rule["resource"]),
+        where,
+        rule["direction"],
+        limit,
+    )
+
+
+def _resource_event(cfg, rule, city_name, value, unit, recovered):
+    reading = _format_reading(value, unit)
+    if rule.get("mode") == "percent":
+        limit = "{:.0f}%".format(rule["threshold"])
+    elif rule.get("mode") == "hours_left":
+        limit = "{:.0f}h".format(rule["threshold"])
+    else:
+        limit = addThousandSeparator(int(rule["threshold"]))
+
+    resource = RESOURCE_LABELS.get(rule["resource"], rule["resource"])
+    if recovered:
+        title = "{} recovered in {}".format(resource, city_name)
+        body = "{} is back to {} (rule: {} {}).".format(
+            resource, reading, rule["direction"], limit
+        )
+    else:
+        title = "{} {} {} in {}".format(resource, rule["direction"], limit, city_name)
+        body = "{} in {} is {} — the rule is {} {}.".format(
+            resource, city_name, reading, rule["direction"], limit
+        )
+
+    return {
+        "id": "res:{}:{}:{}".format(rule.get("id"), city_name, int(time.time())),
+        "type": "resource_alert",
+        "title": title,
+        "sender": "",
+        "body": body,
+        "city": city_name,
+        "date": getDateTime(),
+        "destinations": list(rule.get("destinations") or []),
+    }
+
+
+def _check_resources(session, cfg, state):
+    """Evaluate every enabled rule against every city. Returns events to send."""
+    from ikabot.config import city_url
+    from ikabot.helpers.getJson import getCity
+    from ikabot.helpers.pedirInfo import getIdsOfCities
+
+    rules = [r for r in cfg.get("resource_rules", []) if r.get("enabled", True)]
+    if not rules:
+        return [], 0
+
+    city_ids, _ = getIdsOfCities(session)
+    breaches = state.setdefault("resource_breaches", {})
+    events = []
+    checked = 0
+    now = time.time()
+    live_keys = set()
+
+    for city_id in city_ids:
+        applicable = [
+            r
+            for r in rules
+            if r.get("scope") == "global" or str(r.get("city_id")) == str(city_id)
+        ]
+        if not applicable:
+            continue
+
+        try:
+            page_html = session.get(city_url + str(city_id))
+            city = getCity(page_html)
+        except Exception:
+            logger.warning("Could not read city %s for resource rules", city_id, exc_info=True)
+            continue
+
+        checked += 1
+        city_name = city.get("name") or city.get("cityName") or str(city_id)
+
+        for rule in applicable:
+            value, unit = _rule_reading(rule, city, page_html)
+            if value is None:
+                continue
+
+            key = "{}:{}".format(rule.get("id"), city_id)
+            live_keys.add(key)
+            record = breaches.get(key) or {"breached": False, "fired_at": 0}
+            cooldown = float(rule.get("cooldown_minutes", DEFAULT_COOLDOWN_MINUTES)) * 60
+
+            if _is_breach(rule, value):
+                if not record["breached"]:
+                    record["breached"] = True
+                    record["fired_at"] = now
+                    events.append(
+                        _resource_event(cfg, rule, city_name, value, unit, False)
+                    )
+            elif record["breached"] and _has_recovered(rule, value):
+                # Only re-arm once it is clear of the threshold by the margin
+                # AND the cooldown has passed, so a value hovering on the line
+                # cannot alert every single poll.
+                if now - float(record.get("fired_at", 0)) >= cooldown:
+                    record["breached"] = False
+                    if rule.get("notify_on_recovery"):
+                        events.append(
+                            _resource_event(cfg, rule, city_name, value, unit, True)
+                        )
+            breaches[key] = record
+
+    # Forget rules and cities that no longer exist so the file cannot grow
+    # forever as cities are sold and rules deleted.
+    for key in list(breaches):
+        if key not in live_keys:
+            del breaches[key]
+
+    return events, checked
+
+
+def _poll_resources(session, cfg, state):
+    events, checked = _check_resources(session, cfg, state)
+    sent, failed = _send_events(session, cfg, events, state)
+    _save_state(session, state)
+    return sent, failed, checked
+
+
 def _do_it(session):
     state = _load_state(session)
     cfg = _effective_config(session)
@@ -1768,6 +2047,9 @@ def _do_it(session):
     )
 
     next_city_refresh = time.time() + 6 * 3600
+    next_messages = 0.0
+    next_resources = 0.0
+    summary = "starting"
 
     while True:
         # Re-read both every pass so menu edits — including a counter or
@@ -1775,25 +2057,24 @@ def _do_it(session):
         # restart, and without needing to lock the state file.
         cfg = _effective_config(session)
         state = _load_state(session)
-        interval = max(
-            MIN_MESSAGE_INTERVAL,
-            int(cfg["watchers"]["messages"].get("interval_minutes", DEFAULT_MESSAGE_INTERVAL)),
+        watchers = cfg["watchers"]
+        now = time.time()
+
+        messages_on = watchers["messages"].get("enabled", True)
+        resources_on = watchers.get("resources", {}).get("enabled", False) and cfg.get(
+            "resource_rules"
         )
 
-        if cfg["watchers"]["messages"].get("enabled", True):
+        if messages_on and now >= next_messages:
+            interval = max(
+                MIN_MESSAGE_INTERVAL,
+                int(watchers["messages"].get("interval_minutes", DEFAULT_MESSAGE_INTERVAL)),
+            )
             try:
                 sent, failed, scanned = _poll_messages(
                     session, cfg, state, own_cities, session_langs
                 )
-                session.setStatus(
-                    "Hub: {} new, {} forwarded, {} failed (total {}/{})".format(
-                        scanned,
-                        sent,
-                        failed,
-                        state.get("delivered", 0),
-                        state.get("failed", 0),
-                    )
-                )
+                summary = "{} new, {} forwarded, {} failed".format(scanned, sent, failed)
                 if failed:
                     _report_failures(session, cfg, state)
             except Exception:
@@ -1801,14 +2082,48 @@ def _do_it(session):
                 state["last_error"] = traceback.format_exc()[-400:]
                 _save_state(session, state)
                 _report_failures(session, cfg, state)
-        else:
-            session.setStatus("Hub: message forwarding disabled")
+                summary = "message poll failed"
+            next_messages = time.time() + interval * 60
+
+        if resources_on and now >= next_resources:
+            interval = max(
+                MIN_RESOURCE_INTERVAL,
+                int(
+                    watchers["resources"].get(
+                        "interval_minutes", DEFAULT_RESOURCE_INTERVAL
+                    )
+                ),
+            )
+            try:
+                sent, failed, checked = _poll_resources(session, cfg, state)
+                if sent or failed:
+                    summary += " | resources: {} sent, {} failed".format(sent, failed)
+                if failed:
+                    _report_failures(session, cfg, state)
+            except Exception:
+                logger.error("Resource check failed", exc_info=True)
+                state["last_error"] = traceback.format_exc()[-400:]
+                _save_state(session, state)
+                _report_failures(session, cfg, state)
+            next_resources = time.time() + interval * 60
+
+        if not messages_on and not resources_on:
+            summary = "idle — no watcher enabled"
+
+        session.setStatus(
+            "Hub: {} (total {}/{})".format(
+                summary, state.get("delivered", 0), state.get("failed", 0)
+            )
+        )
 
         if time.time() >= next_city_refresh:
             own_cities = _own_city_names(session)
             next_city_refresh = time.time() + 6 * 3600
 
-        wait(interval * 60, maxrandom=30)
+        # Sleep until whichever watcher is due first.
+        due = [t for t, on in ((next_messages, messages_on), (next_resources, resources_on)) if on]
+        seconds = min(due) - time.time() if due else 300
+        wait(max(30, int(seconds)), maxrandom=30)
 
 
 def _report_failures(session, cfg, state):
@@ -1891,22 +2206,49 @@ def _config_summary(session, cfg):
         for t in EVENT_TYPES
         if cfg["routes"].get(t) and cfg["type_enabled"].get(t, True)
     )
+    watchers = cfg["watchers"]
+    rules = cfg.get("resource_rules", [])
+    active_rules = len([r for r in rules if r.get("enabled", True)])
     return (
         "Destinations: {}\n".format(len(cfg["destinations"]))
         + "Routed types: {}/{}\n".format(routed, len(EVENT_TYPES))
-        + "Interval: {} minute(s)\n".format(
-            cfg["watchers"]["messages"].get("interval_minutes", DEFAULT_MESSAGE_INTERVAL)
+        + "Messages: {}\n".format(
+            "every {} min".format(
+                watchers["messages"].get("interval_minutes", DEFAULT_MESSAGE_INTERVAL)
+            )
+            if watchers["messages"].get("enabled", True)
+            else "off"
+        )
+        + "Resources: {}\n".format(
+            "{} rule(s), every {} min".format(
+                active_rules,
+                watchers.get("resources", {}).get(
+                    "interval_minutes", DEFAULT_RESOURCE_INTERVAL
+                ),
+            )
+            if watchers.get("resources", {}).get("enabled", False)
+            else "off"
         )
         + "Storage: {}".format(_hub_dir(session))
     )
 
 
 def _config_is_runnable(cfg):
-    if not cfg["watchers"]["messages"].get("enabled", True):
-        return False
-    for event_type in EVENT_TYPES:
-        if cfg["type_enabled"].get(event_type, True) and _destinations_for(cfg, event_type):
-            return True
+    if cfg["watchers"]["messages"].get("enabled", True):
+        for event_type in EVENT_TYPES:
+            if event_type in ("resource_alert", "hub_status"):
+                continue
+            if cfg["type_enabled"].get(event_type, True) and _destinations_for(
+                cfg, event_type
+            ):
+                return True
+
+    if cfg["watchers"].get("resources", {}).get("enabled", False):
+        for rule in cfg.get("resource_rules", []):
+            if rule.get("enabled", True) and _destinations_for(
+                cfg, "resource_alert", rule.get("destinations")
+            ):
+                return True
     return False
 
 
@@ -2003,9 +2345,7 @@ def _menu_main_once(session):
         elif choice == 3:
             _menu_forwarding(session)
         elif choice == 4:
-            _header("RESOURCE MONITOR")
-            print("Resource monitoring arrives in v1.2.0 — see plan.md, phase 3.")
-            enter()
+            _menu_resources(session)
         elif choice == 5:
             _menu_formatting(session)
         elif choice == 6:
@@ -2337,6 +2677,315 @@ def _edit_route(session, cfg, is_global, event_type):
     cfg["routes"][event_type] = chosen
     _store(session, cfg, is_global)
     print("\n{}Now going to: {}{}".format(bcolors.GREEN, _dest_names(cfg, chosen), bcolors.ENDC))
+    enter()
+
+
+def _menu_resources(session):
+    while True:
+        cfg, is_global = _pick_config_to_edit(session)
+        watcher = cfg["watchers"].setdefault(
+            "resources",
+            {"enabled": False, "interval_minutes": DEFAULT_RESOURCE_INTERVAL},
+        )
+        rules = cfg.setdefault("resource_rules", [])
+
+        _header("RESOURCE MONITOR{}".format(" (GLOBAL)" if is_global else ""))
+        print("  Monitoring:  {}".format("on" if watcher.get("enabled") else "off"))
+        print("  Check every: {} minute(s)".format(
+            watcher.get("interval_minutes", DEFAULT_RESOURCE_INTERVAL)
+        ))
+        print("")
+        if rules:
+            for index, rule in enumerate(rules, 1):
+                print("  {:>2}) {}{:<40} {}".format(
+                    index,
+                    _on_off(rule.get("enabled", True)),
+                    _rule_label(cfg, rule),
+                    _dest_names(cfg, rule.get("destinations") or cfg["routes"].get("resource_alert", [])),
+                ))
+        else:
+            print("  No rules yet.")
+        print("")
+        print("(0) Back")
+        print("(1) {} monitoring".format("Turn off" if watcher.get("enabled") else "Turn on"))
+        print("(2) Change interval")
+        print("(3) Add a rule")
+        print("(4) Edit a rule")
+        print("(5) Delete a rule")
+        print("(6) Check every rule now (nothing is sent)")
+
+        choice = _read(min=0, max=6, digit=True)
+        if choice == 0:
+            return
+        if choice == 1:
+            watcher["enabled"] = not watcher.get("enabled", False)
+        elif choice == 2:
+            print("\nMinutes between checks (min {}, default {})".format(
+                MIN_RESOURCE_INTERVAL, DEFAULT_RESOURCE_INTERVAL
+            ))
+            watcher["interval_minutes"] = int(
+                _read(min=MIN_RESOURCE_INTERVAL, digit=True, default=DEFAULT_RESOURCE_INTERVAL)
+            )
+        elif choice == 3:
+            if not _add_resource_rule(session, cfg):
+                continue
+        elif choice == 4 and rules:
+            if not _edit_resource_rule(session, cfg):
+                continue
+        elif choice == 5 and rules:
+            print("\nWhich rule should be deleted? (0 to cancel)")
+            index = int(_read(min=0, max=len(rules), digit=True))
+            if index == 0:
+                continue
+            rules.pop(index - 1)
+        elif choice == 6:
+            _resource_dry_run(session, cfg)
+            continue
+        else:
+            continue
+        _store(session, cfg, is_global)
+
+
+def _add_resource_rule(session, cfg):
+    _header("ADD A RESOURCE RULE")
+    print("(0) Cancel")
+    print("(1) One city")
+    print("(2) Every city  — one rule covering the whole account")
+    scope_choice = _read(min=0, max=2, digit=True)
+    if scope_choice == 0:
+        return False
+
+    city_id = None
+    city_name = ""
+    if scope_choice == 1:
+        from ikabot.helpers.pedirInfo import getIdsOfCities
+
+        try:
+            city_ids, cities = getIdsOfCities(session)
+        except Exception:
+            print("\n{}Could not read your cities.{}".format(bcolors.RED, bcolors.ENDC))
+            enter()
+            return False
+        listed = [(cid, cities[cid].get("name", str(cid))) for cid in city_ids]
+        _header("WHICH CITY?")
+        for index, (_, name) in enumerate(listed, 1):
+            print("  {:>2}) {}".format(index, name))
+        print("(0) Cancel")
+        index = int(_read(min=0, max=len(listed), digit=True))
+        if index == 0:
+            return False
+        city_id, city_name = listed[index - 1]
+
+    _header("WHICH RESOURCE?")
+    for index, key in enumerate(RESOURCES, 1):
+        print("  {}) {}".format(index, RESOURCE_LABELS[key]))
+    resource = RESOURCES[int(_read(min=1, max=len(RESOURCES), digit=True)) - 1]
+
+    _header("WHAT SHOULD BE COMPARED?")
+    print("(1) The amount in store")
+    print("(2) Percent of warehouse capacity")
+    if resource == "wine":
+        print("(3) Hours of wine left at the current rate")
+        mode_choice = _read(min=1, max=3, digit=True)
+    else:
+        mode_choice = _read(min=1, max=2, digit=True)
+    mode = RESOURCE_MODES[int(mode_choice) - 1]
+
+    _header("WHEN SHOULD IT ALERT?")
+    print("(1) When it goes below the number")
+    print("(2) When it goes above the number")
+    direction = "below" if int(_read(min=1, max=2, digit=True)) == 1 else "above"
+
+    if mode == "percent":
+        print("\nPercent (1-100)")
+        threshold = float(_read(min=1, max=100, digit=True))
+    elif mode == "hours_left":
+        print("\nHours")
+        threshold = float(_read(min=1, max=1000, digit=True))
+    else:
+        print("\nAmount")
+        threshold = float(_read(min=0, digit=True))
+
+    destinations = _choose_destinations(
+        cfg, "Where should this rule's alerts go?", cfg["routes"].get("resource_alert", [])
+    )
+
+    print("\nMinutes to wait before this rule can alert again (default {})".format(
+        DEFAULT_COOLDOWN_MINUTES
+    ))
+    cooldown = int(_read(min=0, digit=True, default=DEFAULT_COOLDOWN_MINUTES))
+
+    print("\nAlso tell me when it recovers? [y/N]")
+    recovery = str(
+        _read(values=["y", "Y", "n", "N", ""], empty=True, default="n")
+    ).lower() == "y"
+
+    rule = {
+        "id": _new_rule_id(cfg["resource_rules"]),
+        "enabled": True,
+        "scope": "city" if scope_choice == 1 else "global",
+        "city_id": city_id,
+        "city_name": city_name,
+        "resource": resource,
+        "mode": mode,
+        "direction": direction,
+        "threshold": threshold,
+        "destinations": destinations,
+        "cooldown_minutes": cooldown,
+        "rearm_margin_percent": DEFAULT_REARM_MARGIN,
+        "notify_on_recovery": recovery,
+    }
+    cfg["resource_rules"].append(rule)
+    print("\n{}Added: {}{}".format(bcolors.GREEN, _rule_label(cfg, rule), bcolors.ENDC))
+    enter()
+    return True
+
+
+def _edit_resource_rule(session, cfg):
+    rules = cfg["resource_rules"]
+    _header("EDIT A RESOURCE RULE")
+    for index, rule in enumerate(rules, 1):
+        print("  {:>2}) {}".format(index, _rule_label(cfg, rule)))
+    print("(0) Cancel")
+    index = int(_read(min=0, max=len(rules), digit=True))
+    if index == 0:
+        return False
+    rule = rules[index - 1]
+
+    _header(_rule_label(cfg, rule).upper()[:56])
+    print("  Alerts go to:  {}".format(_dest_names(cfg, rule.get("destinations") or [])))
+    print("  Cooldown:      {} minute(s)".format(rule.get("cooldown_minutes", DEFAULT_COOLDOWN_MINUTES)))
+    print("  Re-arm margin: {}%".format(rule.get("rearm_margin_percent", DEFAULT_REARM_MARGIN)))
+    print("  Recovery note: {}".format("yes" if rule.get("notify_on_recovery") else "no"))
+    print("")
+    print("(0) Back")
+    print("(1) {} this rule".format("Disable" if rule.get("enabled", True) else "Enable"))
+    print("(2) Change the number")
+    print("(3) Change where its alerts go")
+    print("(4) Change the cooldown")
+    print("(5) Change the re-arm margin")
+    print("(6) Toggle the recovery message")
+
+    choice = _read(min=0, max=6, digit=True)
+    if choice == 0:
+        return False
+    if choice == 1:
+        rule["enabled"] = not rule.get("enabled", True)
+    elif choice == 2:
+        if rule.get("mode") == "percent":
+            print("\nPercent (1-100)")
+            rule["threshold"] = float(_read(min=1, max=100, digit=True))
+        elif rule.get("mode") == "hours_left":
+            print("\nHours")
+            rule["threshold"] = float(_read(min=1, max=1000, digit=True))
+        else:
+            print("\nAmount")
+            rule["threshold"] = float(_read(min=0, digit=True))
+    elif choice == 3:
+        rule["destinations"] = _choose_destinations(
+            cfg, "Where should this rule's alerts go?", rule.get("destinations") or []
+        )
+    elif choice == 4:
+        print("\nMinutes before this rule can alert again")
+        rule["cooldown_minutes"] = int(_read(min=0, digit=True, default=DEFAULT_COOLDOWN_MINUTES))
+    elif choice == 5:
+        print("\nHow far past the number it must recover before the rule re-arms,")
+        print("as a percent of the number. Higher values mean less flapping.")
+        rule["rearm_margin_percent"] = int(
+            _read(min=0, max=100, digit=True, default=DEFAULT_REARM_MARGIN)
+        )
+    elif choice == 6:
+        rule["notify_on_recovery"] = not rule.get("notify_on_recovery", False)
+    return True
+
+
+def _choose_destinations(cfg, prompt_text, current):
+    """Multi-select destinations. Empty answer falls back to the type's route."""
+    if not cfg["destinations"]:
+        print("\n{}No destinations exist yet — this rule will use the".format(bcolors.WARNING))
+        print("Resource alerts route once you add one.{}".format(bcolors.ENDC))
+        enter()
+        return []
+
+    print("")
+    print(prompt_text)
+    for index, dest in enumerate(cfg["destinations"], 1):
+        marker = "*" if dest["id"] in (current or []) else " "
+        print("  {} {}) {}".format(marker, index, _dest_label(dest)))
+    print("Numbers separated by commas, or blank to use the Resource alerts route.")
+    raw = str(_read(empty=True, default="")).strip()
+
+    chosen = []
+    for token in raw.split(","):
+        token = token.strip()
+        if token.isdigit() and 1 <= int(token) <= len(cfg["destinations"]):
+            dest_id = cfg["destinations"][int(token) - 1]["id"]
+            if dest_id not in chosen:
+                chosen.append(dest_id)
+    return chosen
+
+
+def _new_rule_id(rules):
+    used = {r.get("id") for r in rules}
+    index = 1
+    while "r{}".format(index) in used:
+        index += 1
+    return "r{}".format(index)
+
+
+def _resource_dry_run(session, cfg):
+    _header("RESOURCE CHECK — NOTHING WILL BE SENT")
+    rules = [r for r in cfg.get("resource_rules", []) if r.get("enabled", True)]
+    if not rules:
+        print("No enabled rules.")
+        enter()
+        return
+
+    print("Reading your cities…\n")
+    from ikabot.config import city_url
+    from ikabot.helpers.getJson import getCity
+    from ikabot.helpers.pedirInfo import getIdsOfCities
+
+    try:
+        city_ids, _ = getIdsOfCities(session)
+    except Exception:
+        print("{}Could not read your cities.{}".format(bcolors.RED, bcolors.ENDC))
+        enter()
+        return
+
+    for city_id in city_ids:
+        applicable = [
+            r
+            for r in rules
+            if r.get("scope") == "global" or str(r.get("city_id")) == str(city_id)
+        ]
+        if not applicable:
+            continue
+        try:
+            page_html = session.get(city_url + str(city_id))
+            city = getCity(page_html)
+        except Exception:
+            print("  {}could not read city {}{}".format(bcolors.RED, city_id, bcolors.ENDC))
+            continue
+
+        city_name = city.get("name") or str(city_id)
+        for rule in applicable:
+            value, unit = _rule_reading(rule, city, page_html)
+            if value is None:
+                print("  {:<14} {:<34} {}not measurable here{}".format(
+                    city_name, _rule_label(cfg, rule, city_name),
+                    bcolors.BLACK, bcolors.ENDC
+                ))
+                continue
+            breached = _is_breach(rule, value)
+            print("  {:<14} {:<34} {} {}{}{}".format(
+                city_name,
+                _rule_label(cfg, rule, city_name),
+                _format_reading(value, unit),
+                bcolors.RED if breached else bcolors.GREEN,
+                "ALERT" if breached else "ok",
+                bcolors.ENDC,
+            ))
     enter()
 
 
@@ -2672,6 +3321,7 @@ def _menu_storage(session):
         print("  Global file:       {}".format("present" if shared_exists else "not created yet"))
         print("  Routing from:      {}".format("global" if use_global.get("routing") else "this account"))
         print("  Formatting from:   {}".format("global" if use_global.get("formatting") else "this account"))
+        print("  Resource rules:    {}".format("global" if use_global.get("resources") else "this account"))
         print("")
         print("Point several accounts at the same folder to share one global")
         print("configuration between them.")
@@ -2683,10 +3333,31 @@ def _menu_storage(session):
         print("(4) Use global formatting here: {}".format("on" if use_global.get("formatting") else "off"))
         print("(5) Copy this account's settings into the global configuration")
         print("(6) Copy the global configuration into this account")
+        print("(7) Use global resource rules here: {}".format(
+            "on" if use_global.get("resources") else "off"
+        ))
 
-        choice = _read(min=0, max=6, digit=True)
+        choice = _read(min=0, max=7, digit=True)
         if choice == 0:
             return
+        if choice == 7:
+            if not use_global.get("resources") and not shared_exists:
+                print("\n{}There is no global configuration yet — use (5) first.{}".format(
+                    bcolors.WARNING, bcolors.ENDC
+                ))
+                enter()
+                continue
+            if not use_global.get("resources"):
+                print("\n{}City-specific rules from the global file only apply to the".format(
+                    bcolors.WARNING
+                ))
+                print("account that made them. Rules covering every city apply here.{}".format(
+                    bcolors.ENDC
+                ))
+                enter()
+            use_global["resources"] = not use_global.get("resources", False)
+            _save_account_config(session, account_cfg)
+            continue
         if choice == 1:
             print("\nFolder to keep hub data in — a '{}' folder is created inside it.".format(HUB_DIR_NAME))
             print("Current: {}".format(_base_dir(session)))

@@ -1,7 +1,10 @@
 # Messaging Hub — Build Plan
 
 > Module: `modules/messagingHub_v<X.Y.Z>.py` (external module, installs as `messagingHub.py`)
-> Status: **Phase 1 shipped — `messagingHub_v1.0.0.py`.** Next: Phase 2.
+> Status: **Phases 1 and 3 built in `messagingHub_v1.0.0.py`** (nothing has been
+> released to users yet, so it is all still one unshipped 1.0.0 — bump the
+> filename when it first goes to `main`). Next: Phase 2, which is waiting on
+> real inbox data — see `docs/MESSAGING_HUB_DATA_REQUEST.md`.
 > This file is the working spec across sessions.
 > Read `Explained-ikariam_ikabot.md` and `Explained-user_kurzon.md` before touching it.
 
@@ -339,7 +342,13 @@ One rule list. A rule is either scoped to a city or global across all cities.
   `getWineConsumptionPerHour()` and `getProductionPerHour()`. Mirrors
   `alertLowWine.py`; this is the rule that actually matters day to day.
 - **`scope: global`** — evaluated per city; the message names the city that
-  breached. A per-city rule overrides a global rule for the same resource.
+  breached. Cities that no rule applies to are never fetched.
+
+Each rule carries its own `destinations`; leaving them empty falls back to the
+`resource_alert` route. Rules are a shareable section (`use_global.resources`),
+with the caveat that a **city-scoped** rule from the global file only applies to
+the account that created it — city ids are per account. Global-scope rules work
+everywhere, which is the multi-account case.
 
 ### Hysteresis — the important part
 A resource sitting on a threshold must not alert every poll.
@@ -348,10 +357,14 @@ A resource sitting on a threshold must not alert every poll.
 - Re-arm only when the value recovers past `rearm_margin_percent` beyond the
   threshold, **and** `cooldown_minutes` has elapsed.
 - Rule/city breach state lives in the state file so a hub restart does not
-  re-fire everything.
+  re-fire everything. Keys for deleted rules and sold cities are pruned each
+  sweep so the file cannot grow forever.
 - `notify_on_recovery` optionally sends a "back above X" message.
+- A city that cannot be read is skipped with a warning; the sweep continues.
 
 Cost is one `getCity()` per city per poll; default 30 min interval, minimum 5.
+`(4) → (6)` runs every rule against live cities and prints ALERT/ok per city
+without sending anything.
 
 ---
 
@@ -384,7 +397,7 @@ Messaging Hub
  (1) Start hub                  — launch the background watchers
  (2) Destinations               — add / rename / enable / test / delete
  (3) Message forwarding & routing — enable, interval, first-run behaviour, per-type routing
- (4) Resource monitor           — reserved for Phase 3
+ (4) Resource monitor           — on/off, interval, rules CRUD, check-now
  (5) Formatting & filters       — body limit, combat detail, quiet hours, mutes
  (6) Diagnostics                — test destinations, dry-run scan, capture raw
                                   messages, reset seen ids, counters
@@ -451,8 +464,8 @@ earliest — the same shape as `alertMessages.do_it()`. Every iteration ends in 
 | Phase | Version | Contents |
 |---|---|---|
 | **1** ✅ | `1.0.0` | Skeleton, config + state store, destination book, all four transports, bundled scraper, classification v1 (source + keywords), per-type routing, dedupe, hub loop, diagnostics + **capture**, global/individual config |
-| **2** | `1.1.0` | Classification refinement from captured data: icon/CSS map, per-language keyword tables, user-taught overrides UI, per-type test fixtures |
-| **3** | `1.2.0` | Resource monitor: rules CRUD, three modes, hysteresis + cooldown, recovery notices, global rules |
+| **2** | `1.1.0` | Classification refinement from captured data: icon/CSS map, per-language keyword tables, user-taught overrides UI, per-type test fixtures. **Blocked on data** — `docs/MESSAGING_HUB_DATA_REQUEST.md` |
+| **3** ✅ | — | Resource monitor: rules CRUD, three modes, hysteresis + cooldown + re-arm margin, recovery notices, global and per-city rules, per-rule destinations, dry-run check |
 | **4** | `1.3.0` | Formatting: Discord embeds + colours, templates, batching, quiet hours, mutes, delivery counters, rate-limited failure reporting |
 | **5** | `2.0.0` | General trigger engine — any in-game condition → rule → destination: incoming attack, idle ships, city under siege, research done, pirate raid ready, treaty requests |
 | **6** | `2.1.0` | Other modules emit hub events (`hub_emit(session, type, text)`), so RTM / construction manager / recruitment notifications route through the hub instead of one flat channel |
@@ -524,6 +537,16 @@ lock stolen mid-write (abandoned then retried), busy holder timing out with a
 message, unusable location, section-level merge including "a stale reader must
 not roll back a section it never edited", `.bak` recovery, and the guarantee
 that an unreachable share still leaves message forwarding working.
+
+The resource monitor is covered end to end: reading a city in all three modes
+and the cases that are *not* measurable (percent with no capacity, hours-left on
+a non-wine resource, wine that is not draining), threshold and re-arm-margin
+maths in both directions, and the full anti-spam cycle — breach fires once, a
+still-breached poll sends nothing, recovery inside the margin does not re-arm,
+flapping across the line sends nothing, a clear recovery re-arms and reports,
+and breaching again then fires. Plus cooldown gating, scope, per-rule
+destinations, breach-key pruning, surviving a restart without re-alerting, one
+unreadable city not aborting the sweep, and rule validation.
 
 Two things to watch when writing tests here: the container often runs as
 **root**, so "unwritable directory" must be simulated with a path whose parent
