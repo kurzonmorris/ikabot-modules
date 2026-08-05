@@ -8,13 +8,17 @@ MODULE_ENTRY = "messagingHub"
 MENU_LABEL = "Messaging Hub"
 MENU_ORDER = 50
 
+import copy
 import html
 import json
 import os
+import random
 import re
+import socket
 import sys
 import time
 import traceback
+import uuid
 
 import ikabot.config as config
 from ikabot.config import IKABOT_DATA_DIR
@@ -63,6 +67,16 @@ MIN_MESSAGE_INTERVAL = 1
 DEFAULT_BODY_MAX = 900
 SEEN_HARD_CAP = 5000
 FAILURE_REPORT_COOLDOWN = 3600
+
+# The global config can live on a network share, so the lock must survive
+# other machines, wrong clocks, dead holders and filesystems where O_EXCL
+# is not truly atomic.  Critical sections are read-modify-write only: never
+# hold the lock across a prompt or a network request.
+LOCK_STALE_SECONDS = 45
+LOCK_TIMEOUT = 20
+LOCK_MAX_HOLD = 60
+SHARED_SECTIONS = ("destinations", "routes", "type_enabled", "formatting")
+SNAPSHOT_KEY = "_snapshot"
 
 DISCORD_WEBHOOK_PREFIXES = (
     "https://discord.com/api/webhooks/",
@@ -288,15 +302,41 @@ def _read_json(path):
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
+            logger.warning("%s does not contain a JSON object", path)
     except Exception:
-        logger.debug("Could not read %s", path, exc_info=True)
+        logger.warning("Could not read %s", path, exc_info=True)
     return None
 
 
-def _write_json(path, data):
+def _read_json_resilient(path):
+    """Read a file, falling back to the last known good copy if it is broken."""
+    data = _read_json(path)
+    if data is not None:
+        return data
+    if os.path.exists(path):
+        backup = _read_json(path + ".bak")
+        if backup is not None:
+            logger.warning("Recovered %s from its backup copy", path)
+            return backup
+    return None
+
+
+def _write_json(path, data, keep_backup=False):
+    """Atomic write. A reader either sees the whole old file or the whole new one."""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        if keep_backup and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as src:
+                    previous = src.read()
+                with open(path + ".bak.tmp", "w", encoding="utf-8") as dst:
+                    dst.write(previous)
+                os.replace(path + ".bak.tmp", path + ".bak")
+            except OSError:
+                logger.debug("Could not refresh backup of %s", path, exc_info=True)
+        tmp = "{}.{}.tmp".format(path, os.getpid())
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
@@ -304,6 +344,264 @@ def _write_json(path, data):
     except Exception:
         logger.error("Could not write %s", path, exc_info=True)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Cross-instance lock for the shared global config
+# ---------------------------------------------------------------------------
+
+
+class _LockBusy(Exception):
+    """Another instance is holding the lock and still alive."""
+
+
+class _LockUnavailable(Exception):
+    """The lock cannot be used at all — read-only folder, missing share."""
+
+
+class _LockLost(Exception):
+    """Our lock was taken away mid-section. The write was abandoned, not applied."""
+
+
+_lock_state = {"token": None, "depth": 0, "acquired_at": 0.0}
+
+
+def _pid_alive(pid):
+    """Never touches the process. On Windows os.kill would terminate it."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong(0)
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return exit_code.value == STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _lock_path(session):
+    return _global_config_path(session) + ".lock"
+
+
+def _lock_payload(session, token):
+    return {
+        "token": token,
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "account": _account_key(session),
+        "timestamp": time.time(),
+    }
+
+
+def _read_lock(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _lock_age(path, data):
+    """Age of the lock, taking whichever evidence says it is youngest.
+
+    The file may sit on a share written by a machine whose clock is wrong, so
+    a single timestamp cannot be trusted. Erring young means we wait for a
+    lock we could have stolen — far better than stealing a live one.
+    """
+    ages = []
+    try:
+        ages.append(time.time() - float(data.get("timestamp", 0)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        ages.append(time.time() - os.path.getmtime(path))
+    except OSError:
+        pass
+    ages = [a for a in ages if a >= 0]
+    return min(ages) if ages else 0.0
+
+
+def _holder_is_dead(data):
+    # A pid only means something on the machine that wrote it.
+    if data.get("host") != socket.gethostname():
+        return False
+    pid = data.get("pid")
+    return bool(pid) and not _pid_alive(pid)
+
+
+def _describe_holder(data):
+    if not data:
+        return "unknown"
+    return "{}@{} (pid {})".format(
+        data.get("account", "?"), data.get("host", "?"), data.get("pid", "?")
+    )
+
+
+def _lock_write(path, payload, exclusive):
+    """Create or steal the lock file. Returns True if the bytes were written."""
+    if exclusive:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, json.dumps(payload).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+
+    tmp = "{}.{}.{}.tmp".format(path, os.getpid(), uuid.uuid4().hex[:8])
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+        return True
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _acquire_lock(session, timeout=LOCK_TIMEOUT):
+    """Take the global-config lock. Raises _LockBusy or _LockUnavailable."""
+    path = _lock_path(session)
+    token = uuid.uuid4().hex
+    payload = _lock_payload(session, token)
+    deadline = time.time() + timeout
+    holder = None
+
+    while True:
+        try:
+            _lock_write(path, payload, exclusive=True)
+            # O_EXCL is not atomic on every network filesystem, so confirm the
+            # file really carries our token before believing we own it.
+            current = _read_lock(path)
+            if current and current.get("token") == token:
+                return token
+        except FileExistsError:
+            current = _read_lock(path)
+            age = _lock_age(path, current or {})
+            unreadable = current is None
+            if unreadable and age > LOCK_STALE_SECONDS:
+                stale = True
+            elif current is not None and (
+                age > LOCK_STALE_SECONDS or _holder_is_dead(current)
+            ):
+                stale = True
+            else:
+                stale = False
+                holder = current
+
+            if stale:
+                logger.warning(
+                    "Reclaiming stale hub lock from %s (age %.0fs)",
+                    _describe_holder(current),
+                    age,
+                )
+                try:
+                    payload["timestamp"] = time.time()
+                    _lock_write(path, payload, exclusive=False)
+                    current = _read_lock(path)
+                    if current and current.get("token") == token:
+                        return token
+                except OSError:
+                    logger.debug("Stale lock takeover failed", exc_info=True)
+        except OSError as exc:
+            # No such directory, read-only share, permission denied — the lock
+            # can never be taken here, so say so instead of spinning.
+            raise _LockUnavailable(str(exc))
+
+        if time.time() >= deadline:
+            raise _LockBusy(_describe_holder(holder))
+        time.sleep(random.uniform(0.2, 0.7))
+
+
+def _lock_is_ours(session, token):
+    current = _read_lock(_lock_path(session))
+    return bool(current) and current.get("token") == token
+
+
+def _release_lock(session, token):
+    """Only ever remove a lock file that is still ours."""
+    path = _lock_path(session)
+    try:
+        current = _read_lock(path)
+        if current is None:
+            return
+        if current.get("token") == token:
+            os.remove(path)
+        else:
+            logger.warning(
+                "Hub lock was taken over by %s before we released it",
+                _describe_holder(current),
+            )
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.debug("Could not release hub lock", exc_info=True)
+
+
+class _global_lock:
+    """Re-entrant context manager around the shared global config lock."""
+
+    def __init__(self, session, timeout=LOCK_TIMEOUT):
+        self.session = session
+        self.timeout = timeout
+        self.outermost = False
+
+    def __enter__(self):
+        if _lock_state["depth"] > 0:
+            _lock_state["depth"] += 1
+            return self
+        token = _acquire_lock(self.session, self.timeout)
+        _lock_state["token"] = token
+        _lock_state["depth"] = 1
+        _lock_state["acquired_at"] = time.time()
+        self.outermost = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _lock_state["depth"] -= 1
+        if _lock_state["depth"] > 0:
+            return False
+        held = time.time() - _lock_state["acquired_at"]
+        if held > LOCK_MAX_HOLD:
+            logger.warning(
+                "Held the hub lock for %.0fs — sections must stay short", held
+            )
+        _release_lock(self.session, _lock_state["token"])
+        _lock_state["token"] = None
+        return False
+
+    def still_ours(self):
+        return _lock_is_ours(self.session, _lock_state["token"])
 
 
 def _default_config():
@@ -385,12 +683,13 @@ def _normalise_config(cfg):
 
 
 def _load_account_config(session):
-    return _normalise_config(_read_json(_config_path(session)))
+    return _normalise_config(_read_json_resilient(_config_path(session)))
 
 
 def _save_account_config(session, cfg):
+    cfg.pop(SNAPSHOT_KEY, None)
     cfg["config_version"] = CONFIG_VERSION
-    ok = _write_json(_config_path(session), cfg)
+    ok = _write_json(_config_path(session), cfg, keep_backup=True)
     # Give the mod's auto-start screen a prefs file to flag; the real settings
     # stay in the hub's own config so they can be shared between accounts.
     if ok and _HAS_MODULE_PREFS:
@@ -401,15 +700,75 @@ def _save_account_config(session, cfg):
 
 
 def _load_global_config(session):
-    data = _read_json(_global_config_path(session))
+    """Read the shared config. Lock-free — writers replace the file atomically.
+
+    The snapshot recorded here is what a later save diffs against, so two
+    instances editing different sections do not overwrite each other.
+    """
+    data = _read_json_resilient(_global_config_path(session))
     if data is None:
         return None
-    return _normalise_config(data)
+    cfg = _normalise_config(data)
+    cfg[SNAPSHOT_KEY] = copy.deepcopy({s: cfg.get(s) for s in SHARED_SECTIONS})
+    return cfg
 
 
-def _save_global_config(session, cfg):
+def _save_global_config(session, cfg, retries=3):
+    """Merge this account's changed sections into the shared file, under lock.
+
+    Returns (ok, message). Never raises: a locking problem must never take the
+    hub down, it just means this edit was not saved.
+    """
+    snapshot = cfg.pop(SNAPSHOT_KEY, None)
     cfg["config_version"] = CONFIG_VERSION
-    return _write_json(_global_config_path(session), cfg)
+    path = _global_config_path(session)
+
+    for attempt in range(retries):
+        try:
+            with _global_lock(session) as lock:
+                disk = _read_json_resilient(path)
+                merged = _normalise_config(disk) if disk is not None else _default_config()
+
+                if snapshot is None:
+                    merged = dict(cfg)
+                else:
+                    for section in SHARED_SECTIONS:
+                        if cfg.get(section) == snapshot.get(section):
+                            continue
+                        if merged.get(section) != snapshot.get(section):
+                            logger.warning(
+                                "Global '%s' changed on disk since it was read; "
+                                "this account's version wins",
+                                section,
+                            )
+                        merged[section] = cfg.get(section)
+
+                merged.pop(SNAPSHOT_KEY, None)
+                merged["config_version"] = CONFIG_VERSION
+                merged["revision"] = int((disk or {}).get("revision", 0)) + 1
+                merged["last_written_by"] = _account_key(session)
+
+                # Re-check ownership immediately before replacing the file: if
+                # somebody reclaimed our lock we must abandon the write rather
+                # than clobber whatever they wrote.
+                if not lock.still_ours():
+                    raise _LockLost("lock taken over during the write")
+
+                if _write_json(path, merged, keep_backup=True):
+                    return True, ""
+                return False, "could not write the global configuration file"
+        except _LockLost:
+            logger.warning("Hub lock lost mid-write, retrying (%d/%d)", attempt + 1, retries)
+            time.sleep(random.uniform(0.3, 1.0))
+        except _LockBusy as exc:
+            return False, "another instance is editing it right now ({})".format(exc)
+        except _LockUnavailable as exc:
+            return False, "the folder cannot be locked ({})".format(exc)
+        except Exception as exc:
+            logger.error("Unexpected error saving global config", exc_info=True)
+            return False, str(exc)[:120]
+
+    return False, "another instance kept taking the lock — nothing was changed"
 
 
 def _effective_config(session):
@@ -1411,8 +1770,11 @@ def _do_it(session):
     next_city_refresh = time.time() + 6 * 3600
 
     while True:
-        # Re-read every pass so menu edits take effect without a restart.
+        # Re-read both every pass so menu edits — including a counter or
+        # seen-id reset done while the hub runs — take effect without a
+        # restart, and without needing to lock the state file.
         cfg = _effective_config(session)
+        state = _load_state(session)
         interval = max(
             MIN_MESSAGE_INTERVAL,
             int(cfg["watchers"]["messages"].get("interval_minutes", DEFAULT_MESSAGE_INTERVAL)),
@@ -1470,12 +1832,39 @@ def _report_failures(session, cfg, state):
 # ---------------------------------------------------------------------------
 
 
-def _header(title):
+class _BackToMenu(Exception):
+    """Raised when ' is typed at any prompt — unwinds to the hub's main menu."""
+
+
+class _LeaveHub(Exception):
+    """(0) Back from the hub's main menu — leaves the module."""
+
+
+def _read(**kwargs):
+    """read() plus a universal ' shortcut back to the hub's main menu.
+
+    additionalValues is checked before any digit or range validation, so the
+    shortcut works even on menus that only accept numbers.
+    """
+    additional = list(kwargs.pop("additionalValues", None) or [])
+    if "'" not in additional:
+        additional.append("'")
+    value = read(additionalValues=additional, **kwargs)
+    if isinstance(value, str) and value.strip() == "'":
+        raise _BackToMenu()
+    return value
+
+
+def _header(title, hint=True):
     banner()
     width = 58
     print("{}╔{}╗{}".format(bcolors.BLUE, "═" * width, bcolors.ENDC))
     print("{}║{}║{}".format(bcolors.BLUE, title.center(width), bcolors.ENDC))
     print("{}╚{}╝{}".format(bcolors.BLUE, "═" * width, bcolors.ENDC))
+    if hint:
+        print("{}( ' at any prompt returns to the hub menu ){}".format(
+            bcolors.BLACK, bcolors.ENDC
+        ))
     print("")
 
 
@@ -1542,7 +1931,7 @@ def _pick_config_to_edit(session):
     print("This account is set to use the global configuration.")
     print("(1) Edit the global configuration (affects every account using it)")
     print("(2) Edit this account's own configuration")
-    if read(min=1, max=2, digit=True, default=1) == 1:
+    if _read(min=1, max=2, digit=True, default=1) == 1:
         shared = _load_global_config(session) or _default_config()
         return shared, True
     return account_cfg, False
@@ -1550,16 +1939,33 @@ def _pick_config_to_edit(session):
 
 def _store(session, cfg, is_global):
     if is_global:
-        _save_global_config(session, cfg)
+        ok, message = _save_global_config(session, cfg)
     else:
-        _save_account_config(session, cfg)
+        ok = _save_account_config(session, cfg)
+        message = "could not write the configuration file"
+    if not ok:
+        print("\n{}Not saved — {}{}".format(bcolors.RED, message, bcolors.ENDC))
+        print("Your change was discarded, nothing on disk was damaged.")
+        enter()
+    return ok
 
 
 def _menu_main(session):
     """Returns True when the user chose to start the hub."""
     while True:
+        try:
+            if _menu_main_once(session):
+                return True
+        except _BackToMenu:
+            continue
+        except _LeaveHub:
+            return False
+
+
+def _menu_main_once(session):
+    while True:
         cfg = _effective_config(session)
-        _header("MESSAGING HUB")
+        _header("MESSAGING HUB", hint=False)
         print(_config_summary(session, cfg))
         if not _config_is_runnable(cfg):
             print(
@@ -1578,9 +1984,9 @@ def _menu_main(session):
         print("(7) Storage & global configuration")
         print("(8) Import / export")
 
-        choice = read(min=0, max=8, digit=True)
+        choice = _read(min=0, max=8, digit=True)
         if choice == 0:
-            return False
+            raise _LeaveHub()
         if choice == 1:
             if not _config_is_runnable(cfg):
                 print(
@@ -1621,7 +2027,7 @@ def _offer_autostart(session):
     if is_autostart(session, PREFS_NAME):
         return
     print("\nRun the hub automatically at login from now on?")
-    answer = read(
+    answer = _read(
         values=["y", "Y", "n", "N", ""], empty=True, default="n", msg="[y/N]: "
     )
     if str(answer).lower() == "y":
@@ -1649,7 +2055,7 @@ def _menu_destinations(session):
         print("(3) Send a test message")
         print("(4) Delete a destination")
 
-        choice = read(min=0, max=4, digit=True)
+        choice = _read(min=0, max=4, digit=True)
         if choice == 0:
             return
         if choice == 1:
@@ -1672,11 +2078,11 @@ def _add_destination(session, cfg, is_global):
     print("(2) Telegram bot")
     print("(3) ntfy")
     print("(4) ikabot's own notification setup")
-    kind_choice = read(min=0, max=4, digit=True)
+    kind_choice = _read(min=0, max=4, digit=True)
     if kind_choice == 0:
         return
 
-    name = str(read(msg="Name for this destination: ")).strip()
+    name = str(_read(msg="Name for this destination: ")).strip()
     if not name:
         return
 
@@ -1689,7 +2095,7 @@ def _add_destination(session, cfg, is_global):
     if kind_choice == 1:
         dest["kind"] = "discord"
         print("\nCreate a webhook in the Discord channel you want, then paste its URL.")
-        url = str(read(msg="Webhook URL: ")).strip()
+        url = str(_read(msg="Webhook URL: ")).strip()
         if not url.startswith(DISCORD_WEBHOOK_PREFIXES):
             print(
                 "\n{}That does not look like a Discord webhook URL.{}".format(
@@ -1699,7 +2105,7 @@ def _add_destination(session, cfg, is_global):
             enter()
             return
         print("Override the webhook's display name? (blank keeps the Discord default)")
-        username = str(read(empty=True, default="")).strip()
+        username = str(_read(empty=True, default="")).strip()
         dest["discord"] = {
             "webhook_url": url,
             "username": username,
@@ -1708,10 +2114,10 @@ def _add_destination(session, cfg, is_global):
     elif kind_choice == 2:
         dest["kind"] = "telegram"
         print("\nThis is the hub's own bot — it does not have to be ikabot's bot.")
-        token = str(read(msg="Bot token: ")).strip()
-        chat_id = str(read(msg="Chat id: ")).strip()
+        token = str(_read(msg="Bot token: ")).strip()
+        chat_id = str(_read(msg="Chat id: ")).strip()
         print("Forum topic id? (blank for none)")
-        thread_id = str(read(empty=True, default="")).strip()
+        thread_id = str(_read(empty=True, default="")).strip()
         dest["telegram"] = {
             "bot_token": token,
             "chat_id": chat_id,
@@ -1720,12 +2126,12 @@ def _add_destination(session, cfg, is_global):
     elif kind_choice == 3:
         dest["kind"] = "ntfy"
         print("\nServer (blank for https://ntfy.sh)")
-        server = str(read(empty=True, default="")).strip() or "https://ntfy.sh"
-        topic = str(read(msg="Topic: ")).strip()
+        server = str(_read(empty=True, default="")).strip() or "https://ntfy.sh"
+        topic = str(_read(msg="Topic: ")).strip()
         print("Access token? (blank for a public topic)")
-        token = str(read(empty=True, default="")).strip()
+        token = str(_read(empty=True, default="")).strip()
         print("Priority 1-5 (default 3)")
-        priority = int(read(min=1, max=5, digit=True, default=3))
+        priority = int(_read(min=1, max=5, digit=True, default=3))
         dest["ntfy"] = {
             "server": server,
             "topic": topic,
@@ -1747,7 +2153,7 @@ def _choose_destination(cfg, prompt_text):
         print("  {}) {}".format(index, _dest_label(dest)))
     print("(0) Cancel")
     print(prompt_text)
-    choice = read(min=0, max=len(cfg["destinations"]), digit=True)
+    choice = _read(min=0, max=len(cfg["destinations"]), digit=True)
     if choice == 0:
         return None
     return cfg["destinations"][choice - 1]
@@ -1763,9 +2169,9 @@ def _edit_destination(session, cfg, is_global):
     print("(0) Back")
     print("(1) Rename")
     print("(2) {}".format("Disable" if dest.get("enabled", True) else "Enable"))
-    choice = read(min=0, max=2, digit=True)
+    choice = _read(min=0, max=2, digit=True)
     if choice == 1:
-        name = str(read(msg="New name: ")).strip()
+        name = str(_read(msg="New name: ")).strip()
         if name:
             dest["name"] = name
     elif choice == 2:
@@ -1818,7 +2224,7 @@ def _delete_destination(session, cfg, is_global):
             )
         )
     print("Delete '{}'? [y/N]".format(dest.get("name", "")))
-    if str(read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() != "y":
+    if str(_read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() != "y":
         return
 
     cfg["destinations"] = [d for d in cfg["destinations"] if d["id"] != dest["id"]]
@@ -1850,7 +2256,7 @@ def _menu_forwarding(session):
         print("(3) Toggle first-run behaviour")
         print("(4) Per-type routing")
 
-        choice = read(min=0, max=4, digit=True)
+        choice = _read(min=0, max=4, digit=True)
         if choice == 0:
             return
         if choice == 1:
@@ -1858,7 +2264,7 @@ def _menu_forwarding(session):
         elif choice == 2:
             print("\nMinutes between checks (min 1, default 10)")
             watcher["interval_minutes"] = int(
-                read(min=MIN_MESSAGE_INTERVAL, digit=True, default=DEFAULT_MESSAGE_INTERVAL)
+                _read(min=MIN_MESSAGE_INTERVAL, digit=True, default=DEFAULT_MESSAGE_INTERVAL)
             )
         elif choice == 3:
             watcher["notify_existing"] = not watcher.get("notify_existing", False)
@@ -1884,7 +2290,7 @@ def _menu_routing(session, cfg, is_global):
         print("(0) Back")
         print("Pick a type to change where it goes.")
 
-        choice = read(min=0, max=len(EVENT_TYPES), digit=True)
+        choice = _read(min=0, max=len(EVENT_TYPES), digit=True)
         if choice == 0:
             return
         _edit_route(session, cfg, is_global, EVENT_TYPES[choice - 1])
@@ -1898,7 +2304,7 @@ def _edit_route(session, cfg, is_global, event_type):
     print("(1) {} this type".format("Disable" if cfg["type_enabled"].get(event_type, True) else "Enable"))
     print("(2) Choose destinations")
 
-    choice = read(min=0, max=2, digit=True)
+    choice = _read(min=0, max=2, digit=True)
     if choice == 0:
         return
     if choice == 1:
@@ -1918,7 +2324,7 @@ def _edit_route(session, cfg, is_global, event_type):
     print("")
     print("Enter the numbers to send this type to, separated by commas.")
     print("Enter 0 or leave blank to send it nowhere.")
-    raw = str(read(empty=True, default="")).strip()
+    raw = str(_read(empty=True, default="")).strip()
 
     chosen = []
     for token in raw.split(","):
@@ -1959,14 +2365,14 @@ def _menu_formatting(session):
         print("(4) Quiet hours")
         print("(5) Muted phrases")
 
-        choice = read(min=0, max=5, digit=True)
+        choice = _read(min=0, max=5, digit=True)
         if choice == 0:
             return
         if choice == 1:
             fmt["include_body"] = not fmt.get("include_body", True)
         elif choice == 2:
             print("\nMaximum characters of message body to forward (0 for no limit)")
-            fmt["body_max_chars"] = int(read(min=0, max=4000, digit=True, default=DEFAULT_BODY_MAX))
+            fmt["body_max_chars"] = int(_read(min=0, max=4000, digit=True, default=DEFAULT_BODY_MAX))
         elif choice == 3:
             fmt["combat_full_report"] = not fmt.get("combat_full_report", False)
         elif choice == 4:
@@ -1984,14 +2390,14 @@ def _edit_quiet_hours(quiet):
     print("(0) Back")
     print("(1) {} quiet hours".format("Disable" if quiet.get("enabled") else "Enable"))
     print("(2) Change the times")
-    choice = read(min=0, max=2, digit=True)
+    choice = _read(min=0, max=2, digit=True)
     if choice == 1:
         quiet["enabled"] = not quiet.get("enabled", False)
     elif choice == 2:
         print("\nStart hour (0-23)")
-        start_h = int(read(min=0, max=23, digit=True, default=23))
+        start_h = int(_read(min=0, max=23, digit=True, default=23))
         print("End hour (0-23)")
-        end_h = int(read(min=0, max=23, digit=True, default=7))
+        end_h = int(_read(min=0, max=23, digit=True, default=7))
         quiet["from"] = "{:02d}:00".format(start_h)
         quiet["to"] = "{:02d}:00".format(end_h)
         quiet["enabled"] = True
@@ -2011,16 +2417,16 @@ def _edit_mutes(fmt):
         print("(0) Back")
         print("(1) Add a phrase")
         print("(2) Remove a phrase")
-        choice = read(min=0, max=2, digit=True)
+        choice = _read(min=0, max=2, digit=True)
         if choice == 0:
             return
         if choice == 1:
-            phrase = str(read(msg="Phrase to mute: ")).strip()
+            phrase = str(_read(msg="Phrase to mute: ")).strip()
             if phrase:
                 mutes.append(phrase)
         elif choice == 2 and mutes:
             print("Which one?")
-            index = int(read(min=0, max=len(mutes), digit=True))
+            index = int(_read(min=0, max=len(mutes), digit=True))
             if index:
                 mutes.pop(index - 1)
 
@@ -2041,11 +2447,14 @@ def _menu_diagnostics(session):
         print("(3) Capture raw message data to a file")
         print("(4) Reset seen messages")
         print("(5) Reset counters")
+        print("(6) Shared configuration lock")
 
-        choice = read(min=0, max=5, digit=True)
+        choice = _read(min=0, max=6, digit=True)
         if choice == 0:
             return
-        if choice == 1:
+        if choice == 6:
+            _menu_lock(session)
+        elif choice == 1:
             _test_all_destinations(session, cfg)
         elif choice == 2:
             _dry_run(session, cfg)
@@ -2053,7 +2462,7 @@ def _menu_diagnostics(session):
             _capture(session, cfg)
         elif choice == 4:
             print("\nForget every message id? The next scan treats the inbox as new. [y/N]")
-            if str(read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() == "y":
+            if str(_read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() == "y":
                 state["seen_ids"] = {}
                 state["first_run_done"] = False
                 _save_state(session, state)
@@ -2066,6 +2475,62 @@ def _menu_diagnostics(session):
             _save_state(session, state)
             print("\n{}Counters reset.{}".format(bcolors.GREEN, bcolors.ENDC))
             enter()
+
+
+def _menu_lock(session):
+    while True:
+        path = _lock_path(session)
+        data = _read_lock(path)
+        _header("SHARED CONFIGURATION LOCK")
+        print("  File:    {}".format(path))
+        if data is None:
+            print("  Held by: {}nobody{}".format(bcolors.GREEN, bcolors.ENDC))
+        else:
+            age = _lock_age(path, data)
+            dead = _holder_is_dead(data)
+            if dead:
+                verdict = "{}holder is gone — will be reclaimed{}".format(
+                    bcolors.WARNING, bcolors.ENDC
+                )
+            elif age > LOCK_STALE_SECONDS:
+                verdict = "{}stale — will be reclaimed{}".format(
+                    bcolors.WARNING, bcolors.ENDC
+                )
+            else:
+                verdict = "{}live{}".format(bcolors.GREEN, bcolors.ENDC)
+            print("  Held by: {}".format(_describe_holder(data)))
+            print("  Age:     {:.0f}s ({})".format(age, verdict))
+            print("  Stale after {}s".format(LOCK_STALE_SECONDS))
+
+        shared = _read_json_resilient(_global_config_path(session))
+        if shared is not None:
+            print("")
+            print("  Global config revision {} last written by {}".format(
+                shared.get("revision", 0), shared.get("last_written_by", "?")
+            ))
+        print("")
+        print("A stale lock is reclaimed automatically — you should not normally")
+        print("need this screen. Forcing a release while another instance really")
+        print("is writing can lose that instance's edit.")
+        print("")
+        print("(0) Back")
+        print("(1) Force release the lock")
+
+        if _read(min=0, max=1, digit=True) == 0:
+            return
+        if data is None:
+            continue
+        print("\nForce release the lock held by {}? [y/N]".format(_describe_holder(data)))
+        if str(_read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() != "y":
+            continue
+        try:
+            os.remove(path)
+            print("{}Released.{}".format(bcolors.GREEN, bcolors.ENDC))
+        except FileNotFoundError:
+            print("{}It had already been released.{}".format(bcolors.GREEN, bcolors.ENDC))
+        except OSError as exc:
+            print("{}Could not remove it: {}{}".format(bcolors.RED, exc, bcolors.ENDC))
+        enter()
 
 
 def _test_all_destinations(session, cfg):
@@ -2219,13 +2684,13 @@ def _menu_storage(session):
         print("(5) Copy this account's settings into the global configuration")
         print("(6) Copy the global configuration into this account")
 
-        choice = read(min=0, max=6, digit=True)
+        choice = _read(min=0, max=6, digit=True)
         if choice == 0:
             return
         if choice == 1:
             print("\nFolder to keep hub data in — a '{}' folder is created inside it.".format(HUB_DIR_NAME))
             print("Current: {}".format(_base_dir(session)))
-            path = str(read(msg="New folder: ")).strip().strip('"')
+            path = str(_read(msg="New folder: ")).strip().strip('"')
             if not path:
                 continue
             if not os.path.isdir(path):
@@ -2253,11 +2718,14 @@ def _menu_storage(session):
             _save_account_config(session, account_cfg)
         elif choice == 5:
             print("\nOverwrite the global configuration with this account's settings? [y/N]")
-            if str(read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() == "y":
+            if str(_read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() == "y":
                 shared = dict(account_cfg)
                 shared["use_global"] = {"routing": False, "formatting": False}
-                _save_global_config(session, shared)
-                print("{}Written.{}".format(bcolors.GREEN, bcolors.ENDC))
+                ok, message = _save_global_config(session, shared)
+                if ok:
+                    print("{}Written.{}".format(bcolors.GREEN, bcolors.ENDC))
+                else:
+                    print("{}Not written — {}{}".format(bcolors.RED, message, bcolors.ENDC))
                 enter()
         elif choice == 6:
             shared = _load_global_config(session)
@@ -2266,7 +2734,7 @@ def _menu_storage(session):
                 enter()
                 continue
             print("\nOverwrite this account's settings with the global ones? [y/N]")
-            if str(read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() == "y":
+            if str(_read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() == "y":
                 shared["use_global"] = account_cfg["use_global"]
                 _save_account_config(session, shared)
                 print("{}Copied.{}".format(bcolors.GREEN, bcolors.ENDC))
@@ -2278,7 +2746,7 @@ def _menu_import_export(session):
     print("(0) Back")
     print("(1) Export this account's configuration to a file")
     print("(2) Import a configuration file into this account")
-    choice = read(min=0, max=2, digit=True)
+    choice = _read(min=0, max=2, digit=True)
     if choice == 0:
         return
 
@@ -2287,19 +2755,19 @@ def _menu_import_export(session):
             _hub_dir(session), "{}_export.json".format(_account_key(session))
         )
         print("\nFile to write (blank for {})".format(default_path))
-        path = str(read(empty=True, default="")).strip().strip('"') or default_path
+        path = str(_read(empty=True, default="")).strip().strip('"') or default_path
         if _write_json(path, _load_account_config(session)):
             print("\n{}Exported to {}{}".format(bcolors.GREEN, path, bcolors.ENDC))
         else:
             print("\n{}Could not write that file.{}".format(bcolors.RED, bcolors.ENDC))
     else:
-        path = str(read(msg="File to import: ")).strip().strip('"')
+        path = str(_read(msg="File to import: ")).strip().strip('"')
         data = _read_json(path)
         if data is None:
             print("\n{}Could not read that file.{}".format(bcolors.RED, bcolors.ENDC))
         else:
             print("\nReplace this account's configuration? [y/N]")
-            if str(read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() == "y":
+            if str(_read(values=["y", "Y", "n", "N", ""], empty=True, default="n")).lower() == "y":
                 _save_account_config(session, _normalise_config(data))
                 print("{}Imported.{}".format(bcolors.GREEN, bcolors.ENDC))
     enter()

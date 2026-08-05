@@ -187,6 +187,50 @@ keeps its own:
 the global file, and the global file back **into** an account — so a working
 setup on the main account becomes the shared baseline in one keypress.
 
+### 4.2 Concurrency — the shared file with many instances
+
+Several ikabot instances, possibly on different machines, read and write one
+`global_config.json`. The governing rule: **a locking problem must never stop
+messages being forwarded.** Worst case is "your edit was not saved", never a
+crash and never a corrupt file.
+
+**Reads are lock-free.** Writers replace the file atomically (`.tmp` +
+`os.replace`), so a reader always sees one whole version — never a half-written
+one. The hub loop reads the config every poll and therefore never blocks on the
+lock, no matter what the other instances are doing.
+
+**Only writes lock**, and the critical section is read-modify-write and nothing
+else. Never a prompt, never a network request inside the lock — that is the
+structural fix for "an instance holds it too long". Menus collect all input
+first, then take the lock for the milliseconds it takes to merge and write.
+
+Lock file: `global_config.json.lock`, holding a random **token**, pid, hostname,
+account and timestamp.
+
+| Failure | Handling |
+|---|---|
+| Holder crashed | Reclaimed after `LOCK_STALE_SECONDS` (45s) |
+| Holder's process is gone | Reclaimed immediately — but **only if the lock's hostname is ours**. A pid from another machine means nothing here |
+| Wrong clock on another machine | Age is the **youngest** of the embedded timestamp and the file mtime. Erring young means occasionally waiting for a lock we could have taken — far better than stealing a live one. Future timestamps cannot make a lock immortal |
+| `O_EXCL` not atomic (SMB/NFS) | After creating or stealing, re-read the file and confirm **our token** is in it before believing we hold it |
+| Another instance steals our lock mid-write | Ownership is re-checked immediately before `os.replace`. If it is gone we **abandon the write** (never clobber the thief's data), then re-acquire and redo the whole read-modify-write, up to 3 times |
+| Release after being stolen | We only ever delete a lock file that still carries our token — we never remove someone else's |
+| Corrupt lock file | Respected while fresh (something wrote it), reclaimed once stale |
+| Nested acquisition | The lock is re-entrant per process (depth counter), so nested calls cannot self-deadlock |
+| Read-only or missing share | Raises `_LockUnavailable`; the menu says the folder cannot be locked and the hub keeps forwarding |
+| Thundering herd | Randomised 0.2–0.7s backoff between attempts |
+| Lost update | Saves diff against the snapshot taken at load and write **only the sections this instance actually changed**, so two instances editing different sections both survive. A genuine same-section clash is last-writer-wins and logged |
+| Corrupt config file | `.bak` of the last good version is kept; a broken file falls back to it automatically |
+
+**Diagnostics → (6) Shared configuration lock** shows who holds it, its age,
+whether it is live or reclaimable, and the config's revision and last writer. It
+offers a force-release for the case nothing else can fix — with a warning,
+because a stale lock is already reclaimed automatically.
+
+The per-account state file needs no lock: only that account writes it, and the
+hub reloads it every poll, so a counter or seen-id reset from the menu is picked
+up by the running hub instead of being overwritten by it.
+
 ---
 
 ## 5. Event types
@@ -352,6 +396,11 @@ Messaging Hub
 than renumbering later — `sequenceRunner` replays recorded keystrokes, so a
 shifting menu would silently break saved sequences.
 
+**`'` at any prompt returns to the hub's main menu**, from any depth. It is
+passed through `read()`'s `additionalValues`, which is checked before any digit
+or range validation, so it works even on menus that otherwise accept only
+numbers. Every screen shows the hint under its title.
+
 **Per-type routing screen** — the core of the module. Lists every event type with
 its current destinations, on/off state, and lets one type be pointed at any set
 of destinations:
@@ -443,6 +492,7 @@ ships.
 | Message flood on first run | `notify_existing` defaults to No |
 | Threshold flapping | Transition-only firing, re-arm margin, cooldown, state persisted across restarts |
 | Vanilla ikabot missing mod helpers | Every mod-only import guarded with a local fallback; scraper bundled, not imported |
+| Many instances on one shared config | Lock-free reads, short locked writes, stale reclaim, token-verified ownership, section-level merge (§4.2) |
 
 ---
 
@@ -466,6 +516,19 @@ merging, routing including disabled and dangling destinations, classification fo
 every type, row parsing, formatting limits, quiet hours, seen-id pruning and the
 hard cap, delivery success/failure/retry, redaction, and the full poll pipeline
 (first-run suppression, dedupe, `notify_existing`, dead server).
+
+Locking is covered too: acquire/release, re-entrancy, stale reclaim by time and
+by dead pid, refusal to trust a pid from another host, clock skew in both
+directions, corrupt and hostile lock files, never deleting someone else's lock,
+lock stolen mid-write (abandoned then retried), busy holder timing out with a
+message, unusable location, section-level merge including "a stale reader must
+not roll back a section it never edited", `.bak` recovery, and the guarantee
+that an unreachable share still leaves message forwarding working.
+
+Two things to watch when writing tests here: the container often runs as
+**root**, so "unwritable directory" must be simulated with a path whose parent
+is a file rather than a missing directory; and a merge test only exercises a
+conflict if each writer's value actually differs from the snapshot it loaded.
 
 Keep it running against future phases — the pipeline tests are what stop a
 refactor silently losing messages.

@@ -304,3 +304,235 @@ print()
 if fails:
     print("{} FAILED: {}".format(len(fails), fails)); sys.exit(1)
 print("all checks passed")
+
+print("\n-- lock: basics --")
+import socket, threading
+LP = hub._lock_path(s)
+def clear_lock():
+    try: os.remove(LP)
+    except OSError: pass
+def put_lock(**over):
+    d = {"token": "other", "pid": os.getpid(), "host": socket.gethostname(),
+         "account": "someone_s1-en1", "timestamp": _t.time()}
+    d.update(over)
+    with open(LP, "w") as f: json.dump(d, f)
+    return d
+
+clear_lock()
+tok = hub._acquire_lock(s, timeout=2)
+check("acquired on a free lock", bool(tok) and os.path.exists(LP))
+check("lock is ours", hub._lock_is_ours(s, tok))
+hub._release_lock(s, tok)
+check("released removes the file", not os.path.exists(LP))
+
+with hub._global_lock(s):
+    check("context manager holds", os.path.exists(LP))
+    with hub._global_lock(s):
+        check("re-entrant, no self-deadlock", hub._lock_state["depth"] == 2)
+    check("inner exit keeps the lock", os.path.exists(LP))
+check("outer exit releases", not os.path.exists(LP))
+check("depth reset", hub._lock_state["depth"] == 0)
+
+print("\n-- lock: stale detection --")
+clear_lock(); put_lock(timestamp=_t.time() - 10_000)
+os.utime(LP, (_t.time() - 10_000, _t.time() - 10_000))
+tok = hub._acquire_lock(s, timeout=2)
+check("stale-by-time lock reclaimed", hub._lock_is_ours(s, tok))
+hub._release_lock(s, tok)
+
+clear_lock(); put_lock(pid=999_999)
+check("dead holder on this host is stale", hub._holder_is_dead(hub._read_lock(LP)))
+tok = hub._acquire_lock(s, timeout=2)
+check("dead holder's lock reclaimed", hub._lock_is_ours(s, tok))
+hub._release_lock(s, tok)
+
+clear_lock(); put_lock(pid=999_999, host="some-other-machine")
+check("dead pid on another host is NOT trusted",
+      not hub._holder_is_dead(hub._read_lock(LP)))
+try:
+    hub._acquire_lock(s, timeout=1); check("fresh foreign lock not stolen", False)
+except hub._LockBusy:
+    check("fresh foreign lock not stolen", True)
+
+print("\n-- lock: clock skew --")
+clear_lock(); put_lock(timestamp=_t.time() - 10_000)   # old stamp, fresh mtime
+check("old stamp + fresh mtime reads as young",
+      hub._lock_age(LP, hub._read_lock(LP)) < hub.LOCK_STALE_SECONDS)
+try:
+    hub._acquire_lock(s, timeout=1)
+    check("wrong clock cannot make us steal a live lock", False)
+except hub._LockBusy:
+    check("wrong clock cannot make us steal a live lock", True)
+clear_lock(); put_lock(timestamp=_t.time() + 10_000)   # future stamp
+check("future stamp does not go negative", hub._lock_age(LP, hub._read_lock(LP)) >= 0)
+
+print("\n-- lock: corrupt and hostile --")
+clear_lock()
+with open(LP, "w") as f: f.write("{not json at all")
+check("corrupt lock unreadable", hub._read_lock(LP) is None)
+try:
+    hub._acquire_lock(s, timeout=1); check("fresh corrupt lock not stolen", False)
+except hub._LockBusy:
+    check("fresh corrupt lock not stolen", True)
+os.utime(LP, (_t.time() - 10_000, _t.time() - 10_000))
+tok = hub._acquire_lock(s, timeout=2)
+check("old corrupt lock reclaimed", hub._lock_is_ours(s, tok))
+
+put_lock(token="stolen-by-someone-else")
+hub._release_lock(s, tok)
+check("we never delete a lock that is not ours", os.path.exists(LP))
+check("the thief's lock is intact", hub._read_lock(LP)["token"] == "stolen-by-someone-else")
+clear_lock()
+hub._lock_state.update({"token": None, "depth": 0, "acquired_at": 0.0})
+
+print("\n-- lock: unusable location --")
+# Point the base at a path whose parent is a FILE. Unlike a missing directory,
+# root cannot mkdir its way out of this, so the test means the same thing
+# whether or not the runner is privileged.
+_blocker = os.path.join(TMP, "not_a_directory")
+with open(_blocker, "w") as f: f.write("x")
+class GoneSession(Session):
+    _data = {"shared": {hub.SESSION_DIR_KEY: os.path.join(_blocker, "sub")}}
+try:
+    hub._acquire_lock(GoneSession(), timeout=1)
+    check("missing folder raises _LockUnavailable", False)
+except hub._LockUnavailable:
+    check("missing folder raises _LockUnavailable", True)
+except Exception as e:
+    check("missing folder raises _LockUnavailable, got {}".format(type(e).__name__), False)
+ok, msg = hub._save_global_config(GoneSession(), hub._default_config())
+check("unusable location fails gracefully, no raise", ok is False and msg)
+
+print("\n-- global config: concurrent edits --")
+clear_lock()
+base = hub._default_config()
+base["destinations"] = [{"id": "d1", "name": "shared", "kind": "ntfy",
+                         "ntfy": {"topic": "x"}, "enabled": True}]
+hub._save_global_config(s, dict(base))
+a1 = hub._load_global_config(s)          # instance A reads
+b1 = hub._load_global_config(s)          # instance B reads the same revision
+a1["routes"]["combat"] = ["d1"]          # A changes routing only
+b1["formatting"]["body_max_chars"] = 123 # B changes formatting only
+check("A saved", hub._save_global_config(s, a1)[0])
+check("B saved", hub._save_global_config(s, b1)[0])
+final = hub._load_global_config(s)
+check("A's routing survived B's save", final["routes"]["combat"] == ["d1"])
+check("B's formatting survived", final["formatting"]["body_max_chars"] == 123)
+check("revision incremented", final.get("revision", 0) >= 2)
+check("snapshot never written to disk",
+      hub.SNAPSHOT_KEY not in hub._read_json(hub._global_config_path(s)))
+
+# A save that did not touch a section must never roll back another instance's
+# change to it — this is the whole point of diffing against the snapshot.
+d1_ = hub._load_global_config(s); d2_ = hub._load_global_config(s)
+d1_["routes"]["news"] = ["d1"]
+hub._save_global_config(s, d1_)
+d2_["formatting"]["include_body"] = False      # d2 touches formatting only
+hub._save_global_config(s, d2_)
+untouched = hub._load_global_config(s)
+check("a stale reader does not roll back a section it never edited",
+      untouched["routes"]["news"] == ["d1"])
+
+# A real same-section conflict: both instances change routes["news"] away from
+# the value they read. Last writer wins, and the file stays intact.
+e1 = hub._load_global_config(s); e2 = hub._load_global_config(s)
+e1["routes"]["news"] = []                      # both differ from the snapshot ["d1"]
+e2["routes"]["news"] = ["d1", "d1"]
+hub._save_global_config(s, e1); hub._save_global_config(s, e2)
+same = hub._load_global_config(s)
+check("same-section conflict resolves to last writer, no corruption",
+      same["routes"]["news"] == ["d1", "d1"] and same["destinations"][0]["name"] == "shared")
+
+print("\n-- global config: lock stolen mid-write --")
+before = hub._read_json(hub._global_config_path(s))
+real_is_ours = hub._lock_is_ours
+hub._lock_is_ours = lambda *a, **k: False          # always stolen
+victim = hub._load_global_config(s)
+victim["routes"]["piracy"] = ["d1"]
+ok, msg = hub._save_global_config(s, victim)
+check("stolen lock: save reports failure instead of crashing", ok is False and msg)
+check("stolen lock: nothing was clobbered",
+      hub._read_json(hub._global_config_path(s)) == before)
+
+calls = {"n": 0}
+def flaky_is_ours(*a, **k):
+    calls["n"] += 1
+    return calls["n"] > 1                          # stolen once, then fine
+hub._lock_is_ours = flaky_is_ours
+victim2 = hub._load_global_config(s)
+victim2["routes"]["piracy"] = ["d1"]
+ok, msg = hub._save_global_config(s, victim2)
+hub._lock_is_ours = real_is_ours
+check("stolen once: retried and applied", ok)
+check("retry wrote the intended change",
+      hub._load_global_config(s)["routes"]["piracy"] == ["d1"])
+check("lock file cleaned up after all that", not os.path.exists(LP))
+
+print("\n-- global config: busy holder --")
+put_lock()
+busy = hub._load_global_config(s)
+busy["routes"]["news"] = ["d1"]
+start = _t.time()
+ok, msg = hub._save_global_config(s, busy, retries=1)
+check("busy lock fails fast with a message", ok is False and "another instance" in msg)
+check("busy wait respected the timeout", _t.time() - start >= 1)
+clear_lock()
+
+print("\n-- corrupt config recovery --")
+gp = hub._global_config_path(s)
+good = hub._read_json(gp)
+with open(gp, "w") as f: f.write("}{ truncated")
+rec = hub._read_json_resilient(gp)
+check("corrupt global config recovered from .bak", rec is not None and "routes" in rec)
+hub._write_json(gp, good, keep_backup=True)
+check("hub still loads after recovery", hub._load_global_config(s) is not None)
+
+print("\n-- ' navigation --")
+real_read = hub.read
+hub.read = lambda **k: "'"
+try:
+    hub._read(min=0, max=8, digit=True); check("' raises _BackToMenu", False)
+except hub._BackToMenu:
+    check("' raises _BackToMenu", True)
+hub.read = lambda **k: k.get("additionalValues")
+check("' is injected into additionalValues even when digits are required",
+      "'" in hub._read(min=0, max=3, digit=True))
+hub.read = lambda **k: 2
+check("normal answers pass through", hub._read(min=0, max=3, digit=True) == 2)
+hub.read = real_read
+
+print("\n-- pid liveness --")
+check("own pid is alive", hub._pid_alive(os.getpid()))
+check("absurd pid is not alive", not hub._pid_alive(4_000_000))
+check("garbage pid is not alive", not hub._pid_alive("nope") and not hub._pid_alive(None))
+
+print()
+if fails:
+    print("{} FAILED: {}".format(len(fails), fails)); sys.exit(1)
+print("all checks passed")
+
+print("\n-- a lock problem never stops message forwarding --")
+# The shared config becoming unreachable must degrade to "cannot save edits",
+# never to "the hub stopped forwarding".
+real_lock_write = hub._lock_write
+hub._lock_write = lambda *a, **k: (_ for _ in ()).throw(OSError("share vanished"))
+ok, msg = hub._save_global_config(s, hub._load_global_config(s) or hub._default_config())
+check("save fails cleanly when the share disappears", ok is False and msg)
+
+gs3 = GameSession()
+hub._requests = lambda: FakeRequests()
+cfg3 = hub._default_config()
+cfg3["destinations"] = [{"id": "d1", "name": "all", "kind": "ntfy",
+                         "ntfy": {"topic": "a"}, "enabled": True}]
+for t in hub.EVENT_TYPES:
+    cfg3["routes"][t] = ["d1"]
+st5 = hub._load_state(gs3)
+st5["seen_ids"] = {}; st5["first_run_done"] = True
+sent, failed, scanned = hub._poll_messages(gs3, cfg3, st5, set(), ["en"])
+check("forwarding still works while the share is unreachable", sent == 2 and failed == 0)
+hub._lock_write = real_lock_write
+
+print()
+if fails:
+    print("{} FAILED: {}".format(len(fails), fails)); sys.exit(1)
+print("all checks passed")
