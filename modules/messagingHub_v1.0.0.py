@@ -1293,6 +1293,57 @@ def _fetch_message_payloads(session):
     return unique
 
 
+# Ikariam splits its notifications across the advisor tabs rather than the
+# inbox: trade carries shipments, military carries combat/piracy/espionage,
+# city carries construction. Captured only — nothing parses these yet, so the
+# poll does not pay for them.
+ADVISOR_VIEWS = (
+    "tradeAdvisor",
+    "militaryAdvisor",
+    "militaryAdvisorCombatList",
+    "cityAdvisor",
+    "researchAdvisor",
+    "diplomacyAdvisor",
+)
+
+
+def _advisor_urls(view, city_id):
+    urls = ["view={}".format(view)]
+    if city_id is not None:
+        urls.append(
+            "view={}&backgroundView=city&currentCityId={}".format(view, city_id)
+        )
+        urls.append(
+            "view={}&oldView=city&oldBackgroundView=city&backgroundView=city"
+            "&currentCityId={}&templateView={}&actionRequest={}&ajax=1".format(
+                view, city_id, view, config.actionRequest
+            )
+        )
+    return urls
+
+
+def _fetch_advisor_views(session):
+    """Raw HTML of each advisor tab, for the capture diagnostic."""
+    city_id = _current_city_id(session)
+    collected = []
+    for view in ADVISOR_VIEWS:
+        for url in _advisor_urls(view, city_id):
+            try:
+                data = session.get(url)
+            except Exception:
+                continue
+            if data and len(str(data)) > 500:
+                collected.append((url, str(data)))
+                break
+    return collected
+
+
+def _strip_noise(page_html):
+    text = re.sub(r"<script[\s\S]*?</script>", " ", str(page_html), flags=re.IGNORECASE)
+    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\n\s*\n+", "\n", text)
+
+
 def _canonical_message_id(raw_id):
     value = str(raw_id).strip().lower()
     if not value:
@@ -3297,7 +3348,9 @@ def _redact(text):
 def _capture(session, cfg):
     _header("CAPTURE RAW MESSAGE DATA")
     print("Writes what the game returned plus how the hub read it, so the")
-    print("classification tables can be built from real data.\n")
+    print("classification tables can be built from real data.")
+    print("Includes the advisor tabs, where shipments, construction, piracy")
+    print("and espionage live — the inbox does not carry them.\n")
 
     payloads = _fetch_message_payloads(session)
     messages = _fetch_messages(session)
@@ -3341,6 +3394,19 @@ def _capture(session, cfg):
         ):
             lines.append("")
             lines.append(_redact(row))
+
+    print("Reading the advisor tabs…")
+    for url, page in _fetch_advisor_views(session):
+        clean = _strip_noise(page)
+        lines.append("")
+        lines.append("=== ADVISOR: {} ===".format(url))
+        lines.append("--- rows carrying an id ---")
+        for row in re.findall(
+            r"<tr[^>]*\sid\s*=[\s\S]*?</tr>", clean, flags=re.IGNORECASE
+        )[:60]:
+            lines.append(_redact(row))
+        lines.append("--- first 15000 characters of markup ---")
+        lines.append(_redact(clean[:15000]))
 
     try:
         with open(path, "w", encoding="utf-8") as f:

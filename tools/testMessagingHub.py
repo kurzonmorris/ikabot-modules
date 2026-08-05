@@ -810,6 +810,39 @@ check("a mute on the link drops the advert", hub._is_muted(fmt_mute, ev_advert))
 check("the treaty is unaffected by that mute",
       not hub._is_muted(fmt_mute, hub._to_event(t, "treaty")))
 
+print("\n-- advisor capture --")
+asked = []
+class AdvisorSession(Session):
+    def get(self, url=None, **kw):
+        if url is None: raise AssertionError("bare session.get()")
+        asked.append(url)
+        if "view=city" in url and "Advisor" not in url:
+            return "currentCityId: 4242,"
+        if "militaryAdvisor" in url:
+            raise RuntimeError("advisor unavailable")
+        if "Advisor" in url:
+            return ("<html><body>" + "<tr id='row1'><td>Shipment</td></tr>"
+                    + "<script>secret()</script><style>x{}</style>"
+                    + "padding" * 200 + "</body></html>")
+        return ""
+    def post(self, url=None, **kw): return ""
+
+adv = AdvisorSession()
+got = hub._fetch_advisor_views(adv)
+views = {u.split("view=")[1].split("&")[0] for u, _ in got}
+check("advisor tabs are fetched", "tradeAdvisor" in views and "cityAdvisor" in views)
+check("an advisor that errors is skipped, not fatal", "militaryAdvisor" not in views)
+check("current city id is resolved for the ajax variants",
+      any("currentCityId=4242" in u for u in asked))
+check("each advisor is fetched only until one url works",
+      len([u for u in asked if "view=tradeAdvisor" in u]) == 1)
+
+noisy = "<script>alert(1)</script><style>a{b:c}</style><p>keep me</p>"
+clean = hub._strip_noise(noisy)
+check("scripts stripped from the capture", "alert(1)" not in clean)
+check("styles stripped from the capture", "b:c" not in clean)
+check("real markup kept", "keep me" in clean)
+
 print("\n-- a lock problem never stops message forwarding --")
 real_lock_write = hub._lock_write
 hub._lock_write = lambda *a, **k: (_ for _ in ()).throw(OSError("share vanished"))

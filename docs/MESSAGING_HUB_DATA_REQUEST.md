@@ -86,11 +86,27 @@ and I need to see real ones to build the table.
 
 ---
 
-## Round 2 — where do the other message types actually live?
+## Round 2 — the advisor tabs (no browser work needed)
 
-The inbox does not carry construction, shipments, piracy, espionage or news.
-Before the hub can forward them I need to know which view does. Paste this into
-the extension:
+Confirmed 2026-08-05: the other notification types live in the **advisor tabs**,
+not the inbox — `view=tradeAdvisor` and friends. The capture diagnostic now
+fetches all six advisor views itself, so this round needs nothing from the
+browser:
+
+> **(6) Diagnostics → (3) Capture raw message data**, then send me the file from
+> `<storage>/messaging_hub/capture/`.
+
+It writes, per advisor tab: every `<tr>` carrying an id, and the first 15.000
+characters of markup with `<script>` and `<style>` stripped. Webhook URLs and
+bot tokens are redacted before writing.
+
+Best results if you run it when there is something to see — a transport in
+flight, a building mid-upgrade, a recent pirate raid.
+
+<details>
+<summary>Fallback: the browser version of round 2, if the capture cannot run</summary>
+
+Paste this into the extension:
 
 > I'm on Ikariam. Read-only again — do not click anything that sends, accepts,
 > declines, attacks or spends. Opening a tab or panel to look at it is fine.
@@ -122,6 +138,8 @@ the extension:
 
 The most valuable single answer is **7** — the top-bar counters usually reveal
 the endpoints everything else hangs off.
+
+</details>
 
 ## What I do with it
 
