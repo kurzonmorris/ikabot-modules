@@ -276,15 +276,32 @@ AJAX endpoints with `currentCityId` and `actionRequest`, plus
 must not kill the poll. Never a bare `session.get()`.
 
 ### 6.2 Parsing
-`<tr id="message###">` (player) and `<tr id="gmessage###">` (game-generated) rows;
-sender from `.avatarName`, subject from `.subject`, town/date from the trailing
-`<td>`s, body from `tbl_mail###` / `tbl_gmail###` `.msgText`. Canonical ids
-`m:###` / `g:###`, combat ids composed from combat id + date + rounds so a
-continuing battle re-notifies.
+`<tr id="message###">` (player) and `<tr id="gmessage###">` (game-generated) rows
+in `table01 dotted left clearfloat`, six cells: checkbox, expand toggle, sender,
+`td.subject`, town, date. Sender from `.avatarName`, subject from `.subject`,
+town/date from cells 5 and 6, body from `tbl_mail###` / `tbl_gmail###`
+`.msgText`, unread from `new` in the row class. Canonical ids `m:###` / `g:###`;
+combat ids composed from combat id + date + rounds so a continuing battle
+re-notifies.
+
+**`tbl_reply###` matters.** Diplomacy offers have an *empty* `msgText` — the
+offer wording and the accept/decline links are in that separate hidden row, so
+it is parsed and used as the body when `msgText` is blank. It is scanned to the
+next id'd `<tr>` rather than to a closing tag, because the reply cell contains
+nested tables whose `</tr>`/`</table>` would truncate it.
 
 ### 6.3 Classification — layered, in this order
-1. **Source** — combat list ⇒ `combat`; `message###` ⇒ `player_message`;
-   `gmessage###` ⇒ system, continue below.
+
+> **Confirmed against a live account 2026-08-05.** The inbox carries no
+> `gmessage` rows and no type-naming CSS class — see
+> `docs/MESSAGING_HUB_DATA_REQUEST.md`. Player mail and diplomacy offers are all
+> that appears there; the other types live in views yet to be identified.
+
+1. **Source** — combat list ⇒ `combat`. A `message###` row is player-sent and is
+   only ever tested against the types a *player* can send (`treaty`,
+   `alliance_message`), falling back to `player_message`. Running the full
+   keyword table over player mail misfiles it: a real captured advert for a
+   "trading community" was read as a shipment.
 2. **User overrides** from `classification_overrides` (highest authority after
    source, so a wrong guess is always fixable without a code change).
 3. **Icon / CSS class** on the row — Ikariam marks system message rows by kind.

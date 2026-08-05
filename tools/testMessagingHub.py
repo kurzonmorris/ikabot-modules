@@ -723,9 +723,94 @@ check("bad mode/direction/scope repaired",
       fixed["mode"] == "absolute" and fixed["direction"] == "below"
       and fixed["scope"] == "global")
 
+print("\n-- real inbox fixture (captured from a live account, 2026-08-05) --")
+# Verbatim structure of ?view=diplomacyAdvisor: table01, six-cell rows, the
+# hidden tbl_mail body row and the tbl_reply action row.
+REAL_INBOX = '''<table class="table01 dotted left clearfloat">
+<tr><td class="center">Action</td><td class="center">Sender</td><td class="center">Subject</td><td class="center">Town</td><td class="center">Date</td></tr>
+<tr id="message912797" class="entry alt new">
+ <td class="smallright"><input type="checkbox"></td>
+ <td class="smallleft"><a id="button912797" class="gopen"></a></td>
+ <td class=""><a>Skat</a><span class="flag en">Skat</span><span class="img"></span><span class="avatarName">Skat</span></td>
+ <td class="subject">is offering a cultural goods treaty</td>
+ <td class=""><a>Mal Kor [13:92]</a></td>
+ <td class="">04.08.2026 20:46:49</td>
+</tr>
+<tr id="tbl_mail912797" class="text invisible"><td class="msgText">   </td></tr>
+<tr id="tbl_reply912797" class="text invisible"><td><table><tr><td>Cultural goods agreement</td></tr></table><a>Accept treaty</a> <a>Decline treaty</a></td></tr>
+<tr id="message903736" class="entry alt new">
+ <td class="smallright"><input type="checkbox"></td>
+ <td class="smallleft"><a id="button903736" class="gopen"></a></td>
+ <td class=""><a>Achille322</a><span class="flag fr">Achille322</span><span class="img"></span><span class="avatarName">Achille322</span></td>
+ <td class="subject">is offering a cultural goods treaty</td>
+ <td class=""><a>Sulfur [56:30]</a></td>
+ <td class="">30.07.2026 23:30:49</td>
+</tr>
+<tr id="tbl_mail903736" class="text invisible"><td class="msgText"> </td></tr>
+<tr id="tbl_reply903736" class="text invisible"><td>Cultural goods agreement <a>Accept treaty</a> <a>Decline treaty</a></td></tr>
+<tr id="message901514" class="entry ">
+ <td class="smallright"><input type="checkbox"></td>
+ <td class="smallleft"><a id="button901514" class="gopen"></a></td>
+ <td class=""><a>Neltons</a><span class="flag en">Neltons</span><span class="img"></span><span class="avatarName">Neltons</span></td>
+ <td class="subject">Message</td>
+ <td class=""><a>&#917;&#928;&#913;&#929;&#935;&#921;&#913; [68:77]</a></td>
+ <td class="">29.07.2026 17:01:58</td>
+</tr>
+<tr id="tbl_mail901514" class="text invisible"><td class="msgText">Join our Ikariam trading community<br>An active and reliable group for in-game trading.<br>We offer: Ambrosia with up to 100% discount, Accounts of all levels, Gold and resources, Weekly giveaways, Raffles and events.<br>Join now: Discord: https://discord.gg/example</td></tr>
+<tr id="tbl_reply901514" class="text invisible"><td><a>Reply</a></td></tr>
+</table>'''
+
+real = {m["id"]: m for m in hub._parse_messages_from_payload(REAL_INBOX)}
+check("all three real rows parsed", len(real) == 3)
+check("header row is not a message", "m:0" not in real)
+t = real["m:912797"]
+check("sender from avatarName", t["sender"] == "Skat")
+check("subject from td.subject", t["subject"] == "is offering a cultural goods treaty")
+check("town from the 5th cell", t["city"] == "Mal Kor [13:92]")
+check("date from the 6th cell", t["date"] == "04.08.2026 20:46:49")
+check("unread flagged from the row class", t["unread"] is True)
+check("read row not flagged unread", real["m:901514"]["unread"] is False)
+check("empty msgText falls back to the reply row",
+      "Cultural goods agreement" in t["body"])
+check("nested tables in the reply row are not truncated",
+      "Accept treaty" in t["action"] and "Decline treaty" in t["action"])
+check("real body text is read", "trading community" in real["m:901514"]["body"])
+
+check("treaty offer classifies as a treaty",
+      hub._classify(t, ["en"], [], own) == "treaty")
+check("second treaty too, regardless of sender flag",
+      hub._classify(real["m:903736"], ["en"], [], own) == "treaty")
+# The advert says "trading" and "Accounts" — the old classifier read that as a
+# shipment. Player mail must never be tested against game-only types.
+check("a player advert stays player mail, not a shipment",
+      hub._classify(real["m:901514"], ["en"], [], own) == "player_message")
+check("player rows are never typed as construction",
+      hub._classify({"source": "player", "subject": "has been completed",
+                     "body": "", "action": "", "icon": ""},
+                    ["en"], [], own) == "player_message")
+check("game rows still get the full table",
+      hub._classify({"source": "game", "subject": "The Warehouse has been completed",
+                     "body": "", "action": "", "icon": ""},
+                    ["en"], [], own) == "construction")
+check("an override still beats everything",
+      hub._classify(real["m:901514"], ["en"],
+                    [{"value": "discord.gg", "type": "other"}], own) == "other")
+
+print("\n-- empty combat list (as reported live) --")
+EMPTY_COMBAT = ('<div id="mainview"><h1>Combat reports</h1>'
+                '<p>There are no combat reports available at the moment.</p></div>')
+check("no combat rows invented from an empty page",
+      hub._parse_combat_reports(EMPTY_COMBAT) == [])
+
+print("\n-- muting the advert --")
+fmt_mute = dict(hub._default_config()["formatting"])
+fmt_mute["mutes"] = ["discord.gg"]
+ev_advert = hub._to_event(real["m:901514"], "player_message")
+check("a mute on the link drops the advert", hub._is_muted(fmt_mute, ev_advert))
+check("the treaty is unaffected by that mute",
+      not hub._is_muted(fmt_mute, hub._to_event(t, "treaty")))
+
 print("\n-- a lock problem never stops message forwarding --")
-# The shared config becoming unreachable must degrade to "cannot save edits",
-# never to "the hub stopped forwarding".
 real_lock_write = hub._lock_write
 hub._lock_write = lambda *a, **k: (_ for _ in ()).throw(OSError("share vanished"))
 ok, msg = hub._save_global_config(s, hub._load_global_config(s) or hub._default_config())
@@ -736,8 +821,8 @@ hub._requests = lambda: FakeRequests()
 cfg3 = hub._default_config()
 cfg3["destinations"] = [{"id": "d1", "name": "all", "kind": "ntfy",
                          "ntfy": {"topic": "a"}, "enabled": True}]
-for t in hub.EVENT_TYPES:
-    cfg3["routes"][t] = ["d1"]
+for t2 in hub.EVENT_TYPES:
+    cfg3["routes"][t2] = ["d1"]
 st5 = hub._load_state(gs3)
 st5["seen_ids"] = {}; st5["first_run_done"] = True
 sent, failed, scanned = hub._poll_messages(gs3, cfg3, st5, set(), ["en"])
