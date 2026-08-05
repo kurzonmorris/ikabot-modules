@@ -128,6 +128,7 @@ EVENT_TYPES = [
     "news",
     "treaty",
     "research",
+    "military_movement",
     "other",
     "resource_alert",
     "hub_status",
@@ -145,6 +146,7 @@ TYPE_LABELS = {
     "news": "News / announcements",
     "treaty": "Treaties",
     "research": "Research",
+    "military_movement": "Fleet & army movements",
     "other": "Other / unclassified",
     "resource_alert": "Resource alerts",
     "hub_status": "Hub status & errors",
@@ -162,6 +164,7 @@ TYPE_EMOJI = {
     "news": "\U0001f4f0",
     "treaty": "\U0001f4dc",
     "research": "\U0001f52c",
+    "military_movement": "\U0001f6e1",
     "other": "❓",
     "resource_alert": "\U0001f4ca",
     "hub_status": "⚙",
@@ -179,6 +182,7 @@ DISCORD_COLORS = {
     "news": 9807270,
     "treaty": 12370112,
     "research": 5763719,
+    "military_movement": 15277667,
     "other": 9807270,
     "resource_alert": 15105570,
     "hub_status": 6323595,
@@ -196,6 +200,7 @@ NTFY_TAGS = {
     "news": ["newspaper"],
     "treaty": ["scroll"],
     "research": ["microscope"],
+    "military_movement": ["shield"],
     "other": ["question"],
     "resource_alert": ["bar_chart"],
     "hub_status": ["gear"],
@@ -650,6 +655,8 @@ def _default_config():
                 "enabled": True,
                 "interval_minutes": DEFAULT_MESSAGE_INTERVAL,
                 "notify_existing": False,
+                "watch_movements": True,
+                "notify_incoming": True,
             },
             "resources": {
                 "enabled": False,
@@ -1697,6 +1704,232 @@ def _fetch_messages(session):
 
 
 # ---------------------------------------------------------------------------
+# Fleet and army movements
+#
+# The military advisor's ajax response carries a structured
+# viewScriptParams.militaryAndFleetMovements array — machine-readable mission
+# codes, epoch arrival times and cargo. No HTML scraping, and no dependence on
+# the interface language.
+# ---------------------------------------------------------------------------
+
+# event.mission codes seen in the wild, mapped to the hub's event types.
+# Anything unmapped is decided by relation and direction instead.
+MISSION_TYPES = {
+    "transport": None,  # resolved to internal/external by who owns each end
+    "transportOwn": "shipment_internal",
+    "deployarmy": "military_movement",
+    "deployarmycargo": "military_movement",
+    "attack": "combat",
+    "plunder": "combat",
+    "occupy": "combat",
+    "piracyraid": "piracy",
+    "spy": "espionage",
+    "espionage": "espionage",
+    "convertcity": "combat",
+}
+
+
+def _fetch_movements(session):
+    """Return (movements, server_time). (None, now) when unavailable."""
+    city_id = _current_city_id(session)
+    if city_id is None:
+        return None, int(time.time())
+
+    url = (
+        "view=militaryAdvisor&oldView=city&oldBackgroundView=city&backgroundView=city"
+        "&currentCityId={}&actionRequest={}&ajax=1"
+    ).format(city_id, config.actionRequest)
+
+    try:
+        data = json.loads(session.post(url), strict=False)
+        movements = data[1][1][2]["viewScriptParams"]["militaryAndFleetMovements"]
+        server_time = int(data[0][1].get("time", int(time.time())))
+    except Exception:
+        logger.warning("Could not read fleet movements", exc_info=True)
+        return None, int(time.time())
+
+    if not isinstance(movements, list):
+        return None, server_time
+    return movements, server_time
+
+
+def _movement_id(movement):
+    """Stable id for one movement.
+
+    The rendered table has no row ids at all, but eventTime is an absolute
+    epoch that does not change as the fleet travels, so mission + endpoints +
+    arrival identifies a movement across polls.
+    """
+    event = movement.get("event", {}) or {}
+    origin = movement.get("origin", {}) or {}
+    target = movement.get("target", {}) or {}
+    return "mv:{}:{}:{}:{}".format(
+        event.get("mission", "?"),
+        origin.get("cityId", origin.get("name", "?")),
+        target.get("name", "?"),
+        movement.get("eventTime", "?"),
+    )
+
+
+def _movement_type(movement, username):
+    """Which hub event type this movement belongs to."""
+    event = movement.get("event", {}) or {}
+    mission = str(event.get("mission", "")).strip().lower()
+
+    if movement.get("isHostile"):
+        return "combat"
+
+    mapped = MISSION_TYPES.get(mission, "unmapped")
+    if mapped not in (None, "unmapped"):
+        return mapped
+
+    # A transport is internal only when both ends are mine.
+    me = str(username or "").strip().lower()
+    origin_owner = str((movement.get("origin") or {}).get("avatarName", "")).strip().lower()
+    target_owner = str((movement.get("target") or {}).get("avatarName", "")).strip().lower()
+    if movement.get("resources") or mission.startswith("transport"):
+        if me and origin_owner == me and target_owner == me:
+            return "shipment_internal"
+        return "shipment_external"
+
+    return "military_movement"
+
+
+def _movement_event(movement, server_time, event_type, arrived):
+    origin = movement.get("origin", {}) or {}
+    target = movement.get("target", {}) or {}
+    event = movement.get("event", {}) or {}
+
+    origin_label = "{} ({})".format(origin.get("name", "?"), origin.get("avatarName", "?"))
+    target_label = "{} ({})".format(target.get("name", "?"), target.get("avatarName", "?"))
+    mission_text = event.get("missionText", mission_text_fallback(event))
+
+    lines = ["{} -> {}".format(origin_label, target_label), "Mission: {}".format(mission_text)]
+
+    if arrived:
+        title = "Arrived: {} at {}".format(mission_text, target.get("name", "?"))
+    else:
+        left = int(movement.get("eventTime", server_time)) - int(server_time)
+        title = "Incoming: {} at {}".format(mission_text, target.get("name", "?"))
+        lines.append("Arrives in: {}".format(daysHoursMinutes(max(0, left))))
+
+    lines.append("Relation: {}".format(_movement_relation(movement)))
+
+    army = int((movement.get("army") or {}).get("amount", 0) or 0)
+    fleet = int((movement.get("fleet") or {}).get("amount", 0) or 0)
+    if army:
+        lines.append("Troops: {}".format(addThousandSeparator(army)))
+    if fleet:
+        lines.append("Ships: {}".format(addThousandSeparator(fleet)))
+
+    cargo = []
+    for resource in movement.get("resources") or []:
+        css = str(resource.get("cssClass", "")).strip()
+        cargo.append("{} {}".format(resource.get("amount", "0"), css.split()[-1] if css else ""))
+    if cargo:
+        lines.append("Cargo: {}".format(", ".join(cargo)))
+
+    return {
+        "id": "{}:{}".format(_movement_id(movement), "in" if arrived else "out"),
+        "type": event_type,
+        "title": title,
+        "sender": origin.get("avatarName", ""),
+        "body": "\n".join(lines),
+        "city": target.get("name", ""),
+        "date": getDateTime(),
+    }
+
+
+def mission_text_fallback(event):
+    mission = str(event.get("mission", "")).strip()
+    return mission or "Movement"
+
+
+def _movement_relation(movement):
+    if movement.get("isHostile"):
+        return "Hostile"
+    if movement.get("isOwnArmyOrFleet"):
+        return "Own"
+    if movement.get("isSameAlliance"):
+        return "Alliance"
+    return "Neutral"
+
+
+def _poll_movements(session, cfg, state):
+    """Notify on hostile arrivals immediately and on own movements completing.
+
+    A completed movement is simply absent from the next response — there is no
+    "arrived" list and nothing lands in the inbox — so completion is detected
+    by a tracked movement disappearing after its arrival time passed.
+    """
+    movements, server_time = _fetch_movements(session)
+    if movements is None:
+        return 0, 0, 0
+
+    username = getattr(session, "username", "")
+    tracked = state.setdefault("movements", {})
+    first_run = not state.get("movements_seen_once")
+
+    events = []
+    current = {}
+
+    for movement in movements:
+        try:
+            movement_id = _movement_id(movement)
+            event_type = _movement_type(movement, username)
+        except Exception:
+            logger.debug("Skipping unreadable movement", exc_info=True)
+            continue
+
+        current[movement_id] = {
+            "type": event_type,
+            "eventTime": int(movement.get("eventTime", server_time) or server_time),
+            "target": (movement.get("target") or {}).get("name", ""),
+            "origin": (movement.get("origin") or {}).get("avatarName", ""),
+            "mission": ((movement.get("event") or {}).get("missionText", "")),
+        }
+
+        # An incoming hostile fleet is worth knowing about while it is still in
+        # the air, not once it has landed on you.
+        if (
+            not first_run
+            and movement_id not in tracked
+            and movement.get("isHostile")
+            and cfg["watchers"]["messages"].get("notify_incoming", True)
+        ):
+            events.append(_movement_event(movement, server_time, event_type, False))
+
+    for movement_id, record in list(tracked.items()):
+        if movement_id in current:
+            continue
+        # Gone from the list. If its arrival time has passed it completed;
+        # otherwise it was recalled or the read failed, and is not an arrival.
+        if int(record.get("eventTime", 0)) <= server_time + 60:
+            events.append(
+                {
+                    "id": "{}:in".format(movement_id),
+                    "type": record.get("type", "shipment_internal"),
+                    "title": "Arrived: {} at {}".format(
+                        record.get("mission") or "Movement", record.get("target", "?")
+                    ),
+                    "sender": record.get("origin", ""),
+                    "body": "{} arrived at {}.".format(
+                        record.get("mission") or "Movement", record.get("target", "?")
+                    ),
+                    "city": record.get("target", ""),
+                    "date": getDateTime(),
+                }
+            )
+
+    state["movements"] = current
+    state["movements_seen_once"] = True
+
+    sent, failed = (0, 0) if first_run else _send_events(session, cfg, events, state)
+    _save_state(session, state)
+    return sent, failed, len(current)
+
+
+# ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
@@ -2168,6 +2401,11 @@ def _do_it(session):
                     session, cfg, state, own_cities, session_langs
                 )
                 summary = "{} new, {} forwarded, {} failed".format(scanned, sent, failed)
+                if watchers["messages"].get("watch_movements", True):
+                    m_sent, m_failed, in_flight = _poll_movements(session, cfg, state)
+                    sent += m_sent
+                    failed += m_failed
+                    summary += " | {} in flight, {} sent".format(in_flight, m_sent)
                 if failed:
                     _report_failures(session, cfg, state)
             except Exception:
@@ -2682,17 +2920,30 @@ def _menu_forwarding(session):
                 "forwarded on first run" if watcher.get("notify_existing") else "marked as seen, not forwarded"
             )
         )
+        print("  Movements:         {}".format(
+            "watched" if watcher.get("watch_movements", True) else "ignored"
+        ))
         print("")
         print("(0) Back")
         print("(1) {} forwarding".format("Disable" if watcher.get("enabled", True) else "Enable"))
         print("(2) Change interval")
         print("(3) Toggle first-run behaviour")
         print("(4) Per-type routing")
+        print("(5) {} fleet & army movements".format(
+            "Stop watching" if watcher.get("watch_movements", True) else "Watch"
+        ))
+        print("(6) Warn about incoming hostile fleets: {}".format(
+            "yes" if watcher.get("notify_incoming", True) else "no"
+        ))
 
-        choice = _read(min=0, max=4, digit=True)
+        choice = _read(min=0, max=6, digit=True)
         if choice == 0:
             return
-        if choice == 1:
+        if choice == 5:
+            watcher["watch_movements"] = not watcher.get("watch_movements", True)
+        elif choice == 6:
+            watcher["notify_incoming"] = not watcher.get("notify_incoming", True)
+        elif choice == 1:
             watcher["enabled"] = not watcher.get("enabled", True)
         elif choice == 2:
             print("\nMinutes between checks (min 1, default 10)")

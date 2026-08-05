@@ -255,6 +255,7 @@ The taxonomy the whole module is built around. Every event carries
 | `treaty` | inbox `gmessage` | cultural treaty / trade agreement requests |
 | `research` | inbox `gmessage` | research completed |
 | `other` | anything unmatched | always routed, never dropped |
+| `military_movement` | movements JSON (§6.5) | anything moving that is not a shipment or an attack |
 | `resource_alert` | resource watcher (§7) | not a game message |
 | `hub_status` | the hub itself | start/stop, delivery failures, errors |
 
@@ -314,6 +315,50 @@ nested tables whose `</tr>`/`</table>` would truncate it.
 > Layers 3 and 4 cannot be written accurately from guesswork. Phase 1 therefore
 > ships the **capture diagnostic** (§9); Phase 2 turns that real data into the
 > mapping tables.
+
+### 6.5 Movements — shipments, incoming attacks, piracy, espionage
+
+Confirmed 2026-08-05: these are **not** inbox messages and **not** in
+`tradeAdvisor`. They come from the military advisor's ajax response, which
+carries a structured array at
+`viewScriptParams.militaryAndFleetMovements` — the same data
+`shipMovements.py` and `planRoutes.py` have always used.
+
+Each entry has `event.mission` (a **machine code**, not display text),
+`event.missionText`, `eventTime` (absolute epoch), `origin`/`target` with
+`name`, `avatarName` and `cityId`, `isHostile`, `isOwnArmyOrFleet`,
+`isSameAlliance`, `army`/`fleet` amounts and a `resources` cargo list.
+
+This is what finally makes classification language-independent: the type comes
+from the mission code, not from English keywords.
+
+| Signal | Type |
+|---|---|
+| `isHostile` | `combat` — whatever the mission says |
+| `attack`, `plunder`, `occupy`, `convertCity` | `combat` |
+| `piracyRaid` | `piracy` |
+| `spy`, `espionage` | `espionage` |
+| cargo, both ends mine | `shipment_internal` |
+| cargo, either end another player | `shipment_external` |
+| anything else | `military_movement` |
+
+**Identity.** The rendered table has no row ids at all, but `eventTime` is an
+absolute epoch that does not change while the fleet travels, so
+`mission + origin cityId + target + eventTime` is stable across polls. No
+content fingerprinting needed.
+
+**When it fires.** Two different rules, deliberately:
+
+- **Incoming hostile fleets fire on sight**, while still in the air, with the
+  time remaining — a warning after it lands is worthless.
+- **Everything else fires on completion.** A finished movement simply vanishes
+  from the list; there is no "arrived" section and nothing appears in the
+  inbox. So an arrival is a tracked movement that disappeared *after* its
+  arrival time passed (60s grace). One that disappears well before its arrival
+  time was recalled, and is not reported.
+
+First run records what is already in flight without notifying, same principle
+as the inbox.
 
 ### 6.4 Dedupe
 `seen_ids: {id: first_seen_epoch}` in the state file, pruned by
@@ -481,7 +526,7 @@ earliest — the same shape as `alertMessages.do_it()`. Every iteration ends in 
 | Phase | Version | Contents |
 |---|---|---|
 | **1** ✅ | `1.0.0` | Skeleton, config + state store, destination book, all four transports, bundled scraper, classification v1 (source + keywords), per-type routing, dedupe, hub loop, diagnostics + **capture**, global/individual config |
-| **2** | `1.1.0` | Classification refinement from captured data: icon/CSS map, per-language keyword tables, user-taught overrides UI, per-type test fixtures. **Blocked on data** — `docs/MESSAGING_HUB_DATA_REQUEST.md` |
+| **2** ◐ | — | Movements watcher **done**: shipments, incoming attacks, piracy and espionage now come from the military advisor's structured JSON, keyed on machine-readable mission codes rather than English keywords. Still to do: construction (Building Construction List widget), and verifying combat and piracy against live data |
 | **3** ✅ | — | Resource monitor: rules CRUD, three modes, hysteresis + cooldown + re-arm margin, recovery notices, global and per-city rules, per-rule destinations, dry-run check |
 | **4** | `1.3.0` | Formatting: Discord embeds + colours, templates, batching, quiet hours, mutes, delivery counters, rate-limited failure reporting |
 | **5** | `2.0.0` | General trigger engine — any in-game condition → rule → destination: incoming attack, idle ships, city under siege, research done, pirate raid ready, treaty requests |

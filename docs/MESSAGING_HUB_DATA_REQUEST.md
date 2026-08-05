@@ -103,6 +103,19 @@ bot tokens are redacted before writing.
 Best results if you run it when there is something to see — a transport in
 flight, a building mid-upgrade, a recent pirate raid.
 
+> **Round 2 is done** (captured 2026-08-05). Findings and what they changed:
+>
+> | Question | Answer | Consequence |
+> |---|---|---|
+> | JSON endpoint? | **Yes** — the extension's safety filter blocked the response bodies, but ikabot already parses `viewScriptParams.militaryAndFleetMovements` from the `militaryAdvisor` ajax call. Structured objects, not HTML | No scraping for movements. `event.mission` is a machine code, so it is language-independent |
+> | Where are shipments? | **Not** `tradeAdvisor` (that is the Mayor panel — town news and auto-route config). They are in `militaryAdvisor`, "Troop movements" | Shipment tracking is built on the movements JSON |
+> | Stable row id? | No id on any `<tr>` — but irrelevant, since the JSON carries `eventTime` as an absolute epoch | Movement id = mission + origin city + target + eventTime, stable across polls |
+> | Completion behaviour | The entry simply vanishes; no "arrived" list, nothing lands in the inbox | Arrival is detected by a tracked movement disappearing *after* its arrival time |
+> | Top-bar badges | None. Counts render only inside opened panels ("Troop movements (47)") | No cheap global unread signal |
+> | Pirate fortress | Not built on this account — `view=pirateFortress` returns "The desired town could not be found" | Piracy is mapped from mission codes but cannot be verified yet |
+> | Combat list | Still empty | Combat parsing remains unverified against real data |
+> | `cityAdvisor` | Not a real panel; construction lives in the Building Construction List widget | Construction still to do — see round 3 |
+
 ### The browser version of round 2
 
 Use this instead of, or alongside, the capture. It can answer two things the

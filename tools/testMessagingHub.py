@@ -843,6 +843,117 @@ check("scripts stripped from the capture", "alert(1)" not in clean)
 check("styles stripped from the capture", "b:c" not in clean)
 check("real markup kept", "keep me" in clean)
 
+print("\n-- fleet movements (militaryAdvisor viewScriptParams) --")
+NOW = 1800000000
+
+def mv(mission="transport", origin="Athens", origin_owner="kurzon",
+       target="Sparta", target_owner="kurzon", eta=600, hostile=False,
+       own=True, resources=None, army=0, fleet=0, city_id="111"):
+    return {
+        "event": {"mission": mission, "missionText": mission.title(),
+                  "isFleetReturning": False},
+        "eventTime": NOW + eta,
+        "origin": {"name": origin, "avatarName": origin_owner, "cityId": city_id},
+        "target": {"name": target, "avatarName": target_owner, "islandId": "9"},
+        "isHostile": hostile, "isOwnArmyOrFleet": own, "isSameAlliance": False,
+        "army": {"amount": army}, "fleet": {"amount": fleet, "ships": []},
+        "resources": resources or [],
+    }
+
+check("id is stable across polls", hub._movement_id(mv()) == hub._movement_id(mv()))
+check("id changes with arrival time", hub._movement_id(mv()) != hub._movement_id(mv(eta=900)))
+check("id changes with destination", hub._movement_id(mv()) != hub._movement_id(mv(target="Corinth")))
+
+check("own city to own city is internal",
+      hub._movement_type(mv(resources=[{"amount": "100", "cssClass": "resource wood"}]),
+                         "kurzon") == "shipment_internal")
+check("another player's delivery is external",
+      hub._movement_type(mv(origin_owner="PLAYER1",
+                            resources=[{"amount": "100", "cssClass": "resource wine"}]),
+                         "kurzon") == "shipment_external")
+check("hostile is combat regardless of mission",
+      hub._movement_type(mv(mission="transport", hostile=True), "kurzon") == "combat")
+check("attack mission is combat", hub._movement_type(mv(mission="attack"), "kurzon") == "combat")
+check("piracy mission is piracy", hub._movement_type(mv(mission="piracyRaid"), "kurzon") == "piracy")
+check("spy mission is espionage", hub._movement_type(mv(mission="spy"), "kurzon") == "espionage")
+check("unknown non-cargo mission is a movement",
+      hub._movement_type(mv(mission="somethingNew"), "kurzon") == "military_movement")
+check("case of the mission code does not matter",
+      hub._movement_type(mv(mission="PiracyRaid"), "kurzon") == "piracy")
+
+class MoveSession(Session):
+    payload = []
+    now = NOW          # the server clock: it must advance, or nothing ever "arrives"
+    def get(self, url=None, **kw):
+        if url is None: raise AssertionError("bare session.get()")
+        return "currentCityId: 111,"
+    def post(self, url=None, **kw):
+        return json.dumps([["x", {"time": self.now}],
+                           [None, [None, None, {"viewScriptParams":
+                            {"militaryAndFleetMovements": self.payload}}]]])
+    def setStatus(self, s): pass
+    def logout(self): pass
+
+ms = MoveSession()
+ms.username = "kurzon"
+mcfg = hub._default_config()
+mcfg["destinations"] = [{"id": "d1", "name": "all", "kind": "ntfy",
+                         "ntfy": {"topic": "a"}, "enabled": True}]
+for t3 in hub.EVENT_TYPES:
+    mcfg["routes"][t3] = ["d1"]
+mstate = {"seen_ids": {}, "delivered": 0, "failed": 0}
+hub._requests = lambda: FakeRequests()
+
+cargo = [{"amount": "500", "cssClass": "resource wood"}]
+ms.payload = [mv(resources=cargo), mv(target="Corinth", eta=1200, resources=cargo)]
+sent_log.clear()
+sent, failed, in_flight = hub._poll_movements(ms, mcfg, mstate)
+check("first sweep only learns what is in flight", sent == 0 and in_flight == 2)
+check("nothing sent on the first sweep", not sent_log)
+
+sent, failed, in_flight = hub._poll_movements(ms, mcfg, mstate)
+check("unchanged movements send nothing", sent == 0 and in_flight == 2)
+
+# One lands: it simply disappears from the list, which is the only signal.
+# Move the clock past its arrival time, as the real server would.
+ms.now = NOW + 700
+ms.payload = [mv(target="Corinth", eta=1200, resources=cargo)]
+sent, failed, in_flight = hub._poll_movements(ms, mcfg, mstate)
+check("a movement that vanished after its arrival time reports as arrived", sent == 1)
+check("the other is still tracked", in_flight == 1)
+sent, failed, _ = hub._poll_movements(ms, mcfg, mstate)
+check("an arrival is reported once only", sent == 0)
+
+# Recalled: vanishes while still far from arrival — not an arrival.
+ms.payload = [mv(target="Delos", eta=99999, resources=cargo)]
+hub._poll_movements(ms, mcfg, mstate)
+ms.payload = []
+sent, failed, _ = hub._poll_movements(ms, mcfg, mstate)
+check("a movement recalled before arriving is not reported as arrived", sent == 0)
+
+# Incoming hostile: warned about on sight, while still in the air.
+ms.payload = [mv(mission="attack", origin_owner="PLAYER1", origin="Enemy",
+                 target="Athens", target_owner="kurzon", hostile=True,
+                 own=False, eta=3600, army=500)]
+sent_log.clear()
+sent, failed, _ = hub._poll_movements(ms, mcfg, mstate)
+check("an incoming hostile fleet is reported on sight", sent == 1)
+body = sent_log[-1][1]["data"].decode() if isinstance(sent_log[-1][1].get("data"), bytes) else str(sent_log[-1][1])
+check("the warning says how long until it lands", "Arrives in" in body)
+check("the warning carries the troop count", "500" in body)
+sent, failed, _ = hub._poll_movements(ms, mcfg, mstate)
+check("the same hostile fleet is not re-reported every poll", sent == 0)
+
+class DeadMoveSession(MoveSession):
+    def post(self, url=None, **kw): return "not json at all"
+sent, failed, in_flight = hub._poll_movements(DeadMoveSession(), mcfg, mstate)
+check("an unreadable movements response is survivable", (sent, failed, in_flight) == (0, 0, 0))
+
+class NoCitySession(MoveSession):
+    def get(self, url=None, **kw): return "no city id here"
+check("no city id means no movement poll, not a crash",
+      hub._poll_movements(NoCitySession(), mcfg, mstate) == (0, 0, 0))
+
 print("\n-- a lock problem never stops message forwarding --")
 real_lock_write = hub._lock_write
 hub._lock_write = lambda *a, **k: (_ for _ in ()).throw(OSError("share vanished"))
