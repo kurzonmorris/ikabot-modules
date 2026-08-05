@@ -316,6 +316,26 @@ nested tables whose `</tr>`/`</table>` would truncate it.
 > ships the **capture diagnostic** (§9); Phase 2 turns that real data into the
 > mapping tables.
 
+### 6.4a Town News — the unified event feed
+
+`tradeAdvisor` ("Overview of towns and finances") has a **Town News** tab with a
+show-all-events button and a category filter:
+
+> military · goods · production · espionage · diplomacy · news · piracy
+
+Buildings constructed appear under **production**. Those categories map almost
+one-to-one onto this taxonomy, which makes this the likely single source for
+construction, news and piracy — none of which exist in the inbox.
+
+Whether it also **replaces** the movements-vanish inference for arrivals depends
+on one thing: does the feed keep finished events with timestamps, or drop them
+on completion? That is question 5 of round 3 in
+`docs/MESSAGING_HUB_DATA_REQUEST.md`. A persistent history with row ids would be
+strictly better than watching a row disappear.
+
+> Round 2 concluded `tradeAdvisor` was "just the Mayor panel". That was wrong —
+> the capture had only one category selected.
+
 ### 6.5 Movements — shipments, incoming attacks, piracy, espionage
 
 Confirmed 2026-08-05: these are **not** inbox messages and **not** in

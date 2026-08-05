@@ -116,6 +116,63 @@ flight, a building mid-upgrade, a recent pirate raid.
 > | Combat list | Still empty | Combat parsing remains unverified against real data |
 > | `cityAdvisor` | Not a real panel; construction lives in the Building Construction List widget | Construction still to do — see round 3 |
 
+---
+
+## Round 3 — the Town News event feed (the actual source)
+
+**Correction to round 2, from Kurzon 2026-08-05:** `tradeAdvisor` — "Overview of
+towns and finances" — has a **Town News** tab with a button that shows *all
+current events*, filtered by category:
+
+> military · goods · production · espionage · diplomacy · news · piracy
+
+Buildings constructed come under **production**. The round-2 capture evidently
+had only one category selected, which is why it looked like a thin "town news"
+panel with nothing useful in it.
+
+Those categories map almost one-to-one onto the hub's event types, so this is
+very likely the single source for everything still missing — construction,
+news, piracy — and possibly a better source for arrivals than watching
+movements vanish.
+
+### The brief
+
+> I'm on Ikariam, logged in. **Read-only** — do not accept, decline, attack,
+> send, spend or buy anything. Opening panels and toggling a view filter is
+> fine. Do not include cookies, session tokens or the `actionRequest` value.
+> Replace other players' names with PLAYER1, PLAYER2 etc.
+>
+> Open **`?view=tradeAdvisor`** ("Overview of towns and finances"), go to the
+> **Town News** tab, and find the button that shows all current events. Turn on
+> **every** category — military, goods, production, espionage, diplomacy, news,
+> piracy — so the feed is showing everything at once.
+>
+> 1. **Is the category filter client-side or server-side?** When you toggle a
+>    category, does a new network request fire, or does the page just show and
+>    hide rows already present? If a request fires, give me its URL. This
+>    decides whether one fetch can retrieve everything.
+> 2. **Give me two or three raw event rows per category**, complete, with every
+>    `id` and `class` attribute intact — especially **production** (a building
+>    finishing), **news**, and **piracy**, which I have no examples of at all.
+> 3. **Does each event row have an `id`?** And does that id survive a page
+>    refresh?
+> 4. **How is the time shown** — an absolute timestamp, "3 minutes ago", or a
+>    countdown? Is there a `data-` attribute holding a raw value?
+> 5. **Is this a history or a live list?** Do finished events stay in the feed
+>    after they complete (a building that finished an hour ago, a transport
+>    that already landed), or does an entry vanish once it is done? How far
+>    back does it go, and is there paging or a "load more"?
+> 6. **How does a category identify itself in the markup** — a CSS class on the
+>    row, a data attribute, an icon class? I need whatever names the category,
+>    because that is the language-independent signal.
+>
+> If a category is empty right now, say so explicitly rather than skipping it.
+
+**Question 5 is the important one.** If finished events persist in the feed with
+timestamps, this becomes the primary source: discrete past events with ids beat
+inferring an arrival from a row disappearing. If entries vanish on completion,
+the feed only supplements the movements JSON.
+
 ### The browser version of round 2
 
 Use this instead of, or alongside, the capture. It can answer two things the
