@@ -103,10 +103,65 @@ bot tokens are redacted before writing.
 Best results if you run it when there is something to see — a transport in
 flight, a building mid-upgrade, a recent pirate raid.
 
-<details>
-<summary>Fallback: the browser version of round 2, if the capture cannot run</summary>
+### The browser version of round 2
 
-Paste this into the extension:
+Use this instead of, or alongside, the capture. It can answer two things the
+capture cannot: whether the advisor tabs are backed by a **JSON endpoint**
+(which would remove HTML scraping entirely), and whether rows carry a **stable
+id** across refreshes (which decides how arrival detection has to work).
+
+> I'm on Ikariam, a browser game by Gameforge, logged in. I need you to collect
+> read-only page data. **Do not click anything that acts** — no accepting or
+> declining treaties, no attacking, no sending, no spending, no buying. Opening
+> an advisor tab or panel to look at it is fine. Do not include cookies,
+> session tokens or the `actionRequest` value in what you give me. You can
+> replace other players' names with PLAYER1, PLAYER2 etc.
+>
+> **Priority 1 — is there a JSON endpoint?**
+> Open the browser Network tab, filter to XHR/fetch, then click through the
+> four advisor tabs (the icons near the top: city/mayor, military, trade,
+> diplomacy). For each request that fires, give me the request URL and the
+> **first ~100 lines of the response body**. If a response is JSON rather than
+> HTML, that is the single most useful thing you can send me — include it in
+> full even if it is long.
+>
+> **Priority 2 — the trade advisor** (`?view=tradeAdvisor`).
+> This is where resource shipments appear. Give me:
+> - the raw HTML of the table(s) listing transports, with every `id` and
+>   `class` attribute intact
+> - for one row: every cell's text, in order
+> - whether the row has an `id`, and whether that id **stays the same if you
+>   refresh the page** (please refresh once and compare)
+> - how the arrival time is shown — an absolute timestamp, a countdown, or
+>   both — and whether there is a `data-` attribute or JS variable holding the
+>   real arrival time
+> - whether transports between two of my own cities look different from a
+>   delivery sent by another player, and if so, how
+>
+> **Priority 3 — the other tabs.** Same treatment, briefer:
+> - `?view=militaryAdvisor` — troop movements, attacks, returns
+> - `?view=militaryAdvisorCombatList` — combat reports (was empty last time;
+>   say so again if still empty)
+> - `?view=cityAdvisor` — is construction progress listed here?
+> - `?view=researchAdvisor` — research progress
+>
+> **Priority 4 — completion behaviour.** When a transport arrives or a building
+> finishes, what changes? Does the row disappear from the list, move to a
+> "finished" section, or turn into an inbox message? If you can catch one
+> completing, describe before and after.
+>
+> **Priority 5 — the top bar.** Any icon with a number or badge on it: what is
+> it called, what is its element `id`, and what does opening it show?
+>
+> **Priority 6 — the pirate fortress.** Where is the result of a completed
+> raid shown, and what does one look like?
+>
+> If a section is empty right now, say so explicitly — "this page loads and
+> says there is nothing" is useful and is different from "this page does not
+> exist".
+
+<details>
+<summary>The earlier, more open-ended version of round 2</summary>
 
 > I'm on Ikariam. Read-only again — do not click anything that sends, accepts,
 > declines, attacks or spends. Opening a tab or panel to look at it is fine.
