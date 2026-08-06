@@ -47,7 +47,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.3.1"
+MODULE_VERSION = "10.4.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -1415,6 +1415,50 @@ def _notify_deadline_cut(session, notif_config, mode_label, remaining_desc):
             pass
 
 
+def _full_ships_settings():
+    """Return (enabled, freighter_min_load) for the full-ships-only toggle.
+    Stored in module prefs so the background worker picks it up too."""
+    try:
+        prefs = load_prefs()
+        return (bool(prefs.get("full_ships_only", False)),
+                int(prefs.get("freighter_min_load", 0) or 0))
+    except Exception:
+        return False, 0
+
+
+def _apply_full_ships(resources, derived_mask, capacity, min_last_load):
+    """Trim stock-derived cargo so ships sail full.
+
+    The last vessel of a shipment must carry at least min_last_load
+    (for merchants: the full capacity). Units are only removed from
+    resources marked derived (send-all / all-but-X / computed gaps) —
+    exact user-requested amounts are never reduced, so a specific order
+    may still finish with a partial ship. Mixed resource types on one
+    ship are fine; only the shipment TOTAL matters."""
+    if capacity <= 0:
+        return resources
+    total = sum(resources)
+    if total <= 0:
+        return resources
+    if min_last_load <= 0 or min_last_load > capacity:
+        min_last_load = capacity
+    rem = total % capacity
+    if rem == 0 or rem >= min_last_load:
+        return resources
+    derived_idx = [i for i in range(len(resources))
+                   if i < len(derived_mask) and derived_mask[i]
+                   and resources[i] > 0]
+    cut = min(rem, sum(resources[i] for i in derived_idx))
+    trimmed = list(resources)
+    for i in sorted(derived_idx, key=lambda j: trimmed[j], reverse=True):
+        if cut <= 0:
+            break
+        take = min(trimmed[i], cut)
+        trimmed[i] -= take
+        cut -= take
+    return trimmed
+
+
 def _execute_routes_bounded(session, route, useFreighters, deadline_ts,
                             status_prefix=""):
     """Deliver one route like ikabot's executeRoutes, but stop scheduling
@@ -1523,7 +1567,7 @@ def _check_city_status(session, city_id):
 def send_shipment(session, route, useFreighters, notif_config, log_path,
                   mode_name, dest_island_coords="", dest_player="",
                   max_lock_retries=3, next_shipment_str=None,
-                  min_threshold=0, deadline_ts=None):
+                  min_threshold=0, deadline_ts=None, derived_mask=None):
     origin_city = route[0]
     dest_city = route[1]
     resources = list(route[3:])
@@ -1535,6 +1579,35 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
               "no_ap": False, "below_threshold": False,
               "city_unavailable": False, "shortfalls": {},
               "partial": False}
+
+    # Full-ships-only mode: trim stock-derived cargo so every ship
+    # sails full (freighters: at least the user-set minimum on the last
+    # one). Exact requested amounts are never touched.
+    if derived_mask is not None and any(derived_mask) and total_cargo > 0:
+        fs_on, fr_min = _full_ships_settings()
+        if fs_on:
+            try:
+                _cap_s, _cap_f = getShipCapacity(session)
+            except Exception:
+                _cap_s, _cap_f = 0, 0
+            _cap = _cap_f if useFreighters else _cap_s
+            _min_last = fr_min if useFreighters else _cap
+            trimmed = _apply_full_ships(resources, derived_mask,
+                                        _cap, _min_last)
+            if trimmed != resources:
+                resources = trimmed
+                total_cargo = sum(resources)
+                route = (route[0], route[1], route[2], *resources)
+            if total_cargo == 0:
+                result["error"] = (
+                    "Skipped by full-ships mode — less than one full "
+                    "ship of cargo available")
+                log_shipment(log_path, session, mode_name,
+                             origin_city["name"], "", dest_city["name"],
+                             dest_island_coords, dest_player, resources,
+                             0, ship_type_name, "SKIPPED", result["error"],
+                             next_shipment_str)
+                return result
 
     if min_threshold > 0 and total_cargo < min_threshold:
         result["below_threshold"] = True
@@ -2501,6 +2574,14 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                       f"{C.BOLD}(o){C.RESET} Stop scheduler   "
                       f"{C.BOLD}(x){C.RESET} Clear all schedules")
                 print(f"  {C.BOLD}(n){C.RESET} Notifications: {nd}")
+                fs_on, fr_min = _full_ships_settings()
+                if fs_on:
+                    fr_desc = (f"freighters min {fr_min:,}" if fr_min > 0
+                               else "freighters full")
+                    fd = f"{C.OK}ON{C.RESET} {C.DIM}(merchants full, {fr_desc}){C.RESET}"
+                else:
+                    fd = f"{C.DIM}off{C.RESET}"
+                print(f"  {C.BOLD}(f){C.RESET} Full ships only: {fd}")
                 print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
                       f" to run it.{C.RESET}")
                 print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
@@ -2528,7 +2609,8 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
 
             shipping_mode = read(min=1, max=8, digit=True,
                                  additionalValues=["'", "s", "S", "o", "O",
-                                                    "x", "X", "n", "N", ""])
+                                                    "x", "X", "n", "N",
+                                                    "f", "F", ""])
             if shipping_mode == "":
                 continue
             if shipping_mode == "'":
@@ -2553,6 +2635,34 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                     if result != "CANCEL":
                         notif_preset = result
                         _NOTIF_PRESET = result
+                    continue
+                elif letter == "f":
+                    prefs = load_prefs()
+                    if prefs.get("full_ships_only", False):
+                        prefs["full_ships_only"] = False
+                        save_prefs(prefs)
+                        print(f"  {C.OK}Full ships only disabled — "
+                              f"shipments send whatever is needed.{C.RESET}")
+                    else:
+                        print(f"\n  {C.DIM}Merchant ships will only sail "
+                              f"completely full (multiples of ship "
+                              f"capacity).{C.RESET}")
+                        print(f"  {C.DIM}Exact requested amounts are always "
+                              f"delivered in full, even if the last ship "
+                              f"is partial — this only trims send-all / "
+                              f"all-but-X / computed amounts.{C.RESET}\n")
+                        print(f"  Minimum load per freighter "
+                              f"(0 or blank = completely full):")
+                        fm = read(msg="  > ", min=0, digit=True, empty=True,
+                                  additionalValues=["'"])
+                        if fm == "'":
+                            continue
+                        prefs["full_ships_only"] = True
+                        prefs["freighter_min_load"] = (
+                            int(fm) if isinstance(fm, int) else 0)
+                        save_prefs(prefs)
+                        print(f"  {C.OK}Full ships only enabled.{C.RESET}")
+                    enter()
                     continue
 
             if shipping_mode == 7:
@@ -5176,10 +5286,16 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
 
         if total > 0:
             route = (oc_fresh, destination_city, island["id"], *toSend)
+            fs_derived = [
+                send_mode == 1 or (i < len(resource_config)
+                                   and isinstance(resource_config[i],
+                                                  (tuple, list)))
+                for i in range(len(materials_names))
+            ]
             result = send_shipment(
                 session, route, useFreighters, notif_config, log_path,
                 "Consolidate", coords, min_threshold=min_threshold,
-                deadline_ts=deadline_ts,
+                deadline_ts=deadline_ts, derived_mask=fs_derived,
             )
             if result.get("below_threshold"):
                 small_shipments.append(
@@ -5269,10 +5385,15 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
 
         if total > 0:
             route = (origin_city, dest_city, dest_island["id"], *toSend)
+            fs_derived = [
+                i < len(resource_config)
+                and isinstance(resource_config[i], (tuple, list))
+                for i in range(len(materials_names))
+            ]
             result = send_shipment(
                 session, route, useFreighters, notif_config, log_path,
                 "Distribute", coords, min_threshold=min_threshold,
-                deadline_ts=deadline_ts,
+                deadline_ts=deadline_ts, derived_mask=fs_derived,
             )
             if result.get("below_threshold"):
                 small_shipments.append(
@@ -5373,6 +5494,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                     session, route, useFreighters, notif_config, log_path,
                     "TopUp", coords, min_threshold=min_threshold,
                     deadline_ts=deadline_ts,
+                    derived_mask=[True] * len(materials_names),
                 )
                 if result.get("below_threshold"):
                     small_shipments.append(
@@ -5482,6 +5604,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
                     session, route, useFreighters, notif_config, log_path,
                     "Even Distribution", coords, min_threshold=min_threshold,
                     deadline_ts=deadline_ts,
+                    derived_mask=[True] * len(materials_names),
                 )
                 if result.get("below_threshold"):
                     small_shipments.append(
@@ -5596,10 +5719,14 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
                 session, notif_config, "AUTO SEND",
                 f"{len(routes) - idx_r} shipment(s)")
             break
+        fs_derived = [
+            i < len(requested) and isinstance(requested[i], (tuple, list))
+            for i in range(len(materials_names))
+        ]
         result = send_shipment(
             session, route, useFreighters, notif_config, log_path,
             "Auto Send", min_threshold=min_threshold,
-            deadline_ts=deadline_ts,
+            deadline_ts=deadline_ts, derived_mask=fs_derived,
         )
         if result.get("below_threshold"):
             small_shipments.append(
@@ -5992,10 +6119,12 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             route = (route[0], route[1], route[2], *resources)
 
         coords = f"[{rx}:{ry}]"
+        fs_derived = [m == "except" for m, _ in parsed_res]
         result = send_shipment(
             session, route, row_freighters, notif_config,
             log_path, "Bulk Distribution", coords, player,
             min_threshold=min_threshold, deadline_ts=deadline_ts,
+            derived_mask=fs_derived,
         )
 
         if result.get("shortfalls"):
