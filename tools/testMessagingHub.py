@@ -1061,6 +1061,83 @@ ms2.payload = []
 sent, failed, _ = hub._poll_movements(ms2, mcfg, mstate3, report_arrivals=True)
 check("with Town News off, it reports the arrival itself", sent == 1)
 
+print("\n-- Town News category from the row icon --")
+# The exact icon markup is unknown, so the reader accepts the category from a
+# CSS class, a tooltip, an alt text or an image filename — whichever the game
+# actually uses. A class is language-independent; a tooltip is not.
+def icon_row(icon_html, subject="Something happened", city="9 Jokios"):
+    return ('<tr><td class="city">{}</td><td class="short_text100">{}</td>'
+            '<td class="date">06.08.2026 2:07</td>'
+            '<td class="subject">{}</td></tr>').format(icon_html, city, subject)
+
+check("category from a css class on a child",
+      hub._town_news_category(icon_row('<div class="event_icon production"></div>')) == "production")
+check("category from a class on the cell itself",
+      hub._town_news_category('<td class="city piracy"></td>') == "piracy")
+check("category from the hover tooltip",
+      hub._town_news_category(icon_row('<img title="Espionage">')) == "espionage")
+check("category from alt text",
+      hub._town_news_category(icon_row('<img alt="Diplomacy">')) == "diplomacy")
+check("category from the image filename",
+      hub._town_news_category(icon_row('<img src="/skin/icons/news_small.png">')) == "news")
+check("category from an underscored class",
+      hub._town_news_category(icon_row('<span class="icon_military"></span>')) == "military")
+check("no icon means no category",
+      hub._town_news_category(icon_row('')) == "")
+check("the word 'city' in the cell class is not a category",
+      hub._town_news_category('<td class="city"></td>') == "")
+# Scoped to the icon cell: a subject that happens to mention a category word
+# must not be mistaken for the row's icon.
+check("a category word in the subject is ignored",
+      hub._town_news_category(icon_row('', subject="Our diplomacy is improving")) == "")
+
+print("\n-- the icon beats the wording --")
+mine2 = {"9 jokios", "16 lluhios"}
+def tn_entry(category, subject, city="9 Jokios"):
+    return {"source": "townnews", "category": category, "subject": subject,
+            "body": "", "action": "", "icon": "", "city": city}
+
+check("production icon means construction",
+      hub._classify(tn_entry("production", "Town Hall expanded"), ["en"], [], mine2) == "construction")
+check("piracy icon means piracy even with trade wording",
+      hub._classify(tn_entry("piracy", "A trade fleet has arrived"), ["en"], [], mine2) == "piracy")
+check("military icon means combat",
+      hub._classify(tn_entry("military", "Anything at all"), ["en"], [], mine2) == "combat")
+check("diplomacy icon means treaty",
+      hub._classify(tn_entry("diplomacy", "Anything at all"), ["en"], [], mine2) == "treaty")
+check("news icon means news",
+      hub._classify(tn_entry("news", "Anything at all"), ["en"], [], mine2) == "news")
+check("espionage icon means espionage",
+      hub._classify(tn_entry("espionage", "Anything at all"), ["en"], [], mine2) == "espionage")
+# "goods" still needs the origin to decide direction.
+check("goods from another player is external",
+      hub._classify(tn_entry("goods", "A trade fleet from Twulic-W-3 has arrived in 9 Jokios"),
+                    ["en"], [], mine2) == "shipment_external")
+check("goods from my own town is internal",
+      hub._classify(tn_entry("goods", "A trade fleet from 16 Lluhios has arrived in 9 Jokios"),
+                    ["en"], [], mine2) == "shipment_internal")
+check("an unrecognised category falls back to the wording",
+      hub._classify(tn_entry("", "Your building Town Hall has been expanded to level 35"),
+                    ["en"], [], mine2) == "construction")
+check("a user override still beats the icon",
+      hub._classify(tn_entry("production", "Town Hall expanded"), ["en"],
+                    [{"value": "town hall", "type": "other"}], mine2) == "other")
+
+print("\n-- categories survive the full parse --")
+ICON_FEED = ('<table id="inboxCity" class="table01 left clearfloat">'
+             + icon_row('<div class="event_icon production"></div>',
+                        "Your building Town Hall has been expanded to level 35", "16 Lluhios")
+             + icon_row('<div class="event_icon goods"></div>',
+                        "A trade fleet from Twulic-W-3 has arrived in 9 Jokios")
+             + icon_row('<div class="event_icon piracy"></div>', "Raid complete")
+             + '</table>')
+rows = hub._parse_town_news(ICON_FEED)
+check("every row keeps its category",
+      [r["category"] for r in rows] == ["production", "goods", "piracy"])
+types = [hub._classify(r, ["en"], [], mine2) for r in rows]
+check("and each lands in the right type",
+      types == ["construction", "shipment_external", "piracy"])
+
 print("\n-- a lock problem never stops message forwarding --")
 real_lock_write = hub._lock_write
 hub._lock_write = lambda *a, **k: (_ for _ in ()).throw(OSError("share vanished"))

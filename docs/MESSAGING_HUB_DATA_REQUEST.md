@@ -150,10 +150,16 @@ movements vanish.
 > - Only *goods* and *production* events existed on the account at the time, so
 >   military, espionage, diplomacy, news and piracy rows remain unseen.
 >
-> **Still wanted, when convenient:** the POST parameters a category checkbox
-> sends. Fetching one category at a time would make the type certain and
-> language-independent, instead of falling back to subject keywords. A single
-> line — the request body of one toggle — is enough.
+> **Correction from Kurzon:** each row *does* carry a per-category picture, and
+> its hover label names the category — the capture reported that first cell as
+> empty and missed it. The category is now read from the icon cell's CSS class,
+> `title`, `alt` or image filename, and outranks the subject wording. That was
+> the language-independent signal being looked for all along.
+>
+> **Still wanted, when convenient:** confirmation of what that icon markup
+> actually looks like. `(6) Diagnostics → (3) Capture` now dumps every Town News
+> row raw, each followed by `-> category read as: …`. If any line reads
+> `UNKNOWN`, send me that row and the reader gets one more pattern.
 
 ### The brief
 

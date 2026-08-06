@@ -1719,6 +1719,45 @@ def _fetch_messages(session):
 # ---------------------------------------------------------------------------
 
 
+# Each Town News row carries a per-category picture whose hover label names the
+# category. Read from the markup this gives the category directly, which beats
+# guessing from the subject wording — and when it comes from a CSS class rather
+# than the tooltip text it is language-independent as well.
+TOWN_NEWS_CATEGORIES = {
+    "military": "combat",
+    "goods": None,  # direction decided by the origin, below
+    "production": "construction",
+    "espionage": "espionage",
+    "diplomacy": "treaty",
+    "news": "news",
+    "piracy": "piracy",
+}
+
+
+def _town_news_category(row_html):
+    """Category from the row's icon: its class names, tooltip or image name.
+
+    Scoped to the icon cell so a stray word elsewhere in the row cannot be
+    mistaken for a category.
+    """
+    cell = re.search(
+        r'<td[^>]*class=["\'][^"\']*city[^"\']*["\'][^>]*>[\s\S]*?</td>',
+        row_html,
+        flags=re.IGNORECASE,
+    )
+    scope = cell.group(0) if cell else row_html
+    values = re.findall(
+        r'(?:class|title|alt|src|data-category)\s*=\s*["\']([^"\']*)["\']',
+        scope,
+        flags=re.IGNORECASE,
+    )
+    haystack = " ".join(values).lower()
+    for category in TOWN_NEWS_CATEGORIES:
+        if category in haystack:
+            return category
+    return ""
+
+
 def _cell(row_html, class_name):
     match = re.search(
         r'<td[^>]*class=["\'][^"\']*{}[^"\']*["\'][^>]*>([\s\S]*?)</td>'.format(
@@ -1755,6 +1794,7 @@ def _parse_town_news(payload):
                 "body": "",
                 "action": "",
                 "icon": "",
+                "category": _town_news_category(row),
                 "city": city,
                 "date": date,
             }
@@ -2117,6 +2157,17 @@ def _classify(message, session_langs, overrides, own_cities):
     override = _apply_overrides(overrides, haystack)
     if override:
         return override
+
+    # Town News rows name their own category via the row icon. That is a far
+    # better signal than the subject wording, so it wins outright.
+    category = message.get("category")
+    if category in TOWN_NEWS_CATEGORIES:
+        mapped = TOWN_NEWS_CATEGORIES[category]
+        if mapped:
+            return mapped
+        return _classify_shipment(
+            haystack, own_cities, "shipment_external", message.get("city", "")
+        )
 
     # A row sent by a player can only be a few things. Running the full keyword
     # table over player mail misfiles it — a player advertising a "trading
@@ -3811,6 +3862,24 @@ def _capture(session, cfg):
         clean = _strip_noise(page)
         lines.append("")
         lines.append("=== ADVISOR: {} ===".format(url))
+
+        # The Town News rows carry no id, so dump them explicitly — their icon
+        # markup is what the category is read from.
+        table = re.search(
+            r'<table[^>]*id\s*=\s*["\']\s*inboxCity\s*["\'][^>]*>([\s\S]*?)</table>',
+            clean,
+            flags=re.IGNORECASE,
+        )
+        if table:
+            lines.append("--- town news rows (raw) ---")
+            for row in re.findall(
+                r"<tr[^>]*>[\s\S]*?</tr>", table.group(1), flags=re.IGNORECASE
+            )[:40]:
+                lines.append(_redact(row))
+                lines.append("    -> category read as: {}".format(
+                    _town_news_category(row) or "UNKNOWN"
+                ))
+
         lines.append("--- rows carrying an id ---")
         for row in re.findall(
             r"<tr[^>]*\sid\s*=[\s\S]*?</tr>", clean, flags=re.IGNORECASE

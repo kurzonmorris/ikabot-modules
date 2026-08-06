@@ -343,17 +343,38 @@ new. No vanish-detection, no in-flight tracking.
 | 2 | `date` | absolute `06.08.2026 2:07` |
 | 3 | `subject` | the event text |
 
-**No row ids, and no category marker in the markup.** Entries are therefore
-keyed by `sha1(city + date + subject)`. Two identical events in the same town in
-the same minute collapse into one, which is the right answer far more often than
-not.
+**No row ids**, so entries are keyed by `sha1(city + date + subject)`. Two
+identical events in the same town in the same minute collapse into one, which is
+the right answer far more often than not.
 
-The category exists only as a **server-side filter** — toggling a checkbox
-fires a POST and the server returns a different row set. That means the
-category *could* be established with certainty by fetching each one separately,
-which would be language-independent. Doing so needs the filter's request
-parameters, which are not yet known; until then classification falls back to
-subject keywords.
+**The category comes from the row's icon.** Every line carries a picture for its
+category, and its hover label names it. The reader takes the category from the
+icon cell's CSS class, `title`, `alt` or image filename — whichever the game
+actually uses — scoped to that cell so a category word in the subject cannot be
+mistaken for it. A class match is **language-independent**; a tooltip match is
+not, so an account in another language falls back to keywords if the game only
+puts the category in the tooltip.
+
+Category → type:
+
+| Icon | Type |
+|---|---|
+| production | `construction` |
+| goods | `shipment_internal` / `shipment_external`, by origin |
+| military | `combat` |
+| espionage | `espionage` |
+| diplomacy | `treaty` |
+| news | `news` |
+| piracy | `piracy` |
+
+The icon **outranks the subject wording** — a piracy row that happens to mention
+a trade fleet is piracy. Only a user override beats it. When no icon is found
+the subject keywords decide, as before.
+
+The filter is also **server-side** — toggling a checkbox fires a POST — so
+fetching one category at a time would be an independent way to establish the
+type. That needs the filter's request parameters; the icon makes it unnecessary
+unless the icon turns out to be absent on some servers.
 
 **Shipment direction.** The `city` column is always one of *my* towns, so "does
 this mention a city of mine" would call every delivery internal. The
