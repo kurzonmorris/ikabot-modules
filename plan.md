@@ -347,25 +347,40 @@ new. No vanish-detection, no in-flight tracking.
 identical events in the same town in the same minute collapse into one, which is
 the right answer far more often than not.
 
-**The category comes from the row's icon.** Every line carries a picture for its
-category, and its hover label names it. The reader takes the category from the
-icon cell's CSS class, `title`, `alt` or image filename — whichever the game
-actually uses — scoped to that cell so a category word in the subject cannot be
-mistaken for it. A class match is **language-independent**; a tooltip match is
-not, so an account in another language falls back to keywords if the game only
-puts the category in the tooltip.
+**The category comes from the row's icon**, confirmed verbatim 2026-08-06:
 
-Category → type:
+```html
+<td class="city"><span class="category transport" title="Goods"></span></td>
+```
 
-| Icon | Type |
-|---|---|
-| production | `construction` |
-| goods | `shipment_internal` / `shipment_external`, by origin |
-| military | `combat` |
-| espionage | `espionage` |
-| diplomacy | `treaty` |
-| news | `news` |
-| piracy | `piracy` |
+The span is empty — the icon is a CSS background image — and the category is in
+the **class token**, which is identical on every server. The `title` is the
+translated label, so it is only a fallback.
+
+**Two class tokens do not match their labels**, which is exactly why the class
+has to be mapped rather than string-matched:
+
+| Class token | Label | Type |
+|---|---|---|
+| `transport` | Goods | `shipment_internal` / `shipment_external`, by origin |
+| `production` | Production | `construction` |
+| `military` | Military | `combat` |
+| `espionage` | Espionage | `espionage` |
+| `diplomacy` | Diplomacy | `treaty` |
+| `plus` | News | `news` (Ikariam Plus notices) |
+| `piracy` | Piracy | `piracy` |
+
+Reading is scoped to the icon cell and requires the element to carry the
+`category` class, so neither a category word in the subject nor an unrelated
+styled span can be mistaken for it. Fallbacks, in order: the German asset
+filename (`Icon_Warentransport_…`, language-independent), then the tooltip text
+(English only), then the subject keywords.
+
+The icon **outranks the subject wording** — a piracy row that mentions a trade
+fleet is piracy. Only a user override beats it.
+
+An empty category renders `<td colspan="4">No messages available.</td>`, which
+has no subject cell and is therefore skipped.
 
 The icon **outranks the subject wording** — a piracy row that happens to mention
 a trade fleet is piracy. Only a user override beats it. When no icon is found

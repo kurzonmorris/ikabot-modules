@@ -201,6 +201,28 @@ the feed only supplements the movements JSON.
 
 ---
 
+> **Round 4 is done** (captured 2026-08-06) and settled it:
+>
+> ```html
+> <td class="city"><span class="category transport" title="Goods"></span></td>
+> ```
+>
+> - The category is a **CSS class token**, identical on every server — the
+>   language-independent signal. The empty span confirmed the icon is a CSS
+>   background image, which is why earlier captures reported the cell as blank.
+> - **Two tokens do not match their labels**: goods is `transport`, news is
+>   `plus`. Matching the visible label would have worked in English only and
+>   silently misfiled both on any other server.
+> - The tooltip is a plain native `title`, not a JS tooltip, so it survives as
+>   an English-only fallback.
+> - Asset filenames are German on every server
+>   (`Icon_Warentransport_Rahmen_26x26.png`), giving a second
+>   language-independent fallback.
+> - No sprite sheets — one file per category, so no pixel-offset case to handle.
+> - Military, espionage and piracy had no live rows; their filter buttons
+>   confirm the class names. An empty category renders
+>   `<td colspan="4">No messages available.</td>`.
+
 ## Round 4 — confirm the category icon markup
 
 The reader accepts the category from a CSS class, a `title`, an `alt` or an

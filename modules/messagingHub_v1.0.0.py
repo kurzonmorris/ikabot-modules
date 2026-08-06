@@ -1734,11 +1734,42 @@ TOWN_NEWS_CATEGORIES = {
 }
 
 
-def _town_news_category(row_html):
-    """Category from the row's icon: its class names, tooltip or image name.
+# The class token on <span class="category X">, as the game actually writes it.
+# Two do not match the label shown to the user: goods is "transport" and news
+# is "plus" (Ikariam Plus). Matching the label instead would work only in
+# English.
+TOWN_NEWS_CLASSES = {
+    "transport": "goods",
+    "goods": "goods",
+    "production": "production",
+    "diplomacy": "diplomacy",
+    "plus": "news",
+    "news": "news",
+    "military": "military",
+    "espionage": "espionage",
+    "piracy": "piracy",
+}
 
-    Scoped to the icon cell so a stray word elsewhere in the row cannot be
-    mistaken for a category.
+# Asset filenames are German whatever the server's language, so they are a
+# language-independent fallback if a skin ever drops the class.
+TOWN_NEWS_ASSETS = {
+    "warentransport": "goods",
+    "produktion": "production",
+    "diplomatie": "diplomacy",
+    "ikariamplus": "news",
+    "militaer": "military",
+    "spionage": "espionage",
+    "piraterie": "piracy",
+}
+
+
+def _town_news_category(row_html):
+    """Category from the row's icon.
+
+    `<span class="category transport" title="Goods">` — the class token is the
+    same on every server, the title is translated, so the class is read first.
+    Scoped to the icon cell so a category word in the subject cannot be
+    mistaken for the row's own category.
     """
     cell = re.search(
         r'<td[^>]*class=["\'][^"\']*city[^"\']*["\'][^>]*>[\s\S]*?</td>',
@@ -1746,12 +1777,26 @@ def _town_news_category(row_html):
         flags=re.IGNORECASE,
     )
     scope = cell.group(0) if cell else row_html
+
+    for classes in re.findall(
+        r'class\s*=\s*["\']([^"\']*)["\']', scope, flags=re.IGNORECASE
+    ):
+        tokens = classes.lower().split()
+        if "category" not in tokens:
+            continue
+        for token in tokens:
+            if token != "category" and token in TOWN_NEWS_CLASSES:
+                return TOWN_NEWS_CLASSES[token]
+
     values = re.findall(
-        r'(?:class|title|alt|src|data-category)\s*=\s*["\']([^"\']*)["\']',
+        r'(?:title|alt|src|data-category)\s*=\s*["\']([^"\']*)["\']',
         scope,
         flags=re.IGNORECASE,
     )
     haystack = " ".join(values).lower()
+    for stem, category in TOWN_NEWS_ASSETS.items():
+        if stem in haystack:
+            return category
     for category in TOWN_NEWS_CATEGORIES:
         if category in haystack:
             return category

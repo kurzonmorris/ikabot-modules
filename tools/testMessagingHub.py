@@ -1061,35 +1061,53 @@ ms2.payload = []
 sent, failed, _ = hub._poll_movements(ms2, mcfg, mstate3, report_arrivals=True)
 check("with Town News off, it reports the arrival itself", sent == 1)
 
-print("\n-- Town News category from the row icon --")
-# The exact icon markup is unknown, so the reader accepts the category from a
-# CSS class, a tooltip, an alt text or an image filename — whichever the game
-# actually uses. A class is language-independent; a tooltip is not.
-def icon_row(icon_html, subject="Something happened", city="9 Jokios"):
-    return ('<tr><td class="city">{}</td><td class="short_text100">{}</td>'
-            '<td class="date">06.08.2026 2:07</td>'
-            '<td class="subject">{}</td></tr>').format(icon_html, city, subject)
+print("\n-- Town News category icon (verbatim markup, captured 2026-08-06) --")
+# <span class="category X" title="Label"></span>. The span is empty; the icon
+# is a CSS background image. The class token is stable across languages, the
+# title is not — and for two categories they disagree outright.
+REAL_ICONS = {
+    "goods":      '<td class="city"><span class="category transport" title="Goods"></span></td>',
+    "production": '<td class="city"><span class="category production" title="Production"></span></td>',
+    "diplomacy":  '<td class="city"><span class="category diplomacy" title="Diplomacy"></span></td>',
+    "news":       '<td class="city"><span class="category plus" title="News"></span></td>',
+    "military":   '<td class="city"><span class="category military" title="Military"></span></td>',
+    "espionage":  '<td class="city"><span class="category espionage" title="Espionage"></span></td>',
+    "piracy":     '<td class="city"><span class="category piracy" title="Piracy"></span></td>',
+}
+for expected, markup in REAL_ICONS.items():
+    check("{} icon reads as {}".format(expected, expected),
+          hub._town_news_category(markup) == expected)
 
-check("category from a css class on a child",
-      hub._town_news_category(icon_row('<div class="event_icon production"></div>')) == "production")
-check("category from a class on the cell itself",
-      hub._town_news_category('<td class="city piracy"></td>') == "piracy")
-check("category from the hover tooltip",
-      hub._town_news_category(icon_row('<img title="Espionage">')) == "espionage")
-check("category from alt text",
-      hub._town_news_category(icon_row('<img alt="Diplomacy">')) == "diplomacy")
-check("category from the image filename",
-      hub._town_news_category(icon_row('<img src="/skin/icons/news_small.png">')) == "news")
-check("category from an underscored class",
-      hub._town_news_category(icon_row('<span class="icon_military"></span>')) == "military")
+# The two that would have been wrong if the label were trusted over the class.
+check("class 'transport' means goods, not a literal match on 'goods'",
+      hub._town_news_category('<td class="city"><span class="category transport"></span></td>')
+      == "goods")
+check("class 'plus' means news",
+      hub._town_news_category('<td class="city"><span class="category plus"></span></td>')
+      == "news")
+# A German account: same classes, translated titles. The class must carry it.
+check("a translated label does not break goods",
+      hub._town_news_category('<td class="city"><span class="category transport" title="Waren"></span></td>')
+      == "goods")
+check("a translated label does not break production",
+      hub._town_news_category('<td class="city"><span class="category production" title="Produktion"></span></td>')
+      == "production")
+
 check("no icon means no category",
-      hub._town_news_category(icon_row('')) == "")
-check("the word 'city' in the cell class is not a category",
       hub._town_news_category('<td class="city"></td>') == "")
-# Scoped to the icon cell: a subject that happens to mention a category word
-# must not be mistaken for the row's icon.
+check("the cell class 'city' alone is not a category",
+      hub._town_news_category('<td class="city"><span></span></td>') == "")
 check("a category word in the subject is ignored",
-      hub._town_news_category(icon_row('', subject="Our diplomacy is improving")) == "")
+      hub._town_news_category('<td class="city"></td><td class="subject">'
+                              'Our diplomacy is improving</td>') == "")
+check("an unrelated span with a class is not treated as the icon",
+      hub._town_news_category('<td class="city"><span class="highlight production"></span></td>') == "")
+# Fallbacks, for a skin that drops the class.
+check("German asset filename still resolves",
+      hub._town_news_category('<td class="city"><img src="/skin/Icon_Warentransport_Rahmen_26x26.png"></td>')
+      == "goods")
+check("English tooltip still resolves",
+      hub._town_news_category('<td class="city"><img title="Espionage"></td>') == "espionage")
 
 print("\n-- the icon beats the wording --")
 mine2 = {"9 jokios", "16 lluhios"}
@@ -1097,26 +1115,25 @@ def tn_entry(category, subject, city="9 Jokios"):
     return {"source": "townnews", "category": category, "subject": subject,
             "body": "", "action": "", "icon": "", "city": city}
 
-check("production icon means construction",
+check("production means construction",
       hub._classify(tn_entry("production", "Town Hall expanded"), ["en"], [], mine2) == "construction")
-check("piracy icon means piracy even with trade wording",
+check("piracy beats trade wording",
       hub._classify(tn_entry("piracy", "A trade fleet has arrived"), ["en"], [], mine2) == "piracy")
-check("military icon means combat",
-      hub._classify(tn_entry("military", "Anything at all"), ["en"], [], mine2) == "combat")
-check("diplomacy icon means treaty",
-      hub._classify(tn_entry("diplomacy", "Anything at all"), ["en"], [], mine2) == "treaty")
-check("news icon means news",
-      hub._classify(tn_entry("news", "Anything at all"), ["en"], [], mine2) == "news")
-check("espionage icon means espionage",
-      hub._classify(tn_entry("espionage", "Anything at all"), ["en"], [], mine2) == "espionage")
-# "goods" still needs the origin to decide direction.
+check("military means combat",
+      hub._classify(tn_entry("military", "Anything"), ["en"], [], mine2) == "combat")
+check("diplomacy means treaty",
+      hub._classify(tn_entry("diplomacy", "Anything"), ["en"], [], mine2) == "treaty")
+check("news means news",
+      hub._classify(tn_entry("news", "Anything"), ["en"], [], mine2) == "news")
+check("espionage means espionage",
+      hub._classify(tn_entry("espionage", "Anything"), ["en"], [], mine2) == "espionage")
 check("goods from another player is external",
       hub._classify(tn_entry("goods", "A trade fleet from Twulic-W-3 has arrived in 9 Jokios"),
                     ["en"], [], mine2) == "shipment_external")
 check("goods from my own town is internal",
       hub._classify(tn_entry("goods", "A trade fleet from 16 Lluhios has arrived in 9 Jokios"),
                     ["en"], [], mine2) == "shipment_internal")
-check("an unrecognised category falls back to the wording",
+check("no category falls back to the wording",
       hub._classify(tn_entry("", "Your building Town Hall has been expanded to level 35"),
                     ["en"], [], mine2) == "construction")
 check("a user override still beats the icon",
@@ -1124,19 +1141,30 @@ check("a user override still beats the icon",
                     [{"value": "town hall", "type": "other"}], mine2) == "other")
 
 print("\n-- categories survive the full parse --")
+def real_row(category_class, subject, city="9 Jokios", date="06.08.2026 2:07"):
+    return ('<tr><td class="city"><span class="category {}"></span></td>'
+            '<td class="short_text100">{}</td><td class="date">{}</td>'
+            '<td class="subject">{}</td></tr>').format(category_class, city, date, subject)
+
 ICON_FEED = ('<table id="inboxCity" class="table01 left clearfloat">'
-             + icon_row('<div class="event_icon production"></div>',
-                        "Your building Town Hall has been expanded to level 35", "16 Lluhios")
-             + icon_row('<div class="event_icon goods"></div>',
-                        "A trade fleet from Twulic-W-3 has arrived in 9 Jokios")
-             + icon_row('<div class="event_icon piracy"></div>', "Raid complete")
+             + real_row("production", "Your building Town Hall has been expanded to level 35", "16 Lluhios")
+             + real_row("transport", "A trade fleet from Twulic-W-3 has arrived in 9 Jokios")
+             + real_row("plus", "Your Ambrosia fountain has been harvested")
+             + real_row("piracy", "Your raid was successful")
              + '</table>')
 rows = hub._parse_town_news(ICON_FEED)
 check("every row keeps its category",
-      [r["category"] for r in rows] == ["production", "goods", "piracy"])
-types = [hub._classify(r, ["en"], [], mine2) for r in rows]
+      [r["category"] for r in rows] == ["production", "goods", "news", "piracy"])
 check("and each lands in the right type",
-      types == ["construction", "shipment_external", "piracy"])
+      [hub._classify(r, ["en"], [], mine2) for r in rows]
+      == ["construction", "shipment_external", "news", "piracy"])
+
+# An empty category renders one colspan row with no subject cell.
+EMPTY_CATEGORY = ('<table id="inboxCity" class="table01 left clearfloat">'
+                  '<tr><td colspan="4" class="align_center">No messages available.</td></tr>'
+                  '</table>')
+check("an empty category is not mistaken for an event",
+      hub._parse_town_news(EMPTY_CATEGORY) == [])
 
 print("\n-- a lock problem never stops message forwarding --")
 real_lock_write = hub._lock_write
