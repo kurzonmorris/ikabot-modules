@@ -290,6 +290,47 @@ how many; the manager spreads the order across all available barracks or
 shipyards so everything finishes at roughly the same time.  Handles resource
 shortages with intelligent retry logic.
 
+### Messaging Hub
+Forwards what happens in game out to Discord, Telegram or ntfy, with **each kind
+of event going wherever you choose** — combat to one channel, construction to
+another, shipments to a third.
+
+It sends using its own credentials, separate from **(21) Options → (2)
+Notification Setup**, so it can post to a different server, bot or account than
+the rest of ikabot. Routing to ikabot's normal notifications is still offered as
+one of the destination types if you would rather not set anything else up.
+
+What it watches:
+- **Player mail and treaty offers** from your in-game inbox
+- **Town events** — buildings finishing, deliveries arriving, news, piracy
+- **Fleet movements** — including a warning when a hostile fleet is *inbound*,
+  while it is still in the air
+- **City resources** — alert when a resource crosses a threshold, per city or
+  as one rule covering every city, by amount, by percent of your warehouse, or
+  by hours of wine left
+
+First run on a menu: **(2) Destinations** to add somewhere to send to (for
+Discord, create a webhook in the channel you want and paste its URL), then
+**(3) → (4) Per-type routing** to say what goes where, then **(1) Start hub**.
+
+Worth knowing:
+- The first scan sends nothing — it records what is already there so you do not
+  get a wall of old messages. **(6) → (4)** resets that if you want a fresh start.
+- **Route "Uncategorised" somewhere.** Anything the hub cannot identify, and any
+  type you have not routed yet, is sent there rather than dropped. On a new
+  setup that is everything, so it will be busy until you have routed the types
+  you care about. **(6) → (7)** lists what landed there and lets you assign it a
+  type permanently.
+- **(6) → (2)** shows how your inbox classifies and where each item would go,
+  without sending anything.
+- Config lives in `%APPDATA%\.ikabot\messaging_hub\` and **holds your webhook
+  URLs and bot tokens in plain text**, the same way ikabot stores its own
+  session data. You can move that folder in **(7)**.
+- Point several accounts at the same folder and they can share one global
+  configuration, choosing per section whether to use it or their own — useful
+  when the alts should all behave alike but your main should not.
+- `'` at any prompt takes you back to the hub's menu.
+
 ### Sequence Runner *(work in progress)*
 Record a list of menu inputs (e.g. `16, enter, 5, 1`) and replay them with one
 keypress.  Useful for repeating a fixed startup routine across multiple accounts
