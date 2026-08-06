@@ -199,6 +199,45 @@ timestamps, this becomes the primary source: discrete past events with ids beat
 inferring an arrival from a row disappearing. If entries vanish on completion,
 the feed only supplements the movements JSON.
 
+---
+
+## Round 4 — confirm the category icon markup
+
+The reader accepts the category from a CSS class, a `title`, an `alt` or an
+image filename, because it is not yet known which the game uses. This confirms
+it, and in particular whether it is language-independent.
+
+> I'm on Ikariam, logged in. **Read-only** — do not click anything that acts.
+> No cookies, session tokens or `actionRequest` values in your answer.
+>
+> Open `?view=tradeAdvisor` → **Town News**, with all event categories showing.
+> Each row has a small picture on the left indicating its category.
+>
+> 1. Give me the **complete `outerHTML` of the first `<td>`** (the icon cell)
+>    for one row of each category present — at minimum one *goods* row and one
+>    *production* row. Verbatim, including every attribute, even if it looks
+>    empty.
+> 2. **Where is the category actually encoded?** Check each of these and say
+>    which are present: a CSS class on the `<td>` or on a child element; a
+>    `title` attribute; an `alt` attribute; an `<img src>`; a `data-*`
+>    attribute.
+> 3. If the icon is a **CSS background image**, give me the element's `class`
+>    and its computed `background-image` value
+>    (`getComputedStyle(el).backgroundImage`) — including the file name, and
+>    the `background-position` if it is a sprite sheet.
+> 4. **How is the hover label implemented?** Is it a native `title` attribute,
+>    or a JavaScript tooltip? If it is a JS tooltip, where does the text come
+>    from — a `data-` attribute on the element, or a separate tooltip `<div>`
+>    created on hover? Give me the attribute or element that holds the text.
+> 5. **What exactly does the label say** for each category — just the category
+>    name ("Production"), or a longer sentence?
+> 6. Do any two categories **share the same icon element or class**, with only
+>    the sprite position differing?
+>
+> The key question is 2 and 3: if the category appears in a class name or an
+> image filename it works on any language's server, whereas if it only appears
+> in the tooltip text it is English-only.
+
 ### The browser version of round 2
 
 Use this instead of, or alongside, the capture. It can answer two things the
