@@ -135,6 +135,26 @@ very likely the single source for everything still missing — construction,
 news, piracy — and possibly a better source for arrivals than watching
 movements vanish.
 
+> **Round 3 is done** (captured 2026-08-06) and the Town News watcher is built.
+> Findings:
+>
+> - **Server-side filter.** Each category checkbox fires a POST and the server
+>   returns a different row set — not a client-side show/hide.
+> - **It is a history.** Finished events persist with absolute timestamps
+>   (`06.08.2026 2:07`). Header reads "Current events (2492)". This is the
+>   opposite of the movements list, where rows vanish on completion — so it
+>   dedupes like the inbox instead of needing vanish-detection.
+> - `table#inboxCity`, four cells: icon, town, date, subject.
+> - **No row ids** and **no category marker in the markup**. Entries are keyed
+>   by `sha1(city + date + subject)`.
+> - Only *goods* and *production* events existed on the account at the time, so
+>   military, espionage, diplomacy, news and piracy rows remain unseen.
+>
+> **Still wanted, when convenient:** the POST parameters a category checkbox
+> sends. Fetching one category at a time would make the type certain and
+> language-independent, instead of falling back to subject keywords. A single
+> line — the request body of one toggle — is enough.
+
 ### The brief
 
 > I'm on Ikariam, logged in. **Read-only** — do not accept, decline, attack,

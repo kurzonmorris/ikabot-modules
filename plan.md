@@ -316,25 +316,55 @@ nested tables whose `</tr>`/`</table>` would truncate it.
 > ships the **capture diagnostic** (§9); Phase 2 turns that real data into the
 > mapping tables.
 
-### 6.4a Town News — the unified event feed
+### 6.4a Town News — the event history
 
-`tradeAdvisor` ("Overview of towns and finances") has a **Town News** tab with a
-show-all-events button and a category filter:
+`tradeAdvisor` ("Overview of towns and finances") has a **Town News** tab whose
+show-all-events button reveals a category filter:
 
 > military · goods · production · espionage · diplomacy · news · piracy
 
-Buildings constructed appear under **production**. Those categories map almost
-one-to-one onto this taxonomy, which makes this the likely single source for
-construction, news and piracy — none of which exist in the inbox.
-
-Whether it also **replaces** the movements-vanish inference for arrivals depends
-on one thing: does the feed keep finished events with timestamps, or drop them
-on completion? That is question 5 of round 3 in
-`docs/MESSAGING_HUB_DATA_REQUEST.md`. A persistent history with row ids would be
-strictly better than watching a row disappear.
+Buildings constructed appear under **production**. Confirmed live 2026-08-06.
 
 > Round 2 concluded `tradeAdvisor` was "just the Mayor panel". That was wrong —
 > the capture had only one category selected.
+
+**It is a history, and that is what makes it valuable.** Finished events stay in
+the feed with absolute timestamps — "Your building Town Hall has been expanded
+to level 35" is a permanent record of a completion, not a live countdown. So it
+dedupes exactly like the inbox: remember what has been seen, forward what is
+new. No vanish-detection, no in-flight tracking.
+
+`table#inboxCity`, four cells:
+
+| Cell | Class | Holds |
+|---|---|---|
+| 0 | `city` | icon only, empty |
+| 1 | `short_text100` | the town the event happened in |
+| 2 | `date` | absolute `06.08.2026 2:07` |
+| 3 | `subject` | the event text |
+
+**No row ids, and no category marker in the markup.** Entries are therefore
+keyed by `sha1(city + date + subject)`. Two identical events in the same town in
+the same minute collapse into one, which is the right answer far more often than
+not.
+
+The category exists only as a **server-side filter** — toggling a checkbox
+fires a POST and the server returns a different row set. That means the
+category *could* be established with certainty by fetching each one separately,
+which would be language-independent. Doing so needs the filter's request
+parameters, which are not yet known; until then classification falls back to
+subject keywords.
+
+**Shipment direction.** The `city` column is always one of *my* towns, so "does
+this mention a city of mine" would call every delivery internal. The
+destination is discounted, leaving the origin named in the subject as the
+deciding signal.
+
+**Overlap with movements.** Town News reports arrivals as discrete completed
+events, so when it is enabled the movements watcher stops inferring arrivals —
+otherwise every shipment lands twice. Incoming hostile warnings stay with the
+movements watcher regardless, since a history of things that already happened
+cannot warn about a fleet still in the air.
 
 ### 6.5 Movements — shipments, incoming attacks, piracy, espionage
 

@@ -9,6 +9,7 @@ MENU_LABEL = "Messaging Hub"
 MENU_ORDER = 50
 
 import copy
+import hashlib
 import html
 import json
 import os
@@ -218,13 +219,17 @@ KEYWORDS = {
         "research": ["research", "scientist", "discovered", "new technology"],
         "construction": [
             "has been completed",
+            "has been expanded",
+            "expanded to level",
             "construction",
             "building level",
             "expansion",
             "finished the",
             "upgraded to level",
         ],
-        "shipment_external": ["has delivered", "trade", "market", "bought", "sold", "purchase"],
+        "shipment_external": [
+            "trade fleet", "has delivered", "trade", "market", "bought", "sold", "purchase",
+        ],
         "shipment_internal": ["transport", "freighter", "cargo ship", "shipment", "arrived"],
         "news": ["news", "announcement", "server", "maintenance", "event", "update"],
         "alliance_message": ["alliance", "circular", "ally"],
@@ -657,6 +662,7 @@ def _default_config():
                 "notify_existing": False,
                 "watch_movements": True,
                 "notify_incoming": True,
+                "watch_town_news": True,
             },
             "resources": {
                 "enabled": False,
@@ -1704,6 +1710,129 @@ def _fetch_messages(session):
 
 
 # ---------------------------------------------------------------------------
+# Town News — the trade advisor's event history
+#
+# table#inboxCity, four cells: icon, city, absolute date, subject. Unlike the
+# movements list this is a *log* — finished events stay in it — so it is
+# deduped like the inbox rather than by watching rows disappear. No row ids
+# and no category marker in the markup, so entries are keyed by content.
+# ---------------------------------------------------------------------------
+
+
+def _cell(row_html, class_name):
+    match = re.search(
+        r'<td[^>]*class=["\'][^"\']*{}[^"\']*["\'][^>]*>([\s\S]*?)</td>'.format(
+            re.escape(class_name)
+        ),
+        row_html,
+        flags=re.IGNORECASE,
+    )
+    return _clean_text(match.group(1)) if match else ""
+
+
+def _parse_town_news(payload):
+    table = re.search(
+        r'<table[^>]*id\s*=\s*["\']\s*inboxCity\s*["\'][^>]*>([\s\S]*?)</table>',
+        payload,
+        flags=re.IGNORECASE,
+    )
+    if table is None:
+        return []
+
+    entries = []
+    for row in re.findall(r"<tr[^>]*>([\s\S]*?)</tr>", table.group(1), flags=re.IGNORECASE):
+        subject = _cell(row, "subject")
+        if not subject:
+            continue
+        city = _cell(row, "short_text100")
+        date = _cell(row, "date")
+        entries.append(
+            {
+                "id": _town_news_id(city, date, subject),
+                "source": "townnews",
+                "sender": "",
+                "subject": subject,
+                "body": "",
+                "action": "",
+                "icon": "",
+                "city": city,
+                "date": date,
+            }
+        )
+    return entries
+
+
+def _town_news_id(city, date, subject):
+    """Content key — the rows carry no id of their own.
+
+    Two identical events in the same town in the same minute collapse into one.
+    That is the correct outcome far more often than not.
+    """
+    digest = hashlib.sha1(
+        "{}|{}|{}".format(city, date, subject).encode("utf-8")
+    ).hexdigest()
+    return "tn:{}".format(digest[:16])
+
+
+def _fetch_town_news(session):
+    city_id = _current_city_id(session)
+    payloads = []
+    for url in _advisor_urls("tradeAdvisor", city_id):
+        try:
+            data = session.get(url)
+        except Exception:
+            continue
+        if data:
+            payloads.append(str(data))
+
+    merged = {}
+    for payload in payloads:
+        for candidate in _payload_variants(payload):
+            for entry in _parse_town_news(candidate):
+                merged.setdefault(entry["id"], entry)
+    return list(merged.values())
+
+
+def _poll_town_news(session, cfg, state, own_cities, session_langs):
+    entries = _fetch_town_news(session)
+    if not entries:
+        return 0, 0, 0
+
+    seen = state.setdefault("town_news_seen", {})
+    now = time.time()
+    first_run = not state.get("town_news_seen_once")
+    new_entries = [e for e in entries if e["id"] not in seen]
+
+    events = []
+    if not first_run:
+        for entry in new_entries:
+            event_type = _classify(
+                entry, session_langs, cfg.get("classification_overrides"), own_cities
+            )
+            events.append(_to_event(entry, event_type))
+
+    sent, failed = _send_events(session, cfg, events, state)
+
+    for entry in new_entries:
+        seen[entry["id"]] = now
+    state["town_news_seen_once"] = True
+
+    retention = cfg.get("seen_retention_days", 14)
+    cutoff = now - max(1, int(retention)) * 86400
+    seen = {k: v for k, v in seen.items() if float(v or 0) >= cutoff}
+    if len(seen) > SEEN_HARD_CAP:
+        seen = dict(
+            sorted(seen.items(), key=lambda kv: float(kv[1] or 0), reverse=True)[
+                :SEEN_HARD_CAP
+            ]
+        )
+    state["town_news_seen"] = seen
+    _save_state(session, state)
+
+    return sent, failed, len(new_entries)
+
+
+# ---------------------------------------------------------------------------
 # Fleet and army movements
 #
 # The military advisor's ajax response carries a structured
@@ -1855,7 +1984,7 @@ def _movement_relation(movement):
     return "Neutral"
 
 
-def _poll_movements(session, cfg, state):
+def _poll_movements(session, cfg, state, report_arrivals=True):
     """Notify on hostile arrivals immediately and on own movements completing.
 
     A completed movement is simply absent from the next response — there is no
@@ -1900,7 +2029,7 @@ def _poll_movements(session, cfg, state):
             events.append(_movement_event(movement, server_time, event_type, False))
 
     for movement_id, record in list(tracked.items()):
-        if movement_id in current:
+        if movement_id in current or not report_arrivals:
             continue
         # Gone from the list. If its arrival time has passed it completed;
         # otherwise it was recalled or the read failed, and is not an arrival.
@@ -2006,18 +2135,26 @@ def _classify(message, session_langs, overrides, own_cities):
             for keyword in table.get(event_type, []):
                 if keyword in haystack:
                     if event_type in ("shipment_internal", "shipment_external"):
-                        return _classify_shipment(haystack, own_cities, event_type)
+                        return _classify_shipment(
+                            haystack, own_cities, event_type, message.get("city", "")
+                        )
                     return event_type
 
     return fallback
 
 
-def _classify_shipment(haystack, own_cities, fallback):
-    """A shipment naming one of your own cities came from inside the empire."""
-    for name in own_cities:
-        if name and name in haystack:
-            return "shipment_internal"
-    return fallback
+def _classify_shipment(haystack, own_cities, fallback, destination=""):
+    """Internal only if a city *other than the destination* is also mine.
+
+    Town News always names the receiving town, and that town is always mine, so
+    "any own city mentioned" would call every delivery internal. Discounting the
+    destination leaves the origin as the deciding signal.
+    """
+    destination = str(destination or "").strip().lower()
+    others = {
+        name for name in own_cities if name and name in haystack and name != destination
+    }
+    return "shipment_internal" if others else fallback
 
 
 # ---------------------------------------------------------------------------
@@ -2401,8 +2538,23 @@ def _do_it(session):
                     session, cfg, state, own_cities, session_langs
                 )
                 summary = "{} new, {} forwarded, {} failed".format(scanned, sent, failed)
+
+                town_news_on = watchers["messages"].get("watch_town_news", True)
+                if town_news_on:
+                    t_sent, t_failed, t_new = _poll_town_news(
+                        session, cfg, state, own_cities, session_langs
+                    )
+                    sent += t_sent
+                    failed += t_failed
+                    summary += " | {} town events, {} sent".format(t_new, t_sent)
+
                 if watchers["messages"].get("watch_movements", True):
-                    m_sent, m_failed, in_flight = _poll_movements(session, cfg, state)
+                    # Town News already reports arrivals as discrete events;
+                    # letting the movements watcher infer them too would send
+                    # every arrival twice.
+                    m_sent, m_failed, in_flight = _poll_movements(
+                        session, cfg, state, report_arrivals=not town_news_on
+                    )
                     sent += m_sent
                     failed += m_failed
                     summary += " | {} in flight, {} sent".format(in_flight, m_sent)
@@ -2923,6 +3075,9 @@ def _menu_forwarding(session):
         print("  Movements:         {}".format(
             "watched" if watcher.get("watch_movements", True) else "ignored"
         ))
+        print("  Town events:       {}".format(
+            "watched" if watcher.get("watch_town_news", True) else "ignored"
+        ))
         print("")
         print("(0) Back")
         print("(1) {} forwarding".format("Disable" if watcher.get("enabled", True) else "Enable"))
@@ -2935,11 +3090,16 @@ def _menu_forwarding(session):
         print("(6) Warn about incoming hostile fleets: {}".format(
             "yes" if watcher.get("notify_incoming", True) else "no"
         ))
+        print("(7) {} town events (construction, arrivals, news)".format(
+            "Stop watching" if watcher.get("watch_town_news", True) else "Watch"
+        ))
 
-        choice = _read(min=0, max=6, digit=True)
+        choice = _read(min=0, max=7, digit=True)
         if choice == 0:
             return
-        if choice == 5:
+        if choice == 7:
+            watcher["watch_town_news"] = not watcher.get("watch_town_news", True)
+        elif choice == 5:
             watcher["watch_movements"] = not watcher.get("watch_movements", True)
         elif choice == 6:
             watcher["notify_incoming"] = not watcher.get("notify_incoming", True)

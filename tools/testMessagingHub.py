@@ -954,6 +954,113 @@ class NoCitySession(MoveSession):
 check("no city id means no movement poll, not a crash",
       hub._poll_movements(NoCitySession(), mcfg, mstate) == (0, 0, 0))
 
+print("\n-- Town News event feed (captured live 2026-08-06) --")
+# table#inboxCity, four cells: icon, city, absolute date, subject.
+# No row ids and no category marker anywhere in the markup.
+TOWN_NEWS = '''<table id="inboxCity" class="table01 left clearfloat">
+<tr><td class="city"></td><td class="short_text100">9 Jokios</td>
+    <td class="date">06.08.2026 2:07</td>
+    <td class="subject">A trade fleet from Twulic-W-3 has arrived in 9 Jokios and brought 15,500 <span class="resource"></span></td></tr>
+<tr><td class="city"></td><td class="short_text100">16 Lluhios</td>
+    <td class="date">06.08.2026 1:24</td>
+    <td class="subject">Your building Town Hall has been expanded to level 35</td></tr>
+<tr><td class="city"></td><td class="short_text100">9 Jokios</td>
+    <td class="date">06.08.2026 0:58</td>
+    <td class="subject">A trade fleet from 16 Lluhios has arrived in 9 Jokios and brought 4,000 <span class="resource"></span></td></tr>
+</table>'''
+
+tn = hub._parse_town_news(TOWN_NEWS)
+check("all town news rows parsed", len(tn) == 3)
+check("city column read", tn[0]["city"] == "9 Jokios")
+check("absolute date read", tn[0]["date"] == "06.08.2026 2:07")
+check("subject read", tn[0]["subject"].startswith("A trade fleet from Twulic-W-3"))
+check("rows are keyed by content, not by id", tn[0]["id"].startswith("tn:"))
+check("the same row keys identically twice",
+      hub._parse_town_news(TOWN_NEWS)[0]["id"] == tn[0]["id"])
+check("different rows key differently", len({e["id"] for e in tn}) == 3)
+check("a header or empty row is skipped",
+      hub._parse_town_news('<table id="inboxCity"><tr><th>x</th></tr></table>') == [])
+check("a page without the table yields nothing", hub._parse_town_news("<html></html>") == [])
+
+mine = {"9 jokios", "16 lluhios"}
+check("building expansion is construction",
+      hub._classify(tn[1], ["en"], [], mine) == "construction")
+# The destination town is always mine, so "mentions one of my cities" would
+# call every delivery internal. The origin is what decides it.
+check("delivery from another player is external",
+      hub._classify(tn[0], ["en"], [], mine) == "shipment_external")
+check("delivery from my own town is internal",
+      hub._classify(tn[2], ["en"], [], mine) == "shipment_internal")
+
+print("\n-- Town News is a history, so it dedupes like the inbox --")
+class NewsSession(Session):
+    page = TOWN_NEWS
+    def get(self, url=None, **kw):
+        if url is None: raise AssertionError("bare session.get()")
+        if "view=city" in url and "Advisor" not in url: return "currentCityId: 111,"
+        return self.page
+    def post(self, url=None, **kw): return ""
+    def setStatus(self, s): pass
+    def logout(self): pass
+
+ns = NewsSession()
+ncfg = hub._default_config()
+ncfg["destinations"] = [{"id": "d1", "name": "all", "kind": "ntfy",
+                         "ntfy": {"topic": "a"}, "enabled": True}]
+for t4 in hub.EVENT_TYPES:
+    ncfg["routes"][t4] = ["d1"]
+nstate = {"seen_ids": {}, "delivered": 0, "failed": 0}
+hub._requests = lambda: FakeRequests()
+
+sent, failed, new = hub._poll_town_news(ns, ncfg, nstate, mine, ["en"])
+check("first sweep forwards nothing", sent == 0 and new == 3)
+check("but records what it saw", len(nstate["town_news_seen"]) == 3)
+sent, failed, new = hub._poll_town_news(ns, ncfg, nstate, mine, ["en"])
+check("an unchanged feed sends nothing", sent == 0 and new == 0)
+
+ns.page = TOWN_NEWS.replace(
+    '</table>',
+    '<tr><td class="city"></td><td class="short_text100">9 Jokios</td>'
+    '<td class="date">06.08.2026 3:11</td>'
+    '<td class="subject">Your building Warehouse has been expanded to level 12</td></tr></table>')
+sent, failed, new = hub._poll_town_news(ns, ncfg, nstate, mine, ["en"])
+check("a newly appended event is forwarded once", sent == 1 and new == 1)
+sent, failed, new = hub._poll_town_news(ns, ncfg, nstate, mine, ["en"])
+check("and not forwarded again", sent == 0)
+
+# A finished event stays in the feed; it must not re-fire when older rows age out
+# of the visible window and come back on a later render.
+ns.page = TOWN_NEWS
+sent, failed, new = hub._poll_town_news(ns, ncfg, nstate, mine, ["en"])
+check("rows reappearing in a later render do not re-fire", sent == 0)
+
+class EmptyNewsSession(NewsSession):
+    page = "<html>no table here</html>"
+check("an empty or unreadable feed is survivable",
+      hub._poll_town_news(EmptyNewsSession(), ncfg, nstate, mine, ["en"]) == (0, 0, 0))
+
+print("\n-- arrivals are not reported twice --")
+ms2 = MoveSession()
+ms2.username = "kurzon"
+ms2.now = NOW
+mstate2 = {"seen_ids": {}, "delivered": 0, "failed": 0}
+cargo2 = [{"amount": "500", "cssClass": "resource wood"}]
+ms2.payload = [mv(resources=cargo2)]
+hub._poll_movements(ms2, mcfg, mstate2, report_arrivals=False)
+ms2.now = NOW + 700
+ms2.payload = []
+sent, failed, _ = hub._poll_movements(ms2, mcfg, mstate2, report_arrivals=False)
+check("with Town News on, the movements watcher stays quiet about arrivals", sent == 0)
+
+mstate3 = {"seen_ids": {}, "delivered": 0, "failed": 0}
+ms2.now = NOW
+ms2.payload = [mv(resources=cargo2)]
+hub._poll_movements(ms2, mcfg, mstate3, report_arrivals=True)
+ms2.now = NOW + 700
+ms2.payload = []
+sent, failed, _ = hub._poll_movements(ms2, mcfg, mstate3, report_arrivals=True)
+check("with Town News off, it reports the arrival itself", sent == 1)
+
 print("\n-- a lock problem never stops message forwarding --")
 real_lock_write = hub._lock_write
 hub._lock_write = lambda *a, **k: (_ for _ in ()).throw(OSError("share vanished"))
