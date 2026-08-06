@@ -106,6 +106,7 @@ SHARED_SECTIONS = (
     "type_enabled",
     "formatting",
     "resource_rules",
+    "fallback_to_uncategorised",
 )
 SNAPSHOT_KEY = "_snapshot"
 
@@ -148,7 +149,7 @@ TYPE_LABELS = {
     "treaty": "Treaties",
     "research": "Research",
     "military_movement": "Fleet & army movements",
-    "other": "Other / unclassified",
+    "other": "Uncategorised",
     "resource_alert": "Resource alerts",
     "hub_status": "Hub status & errors",
 }
@@ -677,6 +678,7 @@ def _default_config():
             "mutes": [],
             "quiet_hours": {"enabled": False, "from": "23:00", "to": "07:00", "types": []},
         },
+        "fallback_to_uncategorised": True,
         "classification_overrides": [],
         "seen_retention_days": 14,
     }
@@ -858,6 +860,7 @@ def _effective_config(session):
         return cfg
 
     if use_global.get("routing"):
+        cfg["fallback_to_uncategorised"] = shared.get("fallback_to_uncategorised", True)
         # destinations, routes and type_enabled move together — routes hold
         # destination ids, so splitting them would leave dangling references.
         cfg["destinations"] = shared["destinations"]
@@ -1894,6 +1897,7 @@ def _poll_town_news(session, cfg, state, own_cities, session_langs):
             event_type = _classify(
                 entry, session_langs, cfg.get("classification_overrides"), own_cities
             )
+            _note_uncategorised(state, entry, event_type)
             events.append(_to_event(entry, event_type))
 
     sent, failed = _send_events(session, cfg, events, state)
@@ -2271,13 +2275,64 @@ def _to_event(message, event_type):
     }
 
 
+UNCATEGORISED_LOG_CAP = 60
+
+
+def _note_uncategorised(state, message, event_type):
+    """Remember anything that could not be classified, so it can be taught.
+
+    Kept as a rolling tally of distinct subjects rather than every occurrence:
+    what matters is which *kinds* of thing are unrecognised, not how many.
+    """
+    if event_type != "other":
+        return
+    subject = str(message.get("subject", "")).strip()
+    if not subject:
+        return
+
+    log = state.setdefault("uncategorised", {})
+    key = hashlib.sha1(subject.lower().encode("utf-8")).hexdigest()[:12]
+    entry = log.get(key) or {
+        "subject": subject[:200],
+        "source": message.get("source", ""),
+        "count": 0,
+        "first_seen": time.time(),
+    }
+    entry["count"] = int(entry.get("count", 0)) + 1
+    entry["last_seen"] = time.time()
+    log[key] = entry
+
+    if len(log) > UNCATEGORISED_LOG_CAP:
+        ordered = sorted(
+            log.items(), key=lambda kv: float(kv[1].get("last_seen", 0)), reverse=True
+        )
+        state["uncategorised"] = dict(ordered[:UNCATEGORISED_LOG_CAP])
+
+
 def _destinations_for(cfg, event_type, override=None):
-    """Resolve destination ids for a type. A rule's own list wins over the route."""
+    """Resolve destination ids for a type. A rule's own list wins over the route.
+
+    A type that is *enabled but unrouted* falls through to the Uncategorised
+    route, so something the hub does not yet know where to file still reaches
+    you instead of disappearing. Switching a type off is a deliberate "no" and
+    is honoured as one.
+    """
     if not cfg["type_enabled"].get(event_type, True):
         return []
-    wanted = override if override else (cfg["routes"].get(event_type) or [])
+
     by_id = {d.get("id"): d for d in cfg["destinations"] if d.get("enabled", True)}
-    return [by_id[i] for i in wanted if i in by_id]
+    wanted = override if override else (cfg["routes"].get(event_type) or [])
+    resolved = [by_id[i] for i in wanted if i in by_id]
+    if resolved:
+        return resolved
+
+    if event_type in ("other", "hub_status"):
+        return []
+    if not cfg.get("fallback_to_uncategorised", True):
+        return []
+    if not cfg["type_enabled"].get("other", True):
+        return []
+    return [by_id[i] for i in (cfg["routes"].get("other") or []) if i in by_id]
 
 
 def _send_events(session, cfg, events, state):
@@ -2355,6 +2410,7 @@ def _poll_messages(session, cfg, state, own_cities, session_langs):
         event_type = _classify(
             message, session_langs, cfg.get("classification_overrides"), own_cities
         )
+        _note_uncategorised(state, message, event_type)
         events.append(_to_event(message, event_type))
 
     if cfg["formatting"].get("combat_full_report"):
@@ -3227,6 +3283,9 @@ def _menu_routing(session, cfg, is_global):
                 )
             )
         print("")
+        if cfg.get("fallback_to_uncategorised", True):
+            print("{}An enabled type with no destination falls through to".format(bcolors.BLACK))
+            print("Uncategorised, so nothing is silently dropped.{}".format(bcolors.ENDC))
         print("(0) Back")
         print("Pick a type to change where it goes.")
 
@@ -3697,11 +3756,14 @@ def _menu_diagnostics(session):
         print("(4) Reset seen messages")
         print("(5) Reset counters")
         print("(6) Shared configuration lock")
+        print("(7) Uncategorised events ({})".format(len(state.get("uncategorised", {}))))
 
-        choice = _read(min=0, max=6, digit=True)
+        choice = _read(min=0, max=7, digit=True)
         if choice == 0:
             return
-        if choice == 6:
+        if choice == 7:
+            _menu_uncategorised(session)
+        elif choice == 6:
             _menu_lock(session)
         elif choice == 1:
             _test_all_destinations(session, cfg)
@@ -3724,6 +3786,92 @@ def _menu_diagnostics(session):
             _save_state(session, state)
             print("\n{}Counters reset.{}".format(bcolors.GREEN, bcolors.ENDC))
             enter()
+
+
+def _menu_uncategorised(session):
+    """Everything the hub could not file, and a way to file it permanently."""
+    while True:
+        state = _load_state(session)
+        log = state.get("uncategorised", {})
+        entries = sorted(
+            log.items(), key=lambda kv: float(kv[1].get("last_seen", 0)), reverse=True
+        )
+
+        _header("UNCATEGORISED EVENTS")
+        if not entries:
+            print("  Nothing unrecognised so far.")
+            print("")
+            print("  Anything the hub cannot identify is filed here and sent to")
+            print("  whatever the Uncategorised type is routed to, rather than")
+            print("  being dropped.")
+            print("")
+            print("(0) Back")
+            if _read(min=0, max=0, digit=True) == 0:
+                return
+            continue
+
+        print("  These arrived without a recognised type. Assign one and the")
+        print("  hub will file them correctly from now on.\n")
+        for index, (_, entry) in enumerate(entries[:20], 1):
+            print("  {:>2}) [{}x] {}".format(
+                index, entry.get("count", 1), str(entry.get("subject", ""))[:64]
+            ))
+        print("")
+        print("(0) Back")
+        print("Pick one to give it a type, or 99 to clear the list.")
+
+        choice = _read(min=0, max=99, digit=True)
+        if choice == 0:
+            return
+        if choice == 99:
+            state["uncategorised"] = {}
+            _save_state(session, state)
+            continue
+        if choice > len(entries[:20]):
+            continue
+
+        key, entry = entries[choice - 1]
+        _assign_uncategorised(session, state, key, entry)
+
+
+def _assign_uncategorised(session, state, key, entry):
+    subject = str(entry.get("subject", ""))
+    _header("WHERE DOES THIS BELONG?")
+    print("  {}\n".format(subject[:120]))
+
+    types = [t for t in EVENT_TYPES if t not in ("other", "hub_status")]
+    for index, event_type in enumerate(types, 1):
+        print("  {:>2}) {}".format(index, TYPE_LABELS.get(event_type, event_type)))
+    print("(0) Cancel")
+
+    picked = _read(min=0, max=len(types), digit=True)
+    if picked == 0:
+        return
+    event_type = types[picked - 1]
+
+    print("\nWhich wording identifies this kind of event?")
+    print("Press ENTER to match the whole subject, or type a shorter phrase")
+    print("that will still appear in future ones (city names and numbers change).")
+    phrase = str(_read(empty=True, default=subject)).strip()
+    if not phrase:
+        return
+
+    cfg, is_global = _pick_config_to_edit(session)
+    cfg.setdefault("classification_overrides", []).append(
+        {"match": "subject_contains", "value": phrase, "type": event_type}
+    )
+    if not _store(session, cfg, is_global):
+        return
+
+    log = state.setdefault("uncategorised", {})
+    log.pop(key, None)
+    _save_state(session, state)
+
+    print("\n{}Filed as {} whenever a subject contains:{}".format(
+        bcolors.GREEN, TYPE_LABELS.get(event_type, event_type), bcolors.ENDC
+    ))
+    print("  {}".format(phrase[:100]))
+    enter()
 
 
 def _menu_lock(session):

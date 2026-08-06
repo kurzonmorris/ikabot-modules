@@ -254,7 +254,7 @@ The taxonomy the whole module is built around. Every event carries
 | `news` | inbox `gmessage` | Gameforge announcements, events, server news |
 | `treaty` | inbox `gmessage` | cultural treaty / trade agreement requests |
 | `research` | inbox `gmessage` | research completed |
-| `other` | anything unmatched | always routed, never dropped |
+| `other` | anything unmatched | **Uncategorised** — the safety net (§6.6) |
 | `military_movement` | movements JSON (§6.5) | anything moving that is not a shipment or an attack |
 | `resource_alert` | resource watcher (§7) | not a game message |
 | `hub_status` | the hub itself | start/stop, delivery failures, errors |
@@ -445,6 +445,36 @@ content fingerprinting needed.
 
 First run records what is already in flight without notifying, same principle
 as the inbox.
+
+### 6.6 Uncategorised — the safety net
+
+Classification will always lag the game. New event kinds appear, a category
+turns up that nothing maps, a subject is worded in a way no keyword catches.
+The rule is that **nothing is dropped for want of a home**.
+
+Three parts:
+
+1. **Fallback routing.** A type that is *enabled but has no destinations* falls
+   through to whatever `other` is routed to. Controlled by
+   `fallback_to_uncategorised` (default on), and part of the shared routing
+   section.
+
+   The distinction that makes this safe: **switching a type off is a deliberate
+   "no" and stays a no.** Only *undecided* — enabled, unrouted — falls through.
+   `hub_status` never falls through, and `other` cannot fall through to itself.
+
+2. **A record of what landed there.** Each unclassified subject is kept once,
+   with a count and timestamps, capped at 60 distinct subjects. What matters is
+   which *kinds* of thing are unrecognised, not how many times each occurred.
+
+3. **A way to file it permanently.** *Diagnostics → (7) Uncategorised events*
+   lists them by recency, and picking one asks which type it should be and
+   which wording identifies it. That writes a `classification_overrides` entry,
+   so every future occurrence is filed correctly — and overrides already
+   outrank every other signal, including the category icon.
+
+The loop is therefore: unknown thing arrives → still reaches you → you tell the
+hub what it was → it never needs asking again.
 
 ### 6.4 Dedupe
 `seen_ids: {id: first_seen_epoch}` in the state file, pruned by

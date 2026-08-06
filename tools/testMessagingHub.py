@@ -1166,6 +1166,94 @@ EMPTY_CATEGORY = ('<table id="inboxCity" class="table01 left clearfloat">'
 check("an empty category is not mistaken for an event",
       hub._parse_town_news(EMPTY_CATEGORY) == [])
 
+print("\n-- uncategorised is a safety net, not a dead end --")
+ucfg = hub._default_config()
+ucfg["destinations"] = [
+    {"id": "d1", "name": "combat-chan", "kind": "ntfy", "ntfy": {"topic": "a"}, "enabled": True},
+    {"id": "d9", "name": "uncategorised", "kind": "ntfy", "ntfy": {"topic": "z"}, "enabled": True},
+]
+ucfg["routes"]["combat"] = ["d1"]
+ucfg["routes"]["other"] = ["d9"]
+
+check("a routed type goes where it was routed",
+      [d["id"] for d in hub._destinations_for(ucfg, "combat")] == ["d1"])
+check("an enabled but unrouted type falls through to uncategorised",
+      [d["id"] for d in hub._destinations_for(ucfg, "piracy")] == ["d9"])
+check("uncategorised itself does not recurse",
+      [d["id"] for d in hub._destinations_for(ucfg, "other")] == ["d9"])
+check("hub status never falls through to uncategorised",
+      hub._destinations_for(ucfg, "hub_status") == [])
+# Switching a type off is a deliberate no and must stay a no.
+ucfg["type_enabled"]["piracy"] = False
+check("a disabled type is still dropped, not rerouted",
+      hub._destinations_for(ucfg, "piracy") == [])
+ucfg["type_enabled"]["piracy"] = True
+ucfg["fallback_to_uncategorised"] = False
+check("the fallback can be turned off",
+      hub._destinations_for(ucfg, "piracy") == [])
+ucfg["fallback_to_uncategorised"] = True
+ucfg["type_enabled"]["other"] = False
+check("disabling uncategorised disables the fallback with it",
+      hub._destinations_for(ucfg, "piracy") == [])
+ucfg["type_enabled"]["other"] = True
+check("a rule's own destinations still win",
+      [d["id"] for d in hub._destinations_for(ucfg, "resource_alert", ["d1"])] == ["d1"])
+check("an unroutable config is still unroutable",
+      not hub._config_is_runnable(hub._default_config()))
+
+print("\n-- unrecognised events are remembered so they can be taught --")
+ustate = {}
+msg_a = {"subject": "Some brand new event type", "source": "townnews"}
+hub._note_uncategorised(ustate, msg_a, "other")
+check("an unclassified event is recorded", len(ustate["uncategorised"]) == 1)
+hub._note_uncategorised(ustate, msg_a, "other")
+check("a repeat increments the count rather than duplicating",
+      len(ustate["uncategorised"]) == 1
+      and list(ustate["uncategorised"].values())[0]["count"] == 2)
+hub._note_uncategorised(ustate, {"subject": "SOME BRAND NEW EVENT TYPE"}, "other")
+check("matching is case-insensitive",
+      len(ustate["uncategorised"]) == 1
+      and list(ustate["uncategorised"].values())[0]["count"] == 3)
+hub._note_uncategorised(ustate, {"subject": "A classified thing"}, "construction")
+check("a classified event is not recorded", len(ustate["uncategorised"]) == 1)
+hub._note_uncategorised(ustate, {"subject": "   "}, "other")
+check("a blank subject is not recorded", len(ustate["uncategorised"]) == 1)
+for i in range(hub.UNCATEGORISED_LOG_CAP + 25):
+    hub._note_uncategorised(ustate, {"subject": "event number {}".format(i)}, "other")
+check("the log is capped", len(ustate["uncategorised"]) == hub.UNCATEGORISED_LOG_CAP)
+
+print("\n-- teaching it a type makes the next one land correctly --")
+taught = [{"match": "subject_contains", "value": "brand new event", "type": "piracy"}]
+check("the override files it from then on",
+      hub._classify({"subject": "Some brand new event type", "source": "townnews",
+                     "body": "", "action": "", "icon": "", "city": ""},
+                    ["en"], taught, set()) == "piracy")
+
+nstate2 = {"seen_ids": {}, "delivered": 0, "failed": 0}
+class OddNewsSession(Session):
+    page = ('<table id="inboxCity"><tr><td class="city"></td>'
+            '<td class="short_text100">9 Jokios</td><td class="date">06.08.2026 4:00</td>'
+            '<td class="subject">Something the hub has never seen before</td></tr></table>')
+    def get(self, url=None, **kw):
+        if url is None: raise AssertionError("bare session.get()")
+        if "view=city" in url and "Advisor" not in url: return "currentCityId: 111,"
+        return self.page
+    def post(self, url=None, **kw): return ""
+    def setStatus(self, s): pass
+    def logout(self): pass
+
+ons = OddNewsSession()
+hub._requests = lambda: FakeRequests()
+hub._poll_town_news(ons, ucfg, nstate2, set(), ["en"])   # first sweep: learn only
+sent_log.clear()
+ons.page = ons.page.replace("04:00", "05:00").replace(
+    "Something the hub has never seen before", "Another thing entirely unknown")
+sent, failed, new = hub._poll_town_news(ons, ucfg, nstate2, set(), ["en"])
+check("an unknown town event still reaches a destination", sent == 1)
+check("it went to the uncategorised destination",
+      any("/z" in u for u, _ in sent_log))
+check("and it was recorded for triage", len(nstate2.get("uncategorised", {})) >= 1)
+
 print("\n-- a lock problem never stops message forwarding --")
 real_lock_write = hub._lock_write
 hub._lock_write = lambda *a, **k: (_ for _ in ()).throw(OSError("share vanished"))
