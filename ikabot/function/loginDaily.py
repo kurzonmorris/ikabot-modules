@@ -8,11 +8,13 @@ import traceback
 
 from ikabot.config import *
 from ikabot.helpers.botComm import *
+from ikabot.helpers.getJson import getCity
 from ikabot.helpers.gui import bcolors, enter
+from ikabot.helpers.modulePrefs import load_prefs, prompt_use_saved, save_prefs
 from ikabot.helpers.pedirInfo import chooseCity, getIdsOfCities
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
-from ikabot.helpers.varios import getDateTime, timeStringToSec, wait
+from ikabot.helpers.varios import decodeUnicodeEscape, getDateTime, timeStringToSec, wait
 
 
 earliest_wakeup_time = 24 * 60 * 60
@@ -36,58 +38,124 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
         wood_city = None
         luxury_city = None
         favour_tasks = []
-        print("Choose the city where the daily login bonus wine will be sent:")
-        wine_city = chooseCity(session)
-        print("Do you want to automatically activate the cinetheatre bonus? (Y|N)")
-        choice = read(values=["y", "Y", "n", "N"])
-        if choice in ["y", "Y"]:
+        collect_ambrosia = False
 
-            # choose city for wood
-            print("Choose the city where the wood bonus will be activated:")
-            wood_city = chooseCity(session)
+        # --- module memory: reuse the previous run's answers if the user wants ---
+        _MODULE = "loginDaily"
+        saved = load_prefs(session, _MODULE)
+        use_saved = False
+        if saved:
+            try:
+                (_ids, _cities) = getIdsOfCities(session)
 
-            # choose city for luxury resource
-            print("Choose the city where the luxury resource bonus will be activated:")
-            luxury_city = chooseCity(session)
-        print("Do you want to collect the favour automatically? (Y|N)")
-        choice = read(values=["y", "Y", "n", "N"])
-        if choice in ["y", "Y"]:
-            favour_tasks = [t for t in tasks]
+                def _city_name(cid):
+                    return decodeUnicodeEscape(_cities[str(cid)]["name"])
 
-            def modify_tasks():
-                banner()
-                print(
-                    "Choose which daily tasks will be done/collected by Ikabot automatically."
-                )
-                print(
-                    f"Tasks in {bcolors.BLUE}blue{bcolors.ENDC} WILL be done automatically, tasks in {bcolors.STONE}grey{bcolors.ENDC} WILL NOT be done."
-                )
-                print("Press [ENTER] or type in [Y] to confirm selection")
-                for i, task in enumerate(tasks):
-                    if task in favour_tasks:
-                        print(i + 1, ") ", bcolors.BLUE, task, bcolors.ENDC)
-                    else:
-                        print(i + 1, ") ", bcolors.STONE, task, bcolors.ENDC)
-                choice = read(
-                    min=1,
-                    max=len(tasks),
-                    empty=True,
-                    digit=True,
-                    additionalValues=["y", "Y"],
-                )
-                if not choice or (not choice.isdigit() and choice.lower() == "y"):
-                    return
-                choice -= 1
-                if list(tasks)[choice] in favour_tasks:
-                    favour_tasks.remove(list(tasks)[choice])
+                _wine_id = str(saved["wine_city_id"])
+                # A city may have been lost/renamed since the settings were
+                # saved — validate every id before offering to replay them.
+                assert _wine_id in _cities, "saved wine city no longer exists"
+                _wood_id = saved.get("wood_city_id")
+                _lux_id = saved.get("luxury_city_id")
+                assert (_wood_id is None) == (_lux_id is None), "incomplete cinetheatre config"
+                for _cid in (_wood_id, _lux_id):
+                    assert _cid is None or str(_cid) in _cities, "saved city no longer exists"
+                _saved_tasks = [t for t in saved.get("favour_tasks", []) if t in tasks]
+
+                _summary = ["Wine city:     " + _city_name(_wine_id)]
+                if _wood_id is not None:
+                    _summary.append("Wood city:     " + _city_name(_wood_id))
+                    _summary.append("Luxury city:   " + _city_name(_lux_id))
                 else:
-                    favour_tasks.append(list(tasks)[choice])
-                return modify_tasks()
+                    _summary.append("Cinetheatre:   no")
+                _summary.append(
+                    "Ambrosia:      " + ("yes" if saved.get("collect_ambrosia") else "no")
+                )
+                _summary.append(
+                    "Favour tasks:  " + (", ".join(_saved_tasks) if _saved_tasks else "none")
+                )
 
-            modify_tasks()
+                if prompt_use_saved(session, _MODULE, _summary):
+                    # Re-fetch each city so the module always works from live
+                    # data — never a stale snapshot from the previous run.
+                    wine_city = getCity(session.get(city_url + str(_wine_id)))
+                    if _wood_id is not None:
+                        wood_city = getCity(session.get(city_url + str(_wood_id)))
+                        luxury_city = getCity(session.get(city_url + str(_lux_id)))
+                    collect_ambrosia = bool(saved.get("collect_ambrosia"))
+                    favour_tasks = _saved_tasks
+                    use_saved = True
+            except Exception:
+                use_saved = False  # anything unexpected -> ask normally
 
-        print("I will do the thing.")
-        enter()
+        if not use_saved:
+            print("Choose the city where the daily login bonus wine will be sent:")
+            wine_city = chooseCity(session)
+            print("Do you want to automatically activate the cinetheatre bonus? (Y|N)")
+            choice = read(values=["y", "Y", "n", "N"])
+            if choice in ["y", "Y"]:
+
+                # choose city for wood
+                print("Choose the city where the wood bonus will be activated:")
+                wood_city = chooseCity(session)
+
+                # choose city for luxury resource
+                print("Choose the city where the luxury resource bonus will be activated:")
+                luxury_city = chooseCity(session)
+            print("Do you want to automatically collect the 'Divine Imagination' ambrosia bonus? (Y|N)")
+            choice = read(values=["y", "Y", "n", "N"])
+            collect_ambrosia = choice in ["y", "Y"]
+            print("Do you want to collect the favour automatically? (Y|N)")
+            choice = read(values=["y", "Y", "n", "N"])
+            if choice in ["y", "Y"]:
+                favour_tasks = [t for t in tasks]
+
+                def modify_tasks():
+                    banner()
+                    print(
+                        "Choose which daily tasks will be done/collected by Ikabot automatically."
+                    )
+                    print(
+                        f"Tasks in {bcolors.BLUE}blue{bcolors.ENDC} WILL be done automatically, tasks in {bcolors.STONE}grey{bcolors.ENDC} WILL NOT be done."
+                    )
+                    print("Press [ENTER] or type in [Y] to confirm selection")
+                    for i, task in enumerate(tasks):
+                        if task in favour_tasks:
+                            print(i + 1, ") ", bcolors.BLUE, task, bcolors.ENDC)
+                        else:
+                            print(i + 1, ") ", bcolors.STONE, task, bcolors.ENDC)
+                    choice = read(
+                        min=1,
+                        max=len(tasks),
+                        empty=True,
+                        digit=True,
+                        additionalValues=["y", "Y"],
+                    )
+                    if not choice or (not choice.isdigit() and choice.lower() == "y"):
+                        return
+                    choice -= 1
+                    if list(tasks)[choice] in favour_tasks:
+                        favour_tasks.remove(list(tasks)[choice])
+                    else:
+                        favour_tasks.append(list(tasks)[choice])
+                    return modify_tasks()
+
+                modify_tasks()
+
+            save_prefs(
+                session,
+                _MODULE,
+                {
+                    "wine_city_id": str(wine_city["id"]),
+                    "wood_city_id": str(wood_city["id"]) if wood_city else None,
+                    "luxury_city_id": str(luxury_city["id"]) if luxury_city else None,
+                    "collect_ambrosia": bool(collect_ambrosia),
+                    "favour_tasks": list(favour_tasks),
+                },
+            )
+
+            print("I will do the thing.")
+            enter()
     except KeyboardInterrupt:
         event.set()
         return
@@ -104,6 +172,7 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
             wood_city=wood_city,
             luxury_city=luxury_city,
             favour_tasks=favour_tasks,
+            collect_ambrosia=collect_ambrosia,
         )
     except Exception as e:
         msg = "Error in:\n{}\nCause:\n{}".format(info, traceback.format_exc())
@@ -112,7 +181,7 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
         session.logout()
 
 
-def do_it(session, wine_city, wood_city, luxury_city, favour_tasks):
+def do_it(session, wine_city, wood_city, luxury_city, favour_tasks, collect_ambrosia=False):
     """
     Parameters
     ----------
@@ -214,6 +283,7 @@ def do_it(session, wine_city, wood_city, luxury_city, favour_tasks):
         wait(1)
 
         # collect favour cultural bonus
+        favour_cinetheater_city = None
         if wood_city:
             favour_cinetheater_city = wood_city
         if luxury_city:
@@ -311,6 +381,45 @@ def do_it(session, wine_city, wood_city, luxury_city, favour_tasks):
                 if sec_remaining < earliest_wakeup_time
                 else earliest_wakeup_time
             )
+
+        # collect 'Divine Imagination' ambrosia video bonus (upstream #413)
+        if collect_ambrosia:
+            html = session.post(city_url + str(wine_city["id"]))
+            html = session.post(
+                f"view=cinema&visit=1&currentCityId={wine_city['id']}&backgroundView=city&actionRequest={actionRequest}&ajax=1"
+            )
+            features = (
+                html.split('id=\\"VideoRewards\\"')[1].split("ul>")[0].split("li>")
+            )
+            features = [f for f in features if "form" in f or "js_nextPossible" in f]
+            if len(features) > 3 and "js_nextPossibleAmbrosia" in features[3]:
+                remaining_time_str = re.search(
+                    r'js_nextPossibleAmbrosia\\">([\S\s]*?)<', features[3]
+                )
+                if remaining_time_str:
+                    remaining_time_str = remaining_time_str.group(1).strip()
+                    sec_to_wait = timeStringToSec(remaining_time_str) + 60
+                    earliest_wakeup_time = (
+                        sec_to_wait
+                        if sec_to_wait < earliest_wakeup_time
+                        else earliest_wakeup_time
+                    )
+            elif len(features) > 3 and "form" in features[3]:
+                videoId = re.search(
+                    r'name=\\"videoId\\"\s*value=\\"(\d+)\\"', features[3]
+                )
+                assert videoId, "Could not find a match for videoId in ambrosia html"
+                videoId = videoId.group(1)
+                session.post(
+                    f"view=noViewChange&action=AdVideoRewardAction&function=requestBonus&bonusId=54&videoId={str(videoId)}&backgroundView=city&currentCityId={wine_city['id']}&templateView=cinema&actionRequest={actionRequest}&ajax=1"
+                )
+                session.setStatus("Waiting 55s to watch video for ambrosia bonus")
+                wait(55)
+                session.post(
+                    f"view=noViewChange&action=AdVideoRewardAction&function=watchVideo&videoId={str(videoId)}&backgroundView=city&currentCityId={wine_city['id']}&templateView=cinema&actionRequest={actionRequest}&ajax=1"
+                )
+
+        wait(1)
 
         # find capital and get ambro bonus from fountain if it's active
         for id in ids:

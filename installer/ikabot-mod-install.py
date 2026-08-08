@@ -11,7 +11,8 @@ Install flow:
   5. Optional modules download (from GitHub repo — no release zip needed)
   6. Instance count prompt
   7. Sync ikariam folders from template
-  8. Create numbered shortcuts (+ installer shortcut when frozen)
+  8. Create numbered shortcuts, and install a copy of the installer
+     into the 'ikabot installer' folder with a shortcut to it
   9. Shortcut destination prompt (folder picker)
  10. Summary screen
 
@@ -34,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +47,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "1.3.0"
+INSTALLER_VERSION = "2.1.2"
 
 GITHUB_API      = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/contents"
@@ -56,11 +58,14 @@ GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/cont
 ASSET_IKABOT_RE    = re.compile(r'^ikabot-v([\d.]+)-+mod-v([\d.]+)\.zip$', re.IGNORECASE)
 ASSET_INSTALLER_RE = re.compile(r'^ikabot-mod-install_v([\d.]+)\.zip$',    re.IGNORECASE)
 
-DEFAULT_INSTALL   = Path("C:/Program Files/ikabot")
+DEFAULT_INSTALL   = Path.home() / "Desktop" / "ikabot"
 DEFAULT_SHORTCUTS = Path.home() / "Desktop" / "ikabot shortcuts"
+
+MODULES_TEMPLATE = "Ikabot Modules template"
 
 STATE_FILE  = Path(tempfile.gettempdir()) / "ikabot_install_state.json"
 CONFIG_FILE = Path.home() / "AppData" / "Local" / "ikabot" / "installer_config.json"
+ERROR_LOG   = Path.home() / "AppData" / "Local" / "ikabot" / "last_error.txt"
 
 # ── Tkinter helpers ───────────────────────────────────────────────────────────
 
@@ -202,10 +207,15 @@ def ask_count_or_skip(title: str, message: str, initial: str = "") -> str | None
 
 # ── Version helpers ───────────────────────────────────────────────────────────
 
-def ver_tuple(v: str) -> tuple[int, ...]:
-    v = v.strip().lstrip("vV")
+def ver_tuple(v) -> tuple[int, ...]:
+    """Parse a version into comparable numbers. Never raises.
+
+    Accepts anything — a version.json written by hand may hold a number
+    rather than a string, and a crash here would take the whole app down.
+    """
     try:
-        return tuple(int(x) for x in re.split(r"[.\-_]", v) if x.isdigit())
+        return tuple(int(x) for x in re.split(r"[.\-_]", str(v).strip().lstrip("vV"))
+                     if x.isdigit())
     except Exception:
         return (0,)
 
@@ -214,10 +224,13 @@ def is_newer(remote: str, local: str) -> bool:
     return ver_tuple(remote) > ver_tuple(local)
 
 
-def write_version(directory: Path, version: str) -> None:
+def write_version(directory: Path, version: str, extra: dict | None = None) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     clean = version.lstrip("vV")
-    (directory / "version.json").write_text(json.dumps({"version": clean}, indent=2))
+    data = {"version": clean}
+    if extra:
+        data.update(extra)
+    (directory / "version.json").write_text(json.dumps(data, indent=2))
     for old in directory.glob("version_*"):
         old.unlink(missing_ok=True)
     (directory / f"version_{clean}").touch()
@@ -232,6 +245,17 @@ def read_version(directory: Path) -> str | None:
             pass
     for f in directory.glob("version_*"):
         return f.name[len("version_"):]
+    return None
+
+
+def read_version_key(directory: Path, key: str) -> str | None:
+    """Read an extra key (e.g. ikabot_version) from a folder's version.json."""
+    vj = directory / "version.json"
+    if vj.exists():
+        try:
+            return json.loads(vj.read_text()).get(key)
+        except Exception:
+            pass
     return None
 
 # ── GitHub / download helpers ─────────────────────────────────────────────────
@@ -263,23 +287,142 @@ def find_asset(releases: list[dict], pattern: re.Pattern) -> tuple[str, str, str
     return None
 
 
-def download_zip(url: str, dest_dir: Path, label: str = "") -> None:
+def _curl_available() -> bool:
+    """Windows 10 build 1803 and later ship curl.exe."""
+    return shutil.which("curl.exe") is not None or shutil.which("curl") is not None
+
+
+def _download_with_curl(url: str, tmp: Path) -> tuple[int, str]:
+    """Download using Windows' built-in curl.exe.
+
+    Used as a fallback when Python's own downloader fails — curl handles
+    proxies, TLS and redirects independently, and fails loudly on a
+    partial transfer instead of leaving a truncated file behind.
+    Returns (bytes_written, content_type).
+    """
+    exe = shutil.which("curl.exe") or shutil.which("curl")
+    print("  Falling back to curl ...")
+    subprocess.run(
+        [exe, "-L", "--fail", "--retry", "2", "-#",
+         "-A", f"ikabot-mod-install/{INSTALLER_VERSION}",
+         "-o", str(tmp), url],
+        check=True,
+    )
+    return (tmp.stat().st_size if tmp.exists() else 0), ""
+
+
+def download_zip(url: str, dest_dir: Path, label: str = "", attempts: int = 3) -> None:
+    """Download a zip file and extract it into dest_dir.
+
+    The download is verified as complete (against Content-Length) and
+    confirmed to be a real zip before any extraction is attempted, and
+    failures are retried. Without these checks a connection that drops
+    part-way through leaves a truncated file, which then fails with the
+    misleading error "File is not a zip file" even though the file on
+    GitHub is perfectly valid.
+
+    The first attempt uses Python's downloader; later attempts fall back
+    to curl.exe, which succeeds on some machines where Python's does not.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest_dir / "_tmp_download.zip"
-    print(f"  Downloading {label or url} ...")
+    last_problem = "unknown error"
+
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt > 1:
+                print(f"  Retrying — attempt {attempt} of {attempts} ...")
+                time.sleep(2)
+
+            print(f"  Downloading {label or url} ...")
+
+            # After the first failure, switch transport to curl if we have it
+            if attempt > 1 and _curl_available():
+                written, ctype = _download_with_curl(url, tmp)
+                expected = None          # curl already fails on a partial transfer
+            else:
+                written, expected, ctype = _download_with_urllib(url, tmp)
+
+            _verify_and_extract(tmp, dest_dir, written, expected, ctype)
+            tmp.unlink(missing_ok=True)
+            return
+
+        except (urllib.error.URLError, zipfile.BadZipFile, OSError,
+                subprocess.CalledProcessError, ValueError) as exc:
+            last_problem = str(exc) or exc.__class__.__name__
+            print(f"  Attempt {attempt} failed: {last_problem}")
+
+    tmp.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"The download failed after {attempts} attempts.\n\n"
+        f"Last problem: {last_problem}\n\n"
+        "Check your internet connection, and confirm the release\n"
+        "is still published on GitHub, then try again."
+    )
+
+
+def _download_with_urllib(url: str, tmp: Path) -> tuple[int, int | None, str]:
+    """Download with Python's urllib. Returns (bytes_written, expected, content_type)."""
     req = urllib.request.Request(
         url,
         headers={"User-Agent": f"ikabot-mod-install/{INSTALLER_VERSION}"},
     )
+
+    written = 0
     with urllib.request.urlopen(req, timeout=60) as response:
+        raw_len = response.headers.get("Content-Length")
+        expected = int(raw_len) if raw_len and raw_len.isdigit() else None
+        ctype = (response.headers.get("Content-Type") or "").lower()
+
+        MB = 1024 * 1024
+        marker = -1
         with open(tmp, "wb") as f:
-            shutil.copyfileobj(response, f)
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                written += len(chunk)
+                # refresh on each 1% (or each MB when size is unknown)
+                step = (written * 100 // expected) if expected else (written // MB)
+                if step != marker:
+                    marker = step
+                    if expected:
+                        print(f"\r    {written / MB:.1f} MB of {expected / MB:.1f} MB"
+                              f"  ({step}%)  ", end="")
+                    else:
+                        print(f"\r    {written / MB:.1f} MB  ", end="")
+        if marker >= 0:
+            print()
+
+    return written, expected, ctype
+
+
+def _verify_and_extract(tmp: Path, dest_dir: Path, written: int,
+                        expected: int | None, ctype: str) -> None:
+    """Confirm the download is complete and a real zip, then extract it.
+
+    Raises ValueError with a plain-language reason if it is not usable,
+    so the caller can retry on another transport.
+    """
+    # Did we get the whole thing?
+    if expected is not None and written != expected:
+        raise ValueError(f"the download was cut short — received "
+                         f"{written:,} bytes but expected {expected:,}")
+
+    # Is it actually a zip? (An HTML error page would arrive silently.)
+    if not zipfile.is_zipfile(tmp):
+        with open(tmp, "rb") as f:
+            head = f.read(64)
+        if b"<html" in head.lower() or "text/html" in ctype:
+            raise ValueError("the server sent a web page instead of the file — "
+                             "the release asset may have been removed or renamed")
+        raise ValueError(f"the downloaded file is not a zip "
+                         f"({written:,} bytes, begins with {head[:16]!r})")
+
     print(f"  Extracting to {dest_dir} ...")
-    try:
-        with zipfile.ZipFile(tmp, "r") as zf:
-            zf.extractall(dest_dir)
-    finally:
-        tmp.unlink(missing_ok=True)
+    with zipfile.ZipFile(tmp, "r") as zf:
+        zf.extractall(dest_dir)
 
 
 def fetch_repo_folder(folder_path: str) -> list[dict]:
@@ -293,33 +436,6 @@ def fetch_repo_folder(folder_path: str) -> list[dict]:
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read())
-
-
-def download_repo_files(folder_path: str, dest_dir: Path,
-                        skip_names: set[str] | None = None) -> int:
-    """Download every file in a repo folder to dest_dir. Returns count.
-
-    Files whose name (case-insensitive) is in skip_names are not downloaded.
-    """
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    items = fetch_repo_folder(folder_path)
-    skip = {n.lower() for n in (skip_names or set())}
-    count = 0
-    for item in items:
-        if item["type"] != "file":
-            continue
-        if item["name"].lower() in skip:
-            print(f"  {item['name']}  (skipped — keeping your existing file)")
-            continue
-        print(f"  {item['name']}")
-        req = urllib.request.Request(
-            item["download_url"],
-            headers={"User-Agent": f"ikabot-mod-install/{INSTALLER_VERSION}"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            (dest_dir / item["name"]).write_bytes(resp.read())
-        count += 1
-    return count
 
 
 def ask_csv_overwrite(modules_dir: Path) -> set[str]:
@@ -344,18 +460,77 @@ def ask_csv_overwrite(modules_dir: Path) -> set[str]:
     return {"bulkdistribution.csv"}
 
 
-def strip_version_suffixes(directory: Path) -> None:
-    """Remove _vXXX suffix from every file in directory (CSV files left untouched)."""
-    for f in list(directory.iterdir()):
-        if not f.is_file() or f.suffix.lower() == ".csv":
-            continue
-        new_stem = re.sub(r"_v.+$", "", f.stem)
-        new_name = new_stem + f.suffix
-        if new_name != f.name:
-            target = f.parent / new_name
-            if target.exists():
-                target.unlink()
-            f.rename(target)
+def split_module_name(name: str) -> tuple[str, str]:
+    """'autoRecruitment_v1.2.py' -> ('autoRecruitment.py', '1.2').
+
+    Files without a version suffix return (name, "").
+    """
+    p = Path(name)
+    m = re.match(r"^(.*?)_v(.+)$", p.stem)
+    if m:
+        return m.group(1) + p.suffix, m.group(2)
+    return name, ""
+
+
+def fetch_module_listing() -> list[dict]:
+    """List all module and config-example files available on GitHub.
+
+    Returns [{name, url, base, ver}] sorted by base name.
+    """
+    items: list[dict] = []
+    for folder in ("modules", "config-examples"):
+        try:
+            entries = fetch_repo_folder(folder)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                continue
+            raise
+        for it in entries:
+            if it["type"] != "file":
+                continue
+            base, ver = split_module_name(it["name"])
+            items.append({"name": it["name"], "url": it["download_url"],
+                          "base": base, "ver": ver})
+    items.sort(key=lambda d: d["base"].lower())
+    return items
+
+
+def installed_module_versions(template_dir: Path) -> dict[str, str]:
+    """Map base filename -> installed version, read from the modules template folder."""
+    versions: dict[str, str] = {}
+    if template_dir.exists():
+        for f in template_dir.iterdir():
+            if f.is_file():
+                base, ver = split_module_name(f.name)
+                versions[base] = ver
+    return versions
+
+
+def download_module_file(item: dict, template_dir: Path, modules_dir: Path) -> None:
+    """Download one module file to the template folder (versioned name kept),
+    then copy it to the modules folder with the version suffix stripped.
+    Old versions of the same file are removed from both folders first."""
+    template_dir.mkdir(parents=True, exist_ok=True)
+    modules_dir.mkdir(parents=True, exist_ok=True)
+
+    req = urllib.request.Request(
+        item["url"],
+        headers={"User-Agent": f"ikabot-mod-install/{INSTALLER_VERSION}"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = resp.read()
+
+    # Remove any old versions of this module from the template folder
+    for f in list(template_dir.iterdir()):
+        if f.is_file() and split_module_name(f.name)[0] == item["base"]:
+            f.unlink()
+    (template_dir / item["name"]).write_bytes(data)
+
+    # Remove stale versioned leftovers in the modules folder, then write clean copy
+    for f in list(modules_dir.iterdir()):
+        if f.is_file() and split_module_name(f.name)[0] == item["base"] and f.name != item["base"]:
+            f.unlink()
+    (modules_dir / item["base"]).write_bytes(data)
 
 
 def write_modules_timestamp(modules_dir: Path) -> None:
@@ -417,9 +592,30 @@ def _leading_num(name: str) -> int:
     return int(m.group()) if m else 0
 
 
+def _instance_lnks(folder: Path) -> list[Path]:
+    """Numbered instance shortcuts only (e.g. '1 ikariam.lnk'), sorted by number.
+
+    Ignores other shortcuts in the folder (installer, old manager tools, etc.)."""
+    if not folder.exists():
+        return []
+    return sorted(
+        [f for f in folder.glob("*.lnk") if f.name[0].isdigit()],
+        key=lambda p: _leading_num(p.name),
+    )
+
+
 def maint_open_all(install_dir: Path) -> None:
     sc_dir = install_dir / "shortcuts"
-    lnks = sorted(sc_dir.glob("*.lnk"), key=lambda p: _leading_num(p.name)) if sc_dir.exists() else []
+
+    # Clean up the retired AHK manager shortcut if it is still around
+    for stale in sc_dir.glob("ikabot_manager*.lnk") if sc_dir.exists() else []:
+        try:
+            stale.unlink()
+            print(f"  Removed old shortcut: {stale.name}")
+        except Exception:
+            pass
+
+    lnks = _instance_lnks(sc_dir)
 
     if not lnks:
         show_info(
@@ -429,10 +625,11 @@ def maint_open_all(install_dir: Path) -> None:
         picked = pick_folder("Select your ikabot shortcuts folder", initial=str(install_dir))
         if not picked:
             return
-        lnks = sorted(picked.glob("*.lnk"), key=lambda p: _leading_num(p.name))
+        lnks = _instance_lnks(picked)
 
     if not lnks:
-        show_error("No shortcut (.lnk) files were found in the selected folder.")
+        show_error("No numbered instance shortcuts (e.g. '1 ikariam.lnk')\n"
+                   "were found in the selected folder.")
         return
 
     for lnk in lnks:
@@ -463,37 +660,42 @@ def maint_close_all() -> None:
 
 
 def maint_open_all_ps(install_dir: Path) -> None:
-    sc_dir = install_dir / "shortcuts"
+    """Open each instance inside its own PowerShell window (instead of the
+    default cmd-style console host)."""
+    ikabot_dir = install_dir / "ikabot"
 
-    # Prefer ps1 already copied to the shortcuts folder; fall back to bundle
-    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
-    ps1 = next(
-        (p for p in (
-            sc_dir / "open-all-instances.ps1",
-            bundle_root / "open-all-instances.ps1",
-        ) if p.exists()),
-        None,
-    )
-
-    if ps1:
-        subprocess.Popen(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(ps1)])
-        return
-
-    # Inline fallback when ps1 is unavailable
-    lnks = sorted(
-        [f for f in sc_dir.glob("*.lnk") if f.name[0].isdigit()],
+    folders = sorted(
+        [f for f in ikabot_dir.iterdir()
+         if f.is_dir() and re.match(r"^ikariam \d+$", f.name)],
         key=lambda p: _leading_num(p.name),
-    ) if sc_dir.exists() else []
+    ) if ikabot_dir.exists() else []
 
-    if not lnks:
-        show_error("No numbered shortcuts found in:\n" + str(sc_dir))
+    if not folders:
+        show_error(
+            "No ikariam instance folders were found in:\n"
+            f"  {ikabot_dir}\n\n"
+            "Run the installer first to set up your instances."
+        )
         return
 
-    cmds = "; ".join(
-        f'Start-Process "{lnk}"; Start-Sleep -Milliseconds 150' for lnk in lnks
-    )
-    subprocess.Popen(
-        ["powershell", "-ExecutionPolicy", "Bypass", "-NoExit", "-Command", cmds]
+    launched = 0
+    for folder in folders:
+        exe = folder / "ikabot.exe"
+        if not exe.exists():
+            print(f"  Skipping {folder.name} — no ikabot.exe found")
+            continue
+        subprocess.Popen(
+            ["powershell", "-NoExit", "-Command",
+             f"$host.UI.RawUI.WindowTitle = '{folder.name}'; "
+             f"Set-Location '{folder}'; & '.\\ikabot.exe'"],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        launched += 1
+        time.sleep(0.15)
+
+    show_info(
+        f"{launched} ikabot instance(s) launched in PowerShell windows.",
+        "Open All (PowerShell) — Done",
     )
 
 
@@ -501,16 +703,39 @@ def maint_close_all_ps() -> None:
     if not ask_yes_no("Close all running ikabot instances via PowerShell?", "Close All (PS)"):
         return
 
+    # Kill ikabot.exe processes AND the PowerShell host windows they run in
+    # (the -NoExit windows from 'Open all (PowerShell)' would otherwise stay open).
+    ps_script = (
+        "$closed = 0; "
+        "$ik = Get-CimInstance Win32_Process -Filter \"Name='ikabot.exe'\" "
+        "-ErrorAction SilentlyContinue; "
+        "$parents = @(); "
+        "foreach ($p in $ik) { "
+        "  $par = Get-Process -Id $p.ParentProcessId -ErrorAction SilentlyContinue; "
+        "  if ($par -and $par.Name -eq 'powershell') { $parents += $par } "
+        "}; "
+        "foreach ($p in $ik) { "
+        "  Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $closed++ "
+        "}; "
+        "$parents | Stop-Process -Force -ErrorAction SilentlyContinue; "
+        # Also close leftover PowerShell windows titled 'ikariam N' where
+        # ikabot has already exited but the -NoExit window is still open.
+        "Get-Process powershell -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.MainWindowTitle -match 'ikariam' -and $_.Id -ne $PID } | "
+        "Stop-Process -Force -ErrorAction SilentlyContinue; "
+        "exit ([int]($closed -eq 0))"
+    )
     res = subprocess.run(
-        ["powershell", "-WindowStyle", "Hidden", "-Command",
-         "$p = Get-Process -Name ikabot -ErrorAction SilentlyContinue; "
-         "if ($p) { $p | Stop-Process -Force; exit 0 } else { exit 1 }"],
+        ["powershell", "-WindowStyle", "Hidden", "-Command", ps_script],
         capture_output=True, text=True,
     )
     if res.returncode == 0:
-        show_info("All ikabot instances have been closed.", "Close All (PS) — Done")
+        show_info("All ikabot instances and their PowerShell windows have been closed.",
+                  "Close All (PS) — Done")
     else:
-        show_info("No ikabot instances were running.", "Close All (PS)")
+        show_info("No ikabot instances were running.\n"
+                  "Any leftover 'ikariam' PowerShell windows were closed.",
+                  "Close All (PS)")
 
 
 def find_ikabot_asset(releases: list[dict]) -> tuple[str, str, str] | None:
@@ -523,13 +748,79 @@ def find_ikabot_asset(releases: list[dict]) -> tuple[str, str, str] | None:
     return None
 
 
-def maint_show_status(install_dir: Path) -> None:
-    template_dir  = install_dir / "ikabot template"
-    ikabot_dir    = install_dir / "ikabot"
-    modules_dir   = install_dir / "modules"
-    installer_dir = install_dir / "ikabot installer"
+def check_versions(install_dir: Path) -> dict:
+    """Compare what is installed against the latest on GitHub.
 
-    mod_ver = read_version(template_dir) or "not installed"
+    Returns a dict with an entry per component:
+        {"local": str|None, "remote": str|None, "ok": bool}
+    plus "online" (False when GitHub could not be reached) and "error".
+    Never raises — being offline must not stop the manager from opening.
+    """
+    template_dir = install_dir / "ikabot template"
+
+    result = {
+        "installer": {"local": INSTALLER_VERSION, "remote": None, "ok": False},
+        "ikabot":    {"local": read_version_key(template_dir, "ikabot_version"),
+                      "remote": None, "ok": False},
+        "mod":       {"local": read_version(template_dir), "remote": None, "ok": False},
+        "online": False,
+        "error": None,
+    }
+
+    try:
+        releases = fetch_releases()
+        # A rate-limit or error payload comes back as a dict, not a list
+        if not isinstance(releases, list):
+            raise ValueError(
+                releases.get("message", "unexpected reply from GitHub")
+                if isinstance(releases, dict) else "unexpected reply from GitHub")
+
+        installer_asset = find_asset(releases, ASSET_INSTALLER_RE)
+        if installer_asset:
+            result["installer"]["remote"] = installer_asset[2]
+
+        ikabot_asset = find_ikabot_asset(releases)
+        if ikabot_asset:
+            _, ik_ver, mod_ver = ikabot_asset
+            result["ikabot"]["remote"] = ik_ver
+            result["mod"]["remote"]    = mod_ver
+
+        result["online"] = True
+    except Exception as exc:
+        # Never let a version check stop the manager from opening
+        result["error"] = str(exc)
+        print(f"  Could not check versions: {exc}")
+        return result
+
+    for key in ("installer", "ikabot", "mod"):
+        info = result[key]
+        if info["remote"] is None:
+            # Nothing published to compare against — treat as up to date
+            info["ok"] = info["local"] is not None
+        elif info["local"] is None:
+            info["ok"] = False          # not installed, or version not recorded
+        else:
+            info["ok"] = ver_tuple(info["local"]) >= ver_tuple(info["remote"])
+
+    return result
+
+
+def maint_show_status(install_dir: Path, vers: dict | None = None) -> None:
+    template_dir     = install_dir / "ikabot template"
+    ikabot_dir       = install_dir / "ikabot"
+    modules_dir      = install_dir / "modules"
+    mod_template_dir = install_dir / MODULES_TEMPLATE
+
+    mod_ver    = read_version(template_dir) or "not installed"
+    ikabot_ver = read_version_key(template_dir, "ikabot_version") or "unknown"
+
+    def _latest(key: str) -> str:
+        if not vers or not vers.get("online"):
+            return "  (could not check GitHub)"
+        info = vers[key]
+        if info["remote"] is None:
+            return "  (nothing published)"
+        return "  — up to date" if info["ok"] else f"  — UPDATE AVAILABLE: v{info['remote']}"
 
     inst_count = 0
     if ikabot_dir.exists():
@@ -538,36 +829,186 @@ def maint_show_status(install_dir: Path) -> None:
             if f.is_dir() and re.match(r"^ikariam \d+$", f.name)
         )
 
-    module_count = 0
+    py_count = 0
     modules_updated = "never"
     if modules_dir.exists():
-        module_count = sum(
+        py_count = sum(
             1 for f in modules_dir.iterdir()
-            if f.is_file() and f.name != "modules_updated.txt"
+            if f.is_file() and f.suffix.lower() == ".py"
         )
         ts_file = modules_dir / "modules_updated.txt"
         if ts_file.exists():
             modules_updated = ts_file.read_text().strip()
 
-    installer_ver = read_version(installer_dir) or "not installed"
+    # Module list with versions, read from the modules template folder
+    module_lines: list[str] = []
+    installed = installed_module_versions(mod_template_dir)
+    for base in sorted(installed, key=str.lower):
+        ver = installed[base] or "no version"
+        module_lines.append(f"    {base}  —  v{ver}" if installed[base]
+                            else f"    {base}")
+    modules_text = "\n".join(module_lines) if module_lines else \
+        "    (none — use the Modules menu to download them)"
 
     show_info(
         "ikabot Status\n\n"
-        f"  Install folder     : {install_dir}\n"
-        f"  ikabot mod version : {mod_ver}\n"
-        f"  Instances          : {inst_count}\n"
-        f"  Module files       : {module_count}  (last updated: {modules_updated})\n"
-        f"  Installer (stored) : v{installer_ver}\n"
-        f"  Installer (running): v{INSTALLER_VERSION}",
+        f"  Install folder    : {install_dir}\n"
+        f"  ikabot version    : {ikabot_ver}{_latest('ikabot')}\n"
+        f"  mod version       : {mod_ver}{_latest('mod')}\n"
+        f"  Installer version : v{INSTALLER_VERSION}{_latest('installer')}\n"
+        f"  Instances         : {inst_count}\n"
+        f"  Modules installed : {py_count} .py file(s)  (last updated: {modules_updated})\n\n"
+        "  Installed modules and extra files:\n"
+        f"{modules_text}",
         "ikabot Status",
     )
 
 
-# ── Maintenance: Download submenu ─────────────────────────────────────────────
+# ── Maintenance: Update actions ───────────────────────────────────────────────
 
-def maint_download_ikabot(install_dir: Path, releases: list[dict]) -> None:
+def _fetch_releases_or_error() -> list[dict] | None:
+    try:
+        return fetch_releases()
+    except Exception as exc:
+        show_error(
+            f"Could not contact GitHub:\n\n{exc}\n\n"
+            "Check your internet connection and try again."
+        )
+        return None
+
+
+def maint_update_installer(install_dir: Path) -> None:
+    installer_dir = install_dir / "ikabot installer"
+
+    releases = _fetch_releases_or_error()
+    if releases is None:
+        return
+
+    installer_asset = find_asset(releases, ASSET_INSTALLER_RE)
+    if not installer_asset:
+        show_info(
+            "No installer release found on GitHub.\n\n"
+            "The installer will appear here once a release is published.",
+            "Update Installer",
+        )
+        return
+
+    url, _, remote_ver = installer_asset
+
+    if ver_tuple(remote_ver) == ver_tuple(INSTALLER_VERSION):
+        if not ask_yes_no(
+            f"The latest version on GitHub (v{remote_ver}) is the SAME\n"
+            f"as the version you are running (v{INSTALLER_VERSION}).\n\n"
+            "Are you sure you want to download it again?",
+            "Same Version — Are You Sure?",
+        ):
+            return
+    else:
+        if not ask_yes_no(
+            f"Running version : v{INSTALLER_VERSION}\n"
+            f"Latest version  : v{remote_ver}\n\n"
+            f"The installer will be downloaded to:\n  {installer_dir}\n\n"
+            "Proceed?",
+            "Update Installer",
+        ):
+            return
+
+    # Download into a staging folder first. The installer is usually run
+    # FROM installer_dir, and Windows will not let a running .exe be
+    # deleted or overwritten — so nothing in installer_dir is touched
+    # until we know exactly what we are replacing.
+    staging = installer_dir / "_new_version"
+    try:
+        installer_dir.mkdir(parents=True, exist_ok=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        download_zip(url, staging, f"installer v{remote_ver}")
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        show_error(f"Failed to download installer:\n\n{exc}")
+        return
+
+    # The zip may be a single exe or a onedir bundle — find the exe either way
+    new_exe = next(staging.rglob("ikabot-mod-install.exe"), None)
+    if new_exe is None:
+        shutil.rmtree(staging, ignore_errors=True)
+        show_error(
+            "The downloaded file did not contain ikabot-mod-install.exe.\n\n"
+            "The release asset may have been packaged incorrectly."
+        )
+        return
+
+    target = installer_dir / "ikabot-mod-install.exe"
+    running = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
+    replacing_self = running is not None and str(running).lower() == str(target.resolve()).lower()
+
+    write_version(installer_dir, remote_ver)
+
+    if not replacing_self:
+        # Safe to swap in directly
+        try:
+            if target.exists():
+                target.unlink()
+            shutil.move(str(new_exe), str(target))
+            shutil.rmtree(staging, ignore_errors=True)
+        except Exception as exc:
+            show_error(f"Could not put the new installer in place:\n\n{exc}")
+            return
+
+        if ask_yes_no(
+            f"Installer v{remote_ver} is ready at:\n  {target}\n\n"
+            "Create a shortcut to it in your shortcuts folder now?",
+            "Create Installer Shortcut?",
+        ):
+            maint_update_installer_shortcut(install_dir)
+        return
+
+    # We are replacing the exe that is currently running. Windows keeps it
+    # locked until this process exits, so hand the swap to a small batch
+    # file that waits for us to close, moves the new exe in, and starts it.
+    swapper = installer_dir / "_finish_update.bat"
+    swapper.write_text(
+        "@echo off\r\n"
+        "setlocal\r\n"
+        "set /a tries=0\r\n"
+        ":retry\r\n"
+        f'move /Y "{new_exe}" "{target}" >nul 2>&1\r\n'
+        "if not errorlevel 1 goto done\r\n"
+        "set /a tries+=1\r\n"
+        "if %tries% GEQ 30 goto failed\r\n"
+        "ping -n 2 127.0.0.1 >nul\r\n"
+        "goto retry\r\n"
+        ":done\r\n"
+        f'rmdir /s /q "{staging}" 2>nul\r\n'
+        f'start "" "{target}"\r\n'
+        'goto cleanup\r\n'
+        ":failed\r\n"
+        "echo Could not replace the installer - it is still in use.\r\n"
+        f'echo The new version is here: "{new_exe}"\r\n'
+        "pause\r\n"
+        ":cleanup\r\n"
+        '(goto) 2>nul & del "%~f0"\r\n'
+    )
+
+    show_info(
+        f"Installer v{remote_ver} has been downloaded.\n\n"
+        "This installer will now close so the new version can replace it,\n"
+        "then the new version will start automatically.",
+        "Finishing Update",
+    )
+    subprocess.Popen(["cmd", "/c", str(swapper)],
+                     cwd=str(installer_dir),
+                     creationflags=subprocess.CREATE_NEW_CONSOLE)
+    sys.exit(0)
+
+
+def maint_update_ikabot(install_dir: Path) -> None:
     template_dir = install_dir / "ikabot template"
-    template_dir.mkdir(exist_ok=True)
+    ikabot_dir   = install_dir / "ikabot"
+
+    releases = _fetch_releases_or_error()
+    if releases is None:
+        return
 
     ikabot_asset = find_ikabot_asset(releases)
     if not ikabot_asset:
@@ -579,20 +1020,30 @@ def maint_download_ikabot(install_dir: Path, releases: list[dict]) -> None:
         return
 
     url, ikabot_ver, mod_ver = ikabot_asset
-    local_mod_ver = read_version(template_dir) or "not installed"
+    local_mod_ver = read_version(template_dir)
 
-    if not ask_yes_no(
-        f"Installed mod version  : {local_mod_ver}\n"
-        f"Latest ikabot version  : {ikabot_ver}\n"
-        f"Latest mod version     : {mod_ver}\n\n"
-        "This will replace the ikabot template folder with the latest version.\n\n"
-        "Your instances will not be changed yet — use\n"
-        "'Update → Update ikabot instances' afterwards to apply it.\n\n"
-        "Proceed?",
-        "Download Latest ikabot",
-    ):
-        return
+    if local_mod_ver and ver_tuple(mod_ver) == ver_tuple(local_mod_ver):
+        if not ask_yes_no(
+            f"The latest version on GitHub (mod v{mod_ver}) is the SAME\n"
+            f"as the version currently installed (mod v{local_mod_ver}).\n\n"
+            "Are you sure you want to download and install it again?",
+            "Same Version — Are You Sure?",
+        ):
+            return
+    else:
+        if not ask_yes_no(
+            f"Installed mod version : {local_mod_ver or 'not installed'}\n"
+            f"Latest ikabot version : {ikabot_ver}\n"
+            f"Latest mod version    : {mod_ver}\n\n"
+            "This will download the latest ikabot and update your instances.\n\n"
+            "Close all running instances before continuing.\n\n"
+            "Proceed?",
+            "Update Ikabot",
+        ):
+            return
 
+    # Download into the template folder
+    template_dir.mkdir(exist_ok=True)
     print(f"Downloading ikabot v{ikabot_ver} mod v{mod_ver} ...")
     for item in template_dir.iterdir():
         if item.name.startswith("version"):
@@ -601,203 +1052,212 @@ def maint_download_ikabot(install_dir: Path, releases: list[dict]) -> None:
 
     try:
         download_zip(url, template_dir, f"ikabot v{ikabot_ver} mod v{mod_ver}")
-        write_version(template_dir, mod_ver)
-        show_info(
-            f"Download complete!\n\n"
-            f"  ikabot version : {ikabot_ver}\n"
-            f"  mod version    : {mod_ver}\n\n"
-            "Use 'Update → Update ikabot instances' to apply this to all your instances.",
-            "Download Complete",
-        )
+        write_version(template_dir, mod_ver, extra={"ikabot_version": ikabot_ver})
     except Exception as exc:
         show_error(f"Failed to download ikabot:\n\n{exc}")
         return
 
-    if ask_yes_no(
-        "Apply this update to all your ikabot instances now?\n\n"
-        "This will wipe and re-populate all instance folders from the\n"
-        "newly downloaded template.\n\n"
-        "Close all running instances before continuing.\n\n"
-        "Apply now?",
-        "Apply Update Now?",
-    ):
-        maint_update_ikabot_instances(install_dir)
+    # Instance count — same question as the installer
+    ikabot_dir.mkdir(exist_ok=True)
+    existing = sum(
+        1 for f in ikabot_dir.iterdir()
+        if f.is_dir() and re.match(r"^ikariam \d+$", f.name)
+    )
 
-
-def maint_download_modules(install_dir: Path) -> None:
-    modules_dir = install_dir / "modules"
-
-    if not ask_yes_no(
-        "This will download the latest modules and config examples\n"
-        "directly from the GitHub repository into:\n"
-        f"  {modules_dir}\n\n"
-        "Files downloaded:\n"
-        "  - All files from the modules folder\n"
-        "  - All files from the config-examples folder\n\n"
-        "Existing files will be replaced and version numbers\n"
-        "will be removed from filenames so they load correctly in ikabot.\n\n"
-        "Proceed?",
-        "Download Latest Modules",
-    ):
-        return
-
-    skip_names = ask_csv_overwrite(modules_dir)
-
-    try:
-        modules_dir.mkdir(exist_ok=True)
-        print("Downloading modules ...")
-        count = download_repo_files("modules", modules_dir, skip_names)
-        print("Downloading config examples ...")
-        count += download_repo_files("config-examples", modules_dir, skip_names)
-        print("Removing version suffixes from filenames ...")
-        strip_version_suffixes(modules_dir)
-        write_modules_timestamp(modules_dir)
-        show_info(
-            f"Modules updated!\n\n"
-            f"  Files downloaded : {count}\n"
-            f"  Saved to         : {modules_dir}\n\n"
-            "Version numbers have been removed from all filenames.\n"
-            "The files are ready to use in ikabot.",
-            "Download Complete",
+    count = existing
+    while True:
+        raw = ask_count_or_skip(
+            "Update Ikabot — Instance Count",
+            "How many instances?\n\n"
+            f"You currently have {existing} instance folder(s).\n"
+            "Enter the total number of instances you want (max 100),\n"
+            "or click Skip to keep the current number.",
+            initial=str(existing) if existing > 0 else "",
         )
-    except Exception as exc:
-        show_error(f"Could not download modules:\n\n{exc}")
+        if raw is None:
+            print("Cancelled — ikabot downloaded but instances not updated.")
+            return
+        if raw == "SKIP" or raw.strip() == "" or raw.strip() == "0":
+            count = existing
+            break
+        if not raw.strip().isdigit():
+            show_error("Please enter a whole number, or click Skip.")
+            continue
+        count = int(raw.strip())
+        if count < 1 or count > 100:
+            show_error("Please enter a number between 1 and 100, or click Skip.")
+            continue
+        break
 
-
-def maint_download_installer(install_dir: Path, releases: list[dict]) -> None:
-    installer_dir = install_dir / "ikabot installer"
-    installer_dir.mkdir(exist_ok=True)
-
-    installer_asset = find_asset(releases, ASSET_INSTALLER_RE)
-    if not installer_asset:
+    if count == 0:
         show_info(
-            "No installer release found on GitHub.\n\n"
-            "The installer will appear here once a release is published.",
-            "Download Latest Installer",
+            f"ikabot v{ikabot_ver} mod v{mod_ver} downloaded.\n\n"
+            "No instance folders exist yet — run the installer to create them.",
+            "Update Ikabot — Done",
         )
         return
 
-    url, _, remote_ver = installer_asset
-    local_ver = read_version(installer_dir) or "not installed"
+    print(f"Updating {count} instance folder(s) ...")
+    sync_ikariam_folders(ikabot_dir, count, template_dir)
 
-    if not ask_yes_no(
-        f"Installed version  : {local_ver}\n"
-        f"Latest version     : {remote_ver}\n\n"
-        f"The installer will be downloaded to:\n  {installer_dir}\n\n"
-        "Use 'Update → Update installer shortcut' afterwards\n"
-        "to add a shortcut so you can launch it easily.\n\n"
-        "Proceed?",
-        "Download Latest Installer",
-    ):
-        return
-
-    try:
-        for item in installer_dir.iterdir():
-            if item.name.startswith("version"):
-                continue
-            shutil.rmtree(item) if item.is_dir() else item.unlink()
-        download_zip(url, installer_dir, f"installer v{remote_ver}")
-        write_version(installer_dir, remote_ver)
-        show_info(
-            f"Installer v{remote_ver} downloaded to:\n  {installer_dir}\n\n"
-            "Use 'Update → Update installer shortcut' to add it to your shortcuts folder.",
-            "Download Complete",
-        )
-    except Exception as exc:
-        show_error(f"Failed to download installer:\n\n{exc}")
-        return
-
-    if ask_yes_no(
-        "Create a shortcut to the new installer now?\n\n"
-        "This will add ikabot-mod-install.lnk to your shortcuts folder\n"
-        "so you can launch the installer easily.\n\n"
-        "Create shortcut now?",
-        "Create Installer Shortcut?",
-    ):
-        maint_update_installer_shortcut(install_dir)
-
-
-def maint_download_menu(install_dir: Path) -> None:
     show_info(
-        "Connecting to GitHub to check for the latest versions.\n\n"
+        f"Update complete!\n\n"
+        f"  ikabot version   : {ikabot_ver}\n"
+        f"  mod version      : {mod_ver}\n"
+        f"  Instances updated: {count}",
+        "Update Ikabot — Done",
+    )
+
+
+# ── Maintenance: Modules menu ─────────────────────────────────────────────────
+
+def _modules_dialog(listing: list[dict], install_dir: Path):
+    """Show module list with per-file Update buttons.
+
+    Returns a listing item (update one), "ALL" (update all), or None (close).
+    """
+    mod_template_dir = install_dir / MODULES_TEMPLATE
+    installed = installed_module_versions(mod_template_dir)
+
+    result: list = [None]
+
+    win = tk.Tk()
+    win.withdraw()
+
+    dlg = tk.Toplevel(win)
+    dlg.title("ikabot Modules")
+    dlg.resizable(False, False)
+    dlg.attributes("-topmost", True)
+
+    tk.Label(dlg, text="ikabot Modules\n\nModules and extra files — installed vs GitHub:",
+             justify="left", padx=24, pady=10, wraplength=520).pack(fill="x")
+
+    # Scrollable list
+    outer = tk.Frame(dlg, padx=24)
+    outer.pack(fill="both", expand=True)
+
+    canvas = tk.Canvas(outer, width=560, height=min(360, 34 * max(len(listing), 1) + 10),
+                       highlightthickness=0)
+    scroll = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    rows = tk.Frame(canvas)
+
+    rows.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=rows, anchor="nw")
+    canvas.configure(yscrollcommand=scroll.set)
+
+    canvas.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="right", fill="y")
+
+    def _wheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    dlg.bind("<MouseWheel>", _wheel)
+
+    for r, item in enumerate(listing):
+        inst_ver = installed.get(item["base"], "")
+        inst_txt = f"v{inst_ver}" if inst_ver else ("installed" if
+                    (install_dir / "modules" / item["base"]).exists() else "not installed")
+        gh_txt   = f"v{item['ver']}" if item["ver"] else "no version"
+
+        tk.Label(rows, text=item["base"], anchor="w", width=32).grid(
+            row=r, column=0, sticky="w", pady=2)
+        tk.Label(rows, text=inst_txt, anchor="w", width=12, fg="#555555").grid(
+            row=r, column=1, sticky="w", pady=2)
+        tk.Label(rows, text=f"GitHub: {gh_txt}", anchor="w", width=16, fg="#006600").grid(
+            row=r, column=2, sticky="w", pady=2)
+
+        def _upd(it=item):
+            result[0] = it
+            win.destroy()
+        tk.Button(rows, text="Update", width=8, command=_upd).grid(
+            row=r, column=3, padx=(4, 0), pady=2)
+
+    btns = tk.Frame(dlg, padx=24, pady=10)
+    btns.pack()
+
+    def _all():
+        result[0] = "ALL"
+        win.destroy()
+
+    tk.Button(btns, text="Update all files", width=25, pady=4, command=_all).grid(
+        row=0, column=0, padx=4)
+    tk.Button(btns, text="Close", width=25, pady=4, command=win.destroy).grid(
+        row=0, column=1, padx=4)
+
+    dlg.protocol("WM_DELETE_WINDOW", win.destroy)
+    dlg.lift()
+    dlg.focus_force()
+    win.mainloop()
+    return result[0]
+
+
+def maint_modules_menu(install_dir: Path) -> None:
+    modules_dir      = install_dir / "modules"
+    mod_template_dir = install_dir / MODULES_TEMPLATE
+
+    show_info(
+        "Connecting to GitHub to list the available modules.\n\n"
         "This may take a moment...",
-        "Download Latest Versions",
+        "ikabot Modules",
     )
     try:
-        releases = fetch_releases()
+        listing = fetch_module_listing()
     except Exception as exc:
         show_error(
-            f"Could not contact GitHub:\n\n{exc}\n\n"
+            f"Could not fetch the module list from GitHub:\n\n{exc}\n\n"
             "Check your internet connection and try again."
         )
         return
 
+    if not listing:
+        show_info("No module files were found on GitHub.", "ikabot Modules")
+        return
+
     while True:
-        choice = ask_choice(
-            "Download Latest Versions",
-            "Download Latest Versions\n\nWhat would you like to download?",
-            ["ikabot", "Modules", "Installer", "Back"],
-        )
-        if choice is None or choice == "Back":
+        action = _modules_dialog(listing, install_dir)
+        if action is None:
             return
-        elif choice == "ikabot":
-            maint_download_ikabot(install_dir, releases)
-        elif choice == "Modules":
-            maint_download_modules(install_dir)
-        elif choice == "Installer":
-            maint_download_installer(install_dir, releases)
+
+        if action == "ALL":
+            include_csv = ask_yes_no(
+                "Do you want to download the .csv files too?\n\n"
+                "WARNING: downloading bulkdistribution.csv will OVERWRITE\n"
+                "your existing file and any settings saved in it will be LOST.\n\n"
+                "  Yes = download everything including .csv files\n"
+                "  No  = download everything EXCEPT .csv files",
+                "Include CSV Files?",
+            )
+            count = 0
+            errors: list[str] = []
+            for item in listing:
+                if not include_csv and item["base"].lower().endswith(".csv"):
+                    print(f"  {item['base']}  (skipped — csv)")
+                    continue
+                try:
+                    print(f"  {item['name']}")
+                    download_module_file(item, mod_template_dir, modules_dir)
+                    count += 1
+                except Exception as exc:
+                    errors.append(f"  {item['base']}: {exc}")
+            write_modules_timestamp(modules_dir)
+            msg = f"Update complete!\n\n  Files updated : {count}\n  Saved to      : {modules_dir}"
+            if errors:
+                msg += "\n\nSome files failed:\n" + "\n".join(errors)
+            show_info(msg, "Modules Updated")
+        else:
+            try:
+                print(f"  {action['name']}")
+                download_module_file(action, mod_template_dir, modules_dir)
+                write_modules_timestamp(modules_dir)
+                ver_txt = f" v{action['ver']}" if action["ver"] else ""
+                show_info(
+                    f"{action['base']}{ver_txt} has been updated.",
+                    "Module Updated",
+                )
+            except Exception as exc:
+                show_error(f"Could not update {action['base']}:\n\n{exc}")
 
 
-# ── Maintenance: Update submenu ───────────────────────────────────────────────
-
-def maint_update_ikabot_instances(install_dir: Path) -> None:
-    template_dir = install_dir / "ikabot template"
-    ikabot_dir   = install_dir / "ikabot"
-
-    if not template_dir.exists() or not ikabot_dir.exists():
-        show_error(
-            f"Required folders not found inside:\n  {install_dir}\n\n"
-            "Expected:\n  - ikabot template\n  - ikabot\n\n"
-            "Make sure you selected the correct install folder."
-        )
-        return
-
-    mod_ver      = read_version(template_dir) or "unknown"
-    folder_count = sum(1 for f in ikabot_dir.iterdir()
-                       if f.is_dir() and re.match(r"^ikariam \d+$", f.name))
-
-    if folder_count == 0:
-        show_info(
-            "No ikariam instance folders were found.\n\n"
-            "Run the installer first to set up your instances.",
-            "Nothing to Update",
-        )
-        return
-
-    if not ask_yes_no(
-        f"Template mod version   : {mod_ver}\n"
-        f"Instance folders       : {folder_count}\n\n"
-        "This will wipe and re-populate all instance folders using\n"
-        "the files currently in the ikabot template folder.\n\n"
-        "This does NOT download anything — use\n"
-        "'Download Latest Versions → ikabot' first if you want the latest version.\n\n"
-        "Close all running instances before continuing.\n\n"
-        "Proceed?",
-        "Update ikabot Instances",
-    ):
-        return
-
-    print(f"Updating {folder_count} instance folder(s) from template ...")
-    sync_ikariam_folders(ikabot_dir, folder_count, template_dir)
-
-    show_info(
-        f"Update complete!\n\n"
-        f"  mod version      : {mod_ver}\n"
-        f"  Instances updated: {folder_count}\n\n"
-        "All instances are now running the version in the template folder.",
-        "Update Complete",
-    )
-
+# ── Maintenance: installer shortcut helper ────────────────────────────────────
 
 def maint_update_installer_shortcut(install_dir: Path) -> None:
     installer_dir = install_dir / "ikabot installer"
@@ -846,27 +1306,15 @@ def maint_update_installer_shortcut(install_dir: Path) -> None:
         show_error(f"Could not create installer shortcut:\n\n{exc}")
 
 
-def maint_update_menu(install_dir: Path) -> None:
-    while True:
-        choice = ask_choice(
-            "Update",
-            "Update\n\nWhat would you like to update?\n\n"
-            "Note: these options apply files already downloaded\n"
-            "to your install folder. Use 'Download Latest Versions'\n"
-            "first to get the newest files from GitHub.",
-            ["Update ikabot instances", "Update installer shortcut", "Back"],
-        )
-        if choice is None or choice == "Back":
-            return
-        elif choice == "Update ikabot instances":
-            maint_update_ikabot_instances(install_dir)
-        elif choice == "Update installer shortcut":
-            maint_update_installer_shortcut(install_dir)
+def _maintenance_menu(vers: dict | None = None) -> str | None:
+    """Two-column maintenance menu: Standard (cmd) | PowerShell.
 
-
-def _maintenance_menu() -> str | None:
-    """Two-column maintenance menu: Standard (cmd) | PowerShell."""
+    vers is the result of check_versions(): installed versions are shown
+    green when they match GitHub and red when an update is available.
+    """
     result: list[str | None] = [None]
+
+    GREEN, RED, GREY = "#0a7d0a", "#c00000", "#666666"
 
     win = tk.Tk()
     win.withdraw()
@@ -876,8 +1324,43 @@ def _maintenance_menu() -> str | None:
     dlg.resizable(False, False)
     dlg.attributes("-topmost", True)
 
-    tk.Label(dlg, text="ikabot Manager\n\nSelect an action:",
-             justify="left", padx=24, pady=12, wraplength=420).pack(fill="x")
+    tk.Label(dlg, text="ikabot Manager", justify="left", anchor="w",
+             font=("", 11, "bold"), padx=24).pack(fill="x", pady=(12, 4))
+
+    # ── Installed versions, coloured by whether they are current ──────────
+    if vers:
+        panel = tk.Frame(dlg, padx=24)
+        panel.pack(fill="x", pady=(0, 4))
+
+        for r, (label, key) in enumerate((("Installer", "installer"),
+                                          ("ikabot", "ikabot"),
+                                          ("ikabot mod", "mod"))):
+            info = vers[key]
+            tk.Label(panel, text=label, anchor="w", width=12).grid(
+                row=r, column=0, sticky="w")
+
+            if not vers.get("online"):
+                colour = GREY
+                text = f"v{info['local']}" if info["local"] else "unknown"
+            elif info["ok"]:
+                colour = GREEN
+                text = f"v{info['local']}" if info["local"] else "up to date"
+            else:
+                colour = RED
+                local = f"v{info['local']}" if info["local"] else "not installed"
+                text = f"{local}  →  v{info['remote']}" if info["remote"] else local
+
+            tk.Label(panel, text=text, anchor="w", fg=colour,
+                     font=("", 9, "bold")).grid(row=r, column=1, sticky="w")
+
+        note = ("Could not reach GitHub - versions not checked"
+                if not vers.get("online") else
+                "Green = up to date    Red = update available")
+        tk.Label(dlg, text=note, anchor="w", fg=GREY, font=("", 8),
+                 padx=24).pack(fill="x", pady=(2, 6))
+
+    tk.Label(dlg, text="Select an action:", justify="left", anchor="w",
+             padx=24).pack(fill="x", pady=(0, 6))
 
     frm = tk.Frame(dlg, padx=24, pady=4)
     frm.pack()
@@ -906,7 +1389,8 @@ def _maintenance_menu() -> str | None:
         row=len(pairs) + 1, column=0, columnspan=2, sticky="ew", pady=8)
 
     # Full-width single buttons
-    for i, label in enumerate(("Download latest versions", "Update", "Status", "Exit")):
+    for i, label in enumerate(("Update Installer", "Update Ikabot",
+                               "Modules", "Status", "Exit")):
         def _h(o=label):
             result[0] = o
             win.destroy()
@@ -921,8 +1405,12 @@ def _maintenance_menu() -> str | None:
 
 
 def maintenance_mode(install_dir: Path) -> None:
+    # Check versions against GitHub when the manager opens
+    print("Checking versions ...")
+    vers = check_versions(install_dir)
+
     while True:
-        choice = _maintenance_menu()
+        choice = _maintenance_menu(vers)
         if choice is None or choice == "Exit":
             return
         elif choice == "Open all instances":
@@ -933,12 +1421,18 @@ def maintenance_mode(install_dir: Path) -> None:
             maint_close_all()
         elif choice == "Close all (PowerShell)":
             maint_close_all_ps()
-        elif choice == "Download latest versions":
-            maint_download_menu(install_dir)
-        elif choice == "Update":
-            maint_update_menu(install_dir)
+        elif choice == "Update Installer":
+            maint_update_installer(install_dir)
+            vers = check_versions(install_dir)      # reflect the new state
+        elif choice == "Update Ikabot":
+            maint_update_ikabot(install_dir)
+            vers = check_versions(install_dir)
+        elif choice == "Modules":
+            maint_modules_menu(install_dir)
         elif choice == "Status":
-            maint_show_status(install_dir)
+            # Status re-runs the check, so the menu behind it updates too
+            vers = check_versions(install_dir)
+            maint_show_status(install_dir, vers)
 
 # ── ikariam folder management ─────────────────────────────────────────────────
 
@@ -1060,9 +1554,9 @@ def main() -> None:
     location_str = ask_string(
         "Step 1 of 4 — Install Location\n\n"
         "Where would you like to install ikabot?\n"
-        "Edit the path below or leave it as the default.\n\n"
+        "Edit the path below or leave it as the default (your Desktop).\n\n"
         "The folder will be created automatically if it does not exist.\n"
-        "Installing to Program Files may require running as Administrator.",
+        "If you choose Program Files you may need to run as Administrator.",
         title="Step 1 of 4 — Install Location",
         initial=default_path,
     )
@@ -1082,13 +1576,15 @@ def main() -> None:
         return
 
     # ── 2. Create folder structure ────────────────────────────────────────────
-    shortcuts_dir = install_dir / "shortcuts"
-    modules_dir   = install_dir / "modules"
-    template_dir  = install_dir / "ikabot template"
-    ikabot_dir    = install_dir / "ikabot"
-    installer_dir = install_dir / "ikabot installer"
+    shortcuts_dir    = install_dir / "shortcuts"
+    modules_dir      = install_dir / "modules"
+    template_dir     = install_dir / "ikabot template"
+    ikabot_dir       = install_dir / "ikabot"
+    installer_dir    = install_dir / "ikabot installer"
+    mod_template_dir = install_dir / MODULES_TEMPLATE
 
-    for d in (shortcuts_dir, modules_dir, template_dir, ikabot_dir, installer_dir):
+    for d in (shortcuts_dir, modules_dir, template_dir, ikabot_dir,
+              installer_dir, mod_template_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     print("Folder structure created.")
@@ -1184,7 +1680,8 @@ def main() -> None:
                 item.unlink()
         try:
             download_zip(url, template_dir, f"ikabot v{remote_ikabot_ver} mod v{remote_mod_ver}")
-            write_version(template_dir, remote_mod_ver)
+            write_version(template_dir, remote_mod_ver,
+                          extra={"ikabot_version": remote_ikabot_ver})
             print(f"ikabot v{remote_ikabot_ver} mod v{remote_mod_ver} downloaded.")
         except Exception as exc:
             show_error(f"Failed to download ikabot:\n\n{exc}")
@@ -1206,20 +1703,23 @@ def main() -> None:
         "Would you like to download and install them now?",
         "Step 2 of 4 — ikabot Modules",
     ):
-        skip_names = ask_csv_overwrite(modules_dir)
+        skip_names = {n.lower() for n in ask_csv_overwrite(modules_dir)}
         try:
             print("Downloading modules from repository ...")
-            count = download_repo_files("modules", modules_dir, skip_names)
-            print("Downloading config examples ...")
-            count += download_repo_files("config-examples", modules_dir, skip_names)
-            print("Removing version suffixes from filenames ...")
-            strip_version_suffixes(modules_dir)
+            count = 0
+            for item in fetch_module_listing():
+                if item["base"].lower() in skip_names:
+                    print(f"  {item['base']}  (skipped — keeping your existing file)")
+                    continue
+                print(f"  {item['name']}")
+                download_module_file(item, mod_template_dir, modules_dir)
+                count += 1
             write_modules_timestamp(modules_dir)
             print(f"Modules installed ({count} files).")
         except Exception as exc:
             show_error(
                 f"Could not download modules:\n\n{exc}\n\n"
-                "You can download them later from Maintenance → Download latest versions → Modules."
+                "You can download them later from Maintenance → Modules."
             )
     else:
         print("Modules skipped.")
@@ -1306,13 +1806,35 @@ def main() -> None:
                 "You can create the shortcuts manually later."
             )
 
-    # Installer shortcut — points to the currently-running exe when frozen
+    # Install a copy of the installer into the install folder, and point the
+    # shortcut at that copy — not at wherever this exe was run from. Otherwise
+    # the shortcut breaks as soon as the downloaded installer is moved,
+    # renamed or deleted.
     if getattr(sys, "frozen", False):
         try:
-            create_shortcut(Path(sys.executable), shortcuts_dir / "ikabot-mod-install.lnk")
+            running_exe   = Path(sys.executable).resolve()
+            installed_exe = (installer_dir / "ikabot-mod-install.exe").resolve()
+
+            # Skip the copy when the installer is already the installed one
+            # (re-running it from the install folder) — Windows will not let
+            # a running exe be overwritten.
+            if str(running_exe).lower() != str(installed_exe).lower():
+                shutil.copy2(running_exe, installed_exe)
+                print(f"  Installer copied to {installed_exe}")
+
+            write_version(installer_dir, INSTALLER_VERSION)
+
+            create_shortcut(installed_exe, shortcuts_dir / "ikabot-mod-install.lnk")
             print("  ikabot-mod-install.lnk")
         except Exception as exc:
-            print(f"  Warning: could not create installer shortcut: {exc}")
+            print(f"  Warning: could not install a copy of the installer: {exc}")
+            # Fall back to a shortcut to the running exe so there is still one
+            try:
+                create_shortcut(Path(sys.executable),
+                                shortcuts_dir / "ikabot-mod-install.lnk")
+                print("  ikabot-mod-install.lnk (pointing at the original file)")
+            except Exception as exc2:
+                print(f"  Warning: could not create installer shortcut: {exc2}")
 
     # Copy open-all-instances.ps1 into shortcuts folder if bundled
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
@@ -1382,4 +1904,33 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise                       # sys.exit() during self-update is not an error
+    except Exception:
+        # Without this the console window closes instantly on any crash and
+        # the error is impossible to read.
+        details = traceback.format_exc()
+        print("\n" + "=" * 60)
+        print("The installer hit an unexpected error:\n")
+        print(details)
+        print("=" * 60)
+        try:
+            show_error(
+                "The installer hit an unexpected error and has to stop.\n\n"
+                f"{details.strip().splitlines()[-1]}\n\n"
+                "The full details are in the console window behind this\n"
+                "message, and have been saved to:\n"
+                f"  {ERROR_LOG}",
+                "ikabot Installer — Unexpected Error",
+            )
+        except Exception:
+            pass
+        try:
+            ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+            ERROR_LOG.write_text(details)
+        except Exception:
+            pass
+        input("Press Enter to close ...")
+        sys.exit(1)

@@ -32,14 +32,32 @@ from ikabot.helpers.lobbyDecaptcha import break_interactive_captcha
 
 class Session:
     def __init__(self, mail: str = None, password: str = None,
-                 blackbox: str = None, lobby_token: str = None):
+                 blackbox: str = None, lobby_token: str = None,
+                 locale: str = None, timezone_id: str = None):
         self.padre = True
         self.logged = False
         self.blackbox = None
         self._vault_blackbox = blackbox      # stored blackbox token from vault (may be None)
         self._vault_lobby_token = lobby_token  # stored lobby token from vault (may be None)
         self.logger = getLogger(__name__)
+        # Upstream #418: the user agent the blackbox API was told about, kept
+        # separate from self.user_agent so a manual payload can change the
+        # browser context without desyncing later token requests.
+        self.api_user_agent = None
+        # Regional context. These must stay consistent with each other and with
+        # the blackbox token request, otherwise Gameforge rejects the login.
+        # A per-account region (from the vault) wins over the global defaults;
+        # gf_lang is always derived from the locale so the two cannot disagree.
+        self.locale = locale or config.IKABOT_LOCALE
+        self.gf_lang = self.locale.split("-")[0]
+        self.timezone_id = timezone_id or config.IKABOT_TIMEZONE_ID
+        self.accept_language = config.build_accept_language(self.locale, self.gf_lang)
         self.requestHistory = deque(maxlen=5)  # keep last 5 requests in history
+        # Every Ikariam response embeds a current actionRequest token. Cache the
+        # most recent one so POSTs don't each need a separate page fetch to scrape
+        # a fresh token (halves POST latency — very visible in the web server).
+        # Invalidated whenever the server reports the token was wrong.
+        self._cached_token = None
         # disable ssl verification warning
         requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
         self.__login(mail=mail, password=password)
@@ -158,7 +176,7 @@ class Session:
                 "Host": "lobby.ikariam.gameforge.com",
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate",
                 "DNT": "1",
                 "Connection": "close",
@@ -193,6 +211,72 @@ class Session:
             return True
         return False
 
+    def __set_manual_blackbox_token(self, manual_value):
+        """Accept a manual blackbox value (upstream #411).
+
+        Takes either a raw token or the full JSON payload the generator page
+        emits.  The JSON carries the browser context the token was minted in —
+        user agent, locale, timezone — and adopting it keeps the login
+        consistent with the token, which is the whole point of #414/#416.
+
+        An explicit environment override always wins: if the user pinned a
+        region in .env, a pasted payload must not silently move them off it.
+        """
+        manual_value = manual_value.strip()
+        token = manual_value
+
+        try:
+            payload = json.loads(manual_value)
+            if not isinstance(payload, dict):
+                raise ValueError("Manual blackbox payload must be an object")
+
+            token = payload.get("blackbox") or payload.get("token")
+            if not token:
+                raise ValueError("Manual blackbox payload is missing blackbox")
+
+            user_agent = payload.get("user_agent") or payload.get("userAgent")
+            if isinstance(user_agent, str) and user_agent:
+                self.user_agent = user_agent
+
+            payload_locale = payload.get("locale")
+            if (not os.environ.get("IKABOT_LOCALE")
+                    and isinstance(payload_locale, str) and payload_locale.strip()):
+                self.locale = payload_locale.strip()
+                if not os.environ.get("IKABOT_GF_LANG"):
+                    self.gf_lang = self.locale.split("-")[0]
+                self.accept_language = config.build_accept_language(
+                    self.locale, self.gf_lang
+                )
+
+            payload_timezone = payload.get("timezone_id") or payload.get("timezoneId")
+            if (not os.environ.get("IKABOT_TIMEZONE_ID")
+                    and isinstance(payload_timezone, str) and payload_timezone.strip()):
+                self.timezone_id = payload_timezone.strip()
+
+        except (json.JSONDecodeError, ValueError):
+            # Not JSON (or not usable JSON) — treat the input as a raw token.
+            token = manual_value
+
+        token = token.strip()
+        self.blackbox = token if token.startswith("tra:") else "tra:" + token
+
+    def __ask_manual_blackbox_payload(self, allow_skip=False):
+        """Prompt for a manual blackbox payload. Returns True if one was given."""
+        print("You can obtain a manual blackbox payload here:")
+        print("https://ikabot-collective.github.io/IkabotAPI/")
+        print("Paste the full JSON payload so Ikabot can reuse the same browser context.")
+        print("Raw blackbox tokens are still accepted for compatibility.")
+        if allow_skip:
+            print("Press Enter to skip this step and use gf-token-production instead.")
+            msg = "Paste the manual blackbox payload or raw blackbox token, or press Enter to skip:"
+        else:
+            msg = "Paste the manual blackbox payload or raw blackbox token (e.g. JVq...):"
+        manual_value = read(msg=msg, empty=allow_skip)
+        if not manual_value or not manual_value.strip():
+            return False
+        self.__set_manual_blackbox_token(manual_value)
+        return True
+
     def __load_new_blackbox_token(self, stored_blackbox: str = None):
         # Fast-path: use a stored token from the vault (no API call needed).
         if stored_blackbox:
@@ -203,6 +287,10 @@ class Session:
             if self.padre:
                 print("Obtaining new blackbox token, please wait...")
             blackbox_token = getNewBlackBoxToken(self)
+            # The API minted the token for api_user_agent; the login must
+            # present that same agent or the two contradict each other.
+            if self.api_user_agent:
+                self.user_agent = self.api_user_agent
             assert any(
                 c.isupper() for c in blackbox_token
             ), "The token must contain uppercase letters."
@@ -220,10 +308,8 @@ class Session:
             print(f'{bcolors.RED}[ERROR]{bcolors.ENDC} Failed to obtain new blackbox token from API: ' + str(e)) # using expired fallback token here so that user can insert cookie manually since blackbox generation failed at this point
             print('Please report this issue to developers on github or the discord server!!')
             print('')
-            print('You will need to obtain the blackbox token MANUALLY:')
-            print('Please obtain the blackbox token at this web location and paste it down below: https://ikabot-collective.github.io/IkabotAPI/')
-            token = read(msg="Paste in the blackbox token (e.g. JVq...):")
-            self.blackbox = 'tra:' + token
+            print('You will need to obtain the manual blackbox payload:')
+            self.__ask_manual_blackbox_payload()
             enter()
 
     def __login(self, retries=0, mail: str = None, password: str = None):
@@ -245,7 +331,9 @@ class Session:
             banner()
 
         #choose one user agent from user_agents list based on provided mail
-        self.user_agent = user_agents[sum(ord(c) for c in self.mail) % len(user_agents)]
+        selected_user_agent = user_agents[sum(ord(c) for c in self.mail) % len(user_agents)]
+        self.api_user_agent = selected_user_agent
+        self.user_agent = selected_user_agent
 
         self.s = requests.Session()
         self.cipher = AESCipher(self.mail, self.password)
@@ -282,7 +370,7 @@ class Session:
                 "Host": "lobby.ikariam.gameforge.com",
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate",
                 "DNT": "1",
                 "Connection": "close",
@@ -308,7 +396,7 @@ class Session:
             self.headers = {
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate",
                 "DNT": "1",
                 "Connection": "close",
@@ -326,7 +414,7 @@ class Session:
             self.headers = {
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate",
                 "Referer": "https://lobby.ikariam.gameforge.com/",
                 "Origin": "https://lobby.ikariam.gameforge.com",
@@ -345,7 +433,7 @@ class Session:
                     "Host": "pixelzirkus.gameforge.com",
                     "User-Agent": self.user_agent,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
+                    "Accept-Language": self.accept_language,
                     "Accept-Encoding": "gzip, deflate",
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Origin": "https://lobby.ikariam.gameforge.com",
@@ -377,7 +465,7 @@ class Session:
                     "Host": "pixelzirkus.gameforge.com",
                     "User-Agent": self.user_agent,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
+                    "Accept-Language": self.accept_language,
                     "Accept-Encoding": "gzip, deflate",
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Origin": "https://lobby.ikariam.gameforge.com",
@@ -410,7 +498,7 @@ class Session:
             # options req (not really needed)
             self.headers = {
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate, br",
                 "Access-Control-Request-Headers": "content-type,tnt-installation-id",
                 "Access-Control-Request-Method": "POST",
@@ -429,7 +517,7 @@ class Session:
             # send creds
             self.headers = {
                 "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Language": self.accept_language,
                 "Accept-Encoding": "gzip, deflate, br",
                 "Access-Control-Request-Headers": "content-type,tnt-installation-id",
                 "Access-Control-Request-Method": "POST",
@@ -447,8 +535,8 @@ class Session:
             data = {
                 "identity": self.mail,
                 "password": self.password,
-                "locale": "en-GB",
-                "gfLang": "en",
+                "locale": self.locale,
+                "gfLang": self.gf_lang,
                 "gameId": platformGameId,
                 "gameEnvironmentId": gameEnvironmentId,
                 "blackbox": self.blackbox,
@@ -480,7 +568,7 @@ class Session:
                 while _captcha_attempts < _captcha_max:
                     self.headers = {
                         "Accept": "*/*",
-                        "Accept-Language": "en-US,en;q=0.5",
+                        "Accept-Language": self.accept_language,
                         "Accept-Encoding": "gzip, deflate, br",
                         "Access-Control-Request-Headers": "content-type,tnt-installation-id",
                         "Access-Control-Request-Method": "POST",
@@ -498,8 +586,8 @@ class Session:
                     data = {
                             "identity": self.mail,
                             "password": self.password,
-                            "locale": "en-GB",
-                            "gfLang": "en",
+                            "locale": self.locale,
+                            "gfLang": self.gf_lang,
                             "gameId": platformGameId,
                             "gameEnvironmentId": gameEnvironmentId,
                             "blackbox": self.blackbox,
@@ -512,7 +600,7 @@ class Session:
                     self.headers = {
                         "accept": "*/*",
                         "accept-encoding": "gzip, deflate, br",
-                        "accept-language": "en-GB,el;q=0.9",
+                        "accept-language": self.accept_language,
                         "dnt": "1",
                         "origin": "https://lobby.ikariam.gameforge.com",
                         "referer": "https://lobby.ikariam.gameforge.com/",
@@ -539,23 +627,23 @@ class Session:
                         pass
 
                     captcha_time = self.s.get(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB".format(
-                            challenge_id
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}".format(
+                            challenge_id, self.locale
                         )
                     ).json()["lastUpdated"]
                     text_image = self.s.get(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB/text?{}".format(
-                            challenge_id, captcha_time
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}/text?{}".format(
+                            challenge_id, self.locale, captcha_time
                         )
                     ).content
                     drag_icons = self.s.get(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB/drag-icons?{}".format(
-                            challenge_id, captcha_time
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}/drag-icons?{}".format(
+                            challenge_id, self.locale, captcha_time
                         )
                     ).content
                     drop_target = self.s.get(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB/drop-target?{}".format(
-                            challenge_id, captcha_time
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}/drop-target?{}".format(
+                            challenge_id, self.locale, captcha_time
                         )
                     ).content
                     data = {}
@@ -605,8 +693,8 @@ class Session:
                                     continue
                             time.sleep(5)
                     captcha_sent = self.s.post(
-                        "https://image-drop-challenge.gameforge.com/challenge/{}/en-GB".format(
-                            challenge_id
+                        "https://image-drop-challenge.gameforge.com/challenge/{}/{}".format(
+                            challenge_id, self.locale
                         ),
                         json=data,
                     ).json()
@@ -614,7 +702,7 @@ class Session:
                     if captcha_sent.get("status") == "solved":
                         self.headers = {
                             "Accept": "*/*",
-                            "Accept-Language": "en-US,en;q=0.5",
+                            "Accept-Language": self.accept_language,
                             "Accept-Encoding": "gzip, deflate, br",
                             "Access-Control-Request-Headers": "content-type,tnt-installation-id",
                             "Access-Control-Request-Method": "POST",
@@ -633,8 +721,8 @@ class Session:
                         data = {
                             "identity": self.mail,
                             "password": self.password,
-                            "locale": "en-GB",
-                            "gfLang": "en",
+                            "locale": self.locale,
+                            "gfLang": self.gf_lang,
                             "gameId": platformGameId,
                             "gameEnvironmentId": gameEnvironmentId,
                             "blackbox": self.blackbox,
@@ -666,6 +754,25 @@ class Session:
             if 'token' not in r.text:
                 print("Failed to log in...")
                 print(f"Expected to get token in response to login request but instead got code {r.status_code} and body {r.text}")
+                # Gameforge rejected the generated blackbox token (or presented a
+                # challenge). Offer a manual blackbox retry before falling back to
+                # the gf-token-production cookie method (upstream #417/#419).
+                print("")
+                print("You can retry with a MANUAL blackbox payload first.")
+                if self.__ask_manual_blackbox_payload(allow_skip=True):
+                    # A JSON payload may have changed the user agent, locale or
+                    # timezone, so rebuild the parts of the request that carry
+                    # them before retrying.
+                    data["blackbox"] = self.blackbox
+                    data["locale"] = self.locale
+                    data["gfLang"] = self.gf_lang
+                    self.s.headers.update({"User-Agent": self.user_agent,
+                                           "Accept-Language": self.accept_language})
+                    r = self.s.post(
+                        "https://spark-web.gameforge.com/api/v2/authProviders/mauth/sessions", json=data
+                    )
+
+            if 'token' not in r.text:
                 print(
                     "Log into the lobby via browser and then press CTRL + SHIFT + J to open up the javascript console"
                 )
@@ -716,9 +823,9 @@ class Session:
             "Host": "lobby.ikariam.gameforge.com",
             "User-Agent": self.user_agent,
             "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Language": self.accept_language,
             "Accept-Encoding": "gzip, deflate",
-            "Referer": "https://lobby.ikariam.gameforge.com/es_AR/hub",
+            "Referer": "https://lobby.ikariam.gameforge.com/{}/hub".format(self.locale.replace("-", "_")),
             "Authorization": "Bearer {}".format(self.s.cookies["gf-token-production"]),
             "DNT": "1",
             "Connection": "close",
@@ -736,9 +843,9 @@ class Session:
             "Host": "lobby.ikariam.gameforge.com",
             "User-Agent": self.user_agent,
             "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Language": self.accept_language,
             "Accept-Encoding": "gzip, deflate",
-            "Referer": "https://lobby.ikariam.gameforge.com/es_AR/hub",
+            "Referer": "https://lobby.ikariam.gameforge.com/{}/hub".format(self.locale.replace("-", "_")),
             "Authorization": "Bearer {}".format(self.s.cookies["gf-token-production"]),
             "DNT": "1",
             "Connection": "close",
@@ -820,7 +927,7 @@ class Session:
             "Host": self.host,
             "User-Agent": self.user_agent,
             "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Language": self.accept_language,
             "Accept-Encoding": "gzip, deflate, br",
             "Referer": "https://{}".format(self.host),
             "X-Requested-With": "XMLHttpRequest",
@@ -878,11 +985,11 @@ class Session:
                 "scheme": "https",
                 "accept": "application/json",
                 "accept-encoding": "gzip, deflate, br",
-                "accept-language": "en-US,en;q=0.9",
+                "accept-language": self.accept_language,
                 "authorization": "Bearer " + self.s.cookies["gf-token-production"],
                 "content-type": "application/json",
                 "origin": "https://lobby.ikariam.gameforge.com",
-                "referer": "https://lobby.ikariam.gameforge.com/en_GB/accounts",
+                "referer": "https://lobby.ikariam.gameforge.com/{}/accounts".format(self.locale.replace("-", "_")),
                 "user-agent": self.user_agent,
             }
             self.s.headers.clear()
@@ -1100,9 +1207,10 @@ class Session:
         else:
             obj.proxies.update({})
 
-    def __checkCookie(self):
+    def __checkCookie(self, sessionData=None):
         self.logger.info("__checkCookie()")
-        sessionData = self.getSessionData()
+        if sessionData is None:
+            sessionData = self.getSessionData()
 
         try:
             if self.s.cookies["PHPSESSID"] != sessionData["cookies"]["PHPSESSID"]:
@@ -1113,18 +1221,43 @@ class Session:
             except Exception:
                 self.__sessionExpired()
 
+    def __scrape_token(self, text):
+        """Pull the current actionRequest token out of a response and cache it.
+        Called after every get()/post() so subsequent POSTs can reuse it
+        instead of fetching a fresh page just to read the token."""
+        try:
+            # Cheap substring guard first: skips the regex entirely on binary
+            # asset responses (images/fonts) proxied by the web server, which
+            # never contain the token.
+            if not text or "actionRequest" not in text:
+                return
+            _m = re.search(r'actionRequest"?:\s*"(.*?)"', text)
+            if _m is not None:
+                self._cached_token = _m.group(1)
+        except Exception:
+            pass
+
     def __token(self):
-        """Generates a valid actionRequest token from the session
+        """Return a valid actionRequest token.
+
+        Uses the token scraped from the most recent response when available
+        (no network cost). Only falls back to fetching a page when there is no
+        cached token yet. If the cached token turns out to be stale the server
+        replies TXT_ERROR_WRONG_REQUEST_ID, which clears the cache and forces a
+        fresh fetch on the retry — so the cache is self-correcting.
         Returns
         -------
         token : str
             a string representing a valid actionRequest token
         """
+        if self._cached_token:
+            return self._cached_token
         html = self.get()
         _m = re.search(r'actionRequest"?:\s*"(.*?)"', html)
         if _m is None:
             raise RuntimeError("Could not find actionRequest token in page (unexpected server response)")
-        return _m.group(1)
+        self._cached_token = _m.group(1)
+        return self._cached_token
 
     def get(
         self, url='', params={}, ignoreExpire=False, noIndex=False, fullResponse=False, noQuery=False, **kwargs
@@ -1148,8 +1281,13 @@ class Session:
         html : str
             response from the server
         """
-        self.__checkCookie()
-        self.__update_proxy()
+        # Read the (encrypted) session file once per request and share it
+        # between the cookie check and the proxy update, instead of decrypting
+        # it twice. This halves the per-request session-data overhead, which
+        # adds up under the web server's many proxied requests.
+        _sessionData = self.getSessionData()
+        self.__checkCookie(sessionData=_sessionData)
+        self.__update_proxy(sessionData=_sessionData)
 
         if noIndex:
             url = self.urlBase.replace("index.php", "") + url
@@ -1188,10 +1326,19 @@ class Session:
                     if 'lobby.ikariam.gameforge.com' in location:
                         raise AssertionError("Redirect to lobby detected")
                 
-                # modifica processi 404
+                # Upstream #406: only a 404 from Ikariam itself means the
+                # session died. A 404 from a local or external route (the web
+                # server, ikaEasy) must not trigger a re-login loop.
                 if response.status_code == 404:
-                    self.logger.warning(f"404 Not Found received for URL: {url}")
-                    raise AssertionError("404 Not Found - Session likely expired")
+                    if self.host in url:
+                        self.logger.error(f"404 Not Found received from Ikariam: {url}")
+                        # Only expire the session if the main entry point failed.
+                        if "index.php" in url:
+                            raise AssertionError("404 Not Found on index.php - Session likely expired")
+                    else:
+                        # A local web-server or external 404 must not re-login.
+                        self.logger.warning(f"Local/External 404 detected at: {url}. Ignoring.")
+                        return response if fullResponse else html
 
                 if self.__test_server_maintenace(html):
                     self.logger.warning("Ikariam world backup is in progress, waiting 10 mins.")
@@ -1199,6 +1346,9 @@ class Session:
                     raise requests.exceptions.ConnectionError  # repeat after 10 minutes
                 if ignoreExpire is False:
                     assert self.__isExpired(html) is False
+                # Cache the actionRequest token embedded in this page so the
+                # next POST can reuse it without a separate token-fetch request.
+                self.__scrape_token(html)
                 # --- update developer runtime info ---
                 try:
                     self.dev_api_host = self.host
@@ -1223,7 +1373,7 @@ class Session:
                 time.sleep(ConnectionError_wait)
 
     def post(
-        self, url='', payloadPost={}, params={}, ignoreExpire=False, noIndex=False, fullResponse = False, noQuery=False, **kwargs
+        self, url='', payloadPost={}, params={}, ignoreExpire=False, noIndex=False, fullResponse = False, noQuery=False, _wrid_retries=0, **kwargs
     ):
         """Sends post request to ikariam
         Parameters
@@ -1247,8 +1397,10 @@ class Session:
         url_original = url
         payloadPost_original = payloadPost
         params_original = params
-        self.__checkCookie()
-        self.__update_proxy()
+        # One session-file decrypt shared between both checks (see get()).
+        _sessionData = self.getSessionData()
+        self.__checkCookie(sessionData=_sessionData)
+        self.__update_proxy(sessionData=_sessionData)
 
         # add the request id
         token = self.__token()
@@ -1300,11 +1452,16 @@ class Session:
                     if 'lobby.ikariam.gameforge.com' in location:
                         raise AssertionError("Redirect to lobby detected")
                 
-                #  modifica processi 404
+                # Upstream #406: see the matching comment in get().
                 if response.status_code == 404:
-                    self.logger.error(f"404 Not Found received for POST URL: {url}")
-                    self.logger.error(f"HTML received: {response.text[:200]}")
-                    raise AssertionError("404 Not Found - Session likely expired")
+                    # A failed POST to Ikariam really is a session problem.
+                    if self.host in url:
+                        self.logger.error(f"404 Not Found received from Ikariam POST: {url}")
+                        raise AssertionError("404 Not Found - Session likely expired")
+                    else:
+                        # Probably a request to the local web server's invalid route.
+                        self.logger.warning(f"Local 404 detected on POST: {url}. Ignoring.")
+                        return response if fullResponse else resp
 
                 if self.__test_server_maintenace(resp):
                     self.logger.warning("Ikariam world backup is in progress, waiting 10 mins.")
@@ -1313,7 +1470,41 @@ class Session:
                 if ignoreExpire is False:
                     assert self.__isExpired(resp) is False
                 if "TXT_ERROR_WRONG_REQUEST_ID" in resp:
-                    self.logger.warning("got TXT_ERROR_WRONG_REQUEST_ID, bad actionRequest")
+                    # The actionRequest token was stale — another concurrent
+                    # request (a background task, or the web-server browser)
+                    # rotated it before this POST landed. The server rejected
+                    # this request without executing it, so retrying with a
+                    # fresh token is safe. Bound the retries with a small
+                    # backoff so sustained token contention can't spiral into
+                    # unbounded recursion / a tight request loop.
+                    # Drop the cached token so the retry's __token() fetches a
+                    # fresh one (otherwise it would reuse the same stale token
+                    # and fail every retry).
+                    self._cached_token = None
+                    _WRID_MAX_RETRIES = 5
+                    if _wrid_retries >= _WRID_MAX_RETRIES:
+                        self.logger.warning(
+                            "got TXT_ERROR_WRONG_REQUEST_ID %d times; giving up on this "
+                            "request (actionRequest token contention — another task or the "
+                            "web-server browser keeps rotating the token)",
+                            _wrid_retries,
+                        )
+                        return resp if not fullResponse else response
+                    # Routine, self-healing retry — keep it at debug so it
+                    # doesn't spam the console during heavy web-server use.
+                    self.logger.debug(
+                        "got TXT_ERROR_WRONG_REQUEST_ID, refreshing token and retrying "
+                        "(attempt %d/%d)",
+                        _wrid_retries + 1, _WRID_MAX_RETRIES,
+                    )
+                    # The recursive retry re-fetches a fresh token via __token(),
+                    # which is itself a network round-trip, so the first few
+                    # retries need NO extra sleep — adding one just stacks latency
+                    # onto every contended POST (very visible in the web server,
+                    # where a page change makes many POSTs). Only start a small
+                    # backoff on the later retries as a tight-loop safety valve.
+                    if _wrid_retries >= 2:
+                        time.sleep(0.2 * (_wrid_retries - 1))  # 0.2s, 0.4s on retries 3-4
                     return self.post(
                         url=url_original,
                         payloadPost=payloadPost_original,
@@ -1322,8 +1513,12 @@ class Session:
                         noIndex=noIndex,
                         fullResponse=fullResponse,
                         noQuery=noQuery,
+                        _wrid_retries=_wrid_retries + 1,
                         **kwargs,
                     )
+                # Successful POST — cache the rotated actionRequest token that
+                # the server returned so the next POST can reuse it.
+                self.__scrape_token(resp)
                 # --- update developer runtime info ---
                 try:
                     self.dev_api_host = self.host
@@ -1333,7 +1528,7 @@ class Session:
                     self.dev_gf_token = cookies.get("gf-token-production")
                 except Exception:
                     self.logger.debug("Failed to capture dev cookie snapshot", exc_info=True)
-                    
+
                 return resp if not fullResponse else response
             except AssertionError:
                 self.__sessionExpired()

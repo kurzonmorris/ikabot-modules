@@ -1,7 +1,128 @@
-Version: 1.3.0
+Version: 2.1.2
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 2.1.2
+-----------------
+- Fixed the manager screen failing to open with
+  'bad screen distance "12 4"'. The new version panel passed a pair of
+  padding values to widgets that only accept a single value - valid
+  for pack() and grid(), but not on the widget itself.
+
+Changes in 2.1.1
+-----------------
+- Crashes are no longer invisible. Any unexpected error now prints the
+  full details to the console, shows them in a dialog, saves them to
+  AppData\Local\ikabot\last_error.txt, and waits for a keypress
+  instead of the window vanishing before it can be read.
+- Fixed a crash when opening Maintenance if version.json held a
+  number instead of a string - the version parser now accepts any
+  value rather than raising
+- The version check can no longer stop the manager from opening. A
+  GitHub rate-limit reply, an unreadable response or a malformed
+  release entry are all reported as "could not check" instead of
+  ending the program.
+
+Changes in 2.1.0
+-----------------
+- The manager screen now shows the installed Installer, ikabot and
+  ikabot mod versions, checked against GitHub each time it opens.
+  Versions are green when up to date and red when an update is
+  available, showing what you have and what is on offer, e.g.
+  v1.6.9 -> v1.7.5. If GitHub cannot be reached the versions are
+  shown in grey rather than blocking the manager from opening.
+- Status re-runs that check, so the manager screen behind it updates
+  too, and Status now reports whether each component is current
+- The check also re-runs after Update Installer and Update Ikabot, so
+  the colours turn green as soon as an update completes
+- Fixed "Update Installer" being unable to update the installer. It
+  wiped the folder it was running from and then extracted a new
+  ikabot-mod-install.exe over itself, which Windows does not allow
+  while the exe is running. The new version is now downloaded to a
+  staging folder first, and when it would replace the running exe a
+  small helper waits for this one to close, swaps it in, and starts
+  the new version automatically.
+- Update Installer no longer deletes anything until it knows the
+  download succeeded, so a failed update can no longer leave the
+  installer folder empty
+- First-time install now places a copy of the installer in the
+  'ikabot installer' folder and points the shortcut at that copy.
+  Previously the shortcut pointed at wherever the installer had been
+  run from, so it broke as soon as that download was moved or deleted.
+- Downloads now fall back to Windows' built-in curl if Python's own
+  downloader fails. On some machines Python's downloader returns a
+  truncated file while curl fetches the same URL perfectly, which
+  showed up as "not a zip file" no matter how many times you retried.
+
+Changes in 2.0.1
+-----------------
+- Fixed "File is not a zip file" when downloading ikabot. A dropped
+  connection left a partly-written file that was then extracted as if
+  it were complete. Downloads are now checked against the expected
+  size and confirmed to be a real zip before extracting.
+- Failed downloads are retried automatically (3 attempts)
+- Download progress is now shown (MB downloaded and percentage)
+- Clearer errors: an incomplete download, a damaged zip, and a server
+  returning a web page instead of a file are now reported separately
+- Open all instances only launches numbered instance shortcuts, and
+  removes the retired ikabot_manager shortcut if it is still present
+- Close all (PowerShell) now closes the PowerShell windows too, not
+  just the ikabot processes running inside them
+- Build scripts tidied to one per target:
+    "installer build.bat"  builds the installer
+    "ikabot build.bat"     builds ikabot itself
+  The old ikabot build script was removed - it named the zip
+  ikabot_v{mod version}.zip, which the installer cannot find, and
+  nested the files inside an extra ikabot\ folder. The replacement
+  reads both versions from ikabot\config.py and names the zip
+  ikabot-v{version}-mod-v{mod version}.zip with ikabot.exe and
+  _internal at the zip root.
+- Both build scripts now write their zip into the releases folder,
+  run from any working directory, and auto-confirm PyInstaller's
+  "output directory will be REMOVED - continue?" prompt so a build
+  never stops waiting for a keypress
+- Installer is now built as a single self-contained exe, so it can no
+  longer fail with "No module named 'encodings'" if separated from
+  its _internal folder
+
+Changes in 2.0.0
+-----------------
+- Default install location is now your Desktop (Desktop\ikabot)
+- Maintenance menu rebuilt: Update Installer, Update Ikabot, Modules,
+  Status — the old Download/Update submenus are gone
+- Update Installer / Update Ikabot compare versions first and ask
+  "are you sure?" when the GitHub version matches what is installed
+- Update Ikabot is streamlined: download, instance count question,
+  sync — no shortcut steps
+- New Modules screen: lists every module and extra file with your
+  installed version, the GitHub version, and a per-file Update button,
+  plus an Update All button (asks whether to include .csv files)
+- Module downloads go to a new 'Ikabot Modules template' folder with
+  version numbers kept in filenames, then copy to modules/ without
+  the version suffix — old versions cleaned from both folders
+- 'Open all (PowerShell)' fixed: each instance now genuinely runs
+  inside its own PowerShell window (was opening cmd-style consoles)
+- open-all-instances.ps1 updated to launch instances in PowerShell
+  windows too
+- Status screen expanded: install folder, ikabot version, mod version,
+  installer version, instance count, .py module count, and a full list
+  of installed modules with their version numbers
+- ikabot version now stored alongside mod version in version.json
+
+Changes in 1.4.0
+-----------------
+- Module downloads now ask before overwriting bulkdistribution.csv
+  (declining keeps your existing file and its saved settings)
+- CSV files are never renamed by the version-suffix stripper
+- Maintenance menu redesigned with two columns: Standard (cmd) and
+  PowerShell open/close all instances
+- Added open-all-instances.ps1 — PowerShell script that opens all
+  numbered shortcuts in order; copied to the shortcuts folder on install
+- Fixed mod version not being detected (now parsed from the release
+  asset name instead of the download URL)
+- build.bat uses 'python -m PyInstaller' so it works without
+  pyinstaller on PATH
 
 Changes in 1.3.0
 -----------------
