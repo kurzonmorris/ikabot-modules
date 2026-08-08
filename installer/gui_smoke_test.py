@@ -45,10 +45,21 @@ print("other dialogs:")
 t("ask_choice",        lambda: inst.ask_choice("T", "msg", ["A", "B"]))
 t("ask_count_or_skip", lambda: inst.ask_count_or_skip("T", "msg", "5"))
 
-d = Path(tempfile.mkdtemp()); (d / "modules").mkdir()
-listing = [{"name": f"mod_v1.{i}.py", "url": "u", "base": f"mod{i}.py", "ver": f"1.{i}"} for i in range(4)]
-listing.append({"name": "bulkdistribution.csv", "url": "u", "base": "bulkdistribution.csv", "ver": ""})
-t("modules dialog", lambda: inst._modules_dialog(listing, d))
+d = Path(tempfile.mkdtemp())
+(d / "modules").mkdir()
+(d / inst.MODULES_TEMPLATE).mkdir()
+# installed copies: one current, one behind, one absent -> green / red / red
+(d / inst.MODULES_TEMPLATE / "current_v2.1.9.py").write_text("")
+(d / inst.MODULES_TEMPLATE / "behind_v2.1.3.py").write_text("")
+(d / "modules" / "current.py").write_text("")
+(d / "modules" / "behind.py").write_text("")
+listing = [
+    {"name": "current_v2.1.9.py", "url": "u", "base": "current.py", "ver": "2.1.9"},
+    {"name": "behind_v2.1.9.py",  "url": "u", "base": "behind.py",  "ver": "2.1.9"},
+    {"name": "missing_v1.0.0.py", "url": "u", "base": "missing.py", "ver": "1.0.0"},
+    {"name": "bulkdistribution.csv", "url": "u", "base": "bulkdistribution.csv", "ver": ""},
+]
+t("modules dialog (green/red/red/grey)", lambda: inst._modules_dialog(listing, d))
 t("modules dialog (empty)", lambda: inst._modules_dialog([], d))
 
 print(f"\n{ok} passed, {fail} failed")
