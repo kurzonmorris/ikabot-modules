@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 import csv
 import glob
@@ -142,6 +142,23 @@ def _safe(value):
 
 
 def _account_suffix(session):
+    """Per-instance filename suffix: server + world + player.
+
+    The world number must be part of this.  A player name is only unique
+    within a world, so `en_Bob` collided when the same name existed on two
+    worlds of the same community — both instances then shared one queue and
+    one set of locks.  Mirrors ikabot's own log naming (server + mundo).
+    """
+    world = _safe(getattr(session, "mundo", "") or "")
+    if not world:
+        # No world on the session (shouldn't happen post-login): fall back to
+        # the legacy suffix rather than inventing a new namespace.
+        return _legacy_account_suffix(session)
+    return f"{_safe(session.servidor)}{world}_{_safe(session.username)}"
+
+
+def _legacy_account_suffix(session):
+    """Pre-2.2.1 suffix, without the world. Only used for migration."""
     return f"{_safe(session.servidor)}_{_safe(session.username)}"
 
 
@@ -178,6 +195,64 @@ def stop_flag_path(session):
         os.path.expanduser("~"),
         f".ikabot_construction_stop_{_account_suffix(session)}",
     )
+
+
+def _legacy_path(session, template):
+    return os.path.join(
+        os.path.expanduser("~"),
+        template.format(suffix=_legacy_account_suffix(session)),
+    )
+
+
+def migrate_legacy_account_files(session):
+    """Rename pre-2.2.1 (world-less) queue files to the world-scoped names.
+
+    Returns False if migration is unsafe — specifically when a worker started
+    by an older build still holds the legacy worker lock, since moving the CSV
+    out from under a running worker would break it.
+    """
+    if _account_suffix(session) == _legacy_account_suffix(session):
+        return True
+
+    moves = [
+        (_legacy_path(session, ".ikabot_construction_{suffix}.csv"),
+         csv_path(session)),
+        (_legacy_path(session, ".ikabot_construction_{suffix}.schema"),
+         schema_sidecar_path(session)),
+    ]
+    if not any(os.path.exists(old) for old, _ in moves):
+        return True
+
+    legacy_worker_lock = _legacy_path(
+        session, ".ikabot_construction_worker_{suffix}.lock"
+    )
+    if _worker_lock_is_fresh(legacy_worker_lock):
+        print(f"{bcolors.RED}A construction worker from an older version is "
+              f"still running for this account.{bcolors.ENDC}")
+        print("  Stop it first (press (o) in that instance), then reopen this "
+              "menu to finish upgrading.")
+        print(f"  Lock file: {legacy_worker_lock}")
+        return False
+
+    for old, new in moves:
+        if os.path.exists(old) and not os.path.exists(new):
+            try:
+                os.replace(old, new)
+                print(f"  Migrated {os.path.basename(old)} -> "
+                      f"{os.path.basename(new)}")
+            except OSError as exc:
+                print(f"{bcolors.RED}Could not migrate {old}: {exc}{bcolors.ENDC}")
+                return False
+    # Transient files are simply recreated under the new name; drop the
+    # leftovers so they don't linger in the home directory forever.
+    for template in (".ikabot_construction_{suffix}.lock",
+                     ".ikabot_construction_worker_{suffix}.lock",
+                     ".ikabot_construction_stop_{suffix}"):
+        try:
+            os.remove(_legacy_path(session, template))
+        except OSError:
+            pass
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1947,15 +2022,70 @@ def _get_notification_config(telegram_enabled, event):
 # Worker status helpers
 # ---------------------------------------------------------------------------
 
-def _is_worker_running(session):
-    """True if a fresh (non-stale) worker lock exists for this account."""
-    wlock = worker_lock_path(session)
+def _worker_lock_is_fresh(wlock):
+    """True if *wlock* is held by a live process and recently heartbeaten."""
     try:
         with open(wlock, "r") as f:
             data = json.load(f)
-    except (IOError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return False
-    return time.time() - data.get("timestamp", 0) <= WORKER_LOCK_STALE_SECONDS
+    try:
+        held_at = float(data.get("timestamp", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if time.time() - held_at > WORKER_LOCK_STALE_SECONDS:
+        return False
+    # A crashed worker's lock is dead immediately — don't report RUNNING (or
+    # block a restart) for the whole staleness window.
+    try:
+        pid = int(data.get("pid"))
+    except (TypeError, ValueError):
+        return True  # no usable pid; trust the timestamp
+    try:
+        return psutil.pid_exists(pid)
+    except Exception:
+        return True
+
+
+def _is_worker_running(session):
+    """True if a fresh (non-stale) worker lock exists for this account."""
+    return _worker_lock_is_fresh(worker_lock_path(session))
+
+
+def _worker_lock_heartbeat(wlock, token):
+    """Refresh the worker lock's timestamp so it never looks stale while alive.
+
+    The worker sleeps for hours between build timers, so without this the lock
+    aged past WORKER_LOCK_STALE_SECONDS and a second worker could be started
+    for the same account — two workers issuing duplicate builds and shipments.
+    """
+    try:
+        with open(wlock, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+
+    if data is not None:
+        owned = (data.get("token") == token
+                 or data.get("pid") == os.getpid())
+        if not owned:
+            return  # another worker owns it now; don't stomp on it
+
+    payload = json.dumps({
+        "pid": os.getpid(),
+        "timestamp": time.time(),
+        "token": token,
+    })
+    tmp = f"{wlock}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(payload)
+        os.replace(tmp, wlock)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _worker_status_line(session):
@@ -2029,6 +2159,11 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
     interactive = predetermined_input is None or len(predetermined_input) == 0
+
+    if not migrate_legacy_account_files(session):
+        enter()
+        event.set()
+        return
 
     if not enforce_schema_or_abort(session):
         enter()
@@ -2745,8 +2880,12 @@ def reconcile_on_startup(session, city_state):
 # scheduler_loop  (plan §7)
 # ---------------------------------------------------------------------------
 
-def scheduler_loop(session, stop_event):
+def scheduler_loop(session, stop_event, worker_token=None):
     city_state = {}
+    # Stamp ownership with this process before the (possibly slow) startup
+    # reconcile, so the lock reflects the live worker from the outset.
+    if worker_token is not None:
+        _worker_lock_heartbeat(worker_lock_path(session), worker_token)
     try:
         reconcile_on_startup(session, city_state)
     except Exception:
@@ -2761,6 +2900,11 @@ def scheduler_loop(session, stop_event):
         if os.path.exists(stop_flag_path(session)):
             stop_event.set()
             break
+
+        # Prove we're alive before doing any work: the lock must never look
+        # stale while this process is running, or a second worker could start.
+        if worker_token is not None:
+            _worker_lock_heartbeat(worker_lock_path(session), worker_token)
 
         now = int(time.time())
         drain_shortage_events(session, city_state, now)
@@ -2832,7 +2976,7 @@ def scheduler_loop(session, stop_event):
         pass
 
     # Release worker lock.
-    _lock_release(worker_lock_path(session))
+    _lock_release(worker_lock_path(session), worker_token)
 
 
 # ---------------------------------------------------------------------------
@@ -2860,7 +3004,10 @@ def _activate_worker(session, event):
 
     # Refuse if another worker for this account is already running.
     wlock = worker_lock_path(session)
-    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
+    worker_token = _new_lock_token()
+    if not _lock_acquire(wlock, timeout=1,
+                         stale_after=WORKER_LOCK_STALE_SECONDS,
+                         token=worker_token):
         print(
             f"  {bcolors.RED}Another construction worker is already running "
             f"for this account.{bcolors.ENDC}"
@@ -2894,7 +3041,7 @@ def _activate_worker(session, event):
 
     stop_event = threading.Event()
     try:
-        scheduler_loop(session, stop_event)
+        scheduler_loop(session, stop_event, worker_token=worker_token)
     except Exception:
         try:
             sendToBot(
@@ -2906,7 +3053,7 @@ def _activate_worker(session, event):
     finally:
         # scheduler_loop already releases the worker lock on graceful exit;
         # this is a defensive safety net if it crashed before that.
-        _lock_release(wlock)
+        _lock_release(wlock, worker_token)
         try:
             session.logout()
         except Exception:
