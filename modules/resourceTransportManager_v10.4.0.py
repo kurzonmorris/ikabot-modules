@@ -27,6 +27,13 @@ from ikabot.helpers.naval import getAvailableShips, getAvailableFreighters
 from ikabot.helpers.varios import addThousandSeparator, getDateTime
 from ikabot.helpers.getJson import getWorldMapIslands
 
+try:
+    # ikabot already depends on psutil (see ikabot/helpers/process.py).
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+
 # ---------------------------------------------------------------------------
 #  Resource Reservation System — optional dependency
 # ---------------------------------------------------------------------------
@@ -5014,16 +5021,29 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
 def _is_pid_alive(pid):
     """Check whether a process is running WITHOUT touching it.
-    CRITICAL: os.kill(pid, 0) must never be used on Windows — there any
-    signal other than CTRL_C/CTRL_BREAK calls TerminateProcess and KILLS
-    the target process. On unexpected errors we assume alive (never steal
-    a lock we are not sure about)."""
+
+    CRITICAL: os.kill(pid, 0) must never be used here. Per the os.kill docs,
+    on Windows any sig other than CTRL_C_EVENT/CTRL_BREAK_EVENT "will cause
+    the process to be unconditionally killed by the TerminateProcess API" —
+    so the liveness probe KILLED the lock holder and then returned without
+    raising, leaving the caller to conclude it was still alive. Every
+    contended lock check could take out a running worker.
+
+    psutil.pid_exists is the portable query-only answer and matches
+    constructionManager. The ctypes/os.kill paths below are only a fallback
+    for the case where psutil cannot be imported. On unexpected errors we
+    assume alive, so a lock is never stolen from a holder we are unsure of."""
     try:
         pid = int(pid)
     except (TypeError, ValueError):
         return False
     if pid <= 0:
         return False
+    if _HAS_PSUTIL:
+        try:
+            return psutil.pid_exists(pid)
+        except Exception:
+            return True   # can't tell — assume alive, fall back to staleness
     if os.name == "nt":
         try:
             import ctypes
