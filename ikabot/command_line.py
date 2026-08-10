@@ -531,19 +531,43 @@ def _run_autostart_child(target, session, event, stdin_fd, predetermined_input):
     target(session, event, stdin_fd, predetermined_input)
 
 
-def _autostart_targets(session):
-    """Return [(module_name, function)] for this account's auto-start modules.
+def _run_autostart_external_child(path, session, event, stdin_fd,
+                                  predetermined_input):
+    """Child entry point for an auto-started EXTERNAL module.
 
-    Names are resolved against the menu's own action table rather than a
-    second hand-maintained registry, so the two can never drift apart.
-    Modules whose name no longer resolves are skipped.
+    Module level for the same reason as _run_autostart_child: Windows spawns
+    rather than forks, so the target must be picklable. External modules are
+    launched by file path — the module object itself is loaded from disk and
+    is not importable by name in the child.
+    """
+    config.autostart_active = True
+    _run_external_module_child(path, session, event, stdin_fd,
+                               predetermined_input)
+
+
+def _autostart_targets(session):
+    """Return [(module_name, function, path)] for this account's auto-start
+    modules. Exactly one of function/path is set: built-in modules resolve to
+    a function, external ones to their file path.
+
+    Built-in names are resolved against the menu's own action table rather
+    than a second hand-maintained registry, so the two can never drift apart.
+    External modules are matched on the MODULE_NAME they declare, which is
+    the same name they save their settings under. Modules whose name no
+    longer resolves either way are skipped.
     """
     by_name = {fn.__name__: fn for fn in _menu_actions().values()}
+    try:
+        external = {name: path for name, path in get_external_modules(session)}
+    except Exception:
+        external = {}   # a broken modules directory must not block login
     targets = []
     for module_name in list_autostart_modules(session):
         fn = by_name.get(module_name)
         if fn is not None:
-            targets.append((module_name, fn))
+            targets.append((module_name, fn, None))
+        elif module_name in external:
+            targets.append((module_name, None, external[module_name]))
     return targets
 
 
@@ -560,18 +584,24 @@ def _launch_autostart_modules(session, process_list, announce=True):
 
     running = {p["action"] for p in process_list}
     started = []
-    for module_name, fn in _autostart_targets(session):
+    for module_name, fn, path in _autostart_targets(session):
         if module_name in running:
             if announce:
                 print(f"  {module_name} — already running, skipped")
             continue
         try:
             event = multiprocessing.Event()
+            # Empty predetermined_input in both cases: an auto-started module
+            # must never consume input recorded for the interactive menu.
+            if path is not None:
+                target = _run_autostart_external_child
+                args = (path, session, event, sys.stdin.fileno(), [])
+            else:
+                target = _run_autostart_child
+                args = (fn, session, event, sys.stdin.fileno(), [])
             process = multiprocessing.Process(
-                target=_run_autostart_child,
-                # Empty predetermined_input: an auto-started module must never
-                # consume input recorded for the interactive menu.
-                args=(fn, session, event, sys.stdin.fileno(), []),
+                target=target,
+                args=args,
                 name=module_name,
             )
             process.start()
