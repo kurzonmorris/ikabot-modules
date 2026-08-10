@@ -1234,13 +1234,47 @@ def _flatten_json_payload(raw):
     return fragments
 
 
-def _current_city_id(session):
+_CITY_ID_CACHE = {"value": None, "at": 0.0, "how": ""}
+
+
+def _current_city_id(session, force=False):
+    """A usable city id, however it can be got.
+
+    Fleet movements and the advisor tabs are all addressed through one, so
+    failing to find it silently disables both. Cached because several fetchers
+    need it on every poll.
+    """
+    now = time.time()
+    if not force and _CITY_ID_CACHE["value"] and now - _CITY_ID_CACHE["at"] < 600:
+        return _CITY_ID_CACHE["value"]
+
+    city_id = None
+    how = ""
+
     try:
-        home = session.get("view=city")
+        from ikabot.helpers.varios import getCurrentCityId
+
+        city_id = str(getCurrentCityId(session)).strip() or None
+        how = "getCurrentCityId"
     except Exception:
-        return None
-    match = re.search(r"currentCityId:\s*(\d+),", str(home))
-    return match.group(1) if match else None
+        logger.debug("getCurrentCityId failed", exc_info=True)
+
+    if city_id is None:
+        # That helper reads index.php bare, which some servers 404. The account's
+        # own city list does not depend on the home page at all.
+        try:
+            from ikabot.helpers.pedirInfo import getIdsOfCities
+
+            ids, _ = getIdsOfCities(session)
+            if ids:
+                city_id = str(ids[0])
+                how = "getIdsOfCities"
+        except Exception:
+            logger.warning("Could not determine a city id", exc_info=True)
+
+    if city_id:
+        _CITY_ID_CACHE.update({"value": city_id, "at": now, "how": how})
+    return city_id
 
 
 def _fetch_message_payloads(session):
@@ -1866,12 +1900,24 @@ def _fetch_town_news(session):
     city_id = _current_city_id(session)
     payloads = []
     for url in _advisor_urls("tradeAdvisor", city_id):
-        try:
-            data = session.get(url)
-        except Exception:
+        raw = None
+        # The advisor tabs are filled by an ajax POST; a GET of the same url
+        # returns the page shell without the event table in it.
+        if "ajax=1" in url:
+            try:
+                raw = session.post(url)
+            except Exception:
+                raw = None
+        if not raw:
+            try:
+                raw = session.get(url)
+            except Exception:
+                raw = None
+        if not raw:
             continue
-        if data:
-            payloads.append(str(data))
+        payloads.append(str(raw))
+        # The ajax reply is JSON with the markup nested inside it.
+        payloads.extend(_flatten_json_payload(raw))
 
     merged = {}
     for payload in payloads:
@@ -3757,11 +3803,14 @@ def _menu_diagnostics(session):
         print("(5) Reset counters")
         print("(6) Shared configuration lock")
         print("(7) Uncategorised events ({})".format(len(state.get("uncategorised", {}))))
+        print("(8) Source check — what each watcher can actually read")
 
-        choice = _read(min=0, max=7, digit=True)
+        choice = _read(min=0, max=8, digit=True)
         if choice == 0:
             return
-        if choice == 7:
+        if choice == 8:
+            _source_check(session)
+        elif choice == 7:
             _menu_uncategorised(session)
         elif choice == 6:
             _menu_lock(session)
@@ -3786,6 +3835,113 @@ def _menu_diagnostics(session):
             _save_state(session, state)
             print("\n{}Counters reset.{}".format(bcolors.GREEN, bcolors.ENDC))
             enter()
+
+
+def _source_check(session):
+    """Report what each source returns, so a silent watcher can be diagnosed."""
+    _header("SOURCE CHECK")
+    print("Reading each source once. Nothing is sent.\n")
+
+    city_id = _current_city_id(session, force=True)
+    if city_id:
+        print("  City id:     {} (via {})".format(city_id, _CITY_ID_CACHE.get("how")))
+    else:
+        print("  City id:     {}NOT FOUND{}".format(bcolors.RED, bcolors.ENDC))
+        print("               Fleet movements and town events both need this.")
+
+    try:
+        messages = _fetch_messages(session)
+        players = len([m for m in messages if m.get("source") == "player"])
+        combat = len([m for m in messages if m.get("source") == "combat"])
+        print("  Inbox:       {} row(s), {} player, {} combat".format(
+            len(messages), players, combat
+        ))
+    except Exception as exc:
+        print("  Inbox:       {}error: {}{}".format(bcolors.RED, str(exc)[:60], bcolors.ENDC))
+
+    print("")
+    print("  Town News (tradeAdvisor):")
+    for url in _advisor_urls("tradeAdvisor", city_id):
+        method = "POST" if "ajax=1" in url else "GET "
+        rows, note = _probe_town_news(session, url)
+        colour = bcolors.GREEN if rows else bcolors.WARNING
+        print("    {} {}{:>3} row(s){}  {}".format(
+            method, colour, rows, bcolors.ENDC, note
+        ))
+
+    print("")
+    movements, server_time, note = _probe_movements(session, city_id)
+    if movements is None:
+        print("  Movements:   {}unavailable{} — {}".format(bcolors.RED, bcolors.ENDC, note))
+    else:
+        print("  Movements:   {} in flight".format(len(movements)))
+        username = getattr(session, "username", "")
+        for movement in movements[:6]:
+            try:
+                left = int(movement.get("eventTime", server_time)) - int(server_time)
+                print("    {:<20} {:<18} arrives in {}".format(
+                    str((movement.get("event") or {}).get("missionText", "?"))[:20],
+                    _movement_type(movement, username),
+                    daysHoursMinutes(max(0, left)),
+                ))
+            except Exception:
+                continue
+        if len(movements) > 6:
+            print("    … and {} more".format(len(movements) - 6))
+
+    print("")
+    print("If a source reads fine here but nothing arrives, the watcher for it")
+    print("may be switched off in (3), or its type routed nowhere in (3) -> (4).")
+    enter()
+
+
+def _probe_town_news(session, url):
+    raw = None
+    if "ajax=1" in url:
+        try:
+            raw = session.post(url)
+        except Exception as exc:
+            return 0, "post failed: {}".format(str(exc)[:40])
+    if not raw:
+        try:
+            raw = session.get(url)
+        except Exception as exc:
+            return 0, "get failed: {}".format(str(exc)[:40])
+    if not raw:
+        return 0, "empty response"
+
+    payloads = [str(raw)] + _flatten_json_payload(raw)
+    for payload in payloads:
+        for candidate in _payload_variants(payload):
+            rows = _parse_town_news(candidate)
+            if rows:
+                return len(rows), "ok"
+    if "inboxcity" in str(raw).lower():
+        return 0, "table present but no rows parsed"
+    return 0, "no event table in the response"
+
+
+def _probe_movements(session, city_id):
+    if city_id is None:
+        return None, int(time.time()), "no city id"
+    url = (
+        "view=militaryAdvisor&oldView=city&oldBackgroundView=city&backgroundView=city"
+        "&currentCityId={}&actionRequest={}&ajax=1"
+    ).format(city_id, config.actionRequest)
+    try:
+        raw = session.post(url)
+    except Exception as exc:
+        return None, int(time.time()), "post failed: {}".format(str(exc)[:50])
+    try:
+        data = json.loads(raw, strict=False)
+    except Exception:
+        return None, int(time.time()), "response was not JSON: {}".format(str(raw)[:60])
+    try:
+        movements = data[1][1][2]["viewScriptParams"]["militaryAndFleetMovements"]
+        server_time = int(data[0][1].get("time", int(time.time())))
+    except Exception as exc:
+        return None, int(time.time()), "unexpected JSON shape: {}".format(str(exc)[:50])
+    return movements, server_time, "ok"
 
 
 def _menu_uncategorised(session):
