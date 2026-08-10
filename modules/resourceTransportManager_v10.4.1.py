@@ -12,6 +12,7 @@ import re
 import csv
 import tempfile
 import threading
+import itertools
 import pathlib
 import sys
 
@@ -26,6 +27,13 @@ from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.naval import getAvailableShips, getAvailableFreighters
 from ikabot.helpers.varios import addThousandSeparator, getDateTime
 from ikabot.helpers.getJson import getWorldMapIslands
+
+try:
+    # ikabot already depends on psutil (see ikabot/helpers/process.py).
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
 
 # ---------------------------------------------------------------------------
 #  Resource Reservation System — optional dependency
@@ -47,7 +55,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.4.0"
+MODULE_VERSION = "10.4.1"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -95,9 +103,15 @@ def _rtm_storage_dir():
 
 
 def _island_cache_path(session):
-    suffix = f"{session.servidor.replace('/', '_').replace(chr(92), '_')}_{session.username}"
     return os.path.join(_rtm_storage_dir(),
-                        f"island_cache_{suffix}.json")
+                        f"island_cache_{_account_suffix(session)}.json")
+
+
+def _legacy_island_cache_path(session):
+    """Pre-v10.4.1 island cache name (no world). Only used for migration.
+    Reproduces the original inline formula exactly so the file is found."""
+    suffix = f"{session.servidor.replace('/', '_').replace(chr(92), '_')}_{session.username}"
+    return os.path.join(_rtm_storage_dir(), f"island_cache_{suffix}.json")
 
 
 def _load_island_cache(session):
@@ -707,67 +721,86 @@ def log_shipment(log_path, session, mode, source_city, source_island,
 # ============================================================================
 
 def get_lock_file_path(session, use_freighters=False):
+    """Shipping lock path — per (server, world, player, ship type).
+
+    Including the world is correct: fleets are per-world, so two worlds of
+    one community must not block each other's shipments. RTM is the only
+    module using the .ikabot_shared_* name, so nothing else depends on the
+    old world-less form.
+    """
     ship_type = "freighters" if use_freighters else "merchant_ships"
-    safe_server = session.servidor.replace("/", "_").replace("\\", "_")
-    safe_username = session.username.replace("/", "_").replace("\\", "_")
-    lock_filename = f".ikabot_shared_{ship_type}_{safe_server}_{safe_username}.lock"
+    lock_filename = (
+        f".ikabot_shared_{ship_type}_{_account_suffix(session)}.lock"
+    )
     return os.path.join(os.path.expanduser("~"), lock_filename)
 
 
-def acquire_shipping_lock(session, use_freighters=False, timeout=300):
-    lock_file = get_lock_file_path(session, use_freighters)
-    start_time = time.time()
+def _legacy_lock_file_path(session, use_freighters=False):
+    """Pre-v10.4.1 shipping lock name (no world). Only used for cleanup."""
+    ship_type = "freighters" if use_freighters else "merchant_ships"
+    safe_server = session.servidor.replace("/", "_").replace("\\", "_")
+    safe_username = session.username.replace("/", "_").replace("\\", "_")
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_shared_{ship_type}_{safe_server}_{safe_username}.lock",
+    )
 
-    while time.time() - start_time < timeout:
-        try:
-            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            try:
-                lock_data = json.dumps({
-                    "pid": os.getpid(),
-                    "timestamp": time.time(),
-                    "ship_type": "freighters" if use_freighters else "merchant_ships",
-                    "server": session.servidor,
-                    "username": session.username,
-                })
-                os.write(fd, lock_data.encode())
-            finally:
-                os.close(fd)
-            return True
-        except FileExistsError:
-            try:
-                with open(lock_file, "r") as f:
-                    lock_data = json.load(f)
-                    if time.time() - lock_data.get("timestamp", 0) > 600:
-                        os.remove(lock_file)
-                        continue
-            except (json.JSONDecodeError, KeyError, IOError):
-                try:
-                    os.remove(lock_file)
-                except Exception:
-                    pass
-                continue
-        except Exception:
-            pass
-        time.sleep(5)
-    return False
+
+def acquire_shipping_lock(session, use_freighters=False, timeout=300):
+    """Serialise shipments across threads AND processes.
+
+    The staleness threshold must stay well under the timeout, otherwise an
+    orphaned lock can never be broken before waiters give up. It used to be
+    600s against a 300s timeout, which guaranteed failure.
+    """
+    lock_file = get_lock_file_path(session, use_freighters)
+    guard = _lock_guard(lock_file)
+    if not guard["lock"].acquire(timeout=max(1, timeout)):
+        return False
+    ok = False
+    try:
+        if guard["depth"] == 0:
+            token = _new_lock_token()
+            # Holds here are genuinely long (a whole shipment), so poll
+            # slower than the CSV lock — but jittered, so contenders don't
+            # synchronise into repeated collisions.
+            if not _lock_acquire(lock_file, timeout=timeout, stale_after=120,
+                                 token=token, poll=(1.0, 3.0)):
+                return False
+            guard["token"] = token
+            # 30s heartbeat, comfortably under the 120s staleness window.
+            guard["hb"] = _start_lock_heartbeat(lock_file, token, 30)
+        guard["depth"] += 1
+        ok = True
+        return True
+    finally:
+        if not ok:
+            guard["lock"].release()
 
 
 def release_shipping_lock(session, use_freighters=False):
     lock_file = get_lock_file_path(session, use_freighters)
+    guard = _lock_guard(lock_file)
+    if guard["depth"] <= 0:
+        return
     try:
-        if os.path.exists(lock_file):
-            try:
-                with open(lock_file, "r") as f:
-                    lock_data = json.load(f)
-                    if lock_data.get("pid") == os.getpid():
-                        os.remove(lock_file)
-            except Exception:
-                try:
-                    os.remove(lock_file)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+        guard["depth"] -= 1
+        if guard["depth"] <= 0:
+            guard["depth"] = 0
+            token = guard["token"]
+            guard["token"] = None
+            hb = guard.pop("hb", None)
+            if hb is not None:
+                hb[0].set()
+                hb[1].join(timeout=1)
+            # Token-matched: a sibling thread sharing our pid must not be
+            # able to delete the lock we are still holding.
+            _lock_release(lock_file, token)
+    finally:
+        try:
+            guard["lock"].release()
+        except RuntimeError:
+            pass
 
 
 # ============================================================================
@@ -824,6 +857,7 @@ WORKER_LOCK_STALE_SECONDS = 600   # 10 min — stale lock threshold
 TICK_BUDGET_SECONDS = 60          # max sleep between scheduler checks
 TRANSPORT_WORKER_PREFS = {}       # runtime state shared with worker process
 _NOTIF_PRESET = None              # user's notification preset (set via (n) menu)
+_WORKER_LOCK_TOKEN = None         # token of the worker lock this process holds
 
 
 def _safe(value):
@@ -831,6 +865,24 @@ def _safe(value):
 
 
 def _account_suffix(session):
+    """Per-instance filename suffix: server + world + player.
+
+    The world number must be part of this. A player name is only unique
+    within a world, so `en_Bob` collided when the same name existed on two
+    worlds of the same community — both instances then shared one queue,
+    one island cache and one set of locks. Mirrors ikabot's own log naming
+    (server + mundo) and constructionManager's suffix.
+    """
+    world = _safe(getattr(session, "mundo", "") or "")
+    if not world:
+        # No world on the session (shouldn't happen post-login): fall back
+        # to the legacy suffix rather than inventing a new namespace.
+        return _legacy_account_suffix(session)
+    return f"{_safe(session.servidor)}{world}_{_safe(session.username)}"
+
+
+def _legacy_account_suffix(session):
+    """Pre-v10.4.1 suffix, without the world. Only used for migration."""
     return f"{_safe(session.servidor)}_{_safe(session.username)}"
 
 
@@ -895,15 +947,135 @@ def _consume_wake_flag(session):
     return False
 
 
+def _legacy_path(session, template):
+    return os.path.join(
+        os.path.expanduser("~"),
+        template.format(suffix=_legacy_account_suffix(session)),
+    )
+
+
+def migrate_legacy_account_files(session):
+    """Rename pre-v10.4.1 (world-less) files to the world-scoped names.
+
+    Without this, adding the world to the filenames would make every
+    existing schedule look like it had vanished.
+
+    Returns False if migration is unsafe — specifically when a worker
+    started by an older build still holds the legacy worker lock, since
+    moving the CSV out from under a running worker would break it.
+    """
+    if _account_suffix(session) == _legacy_account_suffix(session):
+        return True
+
+    moves = [
+        (_legacy_path(session, ".ikabot_transport_{suffix}.csv"),
+         transport_csv_path(session)),
+        (_legacy_path(session, ".ikabot_transport_{suffix}.schema"),
+         transport_schema_sidecar_path(session)),
+        (_legacy_island_cache_path(session), _island_cache_path(session)),
+    ]
+    if not any(os.path.exists(old) for old, _ in moves):
+        return True
+
+    legacy_worker_lock = _legacy_path(
+        session, ".ikabot_transport_worker_{suffix}.lock"
+    )
+    if _worker_lock_is_fresh(legacy_worker_lock):
+        print(f"  {C.WARN}A transport scheduler from an older version is "
+              f"still running for this account.{C.RESET}")
+        print("  Stop it first (press (o) in that instance), then reopen "
+              "this menu to finish upgrading.")
+        print(f"  {C.DIM}Lock file: {legacy_worker_lock}{C.RESET}")
+        return False
+
+    for old, new in moves:
+        if os.path.exists(old) and not os.path.exists(new):
+            try:
+                os.makedirs(os.path.dirname(new), exist_ok=True)
+            except OSError:
+                pass
+            try:
+                os.replace(old, new)
+                print(f"  {C.DIM}Migrated {os.path.basename(old)} -> "
+                      f"{os.path.basename(new)}{C.RESET}")
+            except OSError as exc:
+                print(f"  {C.WARN}Could not migrate {old}: {exc}{C.RESET}")
+                return False
+
+    # Transient files are simply recreated under the new name; drop the
+    # leftovers so they don't linger in the home directory forever. The
+    # legacy shipping locks are included because a worker that was mid
+    # shipment during the upgrade leaves one behind under the old name,
+    # where nothing would ever clean it up again.
+    for template in (".ikabot_transport_{suffix}.lock",
+                     ".ikabot_transport_worker_{suffix}.lock",
+                     ".ikabot_transport_stop_{suffix}",
+                     ".ikabot_transport_wake_{suffix}"):
+        try:
+            os.remove(_legacy_path(session, template))
+        except OSError:
+            pass
+    for uf in (False, True):
+        try:
+            os.remove(_legacy_lock_file_path(session, uf))
+        except OSError:
+            pass
+    return True
+
+
 # --- Lock helpers (reusable for both shipping lock and CSV lock) ---
 
-def _lock_acquire(lock_path, timeout=30, stale_after=60):
-    start = time.time()
+_lock_token_seq = itertools.count(1)
+_lock_token_mutex = threading.Lock()
+
+
+def _new_lock_token():
+    """Unique per acquisition, so a holder only ever deletes its own lock."""
+    with _lock_token_mutex:
+        n = next(_lock_token_seq)
+    return f"{os.getpid()}-{threading.get_ident()}-{n}"
+
+
+# In-process serialisation, keyed by lock path. Every thread in one process
+# collapses into a single contender for the file lock. Without this the
+# scheduler thread and the shipment code raced each other through the file
+# lock: they share a pid, so they collided on acquisition and could release
+# each other's locks, and the churn starved waiters into "could not acquire".
+# The RLock also makes nesting the same lock safe.
+_lock_guards = {}
+_lock_guards_mutex = threading.Lock()
+
+
+def _lock_guard(path):
+    with _lock_guards_mutex:
+        guard = _lock_guards.get(path)
+        if guard is None:
+            guard = {"lock": threading.RLock(), "depth": 0, "token": None}
+            _lock_guards[path] = guard
+        return guard
+
+
+def _lock_acquire(lock_path, timeout=45, stale_after=15, token=None,
+                  poll=(0.02, 0.12)):
+    """Acquire a cross-process file lock.
+
+    stale_after MUST stay below timeout: an orphaned lock (holder killed
+    without cleanup) can only be broken after stale_after, so if that
+    exceeds timeout every waiter is guaranteed to give up and raise.
+    """
+    if token is None:
+        token = _new_lock_token()
+    # Build the payload before creating the file so the window in which the
+    # lock exists but is still empty is as small as possible.
     my_payload = json.dumps({
         "pid": os.getpid(),
         "timestamp": time.time(),
+        "token": token,
         "version": MODULE_VERSION,
     }).encode()
+
+    start = time.time()
+    unreadable_since = None
     while time.time() - start < timeout:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -913,77 +1085,194 @@ def _lock_acquire(lock_path, timeout=30, stale_after=60):
                 os.close(fd)
             return True
         except FileExistsError:
+            broke = False
             try:
                 with open(lock_path, "r") as f:
                     data = json.load(f)
-                lock_pid = data.get("pid")
-                stale_by_time = time.time() - data.get("timestamp", 0) > stale_after
-                stale_by_pid = lock_pid and not _is_pid_alive(lock_pid)
-                if stale_by_time or stale_by_pid:
-                    tmp = lock_path + f".{os.getpid()}.tmp"
+                unreadable_since = None
+
+                try:
+                    holder_pid = int(data.get("pid"))
+                except (TypeError, ValueError):
+                    holder_pid = -1
+                try:
+                    held_at = float(data.get("timestamp", 0) or 0)
+                except (TypeError, ValueError):
+                    held_at = 0.0
+                now = time.time()
+
+                # Break the lock when the holder can no longer be waiting on
+                # it. `held_at > now + 60` matters because a timestamp ahead
+                # of our clock (skew, corrupt write) makes (now - held_at)
+                # permanently negative, so the lock would never age out and
+                # every waiter would be guaranteed to time out.
+                holder_dead = holder_pid > 0 and not _is_pid_alive(holder_pid)
+                if (holder_dead
+                        or holder_pid <= 0
+                        or (now - held_at) > stale_after
+                        or held_at > now + 60):
                     try:
-                        fd2 = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                        try:
-                            os.write(fd2, my_payload)
-                        finally:
-                            os.close(fd2)
-                        os.replace(tmp, lock_path)
-                        with open(lock_path, "r") as f2:
-                            check = json.load(f2)
-                        if check.get("pid") == os.getpid():
-                            return True
-                    except Exception:
-                        try:
-                            os.remove(tmp)
-                        except OSError:
-                            pass
+                        os.remove(lock_path)
+                        broke = True
+                    except FileNotFoundError:
+                        broke = True
+                    except OSError:
+                        pass  # Windows: holder still has it open; retry later
             except Exception:
-                pass
+                # The lock may have been caught mid-creation (the file exists
+                # because of O_CREAT|O_EXCL but the payload is not written
+                # yet). Deleting it immediately would steal a lock its owner
+                # believes it holds, so give the owner a grace period before
+                # treating an unreadable lock as junk. Previously this branch
+                # just passed, so a genuinely corrupt lock was never broken
+                # and blocked everyone until deleted by hand.
+                if unreadable_since is None:
+                    unreadable_since = time.time()
+                elif time.time() - unreadable_since > 2.0:
+                    unreadable_since = None
+                    try:
+                        os.remove(lock_path)
+                        broke = True
+                    except OSError:
+                        pass
+            if broke:
+                continue
         except Exception:
             pass
+        # Short, jittered waits. Holds last milliseconds, so a fixed 1s poll
+        # left the lock idle most of the time and let contenders synchronise
+        # into repeated collisions.
         try:
-            time.sleep(1)
+            time.sleep(random.uniform(*poll))
         except Exception:
-            # SystemError can surface here if a lower-level OS call left
-            # the interpreter in a bad state — clear it and keep waiting.
+            # SystemError can surface here if a lower-level OS call left the
+            # interpreter in a bad state — clear it and keep waiting.
             pass
     return False
 
 
-def _lock_refresh(lock_path):
-    """Rewrite the lock file with a fresh timestamp to prevent stale detection."""
+def _lock_refresh(lock_path, token=None):
+    """Refresh the lock's timestamp so it never looks stale while alive.
+
+    Only refreshes if the lock is still ours: rewriting unconditionally
+    stomped on a lock another process had since taken over. Written via a
+    temp file + os.replace so a reader can never observe a half-written
+    lock.
+    """
     try:
-        with open(lock_path, "w") as f:
-            json.dump({"pid": os.getpid(), "timestamp": time.time(),
-                       "version": MODULE_VERSION}, f)
+        with open(lock_path, "r") as f:
+            data = json.load(f)
     except Exception:
-        pass
+        data = None
+
+    if data is not None:
+        if token is not None:
+            owned = data.get("token") == token
+        else:
+            owned = data.get("pid") == os.getpid()
+        if not owned:
+            return  # someone else owns it now; leave it alone
+
+    payload = json.dumps({
+        "pid": os.getpid(),
+        "timestamp": time.time(),
+        "token": token,
+        "version": MODULE_VERSION,
+    })
+    tmp = f"{lock_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(payload)
+        os.replace(tmp, lock_path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
-def _lock_release(lock_path):
+def _start_lock_heartbeat(lock_path, token, interval):
+    """Keep *lock_path* fresh while we hold it.
+
+    Needed wherever a hold can outlast stale_after. A shipment keeps the
+    shipping lock for as long as the cargo takes to dispatch — minutes,
+    sometimes longer while waiting for ships — so without a heartbeat a
+    waiter would declare the live holder stale and ship concurrently.
+    A dead holder stops refreshing and its lock still ages out normally.
+    """
+    stop = threading.Event()
+
+    def _beat():
+        while not stop.wait(interval):
+            _lock_refresh(lock_path, token)
+
+    thread = threading.Thread(target=_beat, daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def _lock_release(lock_path, token=None):
+    """Remove *lock_path* only if we are still its recorded owner.
+
+    Matching on the acquisition token (not just the pid) matters because
+    several threads in one process share a pid: without it, thread A's
+    release could delete the lock thread B had just acquired.
+    """
     try:
-        if os.path.exists(lock_path):
-            with open(lock_path, "r") as f:
-                data = json.load(f)
-            if data.get("pid") == os.getpid():
-                os.remove(lock_path)
+        with open(lock_path, "r") as f:
+            data = json.load(f)
     except Exception:
+        return
+    if token is not None:
+        if data.get("token") != token:
+            return
+    elif data.get("pid") != os.getpid():
+        return
+    try:
+        os.remove(lock_path)
+    except OSError:
         pass
 
 
 class _transport_csv_lock:
+    """Brief-hold lock for the schedule CSV, across threads and processes."""
+
     def __init__(self, session):
         self.path = transport_csv_lock_path(session)
 
     def __enter__(self):
-        if not _lock_acquire(self.path, timeout=30, stale_after=60):
+        self._guard = _lock_guard(self.path)
+        # Bounded so a wedged thread surfaces as an error instead of
+        # hanging the scheduler forever.
+        if not self._guard["lock"].acquire(timeout=120):
             raise RuntimeError(
-                f"Could not acquire transport CSV lock at {self.path}"
+                f"Timed out waiting for transport CSV lock at {self.path}"
             )
+        try:
+            if self._guard["depth"] == 0:
+                token = _new_lock_token()
+                if not _lock_acquire(self.path, timeout=45, stale_after=15,
+                                     token=token):
+                    raise RuntimeError(
+                        f"Could not acquire transport CSV lock at {self.path}"
+                    )
+                self._guard["token"] = token
+            self._guard["depth"] += 1
+        except BaseException:
+            self._guard["lock"].release()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        _lock_release(self.path)
+        try:
+            self._guard["depth"] -= 1
+            if self._guard["depth"] <= 0:
+                self._guard["depth"] = 0
+                token = self._guard["token"]
+                self._guard["token"] = None
+                _lock_release(self.path, token)
+        finally:
+            self._guard["lock"].release()
 
 
 # --- Schema enforcement ---
@@ -2549,6 +2838,11 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
 
     try:
         telegram_enabled = checkTelegramData(session)
+
+        if not migrate_legacy_account_files(session):
+            enter()
+            event.set()
+            return
 
         print_module_banner("Shipment Log Setup")
         log_path = get_log_path(session)
@@ -4945,10 +5239,16 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
     transport_csv_update(session, sid, status="active")
 
     wlock = transport_worker_lock_path(session)
-    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
+    global _WORKER_LOCK_TOKEN
+    _WORKER_LOCK_TOKEN = _new_lock_token()
+    # timeout=1 here is a deliberate fail-fast "is another worker already
+    # running?" check, not a contended wait — stale_after stays large.
+    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS,
+                         token=_WORKER_LOCK_TOKEN):
         if _try_recover_stale_lock(session, wlock):
             if not _lock_acquire(wlock, timeout=5,
-                                 stale_after=WORKER_LOCK_STALE_SECONDS):
+                                 stale_after=WORKER_LOCK_STALE_SECONDS,
+                                 token=_WORKER_LOCK_TOKEN):
                 print("  Scheduler started by another process — "
                       "it will pick up the schedule.")
                 enter()
@@ -5005,7 +5305,7 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
         except Exception:
             pass
     finally:
-        _lock_release(wlock)
+        _lock_release(wlock, _WORKER_LOCK_TOKEN)
         try:
             session.logout()
         except Exception:
@@ -5014,16 +5314,29 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
 def _is_pid_alive(pid):
     """Check whether a process is running WITHOUT touching it.
-    CRITICAL: os.kill(pid, 0) must never be used on Windows — there any
-    signal other than CTRL_C/CTRL_BREAK calls TerminateProcess and KILLS
-    the target process. On unexpected errors we assume alive (never steal
-    a lock we are not sure about)."""
+
+    CRITICAL: os.kill(pid, 0) must never be used here. Per the os.kill docs,
+    on Windows any sig other than CTRL_C_EVENT/CTRL_BREAK_EVENT "will cause
+    the process to be unconditionally killed by the TerminateProcess API" —
+    so the liveness probe KILLED the lock holder and then returned without
+    raising, leaving the caller to conclude it was still alive. Every
+    contended lock check could take out a running worker.
+
+    psutil.pid_exists is the portable query-only answer and matches
+    constructionManager. The ctypes/os.kill paths below are only a fallback
+    for the case where psutil cannot be imported. On unexpected errors we
+    assume alive, so a lock is never stolen from a holder we are unsure of."""
     try:
         pid = int(pid)
     except (TypeError, ValueError):
         return False
     if pid <= 0:
         return False
+    if _HAS_PSUTIL:
+        try:
+            return psutil.pid_exists(pid)
+        except Exception:
+            return True   # can't tell — assume alive, fall back to staleness
     if os.name == "nt":
         try:
             import ctypes
@@ -5101,25 +5414,30 @@ def _try_recover_stale_lock(session, wlock):
     return False
 
 
-def _is_transport_worker_running(session):
-    wlock = transport_worker_lock_path(session)
-    if not os.path.exists(wlock):
-        return False
+def _worker_lock_is_fresh(wlock):
+    """True if *wlock* is held by a live process and recently heartbeaten."""
     try:
         with open(wlock, "r") as f:
             data = json.load(f)
-        if time.time() - data.get("timestamp", 0) > WORKER_LOCK_STALE_SECONDS:
-            return False
-        pid = data.get("pid")
-        if pid and not _is_pid_alive(pid):
-            try:
-                os.remove(wlock)
-            except OSError:
-                pass
-            return False
-        return True
     except Exception:
         return False
+    try:
+        held_at = float(data.get("timestamp", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if time.time() - held_at > WORKER_LOCK_STALE_SECONDS:
+        return False
+    # A crashed worker's lock is dead immediately — don't report RUNNING (or
+    # block a restart) for the whole 10 minute staleness window.
+    try:
+        pid = int(data.get("pid"))
+    except (TypeError, ValueError):
+        return True  # no usable pid; trust the timestamp
+    return _is_pid_alive(pid)
+
+
+def _is_transport_worker_running(session):
+    return _worker_lock_is_fresh(transport_worker_lock_path(session))
 
 
 # ----------------------------------------------------------------------------
@@ -6424,7 +6742,8 @@ def transport_scheduler_loop(session, stop_event):
             stop_event.set()
             break
 
-        _lock_refresh(transport_worker_lock_path(session))
+        _lock_refresh(transport_worker_lock_path(session),
+                      _WORKER_LOCK_TOKEN)
 
         try:
             now = int(time.time())
@@ -6549,7 +6868,7 @@ def transport_scheduler_loop(session, stop_event):
         os.remove(transport_stop_flag_path(session))
     except OSError:
         pass
-    _lock_release(transport_worker_lock_path(session))
+    _lock_release(transport_worker_lock_path(session), _WORKER_LOCK_TOKEN)
 
 
 # ----------------------------------------------------------------------------
@@ -6569,12 +6888,18 @@ def _activate_transport_worker(session, event):
     log_path = get_log_path(session)
 
     wlock = transport_worker_lock_path(session)
-    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
+    global _WORKER_LOCK_TOKEN
+    _WORKER_LOCK_TOKEN = _new_lock_token()
+    # timeout=1 here is a deliberate fail-fast "is another worker already
+    # running?" check, not a contended wait — stale_after stays large.
+    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS,
+                         token=_WORKER_LOCK_TOKEN):
         print(f"  {C.WARN}Lock detected — attempting to recover...{C.RESET}")
         if _try_recover_stale_lock(session, wlock):
             print(f"  {C.OK}Old scheduler stopped. Starting fresh.{C.RESET}")
             if not _lock_acquire(wlock, timeout=5,
-                                 stale_after=WORKER_LOCK_STALE_SECONDS):
+                                 stale_after=WORKER_LOCK_STALE_SECONDS,
+                                 token=_WORKER_LOCK_TOKEN):
                 print(f"  {C.WARN}Could not acquire lock after recovery.{C.RESET}")
                 print(f"  {C.DIM}Try deleting: {wlock}{C.RESET}")
                 enter()
@@ -6588,7 +6913,7 @@ def _activate_transport_worker(session, event):
             return
 
     if not enforce_transport_schema_or_abort(session):
-        _lock_release(wlock)
+        _lock_release(wlock, _WORKER_LOCK_TOKEN)
         enter()
         event.set()
         return
@@ -6602,7 +6927,7 @@ def _activate_transport_worker(session, event):
     if not activatable:
         print(f"  {C.WARN}No schedules to run.{C.RESET}")
         print(f"  {C.DIM}Create a schedule first using options 1-6.{C.RESET}")
-        _lock_release(wlock)
+        _lock_release(wlock, _WORKER_LOCK_TOKEN)
         enter()
         event.set()
         return
@@ -6632,7 +6957,7 @@ def _activate_transport_worker(session, event):
 
     choice = _safe_read(min=1, max=2, digit=True, additionalValues=["'"])
     if choice == "'":
-        _lock_release(wlock)
+        _lock_release(wlock, _WORKER_LOCK_TOKEN)
         event.set()
         return
 
@@ -6692,7 +7017,7 @@ def _activate_transport_worker(session, event):
         except Exception:
             pass
     finally:
-        _lock_release(wlock)
+        _lock_release(wlock, _WORKER_LOCK_TOKEN)
         try:
             session.logout()
         except Exception:
