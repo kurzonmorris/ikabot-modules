@@ -1,7 +1,16 @@
-Version: 2.1.2
+Version: 2.1.3
 ==============
 
   ikabot-mod-install — Multi-instance ikabot installer and manager
+
+Changes in 2.1.3
+-----------------
+- On the Modules screen the GitHub version is now red when it is newer
+  than the installed one, or when the file is not installed at all, so
+  the modules needing attention stand out. It stays green when you are
+  already up to date, and grey for files with no version to compare
+  (such as the csv). Versions are compared numerically, so v2.1.10 is
+  correctly newer than v2.1.9.
 
 Changes in 2.1.2
 -----------------

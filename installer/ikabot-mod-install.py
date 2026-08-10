@@ -47,7 +47,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-INSTALLER_VERSION = "2.1.2"
+INSTALLER_VERSION = "2.1.3"
 
 GITHUB_API      = "https://api.github.com/repos/kurzonmorris/ikabot-modules/releases"
 GITHUB_CONTENTS = "https://api.github.com/repos/kurzonmorris/ikabot-modules/contents"
@@ -1129,7 +1129,8 @@ def _modules_dialog(listing: list[dict], install_dir: Path):
     dlg.resizable(False, False)
     dlg.attributes("-topmost", True)
 
-    tk.Label(dlg, text="ikabot Modules\n\nModules and extra files — installed vs GitHub:",
+    tk.Label(dlg, text="ikabot Modules\n\nModules and extra files — installed vs GitHub.\n"
+                       "Red = a newer version is available.",
              justify="left", padx=24, pady=10, wraplength=520).pack(fill="x")
 
     # Scrollable list
@@ -1152,17 +1153,35 @@ def _modules_dialog(listing: list[dict], install_dir: Path):
         canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
     dlg.bind("<MouseWheel>", _wheel)
 
+    GREEN, RED, GREY = "#0a7d0a", "#c00000", "#666666"
+
     for r, item in enumerate(listing):
         inst_ver = installed.get(item["base"], "")
-        inst_txt = f"v{inst_ver}" if inst_ver else ("installed" if
-                    (install_dir / "modules" / item["base"]).exists() else "not installed")
+        have_file = (install_dir / "modules" / item["base"]).exists()
+        inst_txt = f"v{inst_ver}" if inst_ver else ("installed" if have_file
+                                                    else "not installed")
         gh_txt   = f"v{item['ver']}" if item["ver"] else "no version"
+
+        # Red when GitHub is ahead of what is installed (or nothing is
+        # installed at all) so the files needing attention stand out.
+        if not item["ver"]:
+            gh_colour = GREY                      # nothing to compare
+        elif not inst_ver:
+            gh_colour = RED                       # missing, or version unknown
+        elif ver_tuple(item["ver"]) > ver_tuple(inst_ver):
+            gh_colour = RED                       # newer than installed
+        else:
+            gh_colour = GREEN                     # up to date
+
+        needs_update = gh_colour == RED
 
         tk.Label(rows, text=item["base"], anchor="w", width=32).grid(
             row=r, column=0, sticky="w", pady=2)
-        tk.Label(rows, text=inst_txt, anchor="w", width=12, fg="#555555").grid(
+        tk.Label(rows, text=inst_txt, anchor="w", width=12, fg=GREY).grid(
             row=r, column=1, sticky="w", pady=2)
-        tk.Label(rows, text=f"GitHub: {gh_txt}", anchor="w", width=16, fg="#006600").grid(
+        tk.Label(rows, text=f"GitHub: {gh_txt}", anchor="w", width=16,
+                 fg=gh_colour,
+                 font=("", 9, "bold") if needs_update else ("", 9)).grid(
             row=r, column=2, sticky="w", pady=2)
 
         def _upd(it=item):

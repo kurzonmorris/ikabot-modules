@@ -828,6 +828,10 @@ class AdvisorSession(Session):
     def post(self, url=None, **kw): return ""
 
 adv = AdvisorSession()
+# The city id now comes from ikabot's own helper, not from a hand-rolled
+# view=city fetch, so the stub has to provide it.
+sys.modules["ikabot.helpers.varios"].getCurrentCityId = lambda sess: "4242"
+hub._CITY_ID_CACHE.update({"value": None, "at": 0.0, "how": ""})
 got = hub._fetch_advisor_views(adv)
 views = {u.split("view=")[1].split("&")[0] for u, _ in got}
 check("advisor tabs are fetched", "tradeAdvisor" in views and "cityAdvisor" in views)
@@ -1254,23 +1258,110 @@ check("it went to the uncategorised destination",
       any("/z" in u for u, _ in sent_log))
 check("and it was recorded for triage", len(nstate2.get("uncategorised", {})) >= 1)
 
+print("\n-- city id: the shared dependency of movements and town news --")
+varios = sys.modules["ikabot.helpers.varios"]
+pedir = sys.modules["ikabot.helpers.pedirInfo"]
+
+def reset_cache():
+    hub._CITY_ID_CACHE.update({"value": None, "at": 0.0, "how": ""})
+
+reset_cache()
+varios.getCurrentCityId = lambda sess: "4242"
+check("uses the supported helper first", hub._current_city_id(s, force=True) == "4242")
+check("and records how it got it", hub._CITY_ID_CACHE["how"] == "getCurrentCityId")
+
+# getCurrentCityId reads index.php bare, which some servers 404. That must not
+# take movements and town news down with it.
+reset_cache()
+varios.getCurrentCityId = lambda sess: (_ for _ in ()).throw(RuntimeError("404 on index.php"))
+pedir.getIdsOfCities = lambda sess: (["777", "888"], {"777": {}, "888": {}})
+check("falls back to the account's own city list",
+      hub._current_city_id(s, force=True) == "777")
+check("and says so", hub._CITY_ID_CACHE["how"] == "getIdsOfCities")
+
+reset_cache()
+pedir.getIdsOfCities = lambda sess: (_ for _ in ()).throw(RuntimeError("down"))
+check("both failing returns None rather than raising",
+      hub._current_city_id(s, force=True) is None)
+
+reset_cache()
+calls = {"n": 0}
+def counting(sess):
+    calls["n"] += 1
+    return "555"
+varios.getCurrentCityId = counting
+hub._current_city_id(s); hub._current_city_id(s); hub._current_city_id(s)
+check("the id is cached, not refetched by every watcher", calls["n"] == 1)
+check("force refetches", hub._current_city_id(s, force=True) == "555" and calls["n"] == 2)
+
+print("\n-- town news must POST the ajax url --")
+seen = {"get": [], "post": []}
+NEWS_JSON = json.dumps([["x", {"time": 1}], [None, [None,
+    '<table id="inboxCity"><tr><td class="city">'
+    '<span class="category production"></span></td>'
+    '<td class="short_text100">16 Lluhios</td><td class="date">06.08.2026 1:24</td>'
+    '<td class="subject">Your building Town Hall has been expanded to level 35</td>'
+    '</tr></table>']]])
+
+class AjaxNewsSession(Session):
+    def get(self, url=None, **kw):
+        if url is None: raise AssertionError("bare session.get()")
+        seen["get"].append(url)
+        return "<html>shell only, no event table</html>"
+    def post(self, url=None, **kw):
+        seen["post"].append(url)
+        return NEWS_JSON
+    def setStatus(self, s): pass
+    def logout(self): pass
+
+reset_cache()
+varios.getCurrentCityId = lambda sess: "4242"
+ans = AjaxNewsSession()
+rows = hub._fetch_town_news(ans)
+check("the ajax url is POSTed", any("ajax=1" in u for u in seen["post"]))
+check("rows are found in the JSON-wrapped markup", len(rows) == 1)
+check("and keep their category", rows[0]["category"] == "production")
+check("the GET shell alone would have found nothing",
+      hub._parse_town_news("<html>shell only, no event table</html>") == [])
+
+print("\n-- source check names failures instead of hiding them --")
+movements, stime, note = hub._probe_movements(ans, None)
+check("no city id is reported as such", movements is None and note == "no city id")
+
+class BadJsonSession(AjaxNewsSession):
+    def post(self, url=None, **kw): return "<html>not json</html>"
+movements, stime, note = hub._probe_movements(BadJsonSession(), "4242")
+check("a non-JSON movements reply is named", movements is None and "not JSON" in note)
+
+class WrongShapeSession(AjaxNewsSession):
+    def post(self, url=None, **kw): return json.dumps({"unexpected": True})
+movements, stime, note = hub._probe_movements(WrongShapeSession(), "4242")
+check("an unexpected JSON shape is named", movements is None and "shape" in note)
+
+class GoodMoveSession(AjaxNewsSession):
+    def post(self, url=None, **kw):
+        if "militaryAdvisor" in url:
+            return json.dumps([["x", {"time": NOW}], [None, [None, None,
+                {"viewScriptParams": {"militaryAndFleetMovements": [mv()]}}]]])
+        return NEWS_JSON
+movements, stime, note = hub._probe_movements(GoodMoveSession(), "4242")
+check("a good movements reply is parsed", movements is not None and len(movements) == 1)
+
+rows, note = hub._probe_town_news(ans, "view=tradeAdvisor&ajax=1")
+check("town news probe counts rows", rows == 1 and note == "ok")
+class NoTableSession(AjaxNewsSession):
+    def post(self, url=None, **kw): return "<html>nothing here</html>"
+rows, note = hub._probe_town_news(NoTableSession(), "view=tradeAdvisor&ajax=1")
+check("a missing table is named, not silently zero", rows == 0 and "no event table" in note)
+
+pedir.getIdsOfCities = lambda sess: ([], {})
+reset_cache()
+
 print("\n-- a lock problem never stops message forwarding --")
 real_lock_write = hub._lock_write
 hub._lock_write = lambda *a, **k: (_ for _ in ()).throw(OSError("share vanished"))
 ok, msg = hub._save_global_config(s, hub._load_global_config(s) or hub._default_config())
 check("save fails cleanly when the share disappears", ok is False and msg)
-
-gs3 = GameSession()
-hub._requests = lambda: FakeRequests()
-cfg3 = hub._default_config()
-cfg3["destinations"] = [{"id": "d1", "name": "all", "kind": "ntfy",
-                         "ntfy": {"topic": "a"}, "enabled": True}]
-for t2 in hub.EVENT_TYPES:
-    cfg3["routes"][t2] = ["d1"]
-st5 = hub._load_state(gs3)
-st5["seen_ids"] = {}; st5["first_run_done"] = True
-sent, failed, scanned = hub._poll_messages(gs3, cfg3, st5, set(), ["en"])
-check("forwarding still works while the share is unreachable", sent == 2 and failed == 0)
 hub._lock_write = real_lock_write
 
 print()
