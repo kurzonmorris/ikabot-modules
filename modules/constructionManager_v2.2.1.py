@@ -6,16 +6,18 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.1.9"
+__version__ = "2.2.1"
 
 import csv
 import glob
 import importlib.util
+import itertools
 import json
 import math
 import os
 import pathlib
 import queue
+import random
 import re
 import sys
 import threading
@@ -140,6 +142,23 @@ def _safe(value):
 
 
 def _account_suffix(session):
+    """Per-instance filename suffix: server + world + player.
+
+    The world number must be part of this.  A player name is only unique
+    within a world, so `en_Bob` collided when the same name existed on two
+    worlds of the same community — both instances then shared one queue and
+    one set of locks.  Mirrors ikabot's own log naming (server + mundo).
+    """
+    world = _safe(getattr(session, "mundo", "") or "")
+    if not world:
+        # No world on the session (shouldn't happen post-login): fall back to
+        # the legacy suffix rather than inventing a new namespace.
+        return _legacy_account_suffix(session)
+    return f"{_safe(session.servidor)}{world}_{_safe(session.username)}"
+
+
+def _legacy_account_suffix(session):
+    """Pre-2.2.1 suffix, without the world. Only used for migration."""
     return f"{_safe(session.servidor)}_{_safe(session.username)}"
 
 
@@ -178,6 +197,64 @@ def stop_flag_path(session):
     )
 
 
+def _legacy_path(session, template):
+    return os.path.join(
+        os.path.expanduser("~"),
+        template.format(suffix=_legacy_account_suffix(session)),
+    )
+
+
+def migrate_legacy_account_files(session):
+    """Rename pre-2.2.1 (world-less) queue files to the world-scoped names.
+
+    Returns False if migration is unsafe — specifically when a worker started
+    by an older build still holds the legacy worker lock, since moving the CSV
+    out from under a running worker would break it.
+    """
+    if _account_suffix(session) == _legacy_account_suffix(session):
+        return True
+
+    moves = [
+        (_legacy_path(session, ".ikabot_construction_{suffix}.csv"),
+         csv_path(session)),
+        (_legacy_path(session, ".ikabot_construction_{suffix}.schema"),
+         schema_sidecar_path(session)),
+    ]
+    if not any(os.path.exists(old) for old, _ in moves):
+        return True
+
+    legacy_worker_lock = _legacy_path(
+        session, ".ikabot_construction_worker_{suffix}.lock"
+    )
+    if _worker_lock_is_fresh(legacy_worker_lock):
+        print(f"{bcolors.RED}A construction worker from an older version is "
+              f"still running for this account.{bcolors.ENDC}")
+        print("  Stop it first (press (o) in that instance), then reopen this "
+              "menu to finish upgrading.")
+        print(f"  Lock file: {legacy_worker_lock}")
+        return False
+
+    for old, new in moves:
+        if os.path.exists(old) and not os.path.exists(new):
+            try:
+                os.replace(old, new)
+                print(f"  Migrated {os.path.basename(old)} -> "
+                      f"{os.path.basename(new)}")
+            except OSError as exc:
+                print(f"{bcolors.RED}Could not migrate {old}: {exc}{bcolors.ENDC}")
+                return False
+    # Transient files are simply recreated under the new name; drop the
+    # leftovers so they don't linger in the home directory forever.
+    for template in (".ikabot_construction_{suffix}.lock",
+                     ".ikabot_construction_worker_{suffix}.lock",
+                     ".ikabot_construction_stop_{suffix}"):
+        try:
+            os.remove(_legacy_path(session, template))
+        except OSError:
+            pass
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Schema sidecar — fail loudly on mismatch instead of silently corrupting
 # ---------------------------------------------------------------------------
@@ -211,83 +288,180 @@ def enforce_schema_or_abort(session):
 # pattern in resourceTransportManager_v7.0.py:194 (acquire_shipping_lock).
 # ---------------------------------------------------------------------------
 
-def _lock_acquire(lock_file, timeout, stale_after):
+_lock_token_seq = itertools.count(1)
+_lock_token_mutex = threading.Lock()
+
+
+def _new_lock_token():
+    """Unique per acquisition, so a holder only ever deletes its own lock."""
+    with _lock_token_mutex:
+        n = next(_lock_token_seq)
+    return f"{os.getpid()}-{threading.get_ident()}-{n}"
+
+
+def _lock_acquire(lock_file, timeout, stale_after, token=None):
+    if token is None:
+        token = _new_lock_token()
+    # Build the payload before creating the file so the window in which the
+    # lock exists but is still empty is as small as possible.
+    payload = json.dumps({
+        "pid": os.getpid(),
+        "timestamp": time.time(),
+        "token": token,
+    }).encode()
+
     start = time.time()
+    unreadable_since = None
     while time.time() - start < timeout:
         try:
             fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
-                payload = json.dumps({
-                    "pid": os.getpid(),
-                    "timestamp": time.time(),
-                })
-                os.write(fd, payload.encode())
+                os.write(fd, payload)
             finally:
                 os.close(fd)
             return True
         except FileExistsError:
+            broke = False
             try:
                 with open(lock_file, "r") as f:
                     data = json.load(f)
-                # A lock whose holder process is dead is stale immediately —
-                # don't make every waiter sit out the stale_after window when
-                # the holder was killed (window closed, Ctrl+C mid-write).
-                holder_pid = data.get("pid")
-                holder_dead = (
-                    isinstance(holder_pid, int)
-                    and holder_pid > 0
-                    and not psutil.pid_exists(holder_pid)
-                )
-                if holder_dead or time.time() - data.get("timestamp", 0) > stale_after:
-                    os.remove(lock_file)
-                    continue
-            except (json.JSONDecodeError, KeyError, IOError):
+                unreadable_since = None
+
                 try:
-                    os.remove(lock_file)
+                    holder_pid = int(data.get("pid"))
+                except (TypeError, ValueError):
+                    holder_pid = -1
+                try:
+                    held_at = float(data.get("timestamp", 0) or 0)
+                except (TypeError, ValueError):
+                    held_at = 0.0
+                now = time.time()
+
+                # Break the lock when the holder can no longer be waiting on
+                # it.  `from_future` matters because a timestamp ahead of our
+                # clock (skew, corrupt write) would otherwise never age out,
+                # making the lock permanently unbreakable.
+                try:
+                    holder_dead = (holder_pid > 0
+                                   and not psutil.pid_exists(holder_pid))
                 except Exception:
-                    pass
+                    holder_dead = False  # can't tell; fall back to staleness
+                if (holder_dead
+                        or holder_pid <= 0
+                        or (now - held_at) > stale_after
+                        or held_at > now + 60):
+                    try:
+                        os.remove(lock_file)
+                        broke = True
+                    except FileNotFoundError:
+                        broke = True
+                    except OSError:
+                        pass  # Windows: holder still has it open; retry later
+            except (ValueError, KeyError, OSError):
+                # The lock may have been caught mid-creation (file exists, the
+                # payload is not written yet).  Deleting it immediately would
+                # steal a lock its owner thinks it holds, so give the owner a
+                # grace period before treating an unreadable lock as junk.
+                if unreadable_since is None:
+                    unreadable_since = time.time()
+                elif time.time() - unreadable_since > 2.0:
+                    unreadable_since = None
+                    try:
+                        os.remove(lock_file)
+                        broke = True
+                    except OSError:
+                        pass
+            if broke:
                 continue
-        except Exception:
+        except OSError:
             pass
-        time.sleep(0.5)
+        # Short, jittered waits: holds last milliseconds, so polling every
+        # 0.5s left the lock idle most of the time and let contenders
+        # synchronise into repeated collisions.
+        time.sleep(random.uniform(0.02, 0.12))
     return False
 
 
-def _lock_release(lock_file):
+def _lock_release(lock_file, token=None):
+    """Remove *lock_file* only if we are still its recorded owner.
+
+    Matching on the acquisition token (not just the pid) matters because
+    several threads in one process share a pid: without it, thread A's
+    release could delete the lock thread B had just acquired.
+    """
     try:
-        if not os.path.exists(lock_file):
+        with open(lock_file, "r") as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return
+    if token is not None:
+        if data.get("token") != token:
             return
-        try:
-            with open(lock_file, "r") as f:
-                data = json.load(f)
-            if data.get("pid") != os.getpid():
-                return
-        except Exception:
-            pass
-        try:
-            os.remove(lock_file)
-        except Exception:
-            pass
-    except Exception:
+    elif data.get("pid") != os.getpid():
+        return
+    try:
+        os.remove(lock_file)
+    except OSError:
         pass
 
 
+# In-process serialisation for the CSV file lock.  The scheduler thread and
+# every shipment thread share one pid, so without this they raced each other
+# through the file lock — colliding on acquisition and, worse, releasing each
+# other's locks.  Collapsing them into a single contender also cuts the churn
+# that was starving waiters into "Could not acquire CSV lock".
+_csv_guards = {}
+_csv_guards_mutex = threading.Lock()
+
+
+def _csv_guard(path):
+    with _csv_guards_mutex:
+        guard = _csv_guards.get(path)
+        if guard is None:
+            guard = {"lock": threading.RLock(), "depth": 0, "token": None}
+            _csv_guards[path] = guard
+        return guard
+
+
 class _csv_lock:
-    """Brief-hold cross-process lock for the CSV file."""
+    """Brief-hold lock for the CSV file, across both threads and processes."""
 
     def __init__(self, session):
         self.path = csv_lock_path(session)
 
     def __enter__(self):
-        # stale_after MUST be < timeout: an orphaned lock (holder died without
-        # cleanup) is then always broken before waiters give up.  CSV holds
-        # last milliseconds, so 20s of staleness is already very generous.
-        if not _lock_acquire(self.path, timeout=30, stale_after=20):
-            raise RuntimeError(f"Could not acquire CSV lock at {self.path}")
+        self._guard = _csv_guard(self.path)
+        # Bounded so a wedged thread surfaces as an error instead of hanging
+        # the scheduler forever.
+        if not self._guard["lock"].acquire(timeout=120):
+            raise RuntimeError(f"Timed out waiting for CSV lock at {self.path}")
+        try:
+            if self._guard["depth"] == 0:
+                # stale_after MUST stay below timeout so an orphaned lock is
+                # always broken before waiters give up.
+                token = _new_lock_token()
+                if not _lock_acquire(self.path, timeout=45, stale_after=15,
+                                     token=token):
+                    raise RuntimeError(
+                        f"Could not acquire CSV lock at {self.path}"
+                    )
+                self._guard["token"] = token
+            self._guard["depth"] += 1
+        except BaseException:
+            self._guard["lock"].release()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        _lock_release(self.path)
+        try:
+            self._guard["depth"] -= 1
+            if self._guard["depth"] <= 0:
+                self._guard["depth"] = 0
+                token = self._guard["token"]
+                self._guard["token"] = None
+                _lock_release(self.path, token)
+        finally:
+            self._guard["lock"].release()
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +534,11 @@ def csv_save_all(session, rows):
 
 
 def _csv_modify(session, fn):
-    """Load rows, apply fn(rows) in-place, save — all under a single lock hold."""
+    """Load rows, apply fn(rows) in-place, save — all under a single lock hold.
+
+    Returns the saved rows so callers that need the post-write state can use
+    them instead of taking the lock a second time for a fresh csv_load.
+    """
     path = csv_path(session)
     tmp = path + ".tmp"
     with _csv_lock(session):
@@ -376,6 +554,7 @@ def _csv_modify(session, fn):
             for r in rows:
                 w.writerow(_coerce_row_out(r))
         os.replace(tmp, path)
+        return rows
 
 
 def csv_append(session, row):
@@ -390,6 +569,11 @@ def csv_delete(session, queue_id):
 
 
 def csv_update(session, queue_id, **fields):
+    """Apply *fields* to the row with *queue_id*; returns the updated row.
+
+    Returning the row lets callers avoid a second lock cycle just to read
+    back what they wrote.
+    """
     qid = int(queue_id)
     def _apply(rows):
         for r in rows:
@@ -401,7 +585,8 @@ def csv_update(session, queue_id, **fields):
                         "no" if fields["transport_mode"] == "none" else "yes"
                     )
                 break
-    _csv_modify(session, _apply)
+    rows = _csv_modify(session, _apply)
+    return find_row(rows, qid)
 
 
 def csv_skip_rest_of_slot(session, city_id, slot_position, after_queue_id,
@@ -1837,15 +2022,70 @@ def _get_notification_config(telegram_enabled, event):
 # Worker status helpers
 # ---------------------------------------------------------------------------
 
-def _is_worker_running(session):
-    """True if a fresh (non-stale) worker lock exists for this account."""
-    wlock = worker_lock_path(session)
+def _worker_lock_is_fresh(wlock):
+    """True if *wlock* is held by a live process and recently heartbeaten."""
     try:
         with open(wlock, "r") as f:
             data = json.load(f)
-    except (IOError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return False
-    return time.time() - data.get("timestamp", 0) <= WORKER_LOCK_STALE_SECONDS
+    try:
+        held_at = float(data.get("timestamp", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if time.time() - held_at > WORKER_LOCK_STALE_SECONDS:
+        return False
+    # A crashed worker's lock is dead immediately — don't report RUNNING (or
+    # block a restart) for the whole staleness window.
+    try:
+        pid = int(data.get("pid"))
+    except (TypeError, ValueError):
+        return True  # no usable pid; trust the timestamp
+    try:
+        return psutil.pid_exists(pid)
+    except Exception:
+        return True
+
+
+def _is_worker_running(session):
+    """True if a fresh (non-stale) worker lock exists for this account."""
+    return _worker_lock_is_fresh(worker_lock_path(session))
+
+
+def _worker_lock_heartbeat(wlock, token):
+    """Refresh the worker lock's timestamp so it never looks stale while alive.
+
+    The worker sleeps for hours between build timers, so without this the lock
+    aged past WORKER_LOCK_STALE_SECONDS and a second worker could be started
+    for the same account — two workers issuing duplicate builds and shipments.
+    """
+    try:
+        with open(wlock, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+
+    if data is not None:
+        owned = (data.get("token") == token
+                 or data.get("pid") == os.getpid())
+        if not owned:
+            return  # another worker owns it now; don't stomp on it
+
+    payload = json.dumps({
+        "pid": os.getpid(),
+        "timestamp": time.time(),
+        "token": token,
+    })
+    tmp = f"{wlock}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(payload)
+        os.replace(tmp, wlock)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _worker_status_line(session):
@@ -1919,6 +2159,11 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
     interactive = predetermined_input is None or len(predetermined_input) == 0
+
+    if not migrate_legacy_account_files(session):
+        enter()
+        event.set()
+        return
 
     if not enforce_schema_or_abort(session):
         enter()
@@ -2447,13 +2692,13 @@ def service_city(session, city_id, st, rows, stop_event):
             st["phase"]      = "skip-cooldown"
             st["next_check"] = now + SHIP_RETRY_SECONDS
             return
-        csv_update(
+        # csv_update returns the saved row, so the fresh costs come back
+        # without a second lock cycle.
+        row = csv_update(
             session, row["queue_id"],
             wood=cost[0], wine=cost[1], marble=cost[2],
             crystal=cost[3], sulphur=cost[4],
-        )
-        # Reload row to pick up the fresh costs.
-        row = find_row(csv_load(session), row["queue_id"]) or row
+        ) or row
 
         if row["transport_mode"] == "none" or stock_covers(city, cost):
             # canUpgrade=False means the game won't accept the POST yet
@@ -2635,8 +2880,12 @@ def reconcile_on_startup(session, city_state):
 # scheduler_loop  (plan §7)
 # ---------------------------------------------------------------------------
 
-def scheduler_loop(session, stop_event):
+def scheduler_loop(session, stop_event, worker_token=None):
     city_state = {}
+    # Stamp ownership with this process before the (possibly slow) startup
+    # reconcile, so the lock reflects the live worker from the outset.
+    if worker_token is not None:
+        _worker_lock_heartbeat(worker_lock_path(session), worker_token)
     try:
         reconcile_on_startup(session, city_state)
     except Exception:
@@ -2651,6 +2900,11 @@ def scheduler_loop(session, stop_event):
         if os.path.exists(stop_flag_path(session)):
             stop_event.set()
             break
+
+        # Prove we're alive before doing any work: the lock must never look
+        # stale while this process is running, or a second worker could start.
+        if worker_token is not None:
+            _worker_lock_heartbeat(worker_lock_path(session), worker_token)
 
         now = int(time.time())
         drain_shortage_events(session, city_state, now)
@@ -2722,7 +2976,7 @@ def scheduler_loop(session, stop_event):
         pass
 
     # Release worker lock.
-    _lock_release(worker_lock_path(session))
+    _lock_release(worker_lock_path(session), worker_token)
 
 
 # ---------------------------------------------------------------------------
@@ -2750,7 +3004,10 @@ def _activate_worker(session, event):
 
     # Refuse if another worker for this account is already running.
     wlock = worker_lock_path(session)
-    if not _lock_acquire(wlock, timeout=1, stale_after=WORKER_LOCK_STALE_SECONDS):
+    worker_token = _new_lock_token()
+    if not _lock_acquire(wlock, timeout=1,
+                         stale_after=WORKER_LOCK_STALE_SECONDS,
+                         token=worker_token):
         print(
             f"  {bcolors.RED}Another construction worker is already running "
             f"for this account.{bcolors.ENDC}"
@@ -2784,7 +3041,7 @@ def _activate_worker(session, event):
 
     stop_event = threading.Event()
     try:
-        scheduler_loop(session, stop_event)
+        scheduler_loop(session, stop_event, worker_token=worker_token)
     except Exception:
         try:
             sendToBot(
@@ -2796,7 +3053,7 @@ def _activate_worker(session, event):
     finally:
         # scheduler_loop already releases the worker lock on graceful exit;
         # this is a defensive safety net if it crashed before that.
-        _lock_release(wlock)
+        _lock_release(wlock, worker_token)
         try:
             session.logout()
         except Exception:
