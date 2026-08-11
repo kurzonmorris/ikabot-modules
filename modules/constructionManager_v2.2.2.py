@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 
 import csv
 import glob
@@ -2483,6 +2483,66 @@ def find_row(rows, queue_id):
     return next((r for r in rows if r["queue_id"] == int(queue_id)), None)
 
 
+def reconcile_rows_with_city(session, city, rows):
+    """Drop/skip pending rows the city has already moved past.
+
+    Builds done by hand in the game don't touch the queue, so a slot can sit
+    above the level a pending row targets.  Each row is one upgrade — not
+    "reach level N" — so leaving those rows in place would build past the
+    level the user asked for (queue 5→10, two manual builds, and the last two
+    rows would push the slot to 12).  Dropping them re-aligns the queue so the
+    next row is always exactly current level + 1, which also keeps the cost
+    lookup and the shipped amounts correct.
+
+    A slot that now holds a different building is marked skipped rather than
+    deleted, since that's a layout change the user probably wants to see.
+
+    Returns (surviving_rows, dropped_rows, skipped_rows).
+    """
+    positions = city.get("position", [])
+    survivors, dropped, skipped = [], [], []
+
+    for r in rows:
+        if r["status"] != "pending":
+            survivors.append(r)
+            continue
+
+        slot_pos = int(r["slot_position"])
+        if slot_pos >= len(positions):
+            survivors.append(r)   # bounds are reported downstream
+            continue
+
+        slot          = positions[slot_pos]
+        slot_building = str(slot.get("building", "") or "")
+        row_building  = str(r["building"] or "")
+        try:
+            slot_level = int(slot.get("level", 0) or 0)
+        except (TypeError, ValueError):
+            slot_level = 0
+
+        if (slot_building not in ("", "empty")
+                and slot_building.lower() != row_building.lower()):
+            csv_update(
+                session, r["queue_id"],
+                status="skipped",
+                notes=f"slot now holds {slot_building}, not {row_building}",
+            )
+            skipped.append(r)
+            continue
+
+        # Only compare levels once we know it's the same building — an empty
+        # slot reports level 0, so a pending "build" row survives correctly.
+        if (slot_building.lower() == row_building.lower()
+                and int(r["target_level"]) <= slot_level):
+            csv_delete(session, r["queue_id"])
+            dropped.append(r)
+            continue
+
+        survivors.append(r)
+
+    return survivors, dropped, skipped
+
+
 def cost_tuple(row):
     """Return the row's resource costs as a plain list of ints."""
     return [int(row.get(k, 0) or 0) for k in RESOURCE_COLS]
@@ -2639,6 +2699,29 @@ def service_city(session, city_id, st, rows, stop_event):
         except Exception:
             st["next_check"] = now + SHIP_RETRY_SECONDS
             return
+
+        # Catch up on anything built by hand since the queue was made, so the
+        # next row is always current level + 1.
+        rows, dropped, resolved_skips = reconcile_rows_with_city(
+            session, city, rows
+        )
+        if dropped or resolved_skips:
+            try:
+                sendToBotDebug(
+                    session,
+                    f"city {city_id}: queue re-aligned with in-game state — "
+                    f"dropped rows {[r['queue_id'] for r in dropped]} "
+                    f"(already built), skipped rows "
+                    f"{[r['queue_id'] for r in resolved_skips]} "
+                    f"(building changed)",
+                    True,
+                )
+            except Exception:
+                pass
+            row = next_pending_row(rows)
+            if row is None:
+                st["next_check"] = now + TICK_BUDGET_SECONDS
+                return
 
         # If ANY slot in this city is busy, the game won't accept a new build.
         busy = first_busy_slot(city)
@@ -2838,6 +2921,11 @@ def reconcile_on_startup(session, city_state):
         except Exception:
             st["next_check"] = now + SHIP_RETRY_SECONDS
             continue
+
+        # Same catch-up as the idle phase: a restart may follow manual builds.
+        city_rows, _dropped, _skipped = reconcile_rows_with_city(
+            session, city, city_rows
+        )
 
         running = next(
             (r for r in city_rows if r["status"] == "running"),
