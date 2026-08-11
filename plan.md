@@ -1,10 +1,9 @@
 # Messaging Hub — Build Plan
 
 > Module: `modules/messagingHub_v<X.Y.Z>.py` (external module, installs as `messagingHub.py`)
-> Status: **Phases 1 and 3 built in `messagingHub_v1.0.0.py`** (nothing has been
-> released to users yet, so it is all still one unshipped 1.0.0 — bump the
-> filename when it first goes to `main`). Next: Phase 2, which is waiting on
-> real inbox data — see `docs/MESSAGING_HUB_DATA_REQUEST.md`.
+> Status: **shipped and in use — `messagingHub_v1.1.0.py`.** Phases 1, 2 and 3
+> are in. Messages and resource monitoring are confirmed working on a live
+> account; movements and town events were fixed in 1.1.0 and are unconfirmed.
 > This file is the working spec across sessions.
 > Read `Explained-ikariam_ikabot.md` and `Explained-user_kurzon.md` before touching it.
 
@@ -657,6 +656,14 @@ Ship each phase as its own filename version bump; committing to `modules/` on
 
 Per the mandatory protocol (`Explained-user_kurzon.md` §8):
 
+0. **Bump the filename version — every single change, no exceptions.** The
+   module has shipped, so any edit that reaches `main` is a release. PATCH for a
+   fix, MINOR for a new feature or meaningful improvement, MAJOR for a breaking
+   one. The installer detects updates from this number, so a change without a
+   bump reaches nobody: users keep running the old file and the Modules screen
+   shows them as current. Rename the file, and update the path in `plan.md` —
+   `tools/testMessagingHub.py` finds the newest `messagingHub_v*.py` by glob, so
+   it needs no edit.
 1. `python3 -c "import ast; ast.parse(open(f).read())"` on every modified file.
 2. Checklist: `event.set()` exactly once per path · `set_child_mode()` before any
    game action · no bare `session.get()` · `read()` constrained · no `input()` ·
