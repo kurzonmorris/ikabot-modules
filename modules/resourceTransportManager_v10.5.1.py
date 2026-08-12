@@ -35,6 +35,17 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
+try:
+    # Per-account module settings. Saving here is what makes this module
+    # appear in ikabot's auto-start menu (option: Auto-start modules).
+    from ikabot.helpers.modulePrefs import (
+        save_prefs as _mp_save_prefs,
+        load_prefs as _mp_load_prefs,
+    )
+    _HAS_MODULE_PREFS = True
+except ImportError:
+    _HAS_MODULE_PREFS = False
+
 # ---------------------------------------------------------------------------
 #  Resource Reservation System — optional dependency
 # ---------------------------------------------------------------------------
@@ -55,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.4.1"
+MODULE_VERSION = "10.5.1"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -981,12 +992,47 @@ def migrate_legacy_account_files(session):
         session, ".ikabot_transport_worker_{suffix}.lock"
     )
     if _worker_lock_is_fresh(legacy_worker_lock):
-        print(f"  {C.WARN}A transport scheduler from an older version is "
-              f"still running for this account.{C.RESET}")
-        print("  Stop it first (press (o) in that instance), then reopen "
-              "this menu to finish upgrading.")
+        # Never prompt with no terminal attached — try again next launch.
+        if getattr(config, "autostart_active", False):
+            return False
+
+        # Show WHY it looks running, so this is checkable rather than a
+        # dead end, and offer an override: the lock can outlive its process
+        # (killed worker, reused pid, clock skew) and the user can see the
+        # real process list when we cannot.
+        held_pid, age_str, alive = None, "unknown", None
+        try:
+            with open(legacy_worker_lock, "r") as f:
+                data = json.load(f)
+            held_pid = data.get("pid")
+            held_at = float(data.get("timestamp", 0) or 0)
+            age_str = f"{int(max(0, time.time() - held_at))}s ago"
+            if held_pid is not None:
+                alive = _is_pid_alive(held_pid)
+        except Exception:
+            pass
+
+        print(f"  {C.WARN}A transport scheduler from an older version looks "
+              f"like it is still running for this account.{C.RESET}")
+        print(f"  {C.DIM}Process ID: {held_pid}   Last seen: {age_str}   "
+              f"Still running: {alive}{C.RESET}")
         print(f"  {C.DIM}Lock file: {legacy_worker_lock}{C.RESET}")
-        return False
+        print("")
+        print("  The safe fix is to press (o) in that instance to stop it,")
+        print("  then reopen this menu.")
+        print("")
+        print(f"  {C.BOLD}(1){C.RESET} It is NOT running — continue anyway")
+        print(f"  {C.DIM}    Use this if you already killed it, or the "
+              f"process ID above is gone from Task Manager.{C.RESET}")
+        print(f"  {C.BOLD}('){C.RESET} Cancel")
+        choice = _safe_read(min=1, max=1, digit=True, additionalValues=["'"])
+        if choice != 1:
+            return False
+        try:
+            os.remove(legacy_worker_lock)
+        except OSError:
+            pass
+        print(f"  {C.OK}Continuing — stale lock cleared.{C.RESET}")
 
     for old, new in moves:
         if os.path.exists(old) and not os.path.exists(new):
@@ -2837,6 +2883,12 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
     config.predetermined_input = predetermined_input
 
     try:
+        # Auto-started at login: no terminal, so never prompt — replay the
+        # settings saved by the last interactive start.
+        if getattr(config, "autostart_active", False):
+            _autostart_resume(session, event)
+            return
+
         telegram_enabled = checkTelegramData(session)
 
         if not migrate_legacy_account_files(session):
@@ -5272,6 +5324,8 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
     TRANSPORT_WORKER_PREFS["notif_config"] = notif_config
     TRANSPORT_WORKER_PREFS["log_path"] = log_path
+    # Remember them so ikabot auto-start can resume the scheduler headlessly.
+    _remember_worker_settings(session, notif_config, log_path)
 
     try:
         os.remove(transport_stop_flag_path(session))
@@ -5289,15 +5343,17 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
 
     stop_event = threading.Event()
     try:
-        transport_scheduler_loop(session, stop_event)
+        # Supervised: an unexpected exit is restarted automatically instead
+        # of silently leaving the account with nothing sending.
+        _run_supervised_scheduler(session, stop_event, notif_config)
     except Exception:
         try:
             sendToBot(
                 session,
                 f"TRANSPORT SCHEDULER STOPPED\n"
-                f"The background scheduler hit an unexpected error and "
-                f"shut down. Your schedules are saved, but NOTHING WILL "
-                f"BE SENT until you start it again: open Resource "
+                f"The background scheduler could not be kept running and "
+                f"has shut down. Your schedules are saved, but NOTHING "
+                f"WILL BE SENT until you start it again: open Resource "
                 f"Transport Manager and press (s).\n"
                 f"Technical detail (useful when reporting the "
                 f"problem):\n{traceback.format_exc()}",
@@ -6875,6 +6931,168 @@ def transport_scheduler_loop(session, stop_event):
 #  Worker activation / stop
 # ----------------------------------------------------------------------------
 
+SUPERVISOR_BACKOFF_SECONDS = [5, 15, 30, 60, 120, 300]
+
+
+def _remember_worker_settings(session, notif_config, log_path):
+    """Persist what the scheduler needs to start without asking anything.
+
+    Written to ikabot's per-account module prefs, which is also what lists
+    this module in the auto-start menu.
+    """
+    if not _HAS_MODULE_PREFS:
+        return
+    try:
+        _mp_save_prefs(session, MODULE_NAME, {
+            "notif_level": (notif_config or {}).get("level", "none"),
+            "notif_telegram": bool((notif_config or {}).get("telegram", False)),
+            "log_path": log_path or "",
+        })
+    except Exception:
+        pass
+
+
+def _saved_worker_settings(session):
+    """(notif_config, log_path) saved by a previous interactive start."""
+    if not _HAS_MODULE_PREFS:
+        return {"level": "none", "telegram": False}, ""
+    try:
+        prefs = _mp_load_prefs(session, MODULE_NAME) or {}
+    except Exception:
+        prefs = {}
+    return ({"level": prefs.get("notif_level", "none"),
+             "telegram": bool(prefs.get("notif_telegram", False))},
+            prefs.get("log_path", ""))
+
+
+def _autostart_resume(session, event):
+    """Headless start used by ikabot auto-start (no terminal attached).
+
+    Prompting or printing here would write into the parent's menu and block
+    on input nobody can give, so everything comes from saved settings.
+    """
+    try:
+        if not migrate_legacy_account_files(session):
+            event.set()
+            return
+        if _is_transport_worker_running(session):
+            event.set()      # another scheduler already has this account
+            return
+        if not enforce_transport_schema_or_abort(session):
+            event.set()
+            return
+        rows = transport_csv_load(session)
+        if not any(r.get("status") in ("active", "pending") for r in rows):
+            event.set()      # nothing to run
+            return
+
+        notif_config, log_path = _saved_worker_settings(session)
+        for r in rows:
+            if r.get("status") == "pending":
+                transport_csv_update(session, r["schedule_id"], status="active")
+
+        TRANSPORT_WORKER_PREFS["notif_config"] = notif_config
+        TRANSPORT_WORKER_PREFS["log_path"] = log_path
+
+        global _WORKER_LOCK_TOKEN
+        wlock = transport_worker_lock_path(session)
+        _WORKER_LOCK_TOKEN = _new_lock_token()
+        if not _lock_acquire(wlock, timeout=5,
+                             stale_after=WORKER_LOCK_STALE_SECONDS,
+                             token=_WORKER_LOCK_TOKEN):
+            event.set()
+            return
+        try:
+            os.remove(transport_stop_flag_path(session))
+        except OSError:
+            pass
+
+        set_child_mode(session)
+        event.set()
+        setInfoSignal(session, "\nTransport worker (auto-started)\n")
+        stop_event = threading.Event()
+        try:
+            _run_supervised_scheduler(session, stop_event, notif_config)
+        finally:
+            _lock_release(wlock, _WORKER_LOCK_TOKEN)
+    except Exception:
+        try:
+            event.set()
+        except Exception:
+            pass
+
+
+def _stop_requested(session, stop_event):
+    return stop_event.is_set() or os.path.exists(
+        transport_stop_flag_path(session))
+
+
+def _run_supervised_scheduler(session, stop_event, notif_config):
+    """Run the scheduler loop, restarting it if it ever exits unexpectedly.
+
+    The loop already survives per-cycle errors (they are caught and retried),
+    but anything raised outside a cycle — or a bare return — used to kill the
+    scheduler outright and nothing sent again until the user noticed and
+    pressed (s). This keeps it running.
+
+    Restart is only for UNREQUESTED exits: a stop flag or a set stop_event
+    means the user asked it to stop, and that is honoured immediately.
+
+    NOTE: this supervises the loop, not the process. If the whole process is
+    killed (Task Manager, reboot) nothing here can help — that is what
+    auto-start at ikabot launch covers.
+    """
+    attempt = 0
+    while not _stop_requested(session, stop_event):
+        # The loop releases the worker lock when it exits, so re-take it
+        # before each attempt or a restarted loop would run unlocked.
+        global _WORKER_LOCK_TOKEN
+        wlock = transport_worker_lock_path(session)
+        if not _worker_lock_is_fresh(wlock):
+            _WORKER_LOCK_TOKEN = _new_lock_token()
+            _lock_acquire(wlock, timeout=10,
+                          stale_after=WORKER_LOCK_STALE_SECONDS,
+                          token=_WORKER_LOCK_TOKEN)
+
+        crashed = None
+        try:
+            transport_scheduler_loop(session, stop_event)
+        except Exception:
+            crashed = traceback.format_exc()
+
+        if _stop_requested(session, stop_event):
+            return  # clean, requested shutdown
+
+        attempt += 1
+        delay = SUPERVISOR_BACKOFF_SECONDS[
+            min(attempt - 1, len(SUPERVISOR_BACKOFF_SECONDS) - 1)]
+        try:
+            session.setStatus(
+                f"Transport scheduler stopped unexpectedly; "
+                f"restarting in {delay}s (restart #{attempt})")
+        except Exception:
+            pass
+        if should_notify(notif_config, "error"):
+            try:
+                detail = (f"\nTechnical detail:\n{crashed}" if crashed
+                          else "\nIt exited without reporting an error.")
+                sendToBot(
+                    session,
+                    f"TRANSPORT SCHEDULER RESTARTING\n"
+                    f"The scheduler stopped unexpectedly and is being "
+                    f"restarted automatically in {delay}s "
+                    f"(restart #{attempt}). Your schedules are intact and "
+                    f"nothing needs to be done.{detail}")
+            except Exception:
+                pass
+
+        # Interruptible backoff so (o) still stops promptly.
+        waited = 0
+        while waited < delay and not _stop_requested(session, stop_event):
+            time.sleep(min(2, delay - waited))
+            waited += 2
+
+
 def _activate_transport_worker(session, event):
     try:
         telegram_enabled = checkTelegramData(session)
@@ -6982,6 +7200,8 @@ def _activate_transport_worker(session, event):
 
     TRANSPORT_WORKER_PREFS["notif_config"] = notif_config
     TRANSPORT_WORKER_PREFS["log_path"] = log_path
+    # Remember them so ikabot auto-start can resume the scheduler headlessly.
+    _remember_worker_settings(session, notif_config, log_path)
 
     try:
         os.remove(transport_stop_flag_path(session))
@@ -7001,15 +7221,17 @@ def _activate_transport_worker(session, event):
 
     stop_event = threading.Event()
     try:
-        transport_scheduler_loop(session, stop_event)
+        # Supervised: an unexpected exit is restarted automatically instead
+        # of silently leaving the account with nothing sending.
+        _run_supervised_scheduler(session, stop_event, notif_config)
     except Exception:
         try:
             sendToBot(
                 session,
                 f"TRANSPORT SCHEDULER STOPPED\n"
-                f"The background scheduler hit an unexpected error and "
-                f"shut down. Your schedules are saved, but NOTHING WILL "
-                f"BE SENT until you start it again: open Resource "
+                f"The background scheduler could not be kept running and "
+                f"has shut down. Your schedules are saved, but NOTHING "
+                f"WILL BE SENT until you start it again: open Resource "
                 f"Transport Manager and press (s).\n"
                 f"Technical detail (useful when reporting the "
                 f"problem):\n{traceback.format_exc()}",
