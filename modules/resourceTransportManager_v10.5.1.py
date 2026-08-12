@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.5.0"
+MODULE_VERSION = "10.5.1"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -992,12 +992,47 @@ def migrate_legacy_account_files(session):
         session, ".ikabot_transport_worker_{suffix}.lock"
     )
     if _worker_lock_is_fresh(legacy_worker_lock):
-        print(f"  {C.WARN}A transport scheduler from an older version is "
-              f"still running for this account.{C.RESET}")
-        print("  Stop it first (press (o) in that instance), then reopen "
-              "this menu to finish upgrading.")
+        # Never prompt with no terminal attached — try again next launch.
+        if getattr(config, "autostart_active", False):
+            return False
+
+        # Show WHY it looks running, so this is checkable rather than a
+        # dead end, and offer an override: the lock can outlive its process
+        # (killed worker, reused pid, clock skew) and the user can see the
+        # real process list when we cannot.
+        held_pid, age_str, alive = None, "unknown", None
+        try:
+            with open(legacy_worker_lock, "r") as f:
+                data = json.load(f)
+            held_pid = data.get("pid")
+            held_at = float(data.get("timestamp", 0) or 0)
+            age_str = f"{int(max(0, time.time() - held_at))}s ago"
+            if held_pid is not None:
+                alive = _is_pid_alive(held_pid)
+        except Exception:
+            pass
+
+        print(f"  {C.WARN}A transport scheduler from an older version looks "
+              f"like it is still running for this account.{C.RESET}")
+        print(f"  {C.DIM}Process ID: {held_pid}   Last seen: {age_str}   "
+              f"Still running: {alive}{C.RESET}")
         print(f"  {C.DIM}Lock file: {legacy_worker_lock}{C.RESET}")
-        return False
+        print("")
+        print("  The safe fix is to press (o) in that instance to stop it,")
+        print("  then reopen this menu.")
+        print("")
+        print(f"  {C.BOLD}(1){C.RESET} It is NOT running — continue anyway")
+        print(f"  {C.DIM}    Use this if you already killed it, or the "
+              f"process ID above is gone from Task Manager.{C.RESET}")
+        print(f"  {C.BOLD}('){C.RESET} Cancel")
+        choice = _safe_read(min=1, max=1, digit=True, additionalValues=["'"])
+        if choice != 1:
+            return False
+        try:
+            os.remove(legacy_worker_lock)
+        except OSError:
+            pass
+        print(f"  {C.OK}Continuing — stale lock cleared.{C.RESET}")
 
     for old, new in moves:
         if os.path.exists(old) and not os.path.exists(new):
