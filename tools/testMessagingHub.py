@@ -1,5 +1,5 @@
 """Offline test of messagingHub logic — stubs every ikabot import."""
-import importlib.util, os, sys, types, tempfile, json
+import importlib.util, os, pathlib, sys, types, tempfile, json
 
 TMP = tempfile.mkdtemp()
 
@@ -33,8 +33,10 @@ cfgmod.city_url = "view=city&cityId="
 mod("ikabot.helpers.logging", getLogger=lambda n: __import__("logging").getLogger(n))
 # modulePrefs deliberately absent -> exercises the vanilla fallback path
 
-spec = importlib.util.spec_from_file_location(
-    "messagingHub", "/home/user/ikabot-modules/modules/messagingHub_v1.0.0.py")
+_here = os.path.dirname(os.path.abspath(__file__))
+_candidates = sorted(pathlib.Path(_here, "..", "modules").resolve().glob("messagingHub_v*.py"))
+assert _candidates, "no messagingHub_v*.py in modules/"
+spec = importlib.util.spec_from_file_location("messagingHub", str(_candidates[-1]))
 hub = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hub)
 
