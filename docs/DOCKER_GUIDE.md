@@ -505,6 +505,97 @@ Press `Ctrl-C` to stop watching.
 
 ---
 
+## Part 16 — A permanent browser tab
+
+Optional. Puts a terminal on a web page inside the container, so a bookmark
+opens straight onto your instances — no popup, no typing the attach command.
+
+### Turn it on
+
+The web terminal **will not start without a password**. Recreate the container
+with a port and a password added:
+
+```bash
+docker rm -f ikabot
+```
+
+Then the Part 8 block with two extra lines (pick your own password):
+
+```bash
+docker run -d \
+  --name ikabot \
+  --init \
+  --restart unless-stopped \
+  -p 7681:7681 \
+  -e TTYD_USER=kurzon \
+  -e TTYD_PASS='choose-a-long-one' \
+  -e TZ=Europe/London \
+  -e INSTANCES=24 \
+  -e IKABOT_LOCALE=en-GB \
+  -e IKABOT_GF_LANG=en \
+  -e IKABOT_TIMEZONE_ID=Europe/London \
+  -v /mnt/user/appdata/ikabot/app:/app \
+  -v /mnt/user/appdata/ikabot/config:/config \
+  ikabot-mod:latest
+```
+
+Check it came up:
+
+```bash
+docker logs ikabot | grep "web terminal"
+```
+
+You want `web terminal listening on port 7681`. Now open this in a tab and
+bookmark it — replace `TOWER` with your server's name or IP:
+
+```
+http://TOWER:7681
+```
+
+It asks for the username and password, then drops you on instance `ika01`.
+The same `Ctrl-B` keys work. Detaching just re-attaches, so the tab always
+shows the bots.
+
+> Closing the tab is safe. It disconnects the viewer; the instances keep
+> running, exactly like detaching.
+
+### Reaching it from outside the house
+
+**This is a shell.** Anyone who reaches that URL and gets past the password can
+run commands as root inside the container — your vault file and all 24 sessions
+are in there. It is *not* a shell on Unraid itself, which limits the damage, but
+it is not something to leave open to the internet on plain HTTP, where the
+password crosses the network in the clear and scanners find open ports within
+minutes.
+
+**Use Tailscale instead of port forwarding.** It is less work, not more:
+
+1. Unraid: **Apps → search "Tailscale" → install** the plugin.
+2. Open it, click to authenticate, sign in with Google/GitHub/email.
+3. Install Tailscale on your phone and laptop, sign in with the same account.
+4. From anywhere, open `http://tower:7681`.
+
+No router configuration, no dynamic DNS, no certificates, no open ports. The
+connection is encrypted and only your own devices can reach it. The address
+never changes, so the bookmark keeps working.
+
+If you specifically want a public `https://` address later, Tailscale Funnel
+and Cloudflare Tunnel both do that with a real certificate — still without
+opening a port on your router.
+
+**If you port-forward anyway**, do not forward `7681` directly. Put it behind a
+reverse proxy with a real certificate (SWAG or Nginx Proxy Manager, both in
+Community Applications), forward only `443`, and use a long random password.
+That is considerably more work than the Tailscale route above, which is why I
+am recommending Tailscale.
+
+### Turning it off
+
+Recreate the container without `-e TTYD_PASS`. With no password set it does not
+listen at all.
+
+---
+
 ## Appendix A — What the build files do
 
 You copied these in Part 5; you do not need to create them. This is just so you
@@ -517,6 +608,7 @@ know what they are.
 | `entrypoint.sh` | Starts the 24 tmux windows when the container boots |
 | `ika` | The maintenance commands (`status`, `restart`, `attach`…) |
 | `ika-modules` | Installs/updates modules, stripping `_vX.Y.Z` from filenames |
+| `ika-web-attach` | What the optional web terminal runs (Part 16) |
 | `docker-compose.yml` | Alternative start method, for HexOS later |
 
 Two details worth knowing:
