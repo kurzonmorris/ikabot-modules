@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# ARG, not ENV: keeps debconf quiet during the build without leaving
+# DEBIAN_FRONTEND set inside the running container.
+ARG DEBIAN_FRONTEND=noninteractive
+
 # ncurses-bin supplies /usr/bin/clear — gui.clear() shells out to it, and
 # without it every banner() prints "sh: clear: not found" instead of drawing.
 # dnsutils matches the upstream ikabot image. tzdata is needed so the
