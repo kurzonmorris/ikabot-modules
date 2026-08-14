@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Install and update ikabot external modules inside the container.
+
+Replaces the Windows installer's Modules screen. Mirrors its behaviour: a
+template folder keeps the versioned filenames so versions stay visible, and
+the modules folder ikabot actually loads gets the `_vX.Y.Z` suffix stripped.
+"""
+
+import argparse
+import json
+import os
+import re
+import signal
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# Let `ika-modules list | head` exit quietly instead of raising BrokenPipeError.
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+REPO = os.environ.get("IKABOT_REPO", "kurzonmorris/ikabot-modules")
+BRANCH = os.environ.get("IKABOT_BRANCH", "main")
+CONTENTS = f"https://api.github.com/repos/{REPO}/contents"
+
+MODULES_DIR = Path(os.environ.get("MODULES_DIR", "/config/modules"))
+TEMPLATE_DIR = Path(os.environ.get("TEMPLATE_DIR", "/config/modules-template"))
+LOCAL_SRC = Path(os.environ.get("APP_DIR", "/app"))
+
+# Hand-edited by the user — never clobbered without --force-csv.
+USER_DATA_FILES = {"bulkdistribution.csv"}
+
+
+def split_module_name(name):
+    """'tavernManager_v2.0.1.py' -> ('tavernManager.py', '2.0.1')."""
+    p = Path(name)
+    m = re.match(r"^(.*?)_v(.+)$", p.stem)
+    if m:
+        return m.group(1) + p.suffix, m.group(2)
+    return name, ""
+
+
+def _fetch(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "ika-modules/1.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read()
+
+
+def _listing_remote(folder):
+    raw = _fetch(f"{CONTENTS}/{folder}?ref={BRANCH}")
+    return [
+        {"name": e["name"], "url": e["download_url"]}
+        for e in json.loads(raw)
+        if e.get("type") == "file" and e.get("download_url")
+    ]
+
+
+def _listing_local(folder):
+    src = LOCAL_SRC / folder
+    if not src.is_dir():
+        return []
+    return [{"name": f.name, "path": f} for f in sorted(src.iterdir()) if f.is_file()]
+
+
+def _read(item):
+    if "path" in item:
+        return item["path"].read_bytes()
+    return _fetch(item["url"])
+
+
+def _install_module(item, data):
+    """Write to the template folder versioned, and to modules/ stripped."""
+    base, _ = split_module_name(item["name"])
+
+    for folder, target_name in ((TEMPLATE_DIR, item["name"]), (MODULES_DIR, base)):
+        for existing in folder.iterdir():
+            if (
+                existing.is_file()
+                and split_module_name(existing.name)[0] == base
+                and existing.name != target_name
+            ):
+                existing.unlink()
+        (folder / target_name).write_bytes(data)
+
+
+def _install_config_example(item, data, force_csv):
+    """Config examples keep their exact filename — modules look them up by name."""
+    dest = MODULES_DIR / item["name"]
+    if dest.exists() and item["name"] in USER_DATA_FILES and not force_csv:
+        print(f"  keeping   {item['name']} (your data — use --force-csv to replace)")
+        return
+    dest.write_bytes(data)
+    print(f"  installed {item['name']}")
+
+
+def cmd_sync(args):
+    MODULES_DIR.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    if args.local:
+        source, listing = f"the app folder ({LOCAL_SRC})", _listing_local
+    else:
+        source, listing = f"github.com/{REPO} ({BRANCH})", _listing_remote
+
+    print(f"Updating modules from {source}")
+
+    try:
+        modules = [m for m in listing("modules") if m["name"].endswith(".py")]
+        examples = listing("config-examples")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        print(f"Could not reach {source}: {exc}", file=sys.stderr)
+        if not args.local:
+            print("Retrying with the copy in the app folder...", file=sys.stderr)
+            args.local = True
+            return cmd_sync(args)
+        return 1
+
+    if not modules:
+        print("No modules found at the source.", file=sys.stderr)
+        return 1
+
+    for item in modules:
+        base, version = split_module_name(item["name"])
+        _install_module(item, _read(item))
+        print(f"  installed {base:38} {('v' + version) if version else '(no version)'}")
+
+    for item in examples:
+        _install_config_example(item, _read(item), args.force_csv)
+
+    print(f"\n{len(modules)} module(s) ready in {MODULES_DIR}")
+    return 0
+
+
+def cmd_list(_args):
+    if not TEMPLATE_DIR.is_dir() or not any(TEMPLATE_DIR.iterdir()):
+        print("No modules installed yet — run:  ika-modules sync")
+        return 0
+
+    print(f"{'Module':40} {'Version':12} Loaded as")
+    print("-" * 76)
+    for f in sorted(TEMPLATE_DIR.iterdir()):
+        if not f.is_file() or not f.name.endswith(".py"):
+            continue
+        base, version = split_module_name(f.name)
+        live = MODULES_DIR / base
+        mark = base if live.exists() else "MISSING"
+        print(f"{base[:-3]:40} {version or '-':12} {mark}")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="ika-modules", description=__doc__)
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_sync = sub.add_parser("sync", help="download/refresh all modules")
+    p_sync.add_argument("--local", action="store_true",
+                        help="use the copy in the app folder instead of GitHub")
+    p_sync.add_argument("--force-csv", action="store_true",
+                        help="also overwrite CSV files you have edited")
+    p_sync.set_defaults(func=cmd_sync)
+
+    p_list = sub.add_parser("list", help="show installed modules and versions")
+    p_list.set_defaults(func=cmd_list)
+
+    args = parser.parse_args()
+    if not args.cmd:
+        parser.print_help()
+        return 0
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

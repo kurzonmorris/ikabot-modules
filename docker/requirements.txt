@@ -1,0 +1,10 @@
+requests
+requests[socks]
+cryptography
+psutil
+python-dotenv
+flask
+
+# Optional — only needed for automatic pirate-captcha solving (menu 17).
+# Adds ~250 MB to the image. Uncomment if you use Auto-Pirate.
+# onnxruntime
