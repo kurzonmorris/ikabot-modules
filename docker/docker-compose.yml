@@ -19,6 +19,11 @@ services:
       IKABOT_LOCALE: en-GB
       IKABOT_GF_LANG: en
       IKABOT_TIMEZONE_ID: Europe/London
+      # Web terminal. Stays off entirely unless TTYD_PASS is set.
+      TTYD_USER: ikabot
+      TTYD_PASS: ""
+    ports:
+      - "7681:7681"
     volumes:
       - /mnt/user/appdata/ikabot/app:/app
       - /mnt/user/appdata/ikabot/config:/config

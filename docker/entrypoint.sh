@@ -80,6 +80,27 @@ done
 
 tmux select-window -t "$SESSION:ika01" 2>/dev/null
 
+# --- web terminal ----------------------------------------------------------
+# Deliberately refuses to start without a password: this serves a shell, and
+# an unauthenticated one must never be reachable just because a variable was
+# left unset.
+TTYD_PORT="${TTYD_PORT:-7681}"
+TTYD_USER="${TTYD_USER:-ikabot}"
+TTYD_PASS="${TTYD_PASS:-}"
+
+if [ -n "$TTYD_PASS" ]; then
+    ttyd --port "$TTYD_PORT" \
+         --credential "${TTYD_USER}:${TTYD_PASS}" \
+         --writable \
+         --client-option fontSize=15 \
+         --client-option 'theme={"background":"#0A1119"}' \
+         /usr/local/bin/ika-web-attach \
+         >> "$DATA_DIR/logs/ttyd.log" 2>&1 &
+    echo "[entrypoint] web terminal listening on port $TTYD_PORT (user: $TTYD_USER)"
+else
+    echo "[entrypoint] web terminal off — set TTYD_PASS to turn it on"
+fi
+
 echo "[entrypoint] ready — attach with:  docker exec -it ikabot ika attach"
 
 while tmux has-session -t "$SESSION" 2>/dev/null; do

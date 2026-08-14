@@ -1,0 +1,14 @@
+#!/bin/sh
+# What the web terminal runs. Re-attaches if the user detaches, so the browser
+# tab always shows the instances rather than dropping to a bare shell.
+SESSION="${TMUX_SESSION:-ikabot}"
+
+while true; do
+    tmux attach -t "$SESSION" 2>/dev/null
+    # Session gone (container shutting down, or killed by hand) — don't spin.
+    tmux has-session -t "$SESSION" 2>/dev/null || {
+        echo "ikabot session '$SESSION' is not running."
+        sleep 5
+    }
+    sleep 1
+done
