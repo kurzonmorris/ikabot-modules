@@ -1,0 +1,547 @@
+# Running ikabot in Docker — Unraid Setup Guide
+
+> Replaces the Windows VM. Runs all 24 instances plus the maintenance tools in
+> one container. Written for someone who has never used Docker before.
+>
+> **Everything you need to type is in a grey box. Copy the whole box, paste it,
+> press Enter.**
+
+---
+
+## Part 0 — What changes, and why it will be faster
+
+### What you have now
+
+Your Windows VM runs 24 copies of `ikabot.exe`, each from its own
+`ikariam 1` … `ikariam 24` folder that the installer created. Every one of
+those is a separate PyInstaller executable that unpacks its own private copy
+of Python into memory. Nothing is shared between them.
+
+Worse, **Windows starts background tasks the expensive way.** When you start a
+module (Transport Manager, Construction Manager…), ikabot creates a background
+process. On Windows, Python has to use a method called `spawn` — it launches a
+brand-new Python interpreter and re-imports everything from scratch. Every
+running module costs you another ~50 MB that is shared with nothing.
+
+### What changes on Linux
+
+Linux uses `fork` instead. A background task starts as a *copy* of its parent
+and shares almost all of its memory with it. It costs a few MB instead of ~50.
+On top of that, all 24 instances run the same Python from the same files, so
+the interpreter itself is loaded into memory **once** and shared by all of them.
+
+### The measured numbers
+
+I ran this exact ikabot code on Linux and measured it properly (shared-aware
+"PSS", not the inflated per-process figure):
+
+| | Measured |
+|---|---|
+| One ikabot instance, idle at the menu | **42 MB** |
+| 24 instances | **≈ 1.0 GB** |
+
+For comparison, on your Windows VM today (estimated from how PyInstaller and
+`spawn` behave — I could not measure your VM directly):
+
+| | Estimated |
+|---|---|
+| Windows itself | ~2.0 GB |
+| 24 × `ikabot.exe` sitting at the menu | ~1.7 GB |
+| Background modules, at ~50 MB each, nothing shared | 1–3 GB |
+| **Total** | **~5–7 GB of your 8 GB** |
+
+That is why it lags. You are at or over the limit, so the server starts
+swapping to disk, and everything crawls.
+
+**Expected saving: roughly 2.5–4 GB, plus all the CPU Windows spends on
+itself.** You also get back ~800 MB of disk, because you stop keeping 24
+copies of the same program.
+
+### An honest warning
+
+Docker removes the Windows tax. It does not make 24 bots free. The i7-2700K
+and 8 GB are still your ceiling.
+
+**The single biggest upgrade you can make is RAM, and it is cheap.** One
+correction to what you said: the i7-2700K is Sandy Bridge on socket LGA1155,
+which takes **DDR3**, not DDR2. It officially supports up to 32 GB. DDR3 is
+nearly worthless second-hand now — going from 8 GB to 16 or 32 GB will cost
+very little and will do more for you than any amount of tuning.
+
+Do the Docker move first (it is free), then add RAM.
+
+### How the 24 instances will work
+
+On Windows you have 24 console windows. In Docker you get the same thing using
+a tool called **tmux** — 24 terminal "windows" inside one container, which you
+flick between with a keyboard shortcut. You can close your SSH connection and
+they all keep running.
+
+---
+
+## Part 1 — Before you start
+
+You need:
+
+- [ ] Your Unraid server on and reachable
+- [ ] Your Windows VM still working (do **not** delete it until Docker is proven)
+- [ ] About 30 minutes
+- [ ] Your ikabot vault master password
+
+Nothing here touches your Windows VM. If Docker does not work out, you just
+start the VM again.
+
+---
+
+## Part 2 — Open a terminal on Unraid
+
+1. Open the Unraid web interface in a browser.
+2. Top-right of the page, click the **`>_`** icon.
+
+A black terminal window opens. **That is where every command in this guide
+goes.** Leave it open.
+
+> If you prefer SSH, that works identically.
+
+---
+
+## Part 3 — Create the folders
+
+Paste this:
+
+```bash
+mkdir -p /mnt/user/appdata/ikabot/build \
+         /mnt/user/appdata/ikabot/app \
+         /mnt/user/appdata/ikabot/config
+cd /mnt/user/appdata/ikabot
+ls -la
+```
+
+You should see `app`, `build` and `config`.
+
+What each one is for:
+
+| Folder | Holds | Same as on Windows |
+|---|---|---|
+| `app` | ikabot's program code | `ikariam 1`…`24` folders (but **one** copy, not 24) |
+| `config` | Your vault, sessions, logs, settings, modules | `%APPDATA%\.ikabot` |
+| `build` | The Docker recipe files | nothing — this is new |
+
+---
+
+## Part 4 — Download the ikabot code
+
+Paste this:
+
+```bash
+cd /mnt/user/appdata/ikabot
+wget -O repo.zip https://github.com/kurzonmorris/ikabot-modules/archive/refs/heads/main.zip
+unzip -q repo.zip
+ls ikabot-modules-main
+```
+
+You should see a listing including `ikabot`, `modules`, `docker`, `installer`.
+
+> **If `wget` fails** (404 or "unauthorised"), the repository needs a login.
+> Instead: on your Windows PC open the repo on github.com, click the green
+> **Code** button → **Download ZIP**. Extract it, then copy the extracted
+> `ikabot-modules-main` folder into `\\TOWER\appdata\ikabot\` over the network,
+> and carry on from Part 5. (Replace `TOWER` with your server's name.)
+
+---
+
+## Part 5 — Put the code where it belongs
+
+Paste this:
+
+```bash
+cd /mnt/user/appdata/ikabot
+cp -r ikabot-modules-main/ikabot           app/
+cp -r ikabot-modules-main/modules          app/
+cp -r ikabot-modules-main/config-examples  app/
+cp    ikabot-modules-main/docker/*         build/
+ls app && echo "--- build ---" && ls build
+```
+
+`app` should contain `ikabot`, `modules`, `config-examples`.
+`build` should contain `Dockerfile`, `requirements.txt`, `entrypoint.sh`,
+`ika`, `ika-modules`, `docker-compose.yml`.
+
+> Those five build files are already written for you — that is why you are not
+> pasting them by hand. Their contents are listed in Appendix A if you ever
+> need to recreate them.
+
+---
+
+## Part 6 — Bring your existing accounts across
+
+This copies your **vault** (all 24 saved logins), your sessions, your logs and
+your module settings, so you do not have to set anything up again.
+
+**On your Windows VM**, open File Explorer, paste this into the address bar and
+press Enter:
+
+```
+%APPDATA%\.ikabot
+```
+
+You should see `vault`, `sessions`, `logs`, and probably `module_prefs`.
+
+Now, in another Explorer window, go to:
+
+```
+\\TOWER\appdata\ikabot\config
+```
+
+(Replace `TOWER` with your server name.)
+
+**Create a folder there called `.ikabot`** — note the dot at the front — and
+copy everything from the first window into it.
+
+When you are done, check it from the Unraid terminal:
+
+```bash
+ls -la /mnt/user/appdata/ikabot/config/.ikabot
+```
+
+You want to see `vault` in that list. If you do, all 24 accounts came across.
+
+> **Can't see the appdata share?** In Unraid: **Shares → appdata → SMB →**
+> set Export to **Yes**. Or skip this Part entirely and set your accounts up
+> fresh inside the container later — it just means retyping them.
+
+> **Why the dot?** On Linux, ikabot reads its data from `$HOME/.ikabot`, and
+> the container's home folder is `/config`. So `config/.ikabot` on the server
+> is exactly `%APPDATA%\.ikabot` on Windows.
+
+---
+
+## Part 7 — Build the container image
+
+This is the one command that takes a few minutes. It downloads Python and
+ikabot's libraries and packages them up.
+
+```bash
+cd /mnt/user/appdata/ikabot/build
+docker build -t ikabot-mod:latest .
+```
+
+Wait for it. The last line should say:
+
+```
+Successfully tagged ikabot-mod:latest
+```
+
+Check it exists:
+
+```bash
+docker images | grep ikabot-mod
+```
+
+> You only ever do this again if the Python libraries change. Updating ikabot
+> itself does **not** need a rebuild — see Part 11.
+
+---
+
+## Part 8 — Start it
+
+Paste the whole block:
+
+```bash
+docker run -d \
+  --name ikabot \
+  --init \
+  --restart unless-stopped \
+  -e TZ=Europe/London \
+  -e INSTANCES=24 \
+  -e IKABOT_LOCALE=en-GB \
+  -e IKABOT_GF_LANG=en \
+  -e IKABOT_TIMEZONE_ID=Europe/London \
+  -v /mnt/user/appdata/ikabot/app:/app \
+  -v /mnt/user/appdata/ikabot/config:/config \
+  ikabot-mod:latest
+```
+
+Check it started:
+
+```bash
+docker logs ikabot
+```
+
+You want to see:
+
+```
+[entrypoint] starting 24 ikabot instance(s)
+[entrypoint] ready — attach with:  docker exec -it ikabot ika attach
+```
+
+And check all 24 are alive:
+
+```bash
+docker exec -it ikabot ika status
+```
+
+You should get a list `ika01` … `ika24`, all saying **running**, and a line
+telling you how much memory they are using in total.
+
+---
+
+## Part 9 — Log in to your instances
+
+Open the instance screens:
+
+```bash
+docker exec -it ikabot ika attach
+```
+
+You are now looking at instance **ika01**, showing the ikabot banner and asking
+for your vault master password. Type it, and it will jump straight to the
+account for that window — window `ika03` picks vault account 3, and so on.
+
+Then move to the next one and repeat.
+
+### The only four keys you need
+
+You press **Ctrl-B**, let go of both keys, *then* press the second key.
+
+| Keys | Does |
+|---|---|
+| **Ctrl-B** then **W** | Show the list of all 24 — arrow keys to pick, Enter to go |
+| **Ctrl-B** then **N** | Next instance |
+| **Ctrl-B** then **P** | Previous instance |
+| **Ctrl-B** then **D** | **Leave the screens.** Everything keeps running |
+
+`Ctrl-B` then `W` is the one you will use most.
+
+To come back at any time:
+
+```bash
+docker exec -it ikabot ika attach
+```
+
+> **Important:** `Ctrl-B` then `D` is how you leave. Do not just close the
+> terminal window mid-typing, and never press `Ctrl-C` inside an instance —
+> that kills that instance, exactly like closing its console on Windows.
+> (If you do, `ika restart 7` brings it back.)
+
+> Scrolling: the mouse wheel works. Press `q` to stop scrolling.
+
+---
+
+## Part 10 — Everyday maintenance
+
+Your installer's maintenance menu is replaced by the `ika` command. Every one
+of these is run from the Unraid terminal:
+
+| Installer did | Now type |
+|---|---|
+| Open all instances | `docker start ikabot` |
+| Close all instances | `docker stop ikabot` |
+| See the instance screens | `docker exec -it ikabot ika attach` |
+| Show status | `docker exec -it ikabot ika status` |
+| Show module versions | `docker exec -it ikabot ika list` |
+| Update modules | `docker exec -it ikabot ika modules` |
+| Restart one instance | `docker exec -it ikabot ika restart 7` |
+| Restart all instances | `docker exec -it ikabot ika restart all` |
+| Read a log | `docker exec -it ikabot ika logs` |
+
+Full list of commands:
+
+```bash
+docker exec -it ikabot ika help
+```
+
+> **Tip — make it shorter.** Paste this once and you can just type `ika status`
+> instead of the whole thing:
+> ```bash
+> echo "alias ika='docker exec -it ikabot ika'" >> /boot/config/go
+> ```
+> It takes effect after your next Unraid reboot.
+
+---
+
+## Part 11 — Updating
+
+### Updating your modules
+
+Exactly what the installer's Modules screen did — downloads from GitHub,
+strips the `_v10.5.1` from the filename, drops them in the modules folder:
+
+```bash
+docker exec -it ikabot ika modules
+```
+
+Then restart the instances so they pick the new ones up:
+
+```bash
+docker exec -it ikabot ika restart all
+```
+
+Your `bulkdistribution.csv` is treated as your data and is **never**
+overwritten, same as the installer. Add `--force-csv` if you actually want the
+example version back.
+
+### Updating ikabot itself
+
+No rebuild needed — the code lives in the `app` folder:
+
+```bash
+cd /mnt/user/appdata/ikabot
+rm -rf repo.zip ikabot-modules-main
+wget -O repo.zip https://github.com/kurzonmorris/ikabot-modules/archive/refs/heads/main.zip
+unzip -q repo.zip
+rm -rf app/ikabot
+cp -r ikabot-modules-main/ikabot app/
+docker restart ikabot
+```
+
+### Changing the number of instances
+
+Say you want 12 instead of 24:
+
+```bash
+docker rm -f ikabot
+```
+
+…then re-run the Part 8 block with `-e INSTANCES=12`. Your accounts and
+settings are in `config` and are not touched.
+
+---
+
+## Part 12 — Surviving reboots
+
+`--restart unless-stopped` is already in the Part 8 command, so the container
+comes back on its own after a reboot or a crash.
+
+**But**: your vault password is not stored anywhere, so after a restart the 24
+instances will all be sitting at the password prompt waiting for you. That is
+the same as it is on Windows today.
+
+If you have modules set to auto-start (Options → Auto-start modules), they will
+launch by themselves once you have typed the password for that instance.
+
+---
+
+## Part 13 — If something goes wrong
+
+**Start here, always:**
+
+```bash
+docker logs --tail 50 ikabot
+docker exec -it ikabot ika status
+```
+
+| What you see | What it means | Fix |
+|---|---|---|
+| Container keeps stopping | Something failed at startup | `docker logs ikabot` and read the last few lines |
+| An instance says **STOPPED** | That one crashed or was closed | `docker exec -it ikabot ika restart 7` |
+| `sh: clear: not found` | Image built wrong | Rebuild: Part 7 |
+| Boxes show as `?????` | Your terminal is not on UTF-8 | Use the Unraid web terminal, it is correct by default |
+| `No modules found` in ikabot | Modules folder empty | `docker exec -it ikabot ika modules` |
+| It asks for the account number instead of jumping to it | No vault found | Check `ls /mnt/user/appdata/ikabot/config/.ikabot/vault` — see Part 6 |
+| `Cannot connect to the Docker daemon` | Docker service is off | Unraid **Settings → Docker → Enable = Yes** |
+
+**Start completely over** (keeps all your accounts and settings):
+
+```bash
+docker rm -f ikabot
+docker build -t ikabot-mod:latest /mnt/user/appdata/ikabot/build
+```
+
+…then Part 8 again.
+
+**Go back to the Windows VM:** just stop the container (`docker stop ikabot`)
+and start the VM. Nothing was changed on it.
+
+---
+
+## Part 14 — Later: moving to HexOS
+
+HexOS is built on TrueNAS SCALE, which runs Docker too. The move is easy
+because everything that matters is in two folders.
+
+1. Copy `/mnt/user/appdata/ikabot` to the new server (any pool/dataset path).
+2. Adjust the two paths in `docker/docker-compose.yml` to match the new
+   location.
+3. Run `docker compose up -d` from the `build` folder.
+
+Everything else — the image, the commands, tmux, `ika` — behaves identically.
+`docker-compose.yml` is included for this reason: HexOS/TrueNAS custom apps are
+Compose-based, whereas plain `docker run` suits Unraid 6.12 better.
+
+---
+
+## Part 15 — Getting the most from 8 GB
+
+**Do these in order:**
+
+1. **Shut the Windows VM down for good** once Docker is proven. That is your
+   biggest single win — it frees the RAM *and* the CPU cores it was pinned to.
+   Unraid: **VMS → ikabot VM → Stop**, and turn off autostart.
+
+2. **Give the container a memory ceiling** so a runaway instance can never take
+   the whole server down. Add this line to the Part 8 command and recreate:
+   ```
+   --memory=5g --memory-swap=5g \
+   ```
+   Only do this after you have watched `ika status` for a day and know your
+   normal usage — setting it too low makes Linux kill instances.
+
+3. **Stagger your modules.** 24 instances all polling at once is a CPU spike.
+   The modules already randomise their waits (`wait(3600, maxrandom=300)`), so
+   this mostly takes care of itself — but do not set very short intervals on
+   all 24.
+
+4. **Buy DDR3.** As above: LGA1155, up to 32 GB, very cheap. This is the real
+   fix.
+
+To watch what it is actually using:
+
+```bash
+docker stats ikabot
+```
+
+Press `Ctrl-C` to stop watching.
+
+---
+
+## Appendix A — What the build files do
+
+You copied these in Part 5; you do not need to create them. This is just so you
+know what they are.
+
+| File | Purpose |
+|---|---|
+| `Dockerfile` | The recipe. Python 3.12 + tmux + ikabot's libraries |
+| `requirements.txt` | ikabot's Python libraries |
+| `entrypoint.sh` | Starts the 24 tmux windows when the container boots |
+| `ika` | The maintenance commands (`status`, `restart`, `attach`…) |
+| `ika-modules` | Installs/updates modules, stripping `_vX.Y.Z` from filenames |
+| `docker-compose.yml` | Alternative start method, for HexOS later |
+
+Two details worth knowing:
+
+- **Python is pinned to 3.12 on purpose.** 3.14 changed how background
+  processes start, which would undo the memory saving described in Part 0.
+- **`ncurses-bin` is installed on purpose.** ikabot clears the screen by
+  running the `clear` command; without it every screen redraw prints an error
+  instead.
+
+---
+
+## Appendix B — Where everything lives
+
+| On Windows | In Docker | On the server |
+|---|---|---|
+| `%APPDATA%\.ikabot\vault` | `/config/.ikabot/vault` | `/mnt/user/appdata/ikabot/config/.ikabot/vault` |
+| `%APPDATA%\.ikabot\sessions` | `/config/.ikabot/sessions` | `…/config/.ikabot/sessions` |
+| `%APPDATA%\.ikabot\logs` | `/config/.ikabot/logs` | `…/config/.ikabot/logs` |
+| `…\modules` | `/config/modules` | `…/config/modules` |
+| `ikariam 1`…`24\` | `/app` (one copy) | `/mnt/user/appdata/ikabot/app` |
+
+All of it is reachable over the network at `\\TOWER\appdata\ikabot\` if you
+want to edit a CSV from Windows.
+
+---
+
+*Written against ikabot 7.4.5 / mod v1.7.7, Unraid 6.12.3.*

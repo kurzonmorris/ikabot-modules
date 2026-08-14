@@ -1,0 +1,133 @@
+#!/bin/bash
+# Maintenance commands inside the ikabot container.
+# Replaces the Windows installer's maintenance menu.
+set -uo pipefail
+
+SESSION="${TMUX_SESSION:-ikabot}"
+MODULES_DIR="${MODULES_DIR:-/config/modules}"
+LOGS_DIR=/config/.ikabot/logs
+
+usage() {
+    cat <<'USAGE'
+ika — ikabot container maintenance
+
+  ika attach            Open the instance screens (Ctrl-B then D to leave)
+  ika status            Show every instance and what it is using
+  ika list              Show installed modules and their versions
+  ika modules           Update modules from GitHub
+  ika modules --local   Reinstall modules from the copy in the app folder
+  ika restart <n>       Restart one instance, e.g.  ika restart 3
+  ika restart all       Restart every instance
+  ika logs              List account log files
+  ika logs <name>       Follow one log file
+  ika shell             Plain shell inside the container
+
+Leaving the screens: press Ctrl-B, let go, then press D.
+Switching instance:  Ctrl-B then W picks from a list.
+USAGE
+}
+
+win_name() { printf "ika%02d" "$1"; }
+
+# Rebuild the launch command rather than letting tmux replay it: respawn-window
+# does not remember the pane's start directory, so a bare respawn comes back up
+# in the wrong place.
+instance_cmd() {
+    # Only pre-answer the account prompt when a vault exists — see entrypoint.sh.
+    if [ "${AUTO_ACCOUNT:-1}" = "1" ] \
+       && { [ -f /config/.ikabot/vault ] || [ -f /config/.ikabot_vault ]; }; then
+        echo "python3 -m ikabot $1"
+    else
+        echo "python3 -m ikabot"
+    fi
+}
+
+respawn() {
+    local num="$1" win="$2"
+    tmux respawn-window -k -c /app -t "$SESSION:$win" "$(instance_cmd "$num")" 2>/dev/null
+}
+
+cmd_status() {
+    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+        echo "No tmux session '$SESSION' — the container is not running instances."
+        return 1
+    fi
+
+    printf "%-8s %-10s %-8s %s\n" "WINDOW" "STATE" "PID" "COMMAND"
+    printf -- "------------------------------------------------------------\n"
+    tmux list-windows -t "$SESSION" -F \
+        "#{window_name}|#{pane_dead}|#{pane_pid}|#{pane_current_command}" \
+    | while IFS='|' read -r name dead pid cmd; do
+        if [ "$dead" = "1" ]; then
+            printf "%-8s %-10s %-8s %s\n" "$name" "STOPPED" "-" "(exited)"
+        else
+            printf "%-8s %-10s %-8s %s\n" "$name" "running" "$pid" "$cmd"
+        fi
+    done
+
+    echo
+    local count rss
+    count=$(pgrep -fc "python3 -m ikabot" 2>/dev/null || echo 0)
+    rss=$(ps -eo rss,comm,args --no-headers 2>/dev/null \
+          | awk '/ikabot/ {sum += $1} END {printf "%.0f", sum/1024}')
+    echo "ikabot processes : ${count} running, ${rss:-0} MB resident in total"
+    echo "modules folder   : ${MODULES_DIR}"
+    echo "data folder      : /config/.ikabot"
+}
+
+cmd_restart() {
+    local target="${1:-}"
+    if [ -z "$target" ]; then
+        echo "Which instance? e.g.  ika restart 3   or   ika restart all" >&2
+        return 1
+    fi
+
+    if [ "$target" = "all" ]; then
+        for w in $(tmux list-windows -t "$SESSION" -F "#{window_name}"); do
+            local n="${w#ika}"
+            respawn "$((10#$n))" "$w" && echo "restarted $w"
+        done
+        return 0
+    fi
+
+    if ! [[ "$target" =~ ^[0-9]+$ ]]; then
+        echo "Instance must be a number, or 'all'." >&2
+        return 1
+    fi
+
+    local w
+    w=$(win_name "$target")
+    if respawn "$target" "$w"; then
+        echo "restarted $w"
+    else
+        echo "No instance called $w" >&2
+        return 1
+    fi
+}
+
+cmd_logs() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        if [ -d "$LOGS_DIR" ] && [ -n "$(ls -A "$LOGS_DIR" 2>/dev/null)" ]; then
+            ls -lh "$LOGS_DIR"
+            echo
+            echo "Follow one with:  ika logs <filename>"
+        else
+            echo "No logs yet in $LOGS_DIR"
+        fi
+        return 0
+    fi
+    tail -f "$LOGS_DIR/$name"
+}
+
+case "${1:-}" in
+    attach|"")   exec tmux attach -t "$SESSION" ;;
+    status)      cmd_status ;;
+    list)        exec ika-modules list ;;
+    modules)     shift; exec ika-modules sync "$@" ;;
+    restart)     shift; cmd_restart "$@" ;;
+    logs)        shift; cmd_logs "$@" ;;
+    shell)       exec /bin/bash ;;
+    -h|--help|help) usage ;;
+    *)           echo "Unknown command: $1" >&2; echo; usage; exit 1 ;;
+esac

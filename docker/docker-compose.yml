@@ -1,0 +1,24 @@
+# Optional. Plain `docker run` (see docs/DOCKER_GUIDE.md) works everywhere and
+# is the recommended path on Unraid 6.12.
+#
+# This file is here for HexOS / TrueNAS SCALE, whose custom-app screen is
+# Compose-based. Adjust the two host paths, then:  docker compose up -d
+services:
+  ikabot:
+    build: .
+    image: ikabot-mod:latest
+    container_name: ikabot
+    init: true
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      TZ: Europe/London
+      INSTANCES: "24"
+      AUTO_ACCOUNT: "1"
+      IKABOT_LOCALE: en-GB
+      IKABOT_GF_LANG: en
+      IKABOT_TIMEZONE_ID: Europe/London
+    volumes:
+      - /mnt/user/appdata/ikabot/app:/app
+      - /mnt/user/appdata/ikabot/config:/config
