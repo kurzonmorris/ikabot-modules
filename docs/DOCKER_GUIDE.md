@@ -342,6 +342,7 @@ of these is run from the Unraid terminal:
 | Show module versions | `docker exec -it ikabot ika list` |
 | Update modules | `docker exec -it ikabot ika modules` |
 | Restart one instance | `docker exec -it ikabot ika restart 7` |
+| List instance web server URLs | `docker exec -it ikabot ika web` |
 | Restart all instances | `docker exec -it ikabot ika restart all` |
 | Read a log | `docker exec -it ikabot ika logs` |
 
@@ -568,16 +569,98 @@ it is not something to leave open to the internet on plain HTTP, where the
 password crosses the network in the clear and scanners find open ports within
 minutes.
 
-**Use Tailscale instead of port forwarding.** It is less work, not more:
+**Use Tailscale instead of port forwarding.** It is less work, not more.
 
-1. Unraid: **Apps → search "Tailscale" → install** the plugin.
-2. Open it, click to authenticate, sign in with Google/GitHub/email.
-3. Install Tailscale on your phone and laptop, sign in with the same account.
-4. From anywhere, open `http://tower:7681`.
+> **On Unraid 6.12 you cannot use the Tailscale plugin** — it requires Unraid
+> 7.0 or later, which is why it never appears in Community Applications on
+> 6.12. Use the container below instead; with `--network=host` it does the same
+> job of putting the whole server on your tailnet.
 
-No router configuration, no dynamic DNS, no certificates, no open ports. The
-connection is encrypted and only your own devices can reach it. The address
-never changes, so the bookmark keeps working.
+Run this on Unraid:
+
+```bash
+mkdir -p /mnt/user/appdata/tailscale
+docker run -d \
+  --name tailscale \
+  --restart unless-stopped \
+  --network=host \
+  --cap-add=NET_ADMIN \
+  --cap-add=NET_RAW \
+  --device=/dev/net/tun \
+  -v /mnt/user/appdata/tailscale:/var/lib/tailscale \
+  -e TS_STATE_DIR=/var/lib/tailscale \
+  -e TS_USERSPACE=false \
+  -e TS_ACCEPT_DNS=false \
+  -e TS_HOSTNAME=tower \
+  tailscale/tailscale:latest
+```
+
+`TS_USERSPACE=false` is essential — left at its default the container does its
+own userspace networking and the host's ports stay invisible. `TS_ACCEPT_DNS=false`
+stops Tailscale rewriting Unraid's DNS, which you do not need.
+
+Get the sign-in link and authenticate:
+
+```bash
+docker logs tailscale 2>&1 | grep -i "login.tailscale.com"
+```
+
+> Open that link in a **private/incognito window**. The sign-in page silently
+> reuses whatever Google/GitHub session your browser already has, which is an
+> easy way to attach the server to the wrong account.
+
+Then at **login.tailscale.com → DNS**, enable **MagicDNS** and **HTTPS
+Certificates**, and under **Machines → tower → ⋯**, disable **key expiry** so it
+does not drop off the tailnet in six months.
+
+### Serve it over HTTPS
+
+Do not use `http://<tailscale-ip>:7681`. Reaching a Docker-published port across
+the tailnet depends on the DNAT/forward path and is unreliable. Let Tailscale
+terminate the connection instead:
+
+```bash
+docker exec tailscale tailscale serve --bg 7681
+docker exec tailscale tailscale serve status
+```
+
+That prints your permanent URL — no port number, real certificate, private to
+your tailnet:
+
+```
+https://tower.tailXXXXX.ts.net/
+```
+
+Install Tailscale on your phone and laptop, sign in with the same account, and
+that URL works from anywhere. The setting persists across restarts.
+
+### ⚠ If the page will not load on a phone
+
+**Turn off Private DNS on Android.** This is the one that will waste your
+evening: **Settings → Network & internet → Private DNS → Off**. If it is set to
+a hostname (`dns.adguard.com`, NextDNS, Cloudflare), Android sends every lookup
+straight there and MagicDNS never sees it, so `.ts.net` names do not resolve —
+while ordinary websites keep working perfectly, which makes it look like a
+server problem.
+
+Chrome and Firefox have their own equivalent: **Settings → Privacy and security
+→ Use secure DNS → off** (Chrome), **Settings → DNS over HTTPS → off** (Firefox).
+
+If you used Private DNS for ad-blocking, put the filtering back at the tailnet
+level instead: **login.tailscale.com → DNS → Nameservers**, add NextDNS or
+similar as a global nameserver. You keep the filtering *and* MagicDNS.
+
+To confirm the server side is fine before blaming it, this proves the whole
+chain without needing DNS:
+
+```bash
+curl -sS -o /dev/null -w "serve: %{http_code}\n" \
+  --resolve tower.tailXXXXX.ts.net:443:100.x.x.x \
+  https://tower.tailXXXXX.ts.net/
+```
+
+`401` means TLS, certificate, proxy and ttyd are all working and the problem is
+on the client.
 
 If you specifically want a public `https://` address later, Tailscale Funnel
 and Cloudflare Tunnel both do that with a real certificate — still without
@@ -593,6 +676,88 @@ am recommending Tailscale.
 
 Recreate the container without `-e TTYD_PASS`. With no password set it does not
 listen at all.
+
+---
+
+## Part 17 — The per-instance web servers
+
+Each instance can run its own web server (menu option **16**) that lets you play
+that account in a browser without logging ikabot out. If you use these, one
+change is needed.
+
+### Why they are unreachable by default
+
+The address ikabot prints — something like `172.17.0.2:44214` — is the
+**container's** internal Docker address. The server binds every interface
+*inside the container*, and since only 7681 is published, nothing else gets
+out. That port is not reachable from the host, your LAN, or Tailscale.
+
+The port itself is derived from your email, host and username, landing in
+**43000–44999**. It is stable for an account and only shifts if two instances
+collide, in which case the second takes the next free number.
+
+### The fix: host networking
+
+Recreate the container so it shares the server's network stack. Every instance
+web server then binds the real interfaces, including `tailscale0`.
+
+```bash
+docker rm -f ikabot
+```
+
+```bash
+docker run -d \
+  --name ikabot \
+  --init \
+  --restart unless-stopped \
+  --network=host \
+  -e TTYD_USER=kurzon \
+  -e TTYD_PASS='your-password' \
+  -e TZ=Europe/London \
+  -e INSTANCES=24 \
+  -e IKABOT_LOCALE=en-GB \
+  -e IKABOT_GF_LANG=en \
+  -e IKABOT_TIMEZONE_ID=Europe/London \
+  -v /mnt/user/appdata/ikabot/app:/app \
+  -v /mnt/user/appdata/ikabot/config:/config \
+  ikabot-mod:latest
+```
+
+`-p 7681:7681` is **gone** — with host networking it means nothing, and ttyd
+binds the host's 7681 directly. An existing `tailscale serve` setup keeps
+working, because it proxies to `127.0.0.1:7681` on the host either way.
+
+A side benefit: ikabot works out its address by asking the OS which interface
+reaches the internet. On host networking it prints your real IP instead of
+`172.17.0.2`, so the address it shows you becomes one that actually works.
+
+### Finding all of them at once
+
+```bash
+docker exec -it ikabot ika web
+```
+
+```
+INSTANCE   PORT     URL
+----------------------------------------------------
+ika01      43001    http://100.122.72.17:43001
+ika03      43117    http://100.122.72.17:43117
+```
+
+It walks each tmux window's process tree to find which instance owns which
+listening port, and prints your Tailscale address when it can find one — so
+the URLs work from anywhere on your tailnet. Override the address with
+`-e IKA_WEB_HOST=...` if you want LAN addresses printed instead.
+
+### ⚠ These web servers have no password
+
+They proxy your logged-in Ikariam session — anyone who opens one is playing
+that account. Inside the container they were unreachable; on host networking
+they are exposed to your whole LAN as well as your tailnet, and there is no
+bind-address setting to restrict them to Tailscale only.
+
+On a home network with only your own devices that is fine. If anything less
+trusted shares that network, weigh it before making the change.
 
 ---
 
