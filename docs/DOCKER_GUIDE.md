@@ -568,16 +568,98 @@ it is not something to leave open to the internet on plain HTTP, where the
 password crosses the network in the clear and scanners find open ports within
 minutes.
 
-**Use Tailscale instead of port forwarding.** It is less work, not more:
+**Use Tailscale instead of port forwarding.** It is less work, not more.
 
-1. Unraid: **Apps → search "Tailscale" → install** the plugin.
-2. Open it, click to authenticate, sign in with Google/GitHub/email.
-3. Install Tailscale on your phone and laptop, sign in with the same account.
-4. From anywhere, open `http://tower:7681`.
+> **On Unraid 6.12 you cannot use the Tailscale plugin** — it requires Unraid
+> 7.0 or later, which is why it never appears in Community Applications on
+> 6.12. Use the container below instead; with `--network=host` it does the same
+> job of putting the whole server on your tailnet.
 
-No router configuration, no dynamic DNS, no certificates, no open ports. The
-connection is encrypted and only your own devices can reach it. The address
-never changes, so the bookmark keeps working.
+Run this on Unraid:
+
+```bash
+mkdir -p /mnt/user/appdata/tailscale
+docker run -d \
+  --name tailscale \
+  --restart unless-stopped \
+  --network=host \
+  --cap-add=NET_ADMIN \
+  --cap-add=NET_RAW \
+  --device=/dev/net/tun \
+  -v /mnt/user/appdata/tailscale:/var/lib/tailscale \
+  -e TS_STATE_DIR=/var/lib/tailscale \
+  -e TS_USERSPACE=false \
+  -e TS_ACCEPT_DNS=false \
+  -e TS_HOSTNAME=tower \
+  tailscale/tailscale:latest
+```
+
+`TS_USERSPACE=false` is essential — left at its default the container does its
+own userspace networking and the host's ports stay invisible. `TS_ACCEPT_DNS=false`
+stops Tailscale rewriting Unraid's DNS, which you do not need.
+
+Get the sign-in link and authenticate:
+
+```bash
+docker logs tailscale 2>&1 | grep -i "login.tailscale.com"
+```
+
+> Open that link in a **private/incognito window**. The sign-in page silently
+> reuses whatever Google/GitHub session your browser already has, which is an
+> easy way to attach the server to the wrong account.
+
+Then at **login.tailscale.com → DNS**, enable **MagicDNS** and **HTTPS
+Certificates**, and under **Machines → tower → ⋯**, disable **key expiry** so it
+does not drop off the tailnet in six months.
+
+### Serve it over HTTPS
+
+Do not use `http://<tailscale-ip>:7681`. Reaching a Docker-published port across
+the tailnet depends on the DNAT/forward path and is unreliable. Let Tailscale
+terminate the connection instead:
+
+```bash
+docker exec tailscale tailscale serve --bg 7681
+docker exec tailscale tailscale serve status
+```
+
+That prints your permanent URL — no port number, real certificate, private to
+your tailnet:
+
+```
+https://tower.tailXXXXX.ts.net/
+```
+
+Install Tailscale on your phone and laptop, sign in with the same account, and
+that URL works from anywhere. The setting persists across restarts.
+
+### ⚠ If the page will not load on a phone
+
+**Turn off Private DNS on Android.** This is the one that will waste your
+evening: **Settings → Network & internet → Private DNS → Off**. If it is set to
+a hostname (`dns.adguard.com`, NextDNS, Cloudflare), Android sends every lookup
+straight there and MagicDNS never sees it, so `.ts.net` names do not resolve —
+while ordinary websites keep working perfectly, which makes it look like a
+server problem.
+
+Chrome and Firefox have their own equivalent: **Settings → Privacy and security
+→ Use secure DNS → off** (Chrome), **Settings → DNS over HTTPS → off** (Firefox).
+
+If you used Private DNS for ad-blocking, put the filtering back at the tailnet
+level instead: **login.tailscale.com → DNS → Nameservers**, add NextDNS or
+similar as a global nameserver. You keep the filtering *and* MagicDNS.
+
+To confirm the server side is fine before blaming it, this proves the whole
+chain without needing DNS:
+
+```bash
+curl -sS -o /dev/null -w "serve: %{http_code}\n" \
+  --resolve tower.tailXXXXX.ts.net:443:100.x.x.x \
+  https://tower.tailXXXXX.ts.net/
+```
+
+`401` means TLS, certificate, proxy and ttyd are all working and the problem is
+on the client.
 
 If you specifically want a public `https://` address later, Tailscale Funnel
 and Cloudflare Tunnel both do that with a real certificate — still without
