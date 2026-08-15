@@ -342,6 +342,7 @@ of these is run from the Unraid terminal:
 | Show module versions | `docker exec -it ikabot ika list` |
 | Update modules | `docker exec -it ikabot ika modules` |
 | Restart one instance | `docker exec -it ikabot ika restart 7` |
+| List instance web server URLs | `docker exec -it ikabot ika web` |
 | Restart all instances | `docker exec -it ikabot ika restart all` |
 | Read a log | `docker exec -it ikabot ika logs` |
 
@@ -675,6 +676,88 @@ am recommending Tailscale.
 
 Recreate the container without `-e TTYD_PASS`. With no password set it does not
 listen at all.
+
+---
+
+## Part 17 — The per-instance web servers
+
+Each instance can run its own web server (menu option **16**) that lets you play
+that account in a browser without logging ikabot out. If you use these, one
+change is needed.
+
+### Why they are unreachable by default
+
+The address ikabot prints — something like `172.17.0.2:44214` — is the
+**container's** internal Docker address. The server binds every interface
+*inside the container*, and since only 7681 is published, nothing else gets
+out. That port is not reachable from the host, your LAN, or Tailscale.
+
+The port itself is derived from your email, host and username, landing in
+**43000–44999**. It is stable for an account and only shifts if two instances
+collide, in which case the second takes the next free number.
+
+### The fix: host networking
+
+Recreate the container so it shares the server's network stack. Every instance
+web server then binds the real interfaces, including `tailscale0`.
+
+```bash
+docker rm -f ikabot
+```
+
+```bash
+docker run -d \
+  --name ikabot \
+  --init \
+  --restart unless-stopped \
+  --network=host \
+  -e TTYD_USER=kurzon \
+  -e TTYD_PASS='your-password' \
+  -e TZ=Europe/London \
+  -e INSTANCES=24 \
+  -e IKABOT_LOCALE=en-GB \
+  -e IKABOT_GF_LANG=en \
+  -e IKABOT_TIMEZONE_ID=Europe/London \
+  -v /mnt/user/appdata/ikabot/app:/app \
+  -v /mnt/user/appdata/ikabot/config:/config \
+  ikabot-mod:latest
+```
+
+`-p 7681:7681` is **gone** — with host networking it means nothing, and ttyd
+binds the host's 7681 directly. An existing `tailscale serve` setup keeps
+working, because it proxies to `127.0.0.1:7681` on the host either way.
+
+A side benefit: ikabot works out its address by asking the OS which interface
+reaches the internet. On host networking it prints your real IP instead of
+`172.17.0.2`, so the address it shows you becomes one that actually works.
+
+### Finding all of them at once
+
+```bash
+docker exec -it ikabot ika web
+```
+
+```
+INSTANCE   PORT     URL
+----------------------------------------------------
+ika01      43001    http://100.122.72.17:43001
+ika03      43117    http://100.122.72.17:43117
+```
+
+It walks each tmux window's process tree to find which instance owns which
+listening port, and prints your Tailscale address when it can find one — so
+the URLs work from anywhere on your tailnet. Override the address with
+`-e IKA_WEB_HOST=...` if you want LAN addresses printed instead.
+
+### ⚠ These web servers have no password
+
+They proxy your logged-in Ikariam session — anyone who opens one is playing
+that account. Inside the container they were unreachable; on host networking
+they are exposed to your whole LAN as well as your tailnet, and there is no
+bind-address setting to restrict them to Tailscale only.
+
+On a home network with only your own devices that is fine. If anything less
+trusted shares that network, weigh it before making the change.
 
 ---
 

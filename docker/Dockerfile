@@ -20,6 +20,7 @@ RUN set -eux; \
         tmux \
         ncurses-bin \
         procps \
+        iproute2 \
         dnsutils \
         tzdata \
         ca-certificates \

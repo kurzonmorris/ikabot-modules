@@ -18,6 +18,7 @@ ika — ikabot container maintenance
   ika modules --local   Reinstall modules from the copy in the app folder
   ika restart <n>       Restart one instance, e.g.  ika restart 3
   ika restart all       Restart every instance
+  ika web               Show each instance's web server URL
   ika logs              List account log files
   ika logs <name>       Follow one log file
   ika shell             Plain shell inside the container
@@ -105,6 +106,127 @@ cmd_restart() {
     fi
 }
 
+cmd_web() {
+    python3 - "$SESSION" <<'PY'
+import os, re, subprocess, sys
+
+session = sys.argv[1]
+
+panes = {}
+out = subprocess.run(["tmux", "list-windows", "-t", session,
+                      "-F", "#{window_name} #{pane_pid}"],
+                     capture_output=True, text=True).stdout
+for line in out.split("\n"):
+    if not line.strip():
+        continue
+    name, _, pid = line.rpartition(" ")
+    panes[int(pid)] = name
+
+
+def parent(pid):
+    # /proc/<pid>/stat: field 4 is ppid, but comm can contain spaces and ')'
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return int(f.read().rpartition(")")[2].split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def instance_of(pid):
+    for _ in range(40):
+        if pid in panes:
+            return panes[pid]
+        if pid <= 1:
+            break
+        pid = parent(pid)
+    return None
+
+
+def server_address():
+    if os.environ.get("IKA_WEB_HOST"):
+        return os.environ["IKA_WEB_HOST"]
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr"],
+                             capture_output=True, text=True).stdout
+    except OSError:
+        out = ""
+    found = re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+    # Tailscale hands out 100.64.0.0/10, and that is the address worth
+    # printing — it is the one that works from anywhere.
+    for a in found:
+        p = [int(x) for x in a.split(".")]
+        if p[0] == 100 and 64 <= p[1] <= 127:
+            return a
+    for a in found:
+        if not a.startswith(("127.", "172.17.")):
+            return a
+    return "<server-ip>"
+
+
+def listening_ports_by_inode():
+    """socket inode -> port, for every TCP socket in LISTEN state."""
+    ports = {}
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                next(f, None)
+                for line in f:
+                    col = line.split()
+                    if len(col) < 10 or col[3] != "0A":   # 0A = TCP_LISTEN
+                        continue
+                    ports[col[9]] = int(col[1].rpartition(":")[2], 16)
+        except OSError:
+            pass
+    return ports
+
+
+def sockets_of(pid):
+    """Socket inodes this process holds open."""
+    out = []
+    try:
+        for fd in os.listdir("/proc/%d/fd" % pid):
+            try:
+                target = os.readlink("/proc/%d/fd/%s" % (pid, fd))
+            except OSError:
+                continue
+            if target.startswith("socket:["):
+                out.append(target[8:-1])
+    except OSError:
+        pass
+    return out
+
+
+ttyd_port = int(os.environ.get("TTYD_PORT", "7681"))
+inode_port = listening_ports_by_inode()
+rows = set()
+
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    pid = int(entry)
+    hits = [inode_port[i] for i in sockets_of(pid) if i in inode_port]
+    if not hits:
+        continue
+    name = instance_of(pid)
+    if not name:
+        continue
+    for port in hits:
+        if port != ttyd_port:
+            rows.add((name, port))
+
+if not rows:
+    print("No instance web servers are running.")
+    print("Start one from inside an instance with menu option (16).")
+else:
+    host = server_address()
+    print("%-10s %-8s %s" % ("INSTANCE", "PORT", "URL"))
+    print("-" * 52)
+    for name, port in sorted(rows):
+        print("%-10s %-8d http://%s:%d" % (name, port, host, port))
+    print("\nReachable from anywhere on your tailnet.")
+PY
+}
+
 cmd_logs() {
     local name="${1:-}"
     if [ -z "$name" ]; then
@@ -126,6 +248,7 @@ case "${1:-}" in
     list)        exec ika-modules list ;;
     modules)     shift; exec ika-modules sync "$@" ;;
     restart)     shift; cmd_restart "$@" ;;
+    web)         cmd_web ;;
     logs)        shift; cmd_logs "$@" ;;
     shell)       exec /bin/bash ;;
     -h|--help|help) usage ;;

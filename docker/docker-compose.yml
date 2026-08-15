@@ -22,6 +22,9 @@ services:
       # Web terminal. Stays off entirely unless TTYD_PASS is set.
       TTYD_USER: ikabot
       TTYD_PASS: ""
+    # Swap ports for host networking if you use the per-instance web
+    # servers (menu 16) — see Part 17 of the guide.
+    # network_mode: host
     ports:
       - "7681:7681"
     volumes:
