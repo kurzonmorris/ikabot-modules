@@ -282,6 +282,25 @@ class AESCipher:
         return session_data
 
     def setSessionData(self, session, data, shared=False):
+        return self._writeSessionData(session, data, shared=shared)
+
+    def mutateSessionData(self, session, mutator, shared=False):
+        """Read-modify-write the account's session block atomically.
+
+        setSessionData() locks only the write. Callers that read with
+        getSessionData(), edit, then write back are doing an unsynchronised
+        read-modify-write: two processes can both read the same snapshot and
+        the second write silently discards the first one's changes. That is
+        how a running background task loses its entry from processList and
+        disappears from the menu's task table while still running.
+
+        `mutator` receives the current block (a dict) and returns the block to
+        store. It runs while the file lock is held, so keep it short and do no
+        I/O inside it.
+        """
+        return self._writeSessionData(session, None, shared=shared, mutator=mutator)
+
+    def _writeSessionData(self, session, data, shared=False, mutator=None):
         file_path = self._get_file_path(session)
         lock_path = file_path + ".lock"
         tmp_path  = file_path + ".tmp"
@@ -295,6 +314,8 @@ class AESCipher:
                 session_data.setdefault("shared", {})
                 if "logLevel" not in session_data["shared"]:
                     session_data["shared"]["logLevel"] = DEFAULT_LOG_LEVEL
+                if mutator is not None:
+                    data = mutator(dict(session_data["shared"]))
                 session_data["shared"] = {**session_data["shared"], **data}
             else:
                 username = session.username
@@ -304,6 +325,10 @@ class AESCipher:
                 session_data[username].setdefault(mundo, {})
                 session_data[username][mundo].setdefault(servidor, {})
                 session_data.setdefault("shared", {})
+                if mutator is not None:
+                    # Re-read inside the lock so the mutator edits current
+                    # state, not a snapshot taken before the lock was taken.
+                    data = mutator(dict(session_data[username][mundo][servidor]))
                 session_data[username][mundo][servidor] = data
 
             plaintext  = json.dumps(session_data)

@@ -86,17 +86,19 @@ class Session:
         """
         self.logger.info(f"Changing status to {message}")
 
-        # read from file
-        sessionData = self.getSessionData()
-        try:
-            fileList = sessionData["processList"]
-        except KeyError:
-            fileList = []
-        # modify current process' status message
-        [p.update({"status": message}) for p in fileList if p["pid"] == os.getpid()]
-        # dump back to session data
-        sessionData["processList"] = fileList
-        self.setSessionData(sessionData)
+        # Atomic: a plain read-edit-write here races with the menu's own
+        # updateProcessList() and with every other background task doing the
+        # same, and the loser's changes vanish — including whole processList
+        # entries, which is how a live task disappears from the task table.
+        my_pid = os.getpid()
+
+        def _update(sessionData):
+            fileList = sessionData.get("processList") or []
+            [p.update({"status": message}) for p in fileList if p["pid"] == my_pid]
+            sessionData["processList"] = fileList
+            return sessionData
+
+        self.mutateSessionData(_update)
 
     def __genRand(self):
         return hex(random.randint(0, 65535))[2:]
@@ -1559,6 +1561,16 @@ class Session:
     def getSessionData(self):
         """Gets relevant session data from the .ikabot file"""
         return self.cipher.getSessionData(self)
+
+    def mutateSessionData(self, mutator, shared=False):
+        """Atomically read-modify-write this account's session data.
+
+        Use this instead of getSessionData() + edit + setSessionData() whenever
+        several processes may touch the same key — the read/write pair is
+        otherwise unsynchronised and one process's changes can be silently
+        discarded by another's write.
+        """
+        return self.cipher.mutateSessionData(self, mutator, shared=shared)
 
 
 def normal_get(url, params={}):
