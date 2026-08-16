@@ -51,10 +51,12 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY entrypoint.sh    /usr/local/bin/entrypoint.sh
 COPY ika              /usr/local/bin/ika
 COPY ika-modules      /usr/local/bin/ika-modules
+COPY ika-update       /usr/local/bin/ika-update
 COPY ika-web-attach   /usr/local/bin/ika-web-attach
 RUN chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/ika \
              /usr/local/bin/ika-modules \
+             /usr/local/bin/ika-update \
              /usr/local/bin/ika-web-attach
 
 EXPOSE 7681

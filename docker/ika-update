@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Update ikabot's own code from GitHub.
+
+Replaces the Windows installer's "Update ikabot" screen. The previous copy is
+kept so a bad update can be rolled back without another download.
+"""
+
+import argparse
+import io
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+import zipfile
+from pathlib import Path
+
+REPO = os.environ.get("IKABOT_REPO", "kurzonmorris/ikabot-modules")
+BRANCH = os.environ.get("IKABOT_BRANCH", "main")
+APP = Path(os.environ.get("APP_DIR", "/app"))
+BACKUP = APP / ".previous"
+
+ZIP_URL = "https://github.com/%s/archive/refs/heads/%s.zip" % (REPO, BRANCH)
+
+# Copied wholesale from the downloaded tree; anything else in /app is left alone.
+TRACKED = ("ikabot", "modules", "config-examples")
+
+
+def versions(tree):
+    """Read IKABOT_VERSION / IKABOT_MOD_VERSION out of a source tree."""
+    cfg = Path(tree) / "ikabot" / "config.py"
+    out = {}
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for key in ("IKABOT_VERSION", "IKABOT_MOD_VERSION"):
+        m = re.search(r'^%s\s*=\s*"([^"]+)"' % key, text, re.M)
+        if m:
+            out[key] = m.group(1)
+    return out
+
+
+def describe(v):
+    if not v:
+        return "unknown"
+    return "ikabot %s / mod %s" % (v.get("IKABOT_VERSION", "?"),
+                                   v.get("IKABOT_MOD_VERSION", "?"))
+
+
+def download(dest):
+    print("Downloading %s (%s)..." % (REPO, BRANCH))
+    req = urllib.request.Request(ZIP_URL, headers={"User-Agent": "ika-update/1.0"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        blob = resp.read()
+    print("  %.1f MB" % (len(blob) / 1048576.0))
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        z.extractall(dest)
+    roots = [p for p in Path(dest).iterdir() if p.is_dir()]
+    if len(roots) != 1:
+        raise RuntimeError("unexpected archive layout: %s" % roots)
+    return roots[0]
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="ika-update", description=__doc__)
+    ap.add_argument("--yes", "-y", action="store_true",
+                    help="do not ask for confirmation")
+    ap.add_argument("--rollback", action="store_true",
+                    help="restore the copy saved by the last update")
+    args = ap.parse_args()
+
+    if args.rollback:
+        if not BACKUP.is_dir():
+            print("Nothing to roll back to — no previous copy saved.", file=sys.stderr)
+            return 1
+        print("Restoring %s" % describe(versions(BACKUP)))
+        for name in TRACKED:
+            src = BACKUP / name
+            if not src.is_dir():
+                continue
+            dst = APP / name
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+        print("Restored. Now run:  ika restart all")
+        return 0
+
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="ika-update-")
+    try:
+        try:
+            new = download(tmp)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+            print("Download failed: %s" % exc, file=sys.stderr)
+            print("Check the server has internet access, and that IKABOT_BRANCH "
+                  "(%s) exists." % BRANCH, file=sys.stderr)
+            return 1
+
+        if not (new / "ikabot" / "config.py").is_file():
+            print("Downloaded archive has no ikabot/config.py — refusing to "
+                  "touch %s." % APP, file=sys.stderr)
+            return 1
+
+        now, then = versions(APP), versions(new)
+        print("\n  installed : %s" % describe(now))
+        print("  available : %s\n" % describe(then))
+
+        if now and now == then:
+            print("Already up to date.")
+            if not args.yes:
+                reply = input("Reinstall anyway? [y/N]: ").strip().lower()
+                if reply != "y":
+                    return 0
+
+        if not args.yes:
+            print("This replaces ikabot's code in %s." % APP)
+            print("Running instances keep going until you restart them.")
+            reply = input("Continue? [y/N]: ").strip().lower()
+            if reply != "y":
+                print("Cancelled — nothing changed.")
+                return 0
+
+        # Keep exactly one previous copy so --rollback always has a target.
+        if BACKUP.is_dir():
+            shutil.rmtree(BACKUP)
+        BACKUP.mkdir(parents=True)
+        for name in TRACKED:
+            src = APP / name
+            if src.is_dir():
+                shutil.copytree(src, BACKUP / name)
+
+        for name in TRACKED:
+            src = new / name
+            if not src.is_dir():
+                continue
+            dst = APP / name
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+            print("  updated %s/" % name)
+
+        print("\nRefreshing modules...")
+        subprocess.run(["ika-modules", "sync", "--local"], check=False)
+
+        print("\nUpdated to %s" % describe(versions(APP)))
+        print("Previous copy saved — undo with:  ika update --rollback")
+        print("\nNow restart the instances to load it:")
+        print("  ika restart all")
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

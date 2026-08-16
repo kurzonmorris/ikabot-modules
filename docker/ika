@@ -16,9 +16,12 @@ ika — ikabot container maintenance
   ika list              Show installed modules and their versions
   ika modules           Update modules from GitHub
   ika modules --local   Reinstall modules from the copy in the app folder
+  ika update            Update ikabot itself from GitHub
+  ika update --rollback Undo the last update
   ika restart <n>       Restart one instance, e.g.  ika restart 3
   ika restart all       Restart every instance
   ika web               Show each instance's web server URL
+  ika web --stop        Stop every running instance web server
   ika logs              List account log files
   ika logs <name>       Follow one log file
   ika shell             Plain shell inside the container
@@ -107,10 +110,11 @@ cmd_restart() {
 }
 
 cmd_web() {
-    python3 - "$SESSION" <<'PY'
+    python3 - "$SESSION" "${1:-}" <<'PY'
 import os, re, subprocess, sys
 
 session = sys.argv[1]
+stop = len(sys.argv) > 2 and sys.argv[2] == '--stop'
 
 panes = {}
 out = subprocess.run(["tmux", "list-windows", "-t", session,
@@ -199,6 +203,7 @@ def sockets_of(pid):
 ttyd_port = int(os.environ.get("TTYD_PORT", "7681"))
 inode_port = listening_ports_by_inode()
 rows = set()
+owners = {}
 
 for entry in os.listdir("/proc"):
     if not entry.isdigit():
@@ -213,10 +218,22 @@ for entry in os.listdir("/proc"):
     for port in hits:
         if port != ttyd_port:
             rows.add((name, port))
+            owners[pid] = name
 
 if not rows:
     print("No instance web servers are running.")
-    print("Start one from inside an instance with menu option (16).")
+    if not stop:
+        print("Start one from inside an instance with menu option (16).")
+elif stop:
+    import signal
+    print("Stopping %d web server(s)..." % len(rows))
+    for pid in sorted(owners):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print("  stopped pid %d (%s)" % (pid, owners[pid]))
+        except OSError as exc:
+            print("  could not stop pid %d: %s" % (pid, exc))
+    print("\nThe instances themselves are untouched.")
 else:
     host = server_address()
     print("%-10s %-8s %s" % ("INSTANCE", "PORT", "URL"))
@@ -224,6 +241,7 @@ else:
     for name, port in sorted(rows):
         print("%-10s %-8d http://%s:%d" % (name, port, host, port))
     print("\nReachable from anywhere on your tailnet.")
+    print("Stop them all with:  ika web --stop")
 PY
 }
 
@@ -247,8 +265,9 @@ case "${1:-}" in
     status)      cmd_status ;;
     list)        exec ika-modules list ;;
     modules)     shift; exec ika-modules sync "$@" ;;
+    update)      shift; exec ika-update "$@" ;;
     restart)     shift; cmd_restart "$@" ;;
-    web)         cmd_web ;;
+    web)         shift; cmd_web "${1:-}" ;;
     logs)        shift; cmd_logs "$@" ;;
     shell)       exec /bin/bash ;;
     -h|--help|help) usage ;;

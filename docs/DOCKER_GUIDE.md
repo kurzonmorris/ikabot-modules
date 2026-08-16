@@ -341,8 +341,10 @@ of these is run from the Unraid terminal:
 | Show status | `docker exec -it ikabot ika status` |
 | Show module versions | `docker exec -it ikabot ika list` |
 | Update modules | `docker exec -it ikabot ika modules` |
+| Update ikabot itself | `docker exec -it ikabot ika update` |
 | Restart one instance | `docker exec -it ikabot ika restart 7` |
 | List instance web server URLs | `docker exec -it ikabot ika web` |
+| Stop all instance web servers | `docker exec -it ikabot ika web --stop` |
 | Restart all instances | `docker exec -it ikabot ika restart all` |
 | Read a log | `docker exec -it ikabot ika logs` |
 
@@ -384,17 +386,46 @@ example version back.
 
 ### Updating ikabot itself
 
-No rebuild needed — the code lives in the `app` folder:
+One command. No rebuild — ikabot's code lives in the `app` folder, not inside
+the image:
 
 ```bash
-cd /mnt/user/appdata/ikabot
-rm -rf repo.zip ikabot-modules-main
-wget -O repo.zip https://github.com/kurzonmorris/ikabot-modules/archive/refs/heads/main.zip
-unzip -q repo.zip
-rm -rf app/ikabot
-cp -r ikabot-modules-main/ikabot app/
-docker restart ikabot
+docker exec -it ikabot ika update
 ```
+
+It shows you what you have and what is available, asks before touching
+anything, then downloads and installs:
+
+```
+  installed : ikabot 7.4.5 / mod 1.7.6
+  available : ikabot 7.4.5 / mod 1.7.7
+
+This replaces ikabot's code in /app.
+Running instances keep going until you restart them.
+Continue? [y/N]:
+```
+
+Modules are refreshed at the same time. Then load the new code:
+
+```bash
+docker exec -it ikabot ika restart all
+```
+
+Your instances keep running on the old code until that restart, so nothing
+breaks mid-update — but you will be re-entering vault passwords afterwards, so
+do it when you have a few minutes.
+
+**If an update goes wrong**, the previous copy is kept:
+
+```bash
+docker exec -it ikabot ika update --rollback
+docker exec -it ikabot ika restart all
+```
+
+Only one previous copy is kept, so roll back before updating again.
+
+> Skip the confirmation with `ika update --yes`. To pull from a branch other
+> than `main`, add `-e IKABOT_BRANCH=some-branch` when you create the container.
 
 ### Changing the number of instances
 
