@@ -343,6 +343,7 @@ of these is run from the Unraid terminal:
 | Update modules | `docker exec -it ikabot ika modules` |
 | Restart one instance | `docker exec -it ikabot ika restart 7` |
 | List instance web server URLs | `docker exec -it ikabot ika web` |
+| Stop all instance web servers | `docker exec -it ikabot ika web --stop` |
 | Restart all instances | `docker exec -it ikabot ika restart all` |
 | Read a log | `docker exec -it ikabot ika logs` |
 
