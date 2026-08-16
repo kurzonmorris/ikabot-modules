@@ -16,6 +16,8 @@ ika — ikabot container maintenance
   ika list              Show installed modules and their versions
   ika modules           Update modules from GitHub
   ika modules --local   Reinstall modules from the copy in the app folder
+  ika update            Update ikabot itself from GitHub
+  ika update --rollback Undo the last update
   ika restart <n>       Restart one instance, e.g.  ika restart 3
   ika restart all       Restart every instance
   ika web               Show each instance's web server URL
@@ -263,6 +265,7 @@ case "${1:-}" in
     status)      cmd_status ;;
     list)        exec ika-modules list ;;
     modules)     shift; exec ika-modules sync "$@" ;;
+    update)      shift; exec ika-update "$@" ;;
     restart)     shift; cmd_restart "$@" ;;
     web)         shift; cmd_web "${1:-}" ;;
     logs)        shift; cmd_logs "$@" ;;
