@@ -141,42 +141,46 @@ def updateProcessList(session, programprocesslist=[]):
     runningIkabotProcessList : list[dict]
         a list of dictionaries containing relevant data about a running ikabot process ('pid', 'proxies' and 'action')
     """
-    # read from file
-    sessionData = session.getSessionData()
-    try:
-        fileList = sessionData["processList"]
-    except KeyError:
-        fileList = []
-
-    # check it's still running
-    runningIkabotProcessList = []
+    # Held across the whole read-prune-write so it cannot race with another
+    # process doing the same, or with session.setStatus(). Previously the read
+    # happened outside the lock, so two concurrent callers could each write a
+    # list built from a stale snapshot and silently drop each other's entries —
+    # a live background task would vanish from the task table while still
+    # running, with no way left to stop it.
     ika_process = psutil.Process(pid=os.getpid()).name()
-    for process in fileList:
-        try:
-            proc = psutil.Process(pid=process["pid"])
-        except psutil.NoSuchProcess:
-            continue
+    runningIkabotProcessList = []
 
-        # windows doesn't support the status method
-        isAlive = True if isWindows else proc.status() != "zombie"
+    def _prune_and_merge(sessionData):
+        fileList = sessionData.get("processList") or []
 
-        try:
-            if proc.name() == ika_process and isAlive:
+        del runningIkabotProcessList[:]
+        for process in fileList:
+            try:
+                proc = psutil.Process(pid=process["pid"])
+            except psutil.NoSuchProcess:
+                continue
+
+            # windows doesn't support the status method
+            isAlive = True if isWindows else proc.status() != "zombie"
+
+            try:
+                if proc.name() == ika_process and isAlive:
+                    runningIkabotProcessList.append(process)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        # add new to the list and write to file only if it's given
+        for process in programprocesslist:
+            if process not in runningIkabotProcessList:
                 runningIkabotProcessList.append(process)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
 
-    # add new to the list and write to file only if it's given
-    for process in programprocesslist:
-        if process not in runningIkabotProcessList:
-            runningIkabotProcessList.append(process)
+        for p in runningIkabotProcessList:
+            p.setdefault("status", "running")
 
-    for p in runningIkabotProcessList:
-        p.setdefault("status", "running")
+        sessionData["processList"] = runningIkabotProcessList
+        return sessionData
 
-    # write to file
-    sessionData["processList"] = runningIkabotProcessList
-    session.setSessionData(sessionData)
+    session.mutateSessionData(_prune_and_merge)
 
     # normalize process list (all processes must have properties pid, action, date and status)
     normalized_processes = normalizeDicts(runningIkabotProcessList)
