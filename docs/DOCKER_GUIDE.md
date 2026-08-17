@@ -343,6 +343,8 @@ of these is run from the Unraid terminal:
 | Update modules | `docker exec -it ikabot ika modules` |
 | Update ikabot itself | `docker exec -it ikabot ika update` |
 | Restart one instance | `docker exec -it ikabot ika restart 7` |
+| Restart only crashed instances | `docker exec -it ikabot ika restart dead` |
+| See why an instance died | `docker exec -it ikabot ika crash 7` |
 | List instance web server URLs | `docker exec -it ikabot ika web` |
 | Stop all instance web servers | `docker exec -it ikabot ika web --stop` |
 | Restart all instances | `docker exec -it ikabot ika restart all` |
@@ -466,7 +468,8 @@ docker exec -it ikabot ika status
 | What you see | What it means | Fix |
 |---|---|---|
 | Container keeps stopping | Something failed at startup | `docker logs ikabot` and read the last few lines |
-| An instance says **STOPPED** | That one crashed or was closed | `docker exec -it ikabot ika restart 7` |
+| An instance says **STOPPED** | That one crashed or was closed | `ika crash 7` to see why, then `ika restart 7` |
+| Several instances STOPPED | Crashes | `ika restart dead` — restarts only those, leaves the rest logged in |
 | `sh: clear: not found` | Image built wrong | Rebuild: Part 7 |
 | Boxes show as `?????` | Your terminal is not on UTF-8 | Use the Unraid web terminal, it is correct by default |
 | `No modules found` in ikabot | Modules folder empty | `docker exec -it ikabot ika modules` |
