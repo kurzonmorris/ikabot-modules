@@ -20,10 +20,13 @@ ika — ikabot container maintenance
   ika update --rollback Undo the last update
   ika restart <n>       Restart one instance, e.g.  ika restart 3
   ika restart all       Restart every instance
+  ika restart dead      Restart only the crashed ones
+  ika crash <n>         Show why an instance died
   ika web               Show each instance's web server URL
   ika web --stop        Stop every running instance web server
   ika logs              List account log files
   ika logs <name>       Follow one log file
+  ika panel             Show the control panel address
   ika shell             Plain shell inside the container
 
 Leaving the screens: press Ctrl-B, let go, then press D.
@@ -84,6 +87,25 @@ cmd_restart() {
     if [ -z "$target" ]; then
         echo "Which instance? e.g.  ika restart 3   or   ika restart all" >&2
         return 1
+    fi
+
+    # Only the crashed ones. remain-on-exit keeps a dead pane around holding
+    # its traceback, so this leaves healthy instances (and their logins) alone.
+    if [ "$target" = "dead" ]; then
+        local any=0
+        while IFS='|' read -r w d; do
+            if [ "$d" = "1" ]; then
+                local n="${w#ika}"
+                if respawn "$((10#$n))" "$w"; then
+                    echo "restarted $w"
+                    any=1
+                fi
+            fi
+        done < <(tmux list-windows -t "$SESSION" -F "#{window_name}|#{pane_dead}")
+        if [ "$any" = "0" ]; then
+            echo "No crashed instances — nothing to restart."
+        fi
+        return 0
     fi
 
     if [ "$target" = "all" ]; then
@@ -245,6 +267,22 @@ else:
 PY
 }
 
+cmd_crash() {
+    local target="${1:-}"
+    if [ -z "$target" ] || ! [[ "$target" =~ ^[0-9]+$ ]]; then
+        echo "Which instance? e.g.  ika crash 7" >&2
+        return 1
+    fi
+    local w
+    w=$(win_name "$target")
+    if ! tmux list-windows -t "$SESSION" -F "#{window_name}" | grep -qx "$w"; then
+        echo "No instance called $w" >&2
+        return 1
+    fi
+    echo "--- last output from $w ---"
+    tmux capture-pane -p -t "$SESSION:$w" | grep -vE "^[[:space:]]*$" | tail -30
+}
+
 cmd_logs() {
     local name="${1:-}"
     if [ -z "$name" ]; then
@@ -268,7 +306,11 @@ case "${1:-}" in
     update)      shift; exec ika-update "$@" ;;
     restart)     shift; cmd_restart "$@" ;;
     web)         shift; cmd_web "${1:-}" ;;
+    crash)       shift; cmd_crash "$@" ;;
     logs)        shift; cmd_logs "$@" ;;
+    panel)       host="$(IKA_WEB_HOST="${IKA_WEB_HOST:-}" ika-panel-host)"
+                 echo "Control panel: http://${host}:${PANEL_PORT:-7682}"
+                 echo "Sign in with TTYD_USER / TTYD_PASS (or PANEL_USER / PANEL_PASS)." ;;
     shell)       exec /bin/bash ;;
     -h|--help|help) usage ;;
     *)           echo "Unknown command: $1" >&2; echo; usage; exit 1 ;;

@@ -52,13 +52,17 @@ COPY entrypoint.sh    /usr/local/bin/entrypoint.sh
 COPY ika              /usr/local/bin/ika
 COPY ika-modules      /usr/local/bin/ika-modules
 COPY ika-update       /usr/local/bin/ika-update
+COPY ika-panel        /usr/local/bin/ika-panel
+COPY ika-panel-host   /usr/local/bin/ika-panel-host
 COPY ika-web-attach   /usr/local/bin/ika-web-attach
 RUN chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/ika \
              /usr/local/bin/ika-modules \
              /usr/local/bin/ika-update \
+             /usr/local/bin/ika-panel \
+             /usr/local/bin/ika-panel-host \
              /usr/local/bin/ika-web-attach
 
-EXPOSE 7681
+EXPOSE 7681 7682
 WORKDIR /app
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

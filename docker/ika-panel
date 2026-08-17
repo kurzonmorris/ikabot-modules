@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""Web control panel for the ikabot container.
+
+Serves the same actions as the `ika` command over HTTP, so the container can
+be driven from a phone, tablet or Steam Deck. Stdlib only — no extra packages.
+"""
+
+import base64
+import hmac
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(os.environ.get("PANEL_PORT", "7682"))
+USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
+PASS = os.environ.get("PANEL_PASS") or os.environ.get("TTYD_PASS", "")
+SESSION = os.environ.get("TMUX_SESSION", "ikabot")
+TTYD_PORT = int(os.environ.get("TTYD_PORT", "7681"))
+
+SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+_run_lock = threading.Lock()
+
+
+# --------------------------------------------------------------------------
+# State
+# --------------------------------------------------------------------------
+
+def _sh(args, timeout=600):
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return (p.stdout or "") + (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        return "Timed out after %ds: %s" % (timeout, " ".join(args))
+    except OSError as exc:
+        return "Could not run %s: %s" % (" ".join(args), exc)
+
+
+def _parent(pid):
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return int(f.read().rpartition(")")[2].split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def _listening():
+    ports = {}
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                next(f, None)
+                for line in f:
+                    c = line.split()
+                    if len(c) > 9 and c[3] == "0A":
+                        ports[c[9]] = int(c[1].rpartition(":")[2], 16)
+        except OSError:
+            pass
+    return ports
+
+
+def _sockets(pid):
+    out = []
+    try:
+        for fd in os.listdir("/proc/%d/fd" % pid):
+            try:
+                t = os.readlink("/proc/%d/fd/%s" % (pid, fd))
+            except OSError:
+                continue
+            if t.startswith("socket:["):
+                out.append(t[8:-1])
+    except OSError:
+        pass
+    return out
+
+
+def _address():
+    if os.environ.get("IKA_WEB_HOST"):
+        return os.environ["IKA_WEB_HOST"]
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr"],
+                             capture_output=True, text=True).stdout
+    except OSError:
+        out = ""
+    found = re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+    for a in found:
+        p = [int(x) for x in a.split(".")]
+        if p[0] == 100 and 64 <= p[1] <= 127:
+            return a
+    for a in found:
+        if not a.startswith(("127.", "172.17.")):
+            return a
+    return ""
+
+
+def _versions():
+    cfg = os.path.join(os.environ.get("APP_DIR", "/app"), "ikabot", "config.py")
+    out = {}
+    try:
+        with open(cfg, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return out
+    for key, label in (("IKABOT_VERSION", "ikabot"), ("IKABOT_MOD_VERSION", "mod")):
+        m = re.search(r'^%s\s*=\s*"([^"]+)"' % key, text, re.M)
+        if m:
+            out[label] = m.group(1)
+    return out
+
+
+def state():
+    raw = subprocess.run(
+        ["tmux", "list-windows", "-t", SESSION, "-F",
+         "#{window_name}|#{pane_dead}|#{pane_pid}"],
+        capture_output=True, text=True).stdout
+
+    panes, instances = {}, []
+    for line in raw.split("\n"):
+        if not line.strip():
+            continue
+        name, dead, pid = line.split("|")
+        pid = int(pid or 0)
+        panes[pid] = name
+        instances.append({
+            "name": name,
+            "num": int(re.sub(r"\D", "", name) or 0),
+            "dead": dead == "1",
+            "pid": pid,
+            "ports": [],
+        })
+
+    by_name = {i["name"]: i for i in instances}
+    inode_port = _listening()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        hits = [inode_port[i] for i in _sockets(pid) if i in inode_port]
+        if not hits:
+            continue
+        walk, owner = pid, None
+        for _ in range(40):
+            if walk in panes:
+                owner = panes[walk]
+                break
+            if walk <= 1:
+                break
+            walk = _parent(walk)
+        if owner and owner in by_name:
+            for p in hits:
+                if p != TTYD_PORT and p not in by_name[owner]["ports"]:
+                    by_name[owner]["ports"].append(p)
+
+    try:
+        modules = json.loads(_sh(["ika-modules", "json"], timeout=30) or "[]")
+    except ValueError:
+        modules = []
+
+    instances.sort(key=lambda i: i["num"])
+    return {
+        "instances": instances,
+        "modules": modules,
+        "versions": _versions(),
+        "host": _address(),
+        "running": sum(1 for i in instances if not i["dead"]),
+        "dead": sum(1 for i in instances if i["dead"]),
+    }
+
+
+# --------------------------------------------------------------------------
+# Actions — nothing runs that is not in this table
+# --------------------------------------------------------------------------
+
+def command_for(action, arg):
+    if action == "restart_one":
+        if not (arg or "").isdigit():
+            return None
+        return ["ika", "restart", str(int(arg))]
+    if action == "crash":
+        if not (arg or "").isdigit():
+            return None
+        return ["ika", "crash", str(int(arg))]
+    if action == "module_one":
+        if not arg or not SAFE_NAME.match(arg):
+            return None
+        return ["ika-modules", "sync", "--only", arg]
+    return {
+        "restart_all":     ["ika", "restart", "all"],
+        "restart_dead":    ["ika", "restart", "dead"],
+        "web_stop":        ["ika", "web", "--stop"],
+        "modules_all":     ["ika-modules", "sync"],
+        "modules_local":   ["ika-modules", "sync", "--local"],
+        "update":          ["ika-update", "--yes"],
+        "update_rollback": ["ika-update", "--rollback"],
+        "status":          ["ika", "status"],
+    }.get(action)
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "ika-panel"
+
+    def log_message(self, *a):
+        pass
+
+    def _authed(self):
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            raw = base64.b64decode(header[6:]).decode("utf8", "replace")
+        except Exception:
+            return False
+        user, _, pw = raw.partition(":")
+        return (hmac.compare_digest(user, USER)
+                and hmac.compare_digest(pw, PASS))
+
+    def _deny(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="ikabot control panel"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send(self, code, body, ctype="application/json"):
+        if isinstance(body, str):
+            body = body.encode("utf8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if not self._authed():
+            return self._deny()
+        if self.path.startswith("/api/state"):
+            return self._send(200, json.dumps(state()))
+        if self.path == "/" or self.path.startswith("/?"):
+            return self._send(200, PAGE, "text/html; charset=utf-8")
+        self._send(404, json.dumps({"error": "not found"}))
+
+    def do_POST(self):
+        if not self._authed():
+            return self._deny()
+        if not self.path.startswith("/api/run"):
+            return self._send(404, json.dumps({"error": "not found"}))
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or "{}")
+        except (ValueError, OSError):
+            return self._send(400, json.dumps({"error": "bad request"}))
+
+        cmd = command_for(payload.get("action", ""), payload.get("arg", ""))
+        if cmd is None:
+            return self._send(400, json.dumps({"error": "unknown or malformed action"}))
+
+        # One at a time: two updates or restarts at once would fight each other.
+        with _run_lock:
+            out = _sh(cmd)
+        self._send(200, json.dumps({"output": out or "(no output)",
+                                    "ran": " ".join(cmd)}))
+
+
+PAGE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ikabot control panel</title>
+<style>
+:root{--bg:#F4F6F8;--card:#fff;--ink:#141D26;--soft:#5A6875;--rule:#D5DDE5;
+--accent:#1B4F8A;--ok:#1F6B4A;--bad:#A8331F;--warn:#A2560B;--code:#101A24;--codeink:#D7E2EC}
+@media(prefers-color-scheme:dark){:root{--bg:#0E141B;--card:#151E27;--ink:#E4EBF2;
+--soft:#9AAABA;--rule:#2A3743;--accent:#79B0E4;--ok:#6FC79B;--bad:#E8836F;--warn:#E0A45C;
+--code:#0A1119;--codeink:#D7E2EC}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,
+BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:16px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+h1{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:19px;
+margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--soft);font-size:13px;margin:0 0 18px}
+.wrap{max-width:1000px;margin:0 auto}
+section{background:var(--card);border:1px solid var(--rule);border-radius:8px;
+padding:14px 16px;margin-bottom:16px}
+h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);
+margin:0 0 12px;font-family:ui-monospace,monospace}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:8px}
+.inst{border:1px solid var(--rule);border-radius:6px;padding:8px 10px;background:var(--bg)}
+.inst.dead{border-color:var(--bad)}
+.inst .n{font-family:ui-monospace,monospace;font-weight:600;font-size:13px}
+.inst .s{font-size:11.5px;color:var(--soft);margin:2px 0 6px}
+.inst.dead .s{color:var(--bad)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);
+margin-right:5px;vertical-align:middle}
+.inst.dead .dot{background:var(--bad)}
+button{font:inherit;font-size:12.5px;padding:5px 10px;border-radius:5px;cursor:pointer;
+border:1px solid var(--rule);background:var(--card);color:var(--ink)}
+button:hover{border-color:var(--accent);color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.p{background:var(--accent);border-color:var(--accent);color:#fff}
+button.p:hover{opacity:.88;color:#fff}
+button.d{border-color:var(--bad);color:var(--bad)}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--rule)}
+th{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--soft)}
+tr:last-child td{border-bottom:0}
+a{color:var(--accent)}
+pre{background:var(--code);color:var(--codeink);padding:12px;border-radius:6px;
+overflow-x:auto;font-size:12.5px;margin:0;white-space:pre-wrap;max-height:340px;overflow-y:auto}
+.badge{font-family:ui-monospace,monospace;font-size:11px;padding:2px 7px;border-radius:99px;
+border:1px solid var(--rule);color:var(--soft)}
+.busy{color:var(--warn)}
+</style></head><body><div class="wrap">
+
+<h1>ikabot control panel</h1>
+<p class="sub" id="head">loading…</p>
+
+<section>
+  <h2>Instances</h2>
+  <div class="row" style="margin-bottom:12px">
+    <button class="p" data-a="restart_dead">Restart crashed only</button>
+    <button data-a="restart_all">Restart all</button>
+    <button data-a="status">Show status</button>
+    <button class="d" data-a="web_stop">Stop all web servers</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</section>
+
+<section>
+  <h2>Modules</h2>
+  <div class="row" style="margin-bottom:12px">
+    <button class="p" data-a="modules_all">Update all from GitHub</button>
+    <button data-a="modules_local">Reinstall from app folder</button>
+  </div>
+  <table><thead><tr><th>Module</th><th>Version</th><th>Loaded</th><th></th></tr></thead>
+  <tbody id="mods"></tbody></table>
+</section>
+
+<section>
+  <h2>ikabot</h2>
+  <div class="row">
+    <button class="p" data-a="update">Download &amp; update ikabot</button>
+    <button class="d" data-a="update_rollback">Roll back last update</button>
+  </div>
+  <p class="sub" style="margin:12px 0 0">
+    Instances keep running the old code until you restart them.
+  </p>
+</section>
+
+<section>
+  <h2>Output</h2>
+  <pre id="out">Ready.</pre>
+</section>
+
+</div><script>
+var out=document.getElementById('out'),grid=document.getElementById('grid'),
+mods=document.getElementById('mods'),head=document.getElementById('head'),busy=false;
+
+function setBusy(b){busy=b;
+  document.querySelectorAll('button').forEach(function(x){x.disabled=b});}
+
+function run(action,arg,label){
+  if(busy)return; setBusy(true);
+  out.textContent=(label||action)+' — working…';
+  fetch('api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:action,arg:arg||''})})
+  .then(function(r){return r.json()})
+  .then(function(d){out.textContent=d.error?('Error: '+d.error):d.output;})
+  .catch(function(e){out.textContent='Request failed: '+e;})
+  .then(function(){setBusy(false);refresh();});
+}
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-a]'); if(!b)return;
+  run(b.dataset.a,b.dataset.arg,b.textContent.trim());
+});
+
+function refresh(){
+  fetch('api/state').then(function(r){return r.json()}).then(function(s){
+    var v=s.versions||{};
+    head.textContent='ikabot '+(v.ikabot||'?')+' / mod '+(v.mod||'?')+
+      ' — '+s.running+' running'+(s.dead?', '+s.dead+' crashed':'');
+
+    grid.innerHTML=s.instances.map(function(i){
+      var ports=i.ports.map(function(p){
+        return s.host?'<a href="http://'+s.host+':'+p+'" target="_blank">'+p+'</a>':p;
+      }).join(' ');
+      return '<div class="inst'+(i.dead?' dead':'')+'">'+
+        '<div class="n"><span class="dot"></span>'+i.name+'</div>'+
+        '<div class="s">'+(i.dead?'crashed':'running')+
+          (ports?' · '+ports:'')+'</div>'+
+        '<div class="row">'+
+        '<button data-a="restart_one" data-arg="'+i.num+'">Restart</button>'+
+        (i.dead?'<button data-a="crash" data-arg="'+i.num+'">Why?</button>':'')+
+        '</div></div>';
+    }).join('') || '<p class="sub">No instances found.</p>';
+
+    mods.innerHTML=(s.modules||[]).map(function(m){
+      return '<tr><td class="mono">'+m.name+'</td>'+
+        '<td class="mono">'+(m.version||'—')+'</td>'+
+        '<td>'+(m.live?'<span class="badge">yes</span>':
+                '<span class="badge" style="color:var(--bad)">no</span>')+'</td>'+
+        '<td style="text-align:right"><button data-a="module_one" data-arg="'+
+        m.name+'">Update</button></td></tr>';
+    }).join('') || '<tr><td colspan="4" class="sub">No modules installed.</td></tr>';
+
+    if(busy)setBusy(true);
+  }).catch(function(){head.textContent='Lost contact with the container.';});
+}
+refresh(); setInterval(function(){if(!busy)refresh();},5000);
+</script></body></html>
+"""
+
+
+def main():
+    if not PASS:
+        print("ika-panel: no password set (PANEL_PASS or TTYD_PASS) — refusing "
+              "to serve a control panel unauthenticated.", file=sys.stderr)
+        return 1
+    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    print("ika-panel listening on port %d (user: %s)" % (PORT, USER))
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
