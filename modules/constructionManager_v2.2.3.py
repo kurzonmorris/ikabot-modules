@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.2"
+__version__ = "2.2.3"
 
 import csv
 import glob
@@ -1129,6 +1129,17 @@ def _print_cost_table(header, rows):
 # Interactive add-to-queue flow (menu option 1)
 # ---------------------------------------------------------------------------
 
+# Navigation keys accepted at the level prompts.  "=" is kept for backwards
+# compatibility with the old tip line; "b"/"back" is the discoverable spelling.
+_BACK_VALUES = ["b", "B", "back", "Back", "BACK"]
+_LEVEL_NAV_VALUES = ["'", "="] + _BACK_VALUES
+
+
+def _is_back_choice(value):
+    """True for "=" or any spelling of "b"/"back" — one step back, not exit."""
+    return (isinstance(value, str)
+            and value.strip().lower() in ("=", "b", "back"))
+
 def _prompt_insert_position(pending_rows, city_name):
     """Show numbered pending rows and ask where to insert the new block.
 
@@ -1179,8 +1190,10 @@ def _add_to_queue(session):
 
     print(
         f"  {bcolors.WARNING if hasattr(bcolors, 'WARNING') else ''}"
-        f"Tip: at any prompt below, '=' restarts the current cycle "
-        f"(re-prompts for slot), and ' (apostrophe) exits to the main menu."
+        f"Tip: at any prompt below, 'b' (or '=') goes back one step and "
+        f"re-prompts for a slot, and ' (apostrophe) exits to the main menu.\n"
+        f"  At a level prompt, entering the level the slot is already at "
+        f"skips that slot without queueing anything."
         f"{bcolors.ENDC}\n"
     )
 
@@ -1262,27 +1275,33 @@ def _add_to_queue(session):
             for idx, o in enumerate(opts, 1):
                 print(f"  ({idx}) {o['name']}")
             chosen_idx = read(
-                min=1, max=len(opts), additionalValues=["'", "="]
+                min=1, max=len(opts),
+                additionalValues=["'", "="] + _BACK_VALUES,
             )
             if chosen_idx == "'":
                 exit_to_menu = True
                 break
-            if chosen_idx == "=":
+            if _is_back_choice(chosen_idx):
                 continue
             chosen = opts[chosen_idx - 1]
             building_slug = chosen["building"]
             building_name = chosen["name"]
             building_id   = chosen["buildingId"]
+            # The slot is empty (level 0), so 0 is "leave it alone".
             target_level = read(
-                min=1,
+                min=0,
                 max=HARD_LEVEL_CAP,
-                msg=f"  Build {building_name} to level (1 = just construct): ",
-                additionalValues=["'", "="],
+                msg=(f"  Build {building_name} to level "
+                     f"[1=just construct | 0=skip slot | b=back | '=exit]: "),
+                additionalValues=_LEVEL_NAV_VALUES,
             )
             if target_level == "'":
                 exit_to_menu = True
                 break
-            if target_level == "=":
+            if _is_back_choice(target_level):
+                continue
+            if int(target_level) == 0:
+                print(f"  Slot {slot_pos} skipped — nothing queued.")
                 continue
             rows_to_add = [(1, "build")] + [
                 (lv, "upgrade") for lv in range(2, target_level + 1)
@@ -1328,15 +1347,22 @@ def _add_to_queue(session):
                 f"  Continuing from lv {queued_max + 1}."
             )
             target_level = read(
-                min=queued_max + 1,
+                min=queued_max,
                 max=HARD_LEVEL_CAP,
-                msg=f"  Extend to level: ",
-                additionalValues=["'", "="],
+                msg=(f"  Extend to level "
+                     f"[{queued_max}=skip slot | b=back | '=exit]: "),
+                additionalValues=_LEVEL_NAV_VALUES,
             )
             if target_level == "'":
                 exit_to_menu = True
                 break
-            if target_level == "=":
+            if _is_back_choice(target_level):
+                continue
+            if int(target_level) == queued_max:
+                print(
+                    f"  Slot {slot_pos} skipped — already queued to "
+                    f"lv {queued_max}, nothing added."
+                )
                 continue
             rows_to_add = [
                 (lv, "upgrade")
@@ -1410,15 +1436,21 @@ def _add_to_queue(session):
                     f"(max allowed: {HARD_LEVEL_CAP})"
                 )
             target_level = read(
-                min=effective_lv + 1,
+                min=effective_lv,
                 max=HARD_LEVEL_CAP,
-                msg=f"  Upgrade to level (effective {effective_lv}): ",
-                additionalValues=["'", "="],
+                msg=(f"  Upgrade to level "
+                     f"[{effective_lv}=skip slot | b=back | '=exit]: "),
+                additionalValues=_LEVEL_NAV_VALUES,
             )
             if target_level == "'":
                 exit_to_menu = True
                 break
-            if target_level == "=":
+            if _is_back_choice(target_level):
+                continue
+            if int(target_level) == effective_lv:
+                print(
+                    f"  Slot {slot_pos} skipped — left at lv {effective_lv}."
+                )
                 continue
 
             # fetch costs for all levels in one shot, cache for this session
@@ -2143,6 +2175,181 @@ def _stop_worker(session):
 
 
 # ---------------------------------------------------------------------------
+# Resource requirements report (menu option 4)
+# ---------------------------------------------------------------------------
+
+def _all_city_ids(session):
+    """Return every city id owned by this account, in menu order."""
+    html = session.get()
+    return re.findall(r'<option value="(\d+)" class="cityowntown"', html)
+
+
+def _resource_requirements(session):
+    """Show, per city, the resources still needed to finish its queue.
+
+    Sums the stored per-row costs for every unfinished row, compares them
+    against what the city already holds, and flags anything that would stop
+    the queue completing: rows with no cost data yet, single levels that
+    exceed warehouse capacity, and shortfalls the rest of the empire can't
+    cover.
+    """
+    banner()
+    print("Resource requirements for pending constructions\n")
+
+    rows = csv_load(session)
+    active = [r for r in rows
+              if r["status"] in ("pending", "shipping", "running")]
+    if not active:
+        print("  Nothing queued — no resources needed.")
+        enter()
+        return
+
+    skipped_count = sum(1 for r in rows if r["status"] == "skipped")
+    by_city = {}
+    for r in active:
+        by_city.setdefault(r["city_id"], []).append(r)
+
+    # One fetch per city: the queued cities for their stock and capacity, plus
+    # the rest so the empire-wide shortfall check is meaningful.
+    try:
+        all_ids = _all_city_ids(session)
+    except Exception:
+        all_ids = []
+    wanted_ids = sorted(
+        {str(c) for c in by_city} | {str(c) for c in all_ids},
+        key=lambda s: (len(s), s),
+    )
+    print(f"  Fetching {len(wanted_ids)} city/cities…\n")
+
+    cities, failed = {}, []
+    for cid in wanted_ids:
+        try:
+            cities[str(cid)] = fetch_city(session, cid)
+        except Exception:
+            failed.append(str(cid))
+
+    empire_pool   = [0] * 5    # everything the account currently holds
+    empire_needed = [0] * 5    # everything the queues still need
+    for cid, city in cities.items():
+        avail = city.get("availableResources", [0] * 5)
+        for i in range(5):
+            empire_pool[i] += int(avail[i] or 0)
+
+    problems_seen = False
+    for cid in sorted(by_city, key=lambda c: str(c)):
+        city_rows = by_city[cid]
+        city = cities.get(str(cid))
+
+        needed   = [0] * 5
+        per_res_max_row = [0] * 5   # biggest single level, for capacity checks
+        no_cost_rows = 0
+        for r in city_rows:
+            cost = cost_tuple(r)
+            if not any(cost):
+                no_cost_rows += 1
+            for i in range(5):
+                needed[i] += cost[i]
+                per_res_max_row[i] = max(per_res_max_row[i], cost[i])
+        for i in range(5):
+            empire_needed[i] += needed[i]
+
+        if city is None:
+            listed = ", ".join(
+                f"{addThousandSeparator(needed[i])} "
+                f"{materials_names[i].lower()}"
+                for i in range(5) if needed[i]
+            ) or "nothing"
+            print(f"\n  {bcolors.RED}City {cid}: could not be fetched, so "
+                  f"stock and capacity are unknown. Its queue still needs "
+                  f"{listed}.{bcolors.ENDC}")
+            problems_seen = True
+            continue
+
+        city_name = city.get("cityName") or city.get("name", str(cid))
+        avail = [int(v or 0) for v in city.get("availableResources", [0] * 5)]
+        free  = [int(v or 0) for v in city.get("freeSpaceForResources", [0] * 5)]
+        cap   = [a + f for a, f in zip(avail, free)]
+        shortfall = [max(0, n - a) for n, a in zip(needed, avail)]
+
+        _print_cost_table(
+            f"{city_name} (id {cid}) — {len(city_rows)} row(s) queued",
+            [
+                ("Needed to finish", needed),
+                ("In city now",      avail),
+                ("Still to ship in", shortfall),
+                ("Warehouse capacity", cap),
+            ],
+        )
+
+        notes = []
+        if no_cost_rows:
+            notes.append(
+                f"{no_cost_rows} row(s) have no cost data yet — the totals "
+                f"above are understated; costs are fetched before execution."
+            )
+        for i in range(5):
+            if per_res_max_row[i] > cap[i]:
+                notes.append(
+                    f"a single level needs "
+                    f"{addThousandSeparator(per_res_max_row[i])} "
+                    f"{materials_names[i].lower()} but the warehouse only holds "
+                    f"{addThousandSeparator(cap[i])} — that level can never "
+                    f"be started; raise warehouse level or lower the target."
+                )
+        if not any(shortfall):
+            notes.append("stock already covers the whole queue.")
+        else:
+            notes.append("needs " + ", ".join(
+                f"{addThousandSeparator(shortfall[i])} "
+                f"{materials_names[i].lower()}"
+                for i in range(5) if shortfall[i]
+            ) + " shipped in.")
+
+        for n in notes:
+            flag = "!" if "never" in n or "understated" in n else "-"
+            colour = bcolors.RED if flag == "!" else ""
+            if flag == "!":
+                problems_seen = True
+            print(f"  {colour}{flag} {n}{bcolors.ENDC if colour else ''}")
+
+    # ---- empire-wide view ----
+    net = [max(0, n - p) for n, p in zip(empire_needed, empire_pool)]
+    _print_cost_table(
+        f"ALL CITIES — {len(active)} row(s) across {len(by_city)} city/cities",
+        [
+            ("Needed to finish", empire_needed),
+            ("Held everywhere",  empire_pool),
+            ("Must be produced", net),
+        ],
+    )
+    if any(net):
+        problems_seen = True
+        short = ", ".join(
+            f"{addThousandSeparator(net[i])} {materials_names[i].lower()}"
+            for i in range(5) if net[i]
+        )
+        print(f"  {bcolors.RED}! Not enough in the whole account — short "
+              f"{short}. Production or trade is needed; shipping alone "
+              f"cannot finish the queue.{bcolors.ENDC}")
+    else:
+        print("  - The account holds enough overall; any shortfall above is "
+              "a shipping problem, not a production one.")
+
+    if failed:
+        problems_seen = True
+        print(f"  {bcolors.RED}! {len(failed)} city/cities could not be "
+              f"fetched ({', '.join(failed)}); figures exclude them."
+              f"{bcolors.ENDC}")
+    if skipped_count:
+        print(f"  - {skipped_count} skipped row(s) are not counted; re-queue "
+              f"them from Edit queue if they should be.")
+    if not problems_seen:
+        print("  - No problems found.")
+
+    enter()
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -2187,8 +2394,9 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
             print("(1) Add construction(s) to queue        [interactive only]")
             print("(2) View queue")
             print("(3) Edit queue (modify / delete / reorder) [interactive only]")
+            print("(4) Resource requirements per city")
             print("(') Back")
-            choice = read(min=1, max=3,
+            choice = read(min=1, max=4,
                           additionalValues=["'", "s", "S", "o", "O", "x", "X"])
 
             if isinstance(choice, str):
@@ -2218,6 +2426,8 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
                 _view_queue(session)
             elif choice == 3:
                 _edit_queue(session)
+            elif choice == 4:
+                _resource_requirements(session)
     except KeyboardInterrupt:
         pass
     finally:
