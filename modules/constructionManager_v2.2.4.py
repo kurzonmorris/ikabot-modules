@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.3"
+__version__ = "2.2.4"
 
 import csv
 import glob
@@ -114,6 +114,9 @@ BUILDING_HELP_IDS = {
     "workshop": 15,
     "safehouse": 16,
     "palacecolony": 17,
+    # 18 is absent from the ikipedia grid but valid — probed directly.
+    # IDs 1, 2 and 14 return HTTP 500; they don't exist.
+    "forester": 18,
     "stonemason": 19,
     "glassblowing": 20,
     "winegrower": 21,
