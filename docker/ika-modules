@@ -119,6 +119,15 @@ def cmd_sync(args):
         print("No modules found at the source.", file=sys.stderr)
         return 1
 
+    if args.only:
+        wanted = {n.lower().replace(".py", "") for n in args.only}
+        modules = [m for m in modules
+                   if split_module_name(m["name"])[0][:-3].lower() in wanted]
+        examples = []
+        if not modules:
+            print("No module matched: %s" % ", ".join(args.only), file=sys.stderr)
+            return 1
+
     for item in modules:
         base, version = split_module_name(item["name"])
         _install_module(item, _read(item))
@@ -148,6 +157,24 @@ def cmd_list(_args):
     return 0
 
 
+def cmd_json(_args):
+    """Installed modules as JSON, for the control panel."""
+    out = []
+    if TEMPLATE_DIR.is_dir():
+        for f in sorted(TEMPLATE_DIR.iterdir()):
+            if not f.is_file() or not f.name.endswith(".py"):
+                continue
+            base, version = split_module_name(f.name)
+            out.append({
+                "name": base[:-3],
+                "file": base,
+                "version": version,
+                "live": (MODULES_DIR / base).exists(),
+            })
+    print(json.dumps(out))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(prog="ika-modules", description=__doc__)
     sub = parser.add_subparsers(dest="cmd")
@@ -157,10 +184,15 @@ def main():
                         help="use the copy in the app folder instead of GitHub")
     p_sync.add_argument("--force-csv", action="store_true",
                         help="also overwrite CSV files you have edited")
+    p_sync.add_argument("--only", nargs="+", metavar="NAME",
+                        help="install just these modules, by base name")
     p_sync.set_defaults(func=cmd_sync)
 
     p_list = sub.add_parser("list", help="show installed modules and versions")
     p_list.set_defaults(func=cmd_list)
+
+    p_json = sub.add_parser("json", help="installed modules as JSON")
+    p_json.set_defaults(func=cmd_json)
 
     args = parser.parse_args()
     if not args.cmd:

@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+import os, re, subprocess
+if os.environ.get("IKA_WEB_HOST"):
+    print(os.environ["IKA_WEB_HOST"]); raise SystemExit(0)
+try:
+    out = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True).stdout
+except OSError:
+    out = ""
+found = re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+for a in found:
+    p = [int(x) for x in a.split(".")]
+    if p[0] == 100 and 64 <= p[1] <= 127:
+        print(a); raise SystemExit(0)
+for a in found:
+    if not a.startswith(("127.", "172.17.")):
+        print(a); raise SystemExit(0)
+print("<server-ip>")

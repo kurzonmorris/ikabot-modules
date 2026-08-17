@@ -101,6 +101,19 @@ else
     echo "[entrypoint] web terminal off — set TTYD_PASS to turn it on"
 fi
 
+# --- control panel -------------------------------------------------------
+# Same rule as the web terminal: no password, no listener.
+PANEL_PORT="${PANEL_PORT:-7682}"
+PANEL_PASS="${PANEL_PASS:-$TTYD_PASS}"
+
+if [ -n "$PANEL_PASS" ]; then
+    PANEL_PASS="$PANEL_PASS" PANEL_PORT="$PANEL_PORT" \
+        ika-panel >> "$DATA_DIR/logs/panel.log" 2>&1 &
+    echo "[entrypoint] control panel listening on port $PANEL_PORT"
+else
+    echo "[entrypoint] control panel off — set TTYD_PASS or PANEL_PASS to turn it on"
+fi
+
 echo "[entrypoint] ready — attach with:  docker exec -it ikabot ika attach"
 
 while tmux has-session -t "$SESSION" 2>/dev/null; do

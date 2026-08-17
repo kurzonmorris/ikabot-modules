@@ -26,6 +26,7 @@ ika — ikabot container maintenance
   ika web --stop        Stop every running instance web server
   ika logs              List account log files
   ika logs <name>       Follow one log file
+  ika panel             Show the control panel address
   ika shell             Plain shell inside the container
 
 Leaving the screens: press Ctrl-B, let go, then press D.
@@ -307,6 +308,9 @@ case "${1:-}" in
     web)         shift; cmd_web "${1:-}" ;;
     crash)       shift; cmd_crash "$@" ;;
     logs)        shift; cmd_logs "$@" ;;
+    panel)       host="$(IKA_WEB_HOST="${IKA_WEB_HOST:-}" ika-panel-host)"
+                 echo "Control panel: http://${host}:${PANEL_PORT:-7682}"
+                 echo "Sign in with TTYD_USER / TTYD_PASS (or PANEL_USER / PANEL_PASS)." ;;
     shell)       exec /bin/bash ;;
     -h|--help|help) usage ;;
     *)           echo "Unknown command: $1" >&2; echo; usage; exit 1 ;;

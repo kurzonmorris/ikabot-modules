@@ -349,6 +349,7 @@ of these is run from the Unraid terminal:
 | Stop all instance web servers | `docker exec -it ikabot ika web --stop` |
 | Restart all instances | `docker exec -it ikabot ika restart all` |
 | Read a log | `docker exec -it ikabot ika logs` |
+| Open the control panel | `docker exec -it ikabot ika panel` |
 
 Full list of commands:
 
@@ -795,6 +796,63 @@ trusted shares that network, weigh it before making the change.
 
 ---
 
+## Part 18 — The control panel
+
+Everything the `ika` command does, as buttons in a browser. Same idea as the
+Windows installer's maintenance screen, but reachable from your phone, laptop
+or Steam Deck.
+
+It runs automatically whenever the web terminal does — same password, no extra
+setup. Find its address:
+
+```bash
+docker exec -it ikabot ika panel
+```
+
+Or go straight there:
+
+```
+http://100.122.72.17:7682
+```
+
+Sign in with the same username and password as the terminal.
+
+### What is on it
+
+| Section | Does |
+|---|---|
+| **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback |
+| **Modules** | Every installed module with its version. Update one, update all from GitHub, or reinstall from the app folder |
+| **ikabot** | Download and install an update, or roll the last one back |
+| **Output** | What the command you just pressed actually printed |
+
+The list refreshes every five seconds, and each web server port is a link
+straight into that account.
+
+### Serving it over HTTPS
+
+Like the terminal, it is plain HTTP on a port. To reach it by name with a real
+certificate, give it its own Tailscale port:
+
+```bash
+docker exec tailscale tailscale serve --bg --https=8443 7682
+```
+
+Then `https://tower.tailXXXXX.ts.net:8443`.
+
+### Turning it off
+
+Same rule as the terminal: **no password, no listener.** Remove `TTYD_PASS`
+(and `PANEL_PASS`) and neither starts. To give the panel its own password, set
+`PANEL_PASS` and `PANEL_USER`.
+
+> The panel can restart instances and update ikabot, so treat its password the
+> way you treat the terminal's. It only ever runs a fixed list of commands —
+> anything not on that list is rejected rather than passed to a shell — but it
+> is still a control surface for your bots.
+
+---
+
 ## Appendix A — What the build files do
 
 You copied these in Part 5; you do not need to create them. This is just so you
@@ -808,6 +866,8 @@ know what they are.
 | `ika` | The maintenance commands (`status`, `restart`, `attach`…) |
 | `ika-modules` | Installs/updates modules, stripping `_vX.Y.Z` from filenames |
 | `ika-web-attach` | What the optional web terminal runs (Part 16) |
+| `ika-update` | Updates ikabot itself, with rollback |
+| `ika-panel` | The web control panel (Part 18) |
 | `docker-compose.yml` | Alternative start method, for HexOS later |
 
 Two details worth knowing:
