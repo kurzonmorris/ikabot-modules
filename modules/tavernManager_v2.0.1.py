@@ -616,7 +616,7 @@ class TavernManager:
                             f"refresh — building may have changed ({stale2})"
                         ),
                     }
-                    if self.notification_mode in (1, 2):
+                    if self.notification_mode in (1, 2, 4):
                         sendToBot(
                             self.session,
                             f"❌ Wine auto-tune error\n{display_name}: still stale after refresh ({stale2})"
@@ -628,7 +628,7 @@ class TavernManager:
                         'pop': '', 'satisfaction': '',
                         'note': str(e),
                     }
-                    if self.notification_mode in (1, 2):
+                    if self.notification_mode in (1, 2, 4):
                         sendToBot(self.session, f"❌ Wine auto-tune error\n{display_name}: {str(e)}")
             except Exception as e:
                 self.clear_caches(city_id)
@@ -637,13 +637,16 @@ class TavernManager:
                     'pop': '', 'satisfaction': '',
                     'note': str(e),
                 }
-                if self.notification_mode in (1, 2):
+                if self.notification_mode in (1, 2, 4):
                     sendToBot(self.session, f"❌ Wine auto-tune error\n{display_name}: {str(e)}")
 
             results.append(result)
 
         changes = [r for r in results if r['status'] == 'CHANGED']
-        if self.notification_mode == 1 and changes:
+        # Mode 4 (results→Telegram, quiet console) also wants the
+        # per-cycle "changes" summary that mode 1 gets; without it the
+        # user can't see what changed at all under mode 4.
+        if self.notification_mode in (1, 4) and changes:
             msg = "🍷 Wine auto-tune — changes this cycle\n\n"
             for r in changes:
                 msg += f"📍 {r['name']}: {r['note']}\n"
@@ -655,7 +658,7 @@ class TavernManager:
             r for r in results
             if r['status'] == 'WARN' and 'wine NOT changed' in r['note']
         ]
-        if wine_blocked and self.notification_mode in (1, 2):
+        if wine_blocked and self.notification_mode in (1, 2, 4):
             msg = "⚠️ Wine auto-tune — couldn't apply wine in some cities\n\n"
             for r in wine_blocked:
                 msg += f"📍 {r['name']}: {r['note']}\n"
@@ -741,6 +744,37 @@ class TavernManager:
             f"level {target_level} ({new_wine} wine/hr)"
         )
         return True
+
+
+def _format_results_for_telegram(results):
+    """Plain-text results table suitable for a Telegram message.
+
+    Mirrors _print_results_table but strips ANSI colours (Telegram
+    doesn't render them) and drops the divider row (Telegram
+    proportional font makes fixed-width dividers look garbled).
+    """
+    if not results:
+        return "🍷 Wine auto-tune — no cities checked this cycle."
+    col_city = max((len(r['name']) for r in results), default=8)
+    col_city = max(col_city, 8)
+    lines = ["🍷 Wine auto-tune — this cycle", ""]
+    lines.append(
+        f"{'City':<{col_city}}  {'Result':<7}  {'Pop':<11}  {'Happy':>5}  What happened"
+    )
+    for r in results:
+        lines.append(
+            f"{r['name']:<{col_city}}  {r['status']:<7}  {r['pop']:<11}  "
+            f"{r['satisfaction']:>5}  {r['note']}"
+        )
+    changed = sum(1 for r in results if r['status'] == 'CHANGED')
+    ok      = sum(1 for r in results if r['status'] == 'OK')
+    warned  = sum(1 for r in results if r['status'] in ('WARN', 'ERROR', 'SKIP'))
+    lines.append("")
+    lines.append(
+        f"Summary: {changed} changed, {ok} already fine, "
+        f"{warned} skipped/warned/errored"
+    )
+    return "\n".join(lines)
 
 
 def _print_results_table(results):
@@ -915,7 +949,8 @@ def _run_set_mode(session):
     print()
 
     cities_to_process, pct = _try_replay_set_mode(session)
-    if cities_to_process is None:
+    replayed_from_saved = cities_to_process is not None
+    if not replayed_from_saved:
         # No saved settings, replay rejected, or saved data was stale
         # beyond repair — fall through to the interactive questions.
         cities_to_process = _select_cities(session)
@@ -931,26 +966,30 @@ def _run_set_mode(session):
         if pct is None:
             return
 
-        # Persist so next launch can offer one-Enter reuse. Store city
-        # IDs (strings — matches the format getIdsOfCities returns) so
-        # a rename in-game doesn't invalidate the entry, and cap the
-        # dict to the two fields we actually read on replay. Best-
-        # effort: save_prefs never raises.
-        save_prefs(session, _PREFS_SET, {
-            "city_ids": [str(c["id"]) for c in cities_to_process],
-            "pct": int(pct),
-        })
-
     print()
     city_word = "city" if len(cities_to_process) == 1 else "cities"
     print(f"About to set wine to {pct}% in {len(cities_to_process)} {city_word}.")
     print()
     confirm = read(msg="Go ahead? [Y/n]: ", values=["y", "Y", "n", "N", ""])
     if confirm.lower() == "n":
+        # Explicit user backout AFTER the questions. Deliberately do
+        # NOT save_prefs here — a user who typed 'n' at the confirm
+        # doesn't want their last-good settings overwritten by an
+        # abandoned run. Last-good stays intact.
         print("Cancelled, nothing was changed.")
         print()
         enter()
         return
+
+    # Confirm passed → persist so next launch can offer one-Enter reuse.
+    # Save happens AFTER the confirm (not before the questions) so an
+    # aborted config never overwrites last-good. Only save fresh input;
+    # a replayed set of prefs is already on disk, no need to rewrite.
+    if not replayed_from_saved:
+        save_prefs(session, _PREFS_SET, {
+            "city_ids": [str(c["id"]) for c in cities_to_process],
+            "pct": int(pct),
+        })
 
     print()
     print("Working through your cities...")
@@ -1063,7 +1102,7 @@ def _try_replay_equilibrium_mode(session):
         notif = int(saved["notification_mode"])
         saved_ids = [str(cid) for cid in saved["city_ids"]]
         hours = int(saved["run_hours"])
-        assert notif in (1, 2, 3), "notification_mode out of range"
+        assert notif in (1, 2, 3, 4), "notification_mode out of range"
         assert saved_ids, "no saved city_ids"
         assert 0 <= hours <= 24, "run_hours out of range"
 
@@ -1077,7 +1116,12 @@ def _try_replay_equilibrium_mode(session):
         resolved_cities = {cid: all_cities[cid] for cid in resolved_ids}
         missing = len(saved_ids) - len(resolved_ids)
 
-        notif_desc = {1: "all events + errors", 2: "errors only", 3: "off"}[notif]
+        notif_desc = {
+            1: "all events + errors",
+            2: "errors only",
+            3: "off",
+            4: "results to Telegram (quiet console)",
+        }[notif]
         sched_desc = ("run once and exit" if hours == 0
                       else f"every {hours} hour(s)")
         summary = [
@@ -1129,10 +1173,14 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
         print("  (2) Only when something goes wrong")
         print("      Quiet most of the time; pings you if a city errors.")
         print("  (3) Don't text me")
+        print("  (4) Send the results table to Telegram, keep the")
+        print("      console quiet. Best when you want the module to")
+        print("      go straight to the background after these questions")
+        print("      and only reach you via Telegram.")
         print()
         print("  (') Go back")
         print()
-        notification_mode = read(msg="Pick 1, 2, or 3: ", min=1, max=3, digit=True, additionalValues=["'"])
+        notification_mode = read(msg="Pick 1, 2, 3, or 4: ", min=1, max=4, digit=True, additionalValues=["'"])
 
         if notification_mode == "'":
             return
@@ -1200,26 +1248,60 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
 
     mgr = TavernManager(session, notification_mode)
 
+    # Notification mode 4 = "results to Telegram, quiet console" —
+    # skip the results-table print, send it via sendToBot instead.
+    # Errors still go to Telegram under modes 1, 2, and 4 (all
+    # non-quiet modes want to know when something breaks). Console
+    # error traceback is always printed regardless so a foreground
+    # `logs` viewer isn't blind.
+    quiet_console = notification_mode == 4
+    telegram_errors = notification_mode in (1, 2, 4)
+
     def run_check():
         results = mgr.process_equilibrium(cities_ids, cities)
-        _print_results_table(results)
+        if quiet_console:
+            try:
+                sendToBot(session, _format_results_for_telegram(results))
+            except Exception:
+                # Telegram send failed: don't lose the results — fall
+                # back to printing so at least the log has them.
+                traceback.print_exc()
+                _print_results_table(results)
+        else:
+            _print_results_table(results)
         return results
 
+    # One-shot path: user asked for a single check, no loop. Still
+    # goes straight to background (no `enter()` pause) so an
+    # unattended launch doesn't hang forever waiting for a keystroke.
     if run_hours == 0:
-        print(f"Checking {len(cities_ids)} cities once...")
-        print()
-        run_check()
-        enter()
+        set_child_mode(session)
+        event.set()
+        info = f"\nWine auto-tune: {len(cities_ids)} cities, one-shot\n"
+        setInfoSignal(session, info)
+        try:
+            run_check()
+        except Exception:
+            traceback.print_exc()
+            if telegram_errors:
+                try:
+                    sendToBot(session,
+                              f"Wine auto-tune one-shot failed.\n"
+                              f"Details:\n{traceback.format_exc()}")
+                except Exception:
+                    traceback.print_exc()
+        finally:
+            session.logout()
         return
 
+    # Scheduled path: straight to background, no foreground first
+    # check, no `enter()` pause. This is the "after commands are
+    # input it goes straight into background" behaviour. First check
+    # happens as the FIRST iteration of the loop below (mgr's own
+    # notification settings decide whether the user hears about it).
     print(f"Auto-tune will check {len(cities_ids)} cities every {run_hours} hour(s).")
-    print("Press Ctrl+C in the parent ikabot to stop it.")
+    print("Backgrounding now. Watch progress via Telegram or `logs`.")
     print()
-    print("Running the first check now (so you can see the result")
-    print("before it disappears into the background)...")
-    print()
-    run_check()
-    enter()
 
     set_child_mode(session)
     event.set()
@@ -1227,9 +1309,15 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
     info = f"\nWine auto-tune: {len(cities_ids)} cities, every {run_hours}h\n"
     setInfoSignal(session, info)
 
+    # First cycle runs immediately (no wait) so the user isn't left
+    # wondering for `run_hours` hours whether anything is happening.
+    # Subsequent cycles wait first, then run.
+    first_iteration = True
     try:
         while True:
-            wait(run_hours * 3600)
+            if not first_iteration:
+                wait(run_hours * 3600)
+            first_iteration = False
             # Per-cycle error firewall: a transient failure inside a
             # single cycle (network blip, table-print bug, anything
             # process_equilibrium didn't catch internally) must NOT kill
@@ -1246,7 +1334,7 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
                     f"Details:\n{traceback.format_exc()}"
                 )
                 traceback.print_exc()
-                if notification_mode in (1, 2):
+                if telegram_errors:
                     try:
                         sendToBot(session, cycle_err)
                     except Exception:
@@ -1262,7 +1350,7 @@ def _run_equilibrium_mode(session, event, stdin_fd, predetermined_input):
             f"Details:\n{traceback.format_exc()}"
         )
         traceback.print_exc()
-        if notification_mode in (1, 2):
+        if telegram_errors:
             try:
                 sendToBot(session, msg)
             except Exception:
