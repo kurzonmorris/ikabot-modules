@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
@@ -23,6 +24,52 @@ TTYD_PORT = int(os.environ.get("TTYD_PORT", "7681"))
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 _run_lock = threading.Lock()
+
+# GitHub's unauthenticated API allows 60 calls an hour, so remote versions are
+# cached rather than fetched on every poll.
+_avail = {"data": {}, "checked": 0.0, "error": ""}
+_avail_lock = threading.Lock()
+
+
+def _ver_tuple(v):
+    out = []
+    for part in str(v).split("."):
+        digits = re.sub(r"\D", "", part)
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
+
+
+def is_newer(remote, local):
+    if not remote:
+        return False
+    if not local:
+        return True
+    a, b = _ver_tuple(remote), _ver_tuple(local)
+    n = max(len(a), len(b))
+    return a + (0,) * (n - len(a)) > b + (0,) * (n - len(b))
+
+
+def refresh_available():
+    raw = _sh(["ika-modules", "available"], timeout=90).strip()
+    data, err = {}, ""
+    try:
+        parsed = json.loads(raw.splitlines()[-1]) if raw else {}
+        if "modules" in parsed:
+            data = parsed["modules"]
+        else:
+            err = parsed.get("error", "could not read remote versions")
+    except (ValueError, IndexError):
+        err = raw[:300] or "could not read remote versions"
+
+    with _avail_lock:
+        if data:
+            _avail["data"] = data
+        _avail["error"] = err
+        _avail["checked"] = time.time()
+
+    if err:
+        return "Could not check GitHub: %s" % err
+    return "Checked %d module version(s) on GitHub." % len(data)
 
 
 # --------------------------------------------------------------------------
@@ -159,8 +206,26 @@ def state():
     except ValueError:
         modules = []
 
+    with _avail_lock:
+        avail, checked, avail_err = dict(_avail["data"]), _avail["checked"], _avail["error"]
+
+    for m in modules:
+        remote = avail.get(m["name"], "")
+        m["available"] = remote
+        if not remote:
+            m["status"] = "unknown"
+        elif is_newer(remote, m.get("version", "")):
+            m["status"] = "outdated"
+        else:
+            m["status"] = "current"
+
+    for i in instances:
+        i["ports"].sort()
+
     instances.sort(key=lambda i: i["num"])
     return {
+        "checked": checked,
+        "avail_error": avail_err,
         "instances": instances,
         "modules": modules,
         "versions": _versions(),
@@ -257,6 +322,11 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             return self._send(400, json.dumps({"error": "bad request"}))
 
+        if payload.get("action") == "check_updates":
+            with _run_lock:
+                msg = refresh_available()
+            return self._send(200, json.dumps({"output": msg, "ran": "check versions"}))
+
         cmd = command_for(payload.get("action", ""), payload.get("arg", ""))
         if cmd is None:
             return self._send(400, json.dumps({"error": "unknown or malformed action"}))
@@ -318,6 +388,10 @@ overflow-x:auto;font-size:12.5px;margin:0;white-space:pre-wrap;max-height:340px;
 .badge{font-family:ui-monospace,monospace;font-size:11px;padding:2px 7px;border-radius:99px;
 border:1px solid var(--rule);color:var(--soft)}
 .busy{color:var(--warn)}
+.v-current{color:var(--ok);font-weight:600}
+.v-outdated{color:var(--bad);font-weight:600}
+.v-unknown{color:var(--soft)}
+.hint{font-size:12px;color:var(--soft);margin:10px 0 0}
 </style></head><body><div class="wrap">
 
 <h1>ikabot control panel</h1>
@@ -329,6 +403,7 @@ border:1px solid var(--rule);color:var(--soft)}
     <button class="p" data-a="restart_dead">Restart crashed only</button>
     <button data-a="restart_all">Restart all</button>
     <button data-a="status">Show status</button>
+    <button id="openweb">Open all web servers</button>
     <button class="d" data-a="web_stop">Stop all web servers</button>
   </div>
   <div class="grid" id="grid"></div>
@@ -337,11 +412,13 @@ border:1px solid var(--rule);color:var(--soft)}
 <section>
   <h2>Modules</h2>
   <div class="row" style="margin-bottom:12px">
+    <button data-a="check_updates">Check for updates</button>
     <button class="p" data-a="modules_all">Update all from GitHub</button>
     <button data-a="modules_local">Reinstall from app folder</button>
   </div>
-  <table><thead><tr><th>Module</th><th>Version</th><th>Loaded</th><th></th></tr></thead>
+  <table><thead><tr><th>Module</th><th>Installed</th><th>Available</th><th>Loaded</th><th></th></tr></thead>
   <tbody id="mods"></tbody></table>
+  <p class="hint" id="checked"></p>
 </section>
 
 <section>
@@ -362,7 +439,8 @@ border:1px solid var(--rule);color:var(--soft)}
 
 </div><script>
 var out=document.getElementById('out'),grid=document.getElementById('grid'),
-mods=document.getElementById('mods'),head=document.getElementById('head'),busy=false;
+mods=document.getElementById('mods'),head=document.getElementById('head'),
+checked=document.getElementById('checked'),busy=false,last={},opened={};
 
 function setBusy(b){busy=b;
   document.querySelectorAll('button').forEach(function(x){x.disabled=b});}
@@ -383,8 +461,27 @@ document.addEventListener('click',function(e){
   run(b.dataset.a,b.dataset.arg,b.textContent.trim());
 });
 
+document.getElementById('openweb').addEventListener('click',function(){
+  var host=last.host,n=0,total=0;
+  if(!host){out.textContent='No reachable address for this server yet.';return;}
+  (last.instances||[]).forEach(function(i){
+    (i.ports||[]).forEach(function(p){
+      total++;
+      var url='http://'+host+':'+p;
+      if(!opened[url]){opened[url]=1;window.open(url,'_blank','noopener');n++;}
+    });
+  });
+  out.textContent = total===0
+    ? 'No web servers are running. Start them with menu option (16) in each instance.'
+    : (n===0 ? 'All '+total+' web server tab(s) are already open — press again after starting more.'
+             : 'Opened '+n+' new tab(s), in instance order. '+
+               (total-n)+' already open.\n\nIf fewer tabs appeared than expected, allow '+
+               'pop-ups for this page in your browser and press again.');
+});
+
 function refresh(){
   fetch('api/state').then(function(r){return r.json()}).then(function(s){
+    last=s;
     var v=s.versions||{};
     head.textContent='ikabot '+(v.ikabot||'?')+' / mod '+(v.mod||'?')+
       ' — '+s.running+' running'+(s.dead?', '+s.dead+' crashed':'');
@@ -404,13 +501,22 @@ function refresh(){
     }).join('') || '<p class="sub">No instances found.</p>';
 
     mods.innerHTML=(s.modules||[]).map(function(m){
+      var cls=m.status==='outdated'?'v-outdated':(m.status==='current'?'v-current':'v-unknown');
+      var av=m.status==='unknown'?'not checked':(m.available||'—');
       return '<tr><td class="mono">'+m.name+'</td>'+
-        '<td class="mono">'+(m.version||'—')+'</td>'+
+        '<td class="mono '+cls+'">'+(m.version||'—')+'</td>'+
+        '<td class="mono '+cls+'">'+av+'</td>'+
         '<td>'+(m.live?'<span class="badge">yes</span>':
                 '<span class="badge" style="color:var(--bad)">no</span>')+'</td>'+
         '<td style="text-align:right"><button data-a="module_one" data-arg="'+
-        m.name+'">Update</button></td></tr>';
-    }).join('') || '<tr><td colspan="4" class="sub">No modules installed.</td></tr>';
+        m.name+'"'+(m.status==='outdated'?' class="p"':'')+'>Update</button></td></tr>';
+    }).join('') || '<tr><td colspan="5" class="sub">No modules installed.</td></tr>';
+
+    if(s.avail_error){checked.textContent='Version check failed: '+s.avail_error;}
+    else if(s.checked){checked.textContent='Versions checked '+
+      new Date(s.checked*1000).toLocaleTimeString()+
+      '. Green = up to date, red = a newer version is on GitHub.';}
+    else {checked.textContent='Checking GitHub for newer versions…';}
 
     if(busy)setBusy(true);
   }).catch(function(){head.textContent='Lost contact with the container.';});
@@ -425,6 +531,7 @@ def main():
         print("ika-panel: no password set (PANEL_PASS or TTYD_PASS) — refusing "
               "to serve a control panel unauthenticated.", file=sys.stderr)
         return 1
+    threading.Thread(target=refresh_available, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("ika-panel listening on port %d (user: %s)" % (PORT, USER))
     try:
