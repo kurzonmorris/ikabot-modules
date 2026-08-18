@@ -27,8 +27,16 @@ if [ -z "$(ls -A "$MODULES_DIR" 2>/dev/null)" ]; then
     ika-modules sync --local || echo "[entrypoint] local module sync failed (continuing)"
 fi
 
-if [ ! -f /config/.tmux.conf ]; then
-    cat > /config/.tmux.conf <<'TMUXCONF'
+# Bumping the version line rewrites an existing config; the old one is kept.
+TMUX_CONF=/config/.tmux.conf
+TMUX_CONF_MARK="# ika-tmux-conf v2"
+if [ ! -f "$TMUX_CONF" ] || ! grep -qxF "$TMUX_CONF_MARK" "$TMUX_CONF"; then
+    if [ -f "$TMUX_CONF" ]; then
+        cp "$TMUX_CONF" "$TMUX_CONF.bak"
+        echo "[entrypoint] updated tmux config (previous kept as .tmux.conf.bak)"
+    fi
+    cat > "$TMUX_CONF" <<'TMUXCONF'
+# ika-tmux-conf v2
 set -g mouse on
 set -g history-limit 50000
 set -g default-terminal "screen-256color"
@@ -39,6 +47,13 @@ set -g status-left "[ikabot] "
 set -g status-left-length 20
 set -g status-right "%H:%M"
 setw -g window-status-current-style "bg=colour24,fg=colour231,bold"
+
+# Scrolling the wheel puts tmux into copy-mode, and while there every keystroke
+# goes to copy-mode instead of ikabot -- which reads as "I can only type when
+# scrolled to the bottom". The -e flag makes tmux leave copy-mode by itself as
+# soon as you scroll back to the bottom, so typing just works again.
+bind -n WheelUpPane   if -F "#{pane_in_mode}" "send -M" "copy-mode -e ; send -M"
+bind -n WheelDownPane send -M
 TMUXCONF
 fi
 

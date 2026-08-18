@@ -821,13 +821,23 @@ Sign in with the same username and password as the terminal.
 
 | Section | Does |
 |---|---|
-| **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback |
-| **Modules** | Every installed module with its version. Update one, update all from GitHub, or reinstall from the app folder |
+| **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback. **Open all web servers** opens a tab per running web server, in instance order |
+| **Modules** | Installed version next to the version on GitHub — **green** when up to date, **red** when a newer one exists. Update one, update all, or reinstall from the app folder |
 | **ikabot** | Download and install an update, or roll the last one back |
 | **Output** | What the command you just pressed actually printed |
 
 The list refreshes every five seconds, and each web server port is a link
 straight into that account.
+
+**Open all web servers** remembers what it already opened, so pressing it again
+after starting more only opens the new ones — no duplicate tabs. Your browser
+will likely block all but the first tab the first time: allow pop-ups for the
+page and press it again.
+
+Remote versions come from GitHub, which allows 60 unauthenticated calls an
+hour, so they are cached rather than re-fetched every few seconds. **Check for
+updates** refreshes them on demand. If GitHub cannot be reached the panel says
+so and shows the versions as "not checked" rather than guessing.
 
 ### Serving it over HTTPS
 

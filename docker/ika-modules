@@ -157,6 +157,42 @@ def cmd_list(_args):
     return 0
 
 
+def ver_tuple(v):
+    """'10.5.1' -> (10, 5, 1); non-numeric parts sort as 0."""
+    out = []
+    for part in str(v).split("."):
+        digits = re.sub(r"\D", "", part)
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
+
+
+def is_newer(remote, local):
+    if not remote:
+        return False
+    if not local:
+        return True
+    a, b = ver_tuple(remote), ver_tuple(local)
+    length = max(len(a), len(b))
+    a += (0,) * (length - len(a))
+    b += (0,) * (length - len(b))
+    return a > b
+
+
+def cmd_available(_args):
+    """Versions on GitHub, as JSON. Used by the control panel."""
+    try:
+        remote = [m for m in _listing_remote("modules") if m["name"].endswith(".py")]
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 1
+    out = {}
+    for item in remote:
+        base, version = split_module_name(item["name"])
+        out[base[:-3]] = version
+    print(json.dumps({"modules": out}))
+    return 0
+
+
 def cmd_json(_args):
     """Installed modules as JSON, for the control panel."""
     out = []
@@ -193,6 +229,9 @@ def main():
 
     p_json = sub.add_parser("json", help="installed modules as JSON")
     p_json.set_defaults(func=cmd_json)
+
+    p_avail = sub.add_parser("available", help="versions on GitHub, as JSON")
+    p_avail.set_defaults(func=cmd_available)
 
     args = parser.parse_args()
     if not args.cmd:
