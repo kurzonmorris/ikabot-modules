@@ -138,6 +138,7 @@ piracyMissionWaitingTime = {
     9: 57600,
 }
 predetermined_input = []
+sequence_input_delay = 0.0  # seconds to wait between each sequence input pop; increase (e.g. 0.3) if inputs land in the wrong place
 
 
 

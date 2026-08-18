@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 from decimal import *
 
 from ikabot import config
@@ -73,6 +74,9 @@ def read(
         
     try:
         if len(config.predetermined_input) != 0:
+            delay = getattr(config, 'sequence_input_delay', 0.0)
+            if delay > 0:
+                time.sleep(delay)
             return config.predetermined_input.pop(0)
     except Exception:
         _logger.debug("Failed to read predetermined_input", exc_info=True)
@@ -165,7 +169,7 @@ def chooseCity(session, foreign=False):
             resource_index = str(cities[city_id]["tradegood"])
             resource_abb = resources_abbreviations[resource_index]
             city_name = decodeUnicodeEscape(cities[city_id]["name"])
-            menu_cities += "{: >2}: {}{}{}\n".format(
+            menu_cities += "{: >2}: {}{}{}\ n".format(
                 i, city_name, pad(city_name), resource_abb
             )
         menu_cities = menu_cities[:-1]
@@ -205,7 +209,7 @@ def chooseForeignCity(session):
     )
     html = session.get(url)
     try:
-        islands_json = re.search(r"jsonData = \'(.*?)\';", html).group(1)
+        islands_json = re.search(r"jsonData = \'(.*?)\'", html).group(1)
         islands_json = json.loads(islands_json, strict=False)
         island_id = islands_json["data"][str(x)][str(y)][0]
     except Exception:
@@ -359,7 +363,7 @@ def getShipCapacity(session):
         an integer representing the ship capacity of the user's current city
     """
     html = session.get('view=merchantNavy')
-    data = re.search(r'ajax.Responder, (\[\[[\S\s]*?\]\])\)\;', html).group(1)
+    data = re.search(r'ajax.Responder, (\[\[\S\s]*?\]\])\)\;', html).group(1)
     data = json.loads(data, strict=False)
 
     ship_capacity = data[3][1]['singleTransporterCapacity']

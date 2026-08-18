@@ -3,7 +3,7 @@
 
 MODULE_NAME  = "Sequence Runner"
 MODULE_ENTRY = "sequenceRunner"
-MODULE_VERSION = "1.1.2"
+MODULE_VERSION = "1.2.0"
 
 __version__ = MODULE_VERSION
 
@@ -41,19 +41,36 @@ def print_module_banner(page_title=None):
 # Storage
 # ---------------------------------------------------------------------------
 
-def _load_sequences():
+def _load_data():
     try:
         with open(_SEQUENCES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("sequences", [])
+            return json.load(f)
     except (OSError, json.JSONDecodeError):
-        return []
+        return {}
+
+
+def _load_sequences():
+    return _load_data().get("sequences", [])
+
+
+def _load_delay():
+    return float(_load_data().get("input_delay", 0.0))
 
 
 def _save_sequences(sequences):
     os.makedirs(IKABOT_DATA_DIR, exist_ok=True)
+    data = _load_data()
+    data["sequences"] = sequences
     with open(_SEQUENCES_FILE, "w", encoding="utf-8") as f:
-        json.dump({"sequences": sequences}, f, indent=2)
+        json.dump(data, f, indent=2)
+
+
+def _save_delay(delay):
+    os.makedirs(IKABOT_DATA_DIR, exist_ok=True)
+    data = _load_data()
+    data["input_delay"] = delay
+    with open(_SEQUENCES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +108,34 @@ def _run_sequence(seq, predetermined_input, event):
     The main menu loop resumes immediately after event.set() and read()
     starts consuming the injected values automatically.
     """
+    config.sequence_input_delay = _load_delay()
     predetermined_input.extend(seq["inputs"])
     event.set()
+
+
+def _configure_settings():
+    print_module_banner("Settings")
+    current = _load_delay()
+    print(f"  Current input delay: {current:.2f}s\n")
+    print("  Sets a pause between each sequence input.")
+    print("  Use 0 for normal speed. Increase (e.g. 0.3) if inputs land")
+    print("  in the wrong place — common when running in Docker.\n")
+    print("  Enter delay in seconds (0.00 – 2.00), or Enter to cancel:")
+    raw = read(msg="Delay: ", empty=True)
+    if raw == "" or raw is None:
+        return
+    try:
+        delay = float(raw)
+        if not 0.0 <= delay <= 2.0:
+            raise ValueError
+    except ValueError:
+        print(f"\n{bcolors.RED}Invalid value. Enter a number between 0.00 and 2.00.{bcolors.ENDC}")
+        enter()
+        return
+    _save_delay(delay)
+    config.sequence_input_delay = delay
+    print(f"\n{bcolors.GREEN}Input delay set to {delay:.2f}s.{bcolors.ENDC}")
+    enter()
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +251,11 @@ def sequenceRunner(session, event, stdin_fd, predetermined_input):
             if sequences:
                 print(f"  ({n + 2}) Delete a sequence")
                 print(f"  ({n + 3}) Preview a sequence")
+            delay = _load_delay()
+            delay_str = f"{delay:.2f}s" if delay > 0 else "off"
+            print(f"  ({n + 4}) Settings  [input delay: {delay_str}]")
 
-            max_choice = n + 3 if sequences else n + 1
+            max_choice = n + 4
             choice = read(min=0, max=max_choice, digit=True)
 
             if choice == 0:
@@ -229,6 +275,8 @@ def sequenceRunner(session, event, stdin_fd, predetermined_input):
                 pick = read(min=0, max=n, digit=True)
                 if pick != 0:
                     _preview_sequence(sequences[pick - 1])
+            elif choice == n + 4:
+                _configure_settings()
 
     except KeyboardInterrupt:
         pass
