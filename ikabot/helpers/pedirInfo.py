@@ -77,7 +77,20 @@ def read(
             delay = getattr(config, 'sequence_input_delay', 0.0)
             if delay > 0:
                 time.sleep(delay)
-            return config.predetermined_input.pop(0)
+            val = config.predetermined_input.pop(0)
+            # enter() calls auto-skip during sequence playback without consuming
+            # a token, so any "" tokens in the sequence must not be forwarded to
+            # read() calls that don't accept empty input — skip them transparently.
+            _accepts_empty = (
+                empty is True
+                or (values is not None and "" in values)
+                or (additionalValues is not None and "" in additionalValues)
+            )
+            while val == "" and not _accepts_empty and len(config.predetermined_input) != 0:
+                val = config.predetermined_input.pop(0)
+            if not (val == "" and not _accepts_empty):
+                return val
+            # fell through: only empty tokens left and we don't accept empty — read from stdin
     except Exception:
         _logger.debug("Failed to read predetermined_input", exc_info=True)
     
