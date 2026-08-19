@@ -10,6 +10,9 @@ from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getIsland
 from ikabot.helpers.gui import enter
 from ikabot.helpers.pedirInfo import getIslandsIds
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, prompt_use_saved, offer_autostart,
+)
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import getDateTime, wait
@@ -31,47 +34,79 @@ def searchForIslandSpaces(session, event, stdin_fd, predetermined_input):
             event.set()
             return
         banner()
-        print(
-            "Do you want to search for spaces on your islands or a specific set of islands?"
-        )
-        print("(0) Exit")
-        print("(1) Search all islands I have colonised")
-        print("(2) Search a specific set of islands")
-        choice = read(min=0, max=2)
-        islandList = []
-        if choice == 0:
+        _MODULE = "searchForIslandSpaces"
+
+        saved = load_prefs(session, _MODULE)
+        use_saved = False
+        if saved:
+            try:
+                islandList = [str(i) for i in saved.get("islandList") or []]
+                time = int(saved["time"]); assert time >= 3
+                fights = str(saved["fights"])
+                assert fights.lower() in ("y", "n")
+                use_saved = prompt_use_saved(session, _MODULE, [
+                    "Islands: " + ("all colonised" if not islandList else "{:d} specific".format(len(islandList))),
+                    "Every:   {:d} minutes".format(time),
+                    "Fight alerts: " + ("yes" if fights.lower() == "y" else "no"),
+                ])
+            except Exception:
+                use_saved = False
+
+        if config.autostart_active and not use_saved:
+            sendToBot(session, "{}: saved settings unusable, auto-start aborted.".format(_MODULE))
             event.set()
             return
-        elif choice == 2:
+
+        if use_saved:
+            print("Using saved island search settings.")
+        else:
+            print(
+                "Do you want to search for spaces on your islands or a specific set of islands?"
+            )
+            print("(0) Exit")
+            print("(1) Search all islands I have colonised")
+            print("(2) Search a specific set of islands")
+            choice = read(min=0, max=2)
+            islandList = []
+            if choice == 0:
+                event.set()
+                return
+            elif choice == 2:
+                banner()
+                print(
+                    "Insert the coordinates of each island you want searched like so: X1:Y1, X2:Y2, X3:Y3..."
+                )
+                coords_string = read()
+                coords_string = coords_string.replace(" ", "")
+                coords = coords_string.split(",")
+                for coord in coords:
+                    coord = "&xcoord=" + coord
+                    coord = coord.replace(":", "&ycoord=")
+                    html = session.get("view=island" + coord)
+                    island = getIsland(html)
+                    islandList.append(island["id"])
+            else:
+                pass
+
             banner()
             print(
-                "Insert the coordinates of each island you want searched like so: X1:Y1, X2:Y2, X3:Y3..."
+                "How frequently should the islands be searched in minutes (minimum is 3)?"
             )
-            coords_string = read()
-            coords_string = coords_string.replace(" ", "")
-            coords = coords_string.split(",")
-            for coord in coords:
-                coord = "&xcoord=" + coord
-                coord = coord.replace(":", "&ycoord=")
-                html = session.get("view=island" + coord)
-                island = getIsland(html)
-                islandList.append(island["id"])
-        else:
-            pass
-
-        banner()
-        print(
-            "How frequently should the islands be searched in minutes (minimum is 3)?"
-        )
-        time = read(min=3, digit=True)
-        banner()
-        print(
-            "Do you wish to be notified when a fight breaks out and stops on a city on these islands? (Y|N)"
-        )
-        fights = read(values=["y", "Y", "n", "N"])
-        banner()
-        print("I will search for changes in the selected islands")
-        enter()
+            time = read(min=3, digit=True)
+            banner()
+            print(
+                "Do you wish to be notified when a fight breaks out and stops on a city on these islands? (Y|N)"
+            )
+            fights = read(values=["y", "Y", "n", "N"])
+            save_prefs(session, _MODULE, {
+                "islandList": [str(i) for i in islandList],
+                "time": int(time),
+                "fights": str(fights),
+            })
+            banner()
+            print("I will search for changes in the selected islands")
+            offer_autostart(session, _MODULE)
+            enter()
     except KeyboardInterrupt:
         event.set()
         return
