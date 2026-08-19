@@ -5,10 +5,10 @@ import locale
 import os
 
 # Version is changed automatically by the release pipeline
-IKABOT_VERSION = "7.4.5"
+IKABOT_VERSION = "7.5.1"
 IKABOT_VERSION_TAG = "v" + IKABOT_VERSION
 
-IKABOT_MOD_VERSION = "1.7.7"
+IKABOT_MOD_VERSION = "1.8.0"
 IKABOT_MOD_VERSION_TAG = "modded by kurzon v" + IKABOT_MOD_VERSION
 
 
@@ -17,6 +17,10 @@ IKABOT_MOD_VERSION_TAG = "modded by kurzon v" + IKABOT_MOD_VERSION
 update_msg = ""
 
 isWindows = os.name == "nt"
+
+# Multiprocessing configuration for pure-Python local decaptcha
+# Set to False if your environment struggles with Python multiprocessing
+USE_MULTIPROCESSING_DECAPTCHA = True
 
 
 # --- Regional context -------------------------------------------------------

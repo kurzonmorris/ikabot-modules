@@ -29,7 +29,7 @@ from ikabot.function.donationBot import donationBot
 from ikabot.function.dumpWorld import dumpWorld
 from ikabot.function.getStatus import getStatus
 from ikabot.function.importExportCookie import importExportCookie
-from ikabot.function.Research import research
+from ikabot.function.research import research
 from ikabot.function.consolidateResources import consolidateResources
 from ikabot.function.killTasks import killTasks
 from ikabot.function.loginDaily import loginDaily
@@ -48,6 +48,7 @@ from ikabot.function.externalModules import (
     _run_external_module_child,
 )
 from ikabot.function.trainArmy import trainArmy
+from ikabot.function.viewArmy import viewArmy
 from ikabot.function.update import update
 from ikabot.function.vacationMode import vacationMode
 from ikabot.function.webServer import webServer
@@ -101,6 +102,7 @@ def _menu_actions():
         1201: trainArmy,
         1202: stationArmy,
         1203: UpgradeUnits,
+        1204: viewArmy,
         13: shipMovements,
         14: constructBuilding,
         15: update,
@@ -269,7 +271,8 @@ def menu(session, checkUpdate=True):
             print("(1) Train Army")
             print("(2) Send Troops/Ships")
             print("(3) Upgrade Army")
-            selected = read(min=0, max=3, digit=True)
+            print("(4) View Army")
+            selected = read(min=0, max=4, digit=True)
             if selected == 0:
                 continue
             selected += 1200
