@@ -95,9 +95,11 @@ def _save_miracle_cache(session, islands):
         for island in islands
     ]
     try:
-        data = session.getSessionData()
-        data[MIRACLE_CACHE_KEY] = cache
-        session.setSessionData(data)
+        def _store_cache(data):
+            data[MIRACLE_CACHE_KEY] = cache
+            return data
+
+        session.mutateSessionData(_store_cache)
     except Exception:
         pass  # caching is best-effort; never block the activation flow
 

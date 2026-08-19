@@ -460,6 +460,37 @@ class VaultSession:
 # Module-level API
 # ---------------------------------------------------------------------------
 
+def backup_vault(dest_dir: str) -> str:
+    """Copy the encrypted vault to *dest_dir*, timestamped. Returns the path.
+
+    A straight file copy: the backup stays AES-GCM encrypted and is only
+    readable with the same master password, so it is safe to keep anywhere the
+    original would be safe. Restore by copying it back over the vault file.
+    """
+    import shutil
+
+    src = _vault_path()
+    if not os.path.isfile(src):
+        raise FileNotFoundError("No vault to back up.")
+
+    dest_dir = os.path.expanduser(dest_dir.strip())
+    os.makedirs(dest_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = os.path.join(dest_dir, f"vault-backup-{stamp}")
+
+    _acquire_vault_lock()
+    try:
+        shutil.copy2(src, dest)
+    finally:
+        _release_vault_lock()
+
+    try:
+        os.chmod(dest, 0o600)
+    except OSError:
+        pass
+    return dest
+
+
 def vault_exists() -> bool:
     """Return True if an ikabot vault file is present."""
     _migrate_vault_if_needed()

@@ -138,13 +138,16 @@ def loadCustomModule(session, event, stdin_fd, predetermined_input):
                 # Rename this process's entry in processList so the main
                 # menu shows the actual module name instead of 'loadCustomModule'
                 try:
-                    sd = session.getSessionData()
                     my_pid = os.getpid()
-                    for p in sd.get('processList', []):
-                        if p.get('pid') == my_pid:
-                            p['action'] = name
-                            break
-                    session.setSessionData(sd)
+
+                    def _rename_entry(sd):
+                        for entry in sd.get('processList', []):
+                            if entry.get('pid') == my_pid:
+                                entry['action'] = name
+                                break
+                        return sd
+
+                    session.mutateSessionData(_rename_entry)
                 except Exception:
                     pass
 

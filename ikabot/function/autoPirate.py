@@ -211,6 +211,14 @@ def autoPirate(session, event, stdin_fd, predetermined_input):
     set_child_mode(session)
     event.set()
 
+    # Take the ~2s solver load off the critical path of the first captcha.
+    if LOCAL_DECAPTCHA:
+        try:
+            from ikabot.helpers.piratesDecaptcha import warm_up
+            warm_up()
+        except Exception:
+            pass
+
     try:
         while pirateCount > 0:
             session.setStatus("Pirating for " + str(pirateCount) + " more runs")

@@ -61,6 +61,7 @@ from ikabot.helpers.botComm import telegramDataIsValid, notificationDataIsValid
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.process import updateProcessList
+from ikabot.helpers.taskWatchdog import check_for_dead_tasks, write_status
 from ikabot.web.session import *
 from ikabot.function.UpgradeUnits import UpgradeUnits
 from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWorkers
@@ -72,7 +73,7 @@ from ikabot.helpers.modulePrefs import (
 )
 from ikabot.helpers.credentialStore import (
     vault_exists, create_vault, open_vault,
-    get_vault_location, set_vault_location,
+    get_vault_location, set_vault_location, backup_vault,
     VaultWrongPasswordError, VaultCorruptError, VaultVersionError,
 )
 
@@ -149,6 +150,10 @@ def menu(session, checkUpdate=True):
 
         modules = get_external_modules(session)
         process_list = updateProcessList(session)
+        # A task whose process died used to vanish from this table silently.
+        # Notify once, and export state for external monitors (Docker panel).
+        check_for_dead_tasks(session, process_list)
+        write_status(session, process_list)
         if len(process_list) > 0:
             table = process_list.copy()
             table.insert(
@@ -450,6 +455,71 @@ def init():
 # Credential vault helpers
 # ---------------------------------------------------------------------------
 
+def _unattended_vault_password():
+    """Master password for unattended start, or None to prompt.
+
+    Two sources, file first:
+
+      IKABOT_VAULT_PASSWORD_FILE  path to a file whose contents are the password
+      IKABOT_VAULT_PASSWORD       the password itself
+
+    The file form is strongly preferred and is what Docker/Podman secrets
+    provide (`/run/secrets/<name>`). An environment variable is readable by
+    anything that can run `docker inspect`, read /proc/<pid>/environ, or open a
+    crash dump — the file form keeps the secret off the process environment and
+    lets the filesystem restrict who can read it.
+
+    This does not weaken the vault itself: the file stays AES-GCM encrypted
+    with a PBKDF2 key and nothing is written in the clear. What it does change
+    is that anyone who can read the secret can unlock the vault without being
+    at a terminal, which is inherent to starting unattended.
+    """
+    path = os.getenv("IKABOT_VAULT_PASSWORD_FILE")
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                pw = f.read().strip("\r\n")
+            if pw:
+                try:
+                    mode = os.stat(path).st_mode
+                    if not isWindows and (mode & 0o077):
+                        print(f"{bcolors.WARNING}[!]{bcolors.ENDC} {path} is readable by other users; chmod 600 it.")
+                except OSError:
+                    pass
+                return pw
+            print(f"{bcolors.WARNING}[!]{bcolors.ENDC} IKABOT_VAULT_PASSWORD_FILE is empty: {path}")
+        except OSError as exc:
+            print(f"{bcolors.WARNING}[!]{bcolors.ENDC} Could not read IKABOT_VAULT_PASSWORD_FILE: {exc}")
+
+    pw = os.getenv("IKABOT_VAULT_PASSWORD")
+    if pw:
+        return pw.strip("\r\n")
+    return None
+
+
+def _unattended_account_choice(accounts):
+    """Resolve IKABOT_VAULT_ACCOUNT to a vault index, or None.
+
+    Matches the account label case-insensitively, or accepts a 1-based
+    position. With a single stored account and no variable set, that account is
+    chosen automatically — a one-account container needs no configuration.
+    """
+    wanted = (os.getenv("IKABOT_VAULT_ACCOUNT") or "").strip()
+    if not wanted:
+        return accounts[0][0] if len(accounts) == 1 else None
+
+    for idx, label in accounts:
+        if label.strip().lower() == wanted.lower():
+            return idx
+    if wanted.isdigit():
+        pos = int(wanted)
+        if 1 <= pos <= len(accounts):
+            return accounts[pos - 1][0]
+
+    print(f"{bcolors.WARNING}[!]{bcolors.ENDC} IKABOT_VAULT_ACCOUNT={wanted!r} matched no stored account.")
+    return None
+
+
 def _prompt_vault_login():
     """Prompt for master password, show account list, return (creds, vault_session, index).
 
@@ -458,6 +528,29 @@ def _prompt_vault_login():
     """
     MAX_ATTEMPTS = 3
     vault_session = None
+
+    # Unattended start (Docker): unlock from a secret without a terminal.
+    unattended_pw = _unattended_vault_password()
+    if unattended_pw:
+        try:
+            vs = open_vault(unattended_pw)
+            if vs.verify_password():
+                accounts = vs.list_accounts()
+                if accounts:
+                    idx = _unattended_account_choice(accounts)
+                    if idx is not None:
+                        label = dict(accounts).get(idx, idx)
+                        print(f"Unlocking vault unattended; using account '{label}'.")
+                        return vs.get_credentials(idx), vs, idx
+                    print("Set IKABOT_VAULT_ACCOUNT to pick one; falling back to prompting.")
+                else:
+                    print("Vault is empty; falling back to manual login.")
+            else:
+                print(f"{bcolors.WARNING}[!]{bcolors.ENDC} Unattended vault password was rejected.")
+        except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
+            print(f"{bcolors.WARNING}[!]{bcolors.ENDC} Unattended vault unlock failed: {exc}")
+        except Exception as exc:
+            print(f"{bcolors.WARNING}[!]{bcolors.ENDC} Unattended vault unlock error: {exc}")
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         master_pw = getpass.getpass(
@@ -781,8 +874,9 @@ def _manage_vault_menu(session):
         print("(5) Rename an account")
         print("(6) Change vault location")
         print("(7) Change an account's region")
+        print("(8) Back up the vault")
 
-        choice = read(min=0, max=7, digit=True)
+        choice = read(min=0, max=8, digit=True)
         if choice == 0:
             return
         elif choice == 1:
@@ -799,6 +893,8 @@ def _manage_vault_menu(session):
             _vault_change_location()
         elif choice == 7:
             _vault_change_region()
+        elif choice == 8:
+            _vault_backup()
 
 
 def _vault_list_accounts():
@@ -947,6 +1043,30 @@ def _vault_change_region():
     vs.set_region(acct_idx, new_locale, new_timezone)
     print(f"\n'{acct_label}' is now "
           f"{config.region_label(new_locale, new_timezone)}.")
+    enter()
+
+
+def _vault_backup():
+    """Copy the encrypted vault somewhere safe."""
+    if not vault_exists():
+        print("No vault found.")
+        enter()
+        return
+    print("\nThe backup is a copy of the encrypted vault file. It stays")
+    print("encrypted and still needs the master password, so it is safe")
+    print("wherever the original would be. Restore by copying it back over")
+    print("the vault file.\n")
+    print(f"Current vault location: {get_vault_location()}")
+    dest = read(msg="Backup directory (empty to cancel): ", empty=True).strip()
+    if not dest:
+        return
+    try:
+        path = backup_vault(dest)
+    except Exception as exc:
+        print(f"Backup failed: {exc}")
+        enter()
+        return
+    print(f"\nVault backed up to:\n  {path}")
     enter()
 
 

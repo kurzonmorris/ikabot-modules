@@ -150,12 +150,12 @@ class Session:
         return self.__isExpired(html)
 
     def __saveNewCookies(self):
-        sessionData = self.getSessionData()
-
+        # Atomic: this runs on every cookie refresh, in the parent and in every
+        # background task. A plain read-edit-write here would replace the whole
+        # account block from a stale snapshot and silently drop concurrent
+        # changes — most visibly, live processList entries.
         cookie_dict = dict(self.s.cookies.items())
-        sessionData["cookies"] = cookie_dict
-
-        self.setSessionData(sessionData)
+        self.updateSessionKeys({"cookies": cookie_dict})
 
     def __getCookie(self, sessionData=None):
         if sessionData is None:
@@ -1188,8 +1188,11 @@ class Session:
             if rta.lower() == "n":
                 sys.exit()
             else:
-                sessionData["proxy"]["set"] = False
-                self.setSessionData(sessionData)
+                def _disable_proxy(data):
+                    data.setdefault("proxy", {})["set"] = False
+                    return data
+
+                self.mutateSessionData(_disable_proxy)
                 print("Proxy disabled, try again.")
                 enter()
                 sys.exit()
@@ -1561,6 +1564,20 @@ class Session:
     def getSessionData(self):
         """Gets relevant session data from the .ikabot file"""
         return self.cipher.getSessionData(self)
+
+    def updateSessionKeys(self, updates, shared=False):
+        """Atomically merge top-level keys into this account's session data.
+
+        The common safe replacement for getSessionData() + edit +
+        setSessionData(): setSessionData replaces the *whole* account block, so
+        a stale snapshot silently discards anything another process changed in
+        between — including live processList entries.
+        """
+        def _merge(data):
+            data.update(updates)
+            return data
+
+        return self.mutateSessionData(_merge, shared=shared)
 
     def mutateSessionData(self, mutator, shared=False):
         """Atomically read-modify-write this account's session data.

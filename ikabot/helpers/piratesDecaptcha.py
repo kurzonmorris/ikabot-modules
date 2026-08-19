@@ -313,3 +313,38 @@ def get_captcha_string(image_bytes):
 
     from ikabot.helpers.piratesDecaptchaPure import get_captcha_string as pure_solve
     return pure_solve(image_bytes)
+
+def warm_up(background=True):
+    """Pre-load whichever solver will actually be used.
+
+    The first pure-Python solve pays ~2s loading the 6.6 MB weights before any
+    inference happens. Doing that while the bot is busy with something else
+    takes it off the critical path of the first captcha.
+
+    Only the solver that would actually be used is warmed: if onnxruntime is
+    importable the ONNX model is prepared and the pure weights are left alone,
+    since loading them would cost seconds of CPU and the memory for nothing.
+
+    Never raises; warming is an optimisation, not a requirement.
+    """
+    def _warm():
+        try:
+            _load_model()
+            return
+        except Exception:
+            pass
+        try:
+            from ikabot.helpers.piratesDecaptchaPure import get_cached_weights
+            get_cached_weights()
+        except Exception:
+            pass
+
+    if not background:
+        _warm()
+        return None
+
+    import threading
+
+    t = threading.Thread(target=_warm, name="decaptcha-warmup", daemon=True)
+    t.start()
+    return t
