@@ -8,7 +8,7 @@ deviation back into a bug.
 | | |
 |---|---|
 | **Parity point** | upstream **v7.5.1** |
-| **Fork version** | `IKABOT_MOD_VERSION` **1.8.0** |
+| **Fork version at parity** | `IKABOT_MOD_VERSION` **1.8.0** (later bumps are fork-only work) |
 | **Last audited** | 2026-08-19 (upstream `c70a8d1`) |
 | **Scope** | `ikabot/` core only — `modules/` is fork-specific, no upstream counterpart |
 
