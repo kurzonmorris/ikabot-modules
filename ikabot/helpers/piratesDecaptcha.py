@@ -1,30 +1,40 @@
 import os
 import sys
+
+class SuppressStderr:
+    def __enter__(self):
+        self._devnull = None
+        self._old_stderr = None
+        try:
+            self._devnull = os.open(os.devnull, os.O_WRONLY)
+            self._old_stderr = os.dup(2)
+            os.dup2(self._devnull, 2)
+        except Exception:
+            # Fallback for Pyodide, Windows GUI (pythonw), Jupyter, or environments without true fd 2
+            if self._devnull is not None:
+                try:
+                    os.close(self._devnull)
+                except Exception:
+                    pass
+                self._devnull = None
+
+    def __exit__(self, *args):
+        if self._old_stderr is not None:
+            try:
+                os.dup2(self._old_stderr, 2)
+                os.close(self._old_stderr)
+            except Exception:
+                pass
+        if self._devnull is not None:
+            try:
+                os.close(self._devnull)
+            except Exception:
+                pass
+
 import struct
 import zlib
 import io
 import requests
-
-
-class SuppressStderr:
-    def __enter__(self):
-        self._devnull = os.open(os.devnull, os.O_WRONLY)
-        self._old_stderr = os.dup(2)
-        os.dup2(self._devnull, 2)
-    def __exit__(self, *args):
-        os.dup2(self._old_stderr, 2)
-        os.close(self._old_stderr)
-        os.close(self._devnull)
-
-
-with SuppressStderr():
-    try:
-        from onnxruntime_inference_collection import InferenceSession # NOTE: This only works if you have the onnxruntime_pybind11_state.pyd file for win
-    except:                                                           # or onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so for linux
-        try:
-            from onnxruntime import InferenceSession
-        except:
-            InferenceSession = None
 
 if os.name == 'nt':
     _temp = os.getenv('temp') or os.getenv('TMP') or os.getenv('TEMP') or '.'
@@ -37,13 +47,14 @@ session = None
 
 def _load_model():
     global session
-    if InferenceSession is None:
-        raise RuntimeError(
-            'onnxruntime is not installed — pirates captcha solving is unavailable.\n'
-            'Fix: pip install onnxruntime'
-        )
     if session is not None:
         return session
+
+    with SuppressStderr():
+        try:
+            from onnxruntime_inference_collection import InferenceSession # NOTE: This only works if you have the onnxruntime_pybind11_state.pyd file for win
+        except Exception:                                                 # or onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so for linux
+            from onnxruntime import InferenceSession
 
     if os.path.isfile(_model_cache_path):
         try:
@@ -266,8 +277,8 @@ def _ctc_greedy_decode(logits_tbc):
     return "".join(chars)
 
 
-def get_captcha_string(image_bytes):
-    """Return the captcha text for a given image."""
+def _solve_with_onnx(image_bytes):
+    """Solve using the ONNX CRNN model. Raises if onnxruntime is unavailable."""
     width, height, rgb_pixels = read_png(image_bytes)
 
     assert height <= 100 and width <= 500, "Image is too large"
@@ -279,3 +290,61 @@ def get_captcha_string(image_bytes):
     logits = sess.run(None, {input_name: blob})[0]  # (T, B, C)
 
     return _ctc_greedy_decode(logits).upper()
+
+
+def get_captcha_string(image_bytes):
+    """Return the captcha text for a given image.
+
+    ONNX first, pure Python second. Upstream 7.5.1 had these the other way
+    round, but the pure solver returns a string rather than raising, so the
+    ONNX branch below it was unreachable whenever the pure module imported —
+    which is always, since it is stdlib-only and ships with its weights. That
+    silently routed every captcha through the pure solver, which is orders of
+    magnitude slower (seconds per image versus milliseconds).
+
+    Keeping ONNX first preserves the speed where onnxruntime is installed;
+    the pure fallback still covers environments where it is not (Docker on
+    ARM, minimal images), which is what it was added for.
+    """
+    try:
+        return _solve_with_onnx(image_bytes)
+    except Exception:
+        pass
+
+    from ikabot.helpers.piratesDecaptchaPure import get_captcha_string as pure_solve
+    return pure_solve(image_bytes)
+
+def warm_up(background=True):
+    """Pre-load whichever solver will actually be used.
+
+    The first pure-Python solve pays ~2s loading the 6.6 MB weights before any
+    inference happens. Doing that while the bot is busy with something else
+    takes it off the critical path of the first captcha.
+
+    Only the solver that would actually be used is warmed: if onnxruntime is
+    importable the ONNX model is prepared and the pure weights are left alone,
+    since loading them would cost seconds of CPU and the memory for nothing.
+
+    Never raises; warming is an optimisation, not a requirement.
+    """
+    def _warm():
+        try:
+            _load_model()
+            return
+        except Exception:
+            pass
+        try:
+            from ikabot.helpers.piratesDecaptchaPure import get_cached_weights
+            get_cached_weights()
+        except Exception:
+            pass
+
+    if not background:
+        _warm()
+        return None
+
+    import threading
+
+    t = threading.Thread(target=_warm, name="decaptcha-warmup", daemon=True)
+    t.start()
+    return t

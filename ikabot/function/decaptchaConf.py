@@ -53,7 +53,7 @@ def decaptchaConf(session, event, stdin_fd, predetermined_input):
                 "endpoint": "default",
                 "relevant_data": {},
             }
-            session.setSessionData(session_data)
+            session.updateSessionKeys({"decaptcha": session_data["decaptcha"]})
 
         if session_data["decaptcha"]["name"] == "default":
             print("You are currently using the default decaptcha service")
@@ -92,7 +92,7 @@ def decaptchaConf(session, event, stdin_fd, predetermined_input):
                 "endpoint": "default",
                 "relevant_data": {},
             }
-            session.setSessionData(session_data)
+            session.updateSessionKeys({"decaptcha": session_data["decaptcha"]})
             print("Default decaptcha service set as decaptcha service!")
             enter()
             event.set()
@@ -117,7 +117,7 @@ def decaptchaConf(session, event, stdin_fd, predetermined_input):
                 print("Do you want to test this newly-set custom endpoint?(y|n)")
                 test_bool = read(values=["y", "Y", "n", "N"])
                 if test_bool.lower() == "n":
-                    session.setSessionData(session_data)
+                    session.updateSessionKeys({"decaptcha": session_data["decaptcha"]})
                     event.set()
                     return
                 for test in decaptcha_test_pictures:
@@ -126,7 +126,7 @@ def decaptchaConf(session, event, stdin_fd, predetermined_input):
                         base64.b64decode(test["picture"]),
                         endpoint,
                     ):
-                        session.setSessionData(session_data)
+                        session.updateSessionKeys({"decaptcha": session_data["decaptcha"]})
                         print("Custom decaptcha passed at least one test, good enough!")
                         enter()
                         event.set()
@@ -162,7 +162,7 @@ def decaptchaConf(session, event, stdin_fd, predetermined_input):
                     )
                 )
                 enter()
-                session.setSessionData(session_data)
+                session.updateSessionKeys({"decaptcha": session_data["decaptcha"]})
                 event.set()
                 return
 
@@ -209,7 +209,7 @@ def decaptchaConf(session, event, stdin_fd, predetermined_input):
                         )
                     )
                     enter()
-                    session.setSessionData(session_data)
+                    session.updateSessionKeys({"decaptcha": session_data["decaptcha"]})
                     event.set()
                     return
                 else:
@@ -223,7 +223,7 @@ def decaptchaConf(session, event, stdin_fd, predetermined_input):
                     return
             else:
                 print("You will now recieve the piracy captcha over Telegram!")
-                session.setSessionData(session_data)
+                session.updateSessionKeys({"decaptcha": session_data["decaptcha"]})
                 enter()
                 event.set()
                 return

@@ -19,6 +19,11 @@ datas, binaries, hiddenimports = collect_all('ikabot')
 # Also pull in the locale data files explicitly
 datas += collect_data_files('ikabot', includes=['locale/**/*'])
 
+# The local pure-Python decaptcha weights (6.6 MB). Explicit rather than
+# relying on collect_all's heuristics: if this is silently missing the solver
+# falls back to the API with no visible error, which is very hard to diagnose.
+datas += collect_data_files('ikabot', includes=['assets/*.bin'])
+
 a = Analysis(
     [os.path.join(ROOT, 'ikabot', '__main__.py')],
     pathex=[ROOT],

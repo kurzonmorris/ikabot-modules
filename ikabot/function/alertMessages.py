@@ -14,6 +14,9 @@ import ikabot.config as config
 from ikabot.helpers.botComm import checkTelegramData, sendToBot
 from ikabot.helpers.gui import banner, enter
 from ikabot.helpers.pedirInfo import read
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, prompt_use_saved, offer_autostart,
+)
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import addThousandSeparator, daysHoursMinutes
@@ -63,36 +66,76 @@ def alertMessages(session, event, stdin_fd, predetermined_input):
             event.set()
             return
 
-        banner()
-        print("How often should I check in-game messages in minutes? (min:1, default: 10)")
-        interval_minutes = int(read(min=1, digit=True, default=POLL_MINUTES_DEFAULT))
+        _MODULE = "alertMessages"
 
-        banner()
-        print("Select which message types should trigger Telegram alerts:")
-        print("(1) All")
-        print("(2) Player messages")
-        print("(3) Combat reports")
-        print("Type one or more numbers separated by commas (example: 2,3). Default: 1")
-        raw_selection = str(read(empty=True, default="1")).strip()
-        enabled_types = _parse_type_selection(raw_selection)
+        saved = load_prefs(session, _MODULE)
+        use_saved = False
+        if saved:
+            try:
+                interval_minutes = int(saved["interval_minutes"]); assert interval_minutes >= 1
+                enabled_types = _parse_type_selection(str(saved["raw_selection"]))
+                assert enabled_types
+                include_battlefield_details = bool(saved["include_battlefield_details"])
+                notify_existing = bool(saved["notify_existing"])
+                include_movements = bool(saved["include_movements"])
+                movement_interval_minutes = int(saved["movement_interval_minutes"])
+                assert not include_movements or movement_interval_minutes >= 1
+                use_saved = prompt_use_saved(session, _MODULE, [
+                    "Check every:   {:d} minutes".format(interval_minutes),
+                    "Types:         {}".format(saved["raw_selection"]),
+                    "Battlefield:   " + ("yes" if include_battlefield_details else "no"),
+                    "Notify existing: " + ("yes" if notify_existing else "no"),
+                    "Movements:     " + ("every {:d} min".format(movement_interval_minutes) if include_movements else "no"),
+                ])
+            except Exception:
+                use_saved = False
 
-        banner()
-        print("Include detailed battlefield info for combat reports? (y|N)")
-        include_battlefield_details = read(values=["y", "Y", "n", "N"], default="n") in ["y", "Y"]
+        if config.autostart_active and not use_saved:
+            sendToBot(session, "{}: saved settings unusable, auto-start aborted.".format(_MODULE))
+            event.set()
+            return
 
-        banner()
-        print("Should already existing messages trigger alerts on first scan? (y|N)")
-        notify_existing = read(values=["y", "Y", "n", "N"], default="n") in ["y", "Y"]
-
-        banner()
-        print("Also send military movement reports to Telegram? (y|N)")
-        include_movements = read(values=["y", "Y", "n", "N"], default="n") in ["y", "Y"]
-
-        movement_interval_minutes = 0
-        if include_movements:
+        if not use_saved:
             banner()
-            print("How often should I send movement reports in minutes? (min:1, default: 10)")
-            movement_interval_minutes = int(read(min=1, digit=True, default=POLL_MINUTES_DEFAULT))
+            print("How often should I check in-game messages in minutes? (min:1, default: 10)")
+            interval_minutes = int(read(min=1, digit=True, default=POLL_MINUTES_DEFAULT))
+
+            banner()
+            print("Select which message types should trigger Telegram alerts:")
+            print("(1) All")
+            print("(2) Player messages")
+            print("(3) Combat reports")
+            print("Type one or more numbers separated by commas (example: 2,3). Default: 1")
+            raw_selection = str(read(empty=True, default="1")).strip()
+            enabled_types = _parse_type_selection(raw_selection)
+
+            banner()
+            print("Include detailed battlefield info for combat reports? (y|N)")
+            include_battlefield_details = read(values=["y", "Y", "n", "N"], default="n") in ["y", "Y"]
+
+            banner()
+            print("Should already existing messages trigger alerts on first scan? (y|N)")
+            notify_existing = read(values=["y", "Y", "n", "N"], default="n") in ["y", "Y"]
+
+            banner()
+            print("Also send military movement reports to Telegram? (y|N)")
+            include_movements = read(values=["y", "Y", "n", "N"], default="n") in ["y", "Y"]
+
+            movement_interval_minutes = 0
+            if include_movements:
+                banner()
+                print("How often should I send movement reports in minutes? (min:1, default: 10)")
+                movement_interval_minutes = int(read(min=1, digit=True, default=POLL_MINUTES_DEFAULT))
+
+            save_prefs(session, _MODULE, {
+                "interval_minutes": int(interval_minutes),
+                "raw_selection": raw_selection,
+                "include_battlefield_details": bool(include_battlefield_details),
+                "notify_existing": bool(notify_existing),
+                "include_movements": bool(include_movements),
+                "movement_interval_minutes": int(movement_interval_minutes),
+            })
+            offer_autostart(session, _MODULE)
 
         print(
             "Message alert configured:\n"

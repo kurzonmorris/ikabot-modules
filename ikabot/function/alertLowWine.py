@@ -13,6 +13,9 @@ from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getCity
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import getIdsOfCities
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, prompt_use_saved, offer_autostart,
+)
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.resources import getWineConsumptionPerHour, getAvailableResources, getProductionPerHour
 from ikabot.helpers.signals import setInfoSignal
@@ -37,23 +40,52 @@ def alertLowWine(session, event, stdin_fd, predetermined_input):
             event.set()
             return
         banner()
-        hours = read(
-            msg=(
-                "How many hours should be left until the wine runs out in a city so that it's alerted? : "
-            ),
-            min=1,
-        )
-        auto_transfer = read(msg=("Would you like to automatically transfer wine if necessary? (y/n) : ")).strip().lower()
-        
-        if auto_transfer in ["y", "yes"]:
-            auto_transfer = True
-            transfer_amount = read(msg=("How much wine should be sent automatically? : "), min=1)
-        else:
-            auto_transfer = False
-            transfer_amount = 0
-        print("It will be alerted when the wine runs out in less than {:d} hours in any city, and {:,d} wine will be transferred if necessary.".format(hours, transfer_amount))
+        _MODULE = "alertLowWine"
 
-        enter()
+        saved = load_prefs(session, _MODULE)
+        use_saved = False
+        if saved:
+            try:
+                hours = int(saved["hours"]); assert hours >= 1
+                auto_transfer = bool(saved["auto_transfer"])
+                transfer_amount = int(saved["transfer_amount"])
+                assert transfer_amount >= 0
+                assert not auto_transfer or transfer_amount >= 1
+                use_saved = prompt_use_saved(session, _MODULE, [
+                    "Alert below:   {:d} hours of wine".format(hours),
+                    "Auto-transfer: " + ("{:,d} wine".format(transfer_amount) if auto_transfer else "no"),
+                ])
+            except Exception:
+                use_saved = False
+
+        if config.autostart_active and not use_saved:
+            sendToBot(session, "{}: saved settings unusable, auto-start aborted.".format(_MODULE))
+            event.set()
+            return
+
+        if not use_saved:
+            hours = read(
+                msg=(
+                    "How many hours should be left until the wine runs out in a city so that it's alerted? : "
+                ),
+                min=1,
+            )
+            auto_transfer = read(msg=("Would you like to automatically transfer wine if necessary? (y/n) : ")).strip().lower()
+
+            if auto_transfer in ["y", "yes"]:
+                auto_transfer = True
+                transfer_amount = read(msg=("How much wine should be sent automatically? : "), min=1)
+            else:
+                auto_transfer = False
+                transfer_amount = 0
+            save_prefs(session, _MODULE, {
+                "hours": int(hours),
+                "auto_transfer": bool(auto_transfer),
+                "transfer_amount": int(transfer_amount),
+            })
+            print("It will be alerted when the wine runs out in less than {:d} hours in any city, and {:,d} wine will be transferred if necessary.".format(hours, transfer_amount))
+            offer_autostart(session, _MODULE)
+            enter()
     except KeyboardInterrupt:
         event.set()
         return

@@ -162,6 +162,36 @@ def list_saved_modules(session):
     return names
 
 
+def offer_autostart(session, module_name):
+    """Offer to run this module automatically at login. Returns True if enabled.
+
+    Call once, after save_prefs(), in the interactive path only. Silent and
+    inert when there is nothing to offer, so callers need no extra guards.
+    """
+    from ikabot.helpers.pedirInfo import read
+
+    # Never prompt under sequenceRunner (would swallow a recorded keystroke)
+    # or under auto-start (no terminal). Nothing to enable without settings.
+    try:
+        if len(config.predetermined_input) != 0:
+            return False
+    except Exception:
+        pass
+    if getattr(config, "autostart_active", False):
+        return False
+    if not load_prefs(session, module_name) or is_autostart(session, module_name):
+        return False
+
+    print("")
+    print("Run this automatically at login from now on?")
+    print("It will start in the background using these settings.")
+    choice = read(values=["y", "Y", "n", "N", ""], empty=True, default="n",
+                  msg="[y/N]: ")
+    if choice.lower() != "y":
+        return False
+    return set_autostart(session, module_name, True)
+
+
 def prompt_use_saved(session, module_name, summary_lines=()):
     """Show the saved settings and ask whether to reuse them.
 

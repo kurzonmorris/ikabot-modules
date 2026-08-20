@@ -16,8 +16,11 @@ def show_proxy(session):
     if "proxy" in session_data and session_data["proxy"]["set"] is True:
         curr_proxy = session_data["proxy"]["conf"]["https"]
         if test_proxy(session, session_data["proxy"]["conf"]) is False:
-            session_data["proxy"]["set"] = False
-            session.setSessionData(session_data)
+            def _disable_proxy(sd):
+                sd.setdefault("proxy", {})["set"] = False
+                return sd
+
+            session.mutateSessionData(_disable_proxy)
             sys.exit(
                 "the {} proxy does not work, it has been removed".format(curr_proxy)
             )
