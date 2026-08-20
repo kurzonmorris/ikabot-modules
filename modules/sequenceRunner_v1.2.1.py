@@ -3,7 +3,7 @@
 
 MODULE_NAME  = "Sequence Runner"
 MODULE_ENTRY = "sequenceRunner"
-MODULE_VERSION = "1.2.0"
+MODULE_VERSION = "1.2.1"
 
 __version__ = MODULE_VERSION
 
@@ -154,16 +154,13 @@ def _create_sequence(sequences):
     description = read(msg="Description (optional, Enter to skip): ", empty=True).strip()
 
     print("\n  Enter inputs as comma-separated values.")
-    print("  Use 'enter' for an empty/Enter keypress.")
-    print("  Numbers are entered as digits, text as words.")
-    print("  Example: 16, enter, 5, 1, 0, 2, 6, 1, y, enter")
+    print("  Numbers are entered as digits, text as-is.")
+    print("  Do NOT use 'enter' for [Enter] pause prompts — those are")
+    print("  skipped automatically. Only use 'enter' for text fields")
+    print("  that genuinely accept an empty input (e.g. optional fields).")
     print()
-    print("  For External Modules (30): stay in submenu between modules.")
-    print("  Use a single 0 at the end to exit, NOT between each module.")
-    print("  Example: 30, 34, 0, 32, s, 3, 37, 2, 2, 2, 24, 0")
-    print("           ^^  ^^  ^  ^^           ^^                ^")
-    print("           |   RRS |  CM           TM                exit")
-    print("           enter   RRS exits its own menu\n")
+    print("  Example: 16, 5, 1, 0, 2, 6, 1, y")
+    print()
 
     raw = read(msg="Inputs: ").strip()
     if not raw:
