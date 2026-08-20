@@ -44,8 +44,23 @@ function isIkariamPage() {
 }
 
 // Only boot the extension on real Ikariam pages. On every other site this
-// content script does nothing beyond this cheap check.
+// content script does nothing beyond this cheap check — the heavy libraries
+// (jQuery, lodash, moment) are not loaded there at all.
 if (isIkariamPage()) {
-    // Подключаем initModule чтобы потом нормально работать с импортами
-    import('./initModule.js');
+    // Ask the background worker to inject the libraries into this frame's
+    // isolated world, then start the app once they are available. Everything
+    // downstream relies on $, _ and moment being present as globals.
+    chrome.runtime.sendMessage({ cmd: 'load-libs' }, (ok) => {
+        if (chrome.runtime.lastError) {
+            console.error('IkaEasy: could not reach background worker —',
+                chrome.runtime.lastError.message);
+            return;
+        }
+        if (!ok) {
+            console.error('IkaEasy: failed to load required libraries.');
+            return;
+        }
+        // Подключаем initModule чтобы потом нормально работать с импортами
+        import('./initModule.js');
+    });
 }

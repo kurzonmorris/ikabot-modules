@@ -22,9 +22,6 @@
     "content_scripts": [
         {
             "js": [
-                "js/libs/jquery.js",
-                "js/libs/lodash.js",
-                "js/libs/moment-with-locales.min.js",
                 "js/init.js"
             ],
             "matches": [
@@ -83,7 +80,8 @@
         "storage",
         "notifications",
         "background",
-        "alarms"
+        "alarms",
+        "scripting"
     ],
     "host_permissions": [
         "http://*.ikariam.gameforge.com/*",
