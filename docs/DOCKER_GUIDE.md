@@ -824,6 +824,8 @@ Sign in with the same username and password as the terminal.
 | **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback. **Open all web servers** opens a tab per running web server, in instance order |
 | **Modules** | Installed version next to the version on GitHub — **green** when up to date, **red** when a newer one exists. Update one, update all, or reinstall from the app folder |
 | **ikabot** | Download and install an update, or roll the last one back |
+| **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going |
+| **Quick keys** | Buttons that press a menu option and Enter in an instance, or in every running instance at once |
 | **Output** | What the command you just pressed actually printed |
 
 The list refreshes every five seconds, and each web server port is a link
@@ -838,6 +840,42 @@ Remote versions come from GitHub, which allows 60 unauthenticated calls an
 hour, so they are cached rather than re-fetched every few seconds. **Check for
 updates** refreshes them on demand. If GitHub cannot be reached the panel says
 so and shows the versions as "not checked" rather than guessing.
+
+### Active processes
+
+Each instance card carries a task count and an **Active processes** dropdown
+listing what that account is running — `alertAttacks`, `webServer` and so on —
+with the status line each module sets, and how long it has been going.
+
+This reads the status files ikabot writes to `/config/.ikabot/status/`, so
+nothing needs mounting: the panel lives in the same container. Files are
+matched to windows by walking the recorded process up to its tmux pane, so the
+tasks land on the right instance without anything having to be told how many
+instances there are.
+
+> **Needs ikabot mod 1.8.1 or later.** Earlier versions do not write those
+> files, and the panel says so rather than showing an empty list.
+
+A task count that is blank means no status file — either the instance has never
+finished starting, or ikabot is older than 1.8.1. `0 tasks` genuinely means
+idle at the menu.
+
+### Quick keys
+
+Each instance card has small numbered buttons — **5, 6, 9, 11** by default.
+Pressing one types that number and Enter into that instance, the same as doing
+it by hand in the terminal. **Send to all** does it to every running instance,
+skipping crashed ones.
+
+Change which numbers appear with `-e QUICK_KEYS=5,6,9,11` on the container.
+Only numbers in that list are accepted — the panel refuses anything else rather
+than passing it on.
+
+> **These type into whatever is on screen.** If an instance is sitting at a
+> submenu or a prompt rather than the main menu, the keypress goes there
+> instead. Options that open a submenu or ask a question (Donate, Activate
+> miracle) will need the rest of the answers typed in the terminal — the button
+> only sends the first keypress.
 
 ### Serving it over HTTPS
 
