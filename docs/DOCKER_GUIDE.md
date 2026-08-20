@@ -470,6 +470,7 @@ docker exec -it ikabot ika status
 |---|---|---|
 | Container keeps stopping | Something failed at startup | `docker logs ikabot` and read the last few lines |
 | An instance says **STOPPED** | That one crashed or was closed | `ika crash 7` to see why, then `ika restart 7` |
+| Several web servers on different ports for one account | Older ikabot started a new one on each retry instead of reporting the existing one | Fixed in mod 1.8.x; clear strays with `ika web --stop` |
 | Several instances STOPPED | Crashes | `ika restart dead` — restarts only those, leaves the rest logged in |
 | `sh: clear: not found` | Image built wrong | Rebuild: Part 7 |
 | Boxes show as `?????` | Your terminal is not on UTF-8 | Use the Unraid web terminal, it is correct by default |
@@ -853,8 +854,9 @@ matched to windows by walking the recorded process up to its tmux pane, so the
 tasks land on the right instance without anything having to be told how many
 instances there are.
 
-> **Needs ikabot mod 1.8.1 or later.** Earlier versions do not write those
-> files, and the panel says so rather than showing an empty list.
+> **Needs ikabot mod 1.8.1 or later** — verified against the writer in 1.8.2.
+> Earlier versions do not write those files, and the panel says so rather than
+> showing an empty list. Get it with `ika update`.
 
 A task count that is blank means no status file — either the instance has never
 finished starting, or ikabot is older than 1.8.1. `0 tasks` genuinely means
