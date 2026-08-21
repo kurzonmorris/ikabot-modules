@@ -935,6 +935,40 @@ or started. The tmux settings live in the entrypoint, so those count too.
 > A hot-swapped file lives only in the running container. Rebuild at some point
 > or the next `docker rm`/`docker run` silently puts the old version back.
 
+### Panel versions
+
+The panel carries its own version, separate from ikabot's. It is shown in three
+places so there is never any doubt which one is actually running:
+
+- next to the title on the page itself, and in the browser tab
+- `docker exec -it ikabot ika panel`
+- the first line of `/config/.ikabot/logs/panel.log`
+
+In the repo the file is named `docker/ika-panel_v1.0.0`, the same `_vX.Y.Z`
+convention the modules use. **The suffix is stripped on install** — the running
+file is always `/usr/local/bin/ika-panel` — so the build and the entrypoint
+never need editing when the version changes.
+
+To upgrade without downloading anything by hand:
+
+```bash
+docker exec -it ikabot ika panel upgrade
+```
+
+That finds the newest `ika-panel_v*` in the repo, checks it really is the panel
+before replacing anything, installs it with the suffix stripped, and reloads.
+It prints `panel 1.0.0 -> 1.1.0`, or says you are already current.
+
+```bash
+docker exec -it ikabot ika panel
+```
+
+reports the running version and the newest available, so a stale panel is
+obvious rather than something you discover from a confusing error.
+
+> GitHub names its own download `main.zip` and that cannot be changed, so the
+> version lives in the file inside it rather than in the zip name.
+
 ### Serving it over HTTPS
 
 Like the terminal, it is plain HTTP on a port. To reach it by name with a real

@@ -28,6 +28,7 @@ ika — ikabot container maintenance
   ika logs <name>       Follow one log file
   ika panel             Show the control panel address
   ika panel restart     Reload the panel after swapping in a new one
+  ika panel upgrade     Fetch the newest panel from GitHub and reload
   ika shell             Plain shell inside the container
 
 Leaving the screens: press Ctrl-B, let go, then press D.
@@ -320,19 +321,92 @@ for entry in os.listdir("/proc"):
 PY
 }
 
+panel_version() {
+    sed -n 's/^PANEL_VERSION = "\(.*\)"$/\1/p' /usr/local/bin/ika-panel 2>/dev/null | head -1
+}
+
+# The newest docker/ika-panel_v* on GitHub: name, version and download url.
+panel_remote() {
+    python3 - <<'PY'
+import json, os, re, sys, urllib.error, urllib.request
+repo = os.environ.get("IKABOT_REPO", "kurzonmorris/ikabot-modules")
+branch = os.environ.get("IKABOT_BRANCH", "main")
+url = "https://api.github.com/repos/%s/contents/docker?ref=%s" % (repo, branch)
+try:
+    req = urllib.request.Request(url, headers={"User-Agent": "ika/1.0"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        entries = json.load(r)
+except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as exc:
+    print("error %s" % exc)
+    sys.exit(0)
+
+best = None
+for e in entries:
+    m = re.match(r"^ika-panel_v(.+)$", e.get("name", ""))
+    if m and e.get("download_url"):
+        key = tuple(int(re.sub(r"\D", "", p) or 0) for p in m.group(1).split("."))
+        if best is None or key > best[0]:
+            best = (key, m.group(1), e["download_url"])
+print("%s %s" % (best[1], best[2]) if best else "none")
+PY
+}
+
 cmd_panel() {
-    local host port
+    local host port running
     port="${PANEL_PORT:-7682}"
+    running="$(panel_version)"
+
+    if [ "${1:-}" = "upgrade" ]; then
+        local info remote_ver remote_url tmp
+        info="$(panel_remote)"
+        case "$info" in
+            error*) echo "Could not reach GitHub: ${info#error }" >&2; return 1 ;;
+            none)   echo "No ika-panel_v* found in the repo's docker folder." >&2; return 1 ;;
+        esac
+        remote_ver="${info%% *}"
+        remote_url="${info#* }"
+
+        if [ "$remote_ver" = "$running" ]; then
+            echo "Already on v$running — nothing to do."
+            return 0
+        fi
+
+        tmp="$(mktemp)"
+        if ! curl -fsSL -o "$tmp" "$remote_url"; then
+            echo "Download failed." >&2; rm -f "$tmp"; return 1
+        fi
+        if ! grep -q "^PANEL_VERSION" "$tmp"; then
+            echo "That file does not look like the panel — leaving things alone." >&2
+            rm -f "$tmp"; return 1
+        fi
+        # The _v suffix is dropped here: installed name is always ika-panel.
+        install -m 755 "$tmp" /usr/local/bin/ika-panel
+        rm -f "$tmp"
+        echo "panel ${running:-unknown} -> $remote_ver"
+        cmd_panel restart
+        return $?
+    fi
 
     if [ "${1:-}" != "restart" ]; then
         host="$(ika-panel-host)"
         echo "Control panel: http://${host}:${port}"
+        echo "Version: v${running:-unknown}"
         echo "Sign in with TTYD_USER / TTYD_PASS (or PANEL_USER / PANEL_PASS)."
         if [ -n "$(panel_pid)" ]; then
             echo "Status: running"
         else
             echo "Status: NOT running — start it with:  ika panel restart"
         fi
+        local info
+        info="$(panel_remote)"
+        case "$info" in
+            error*|none) echo "Latest: could not check GitHub" ;;
+            *) if [ "${info%% *}" != "$running" ]; then
+                   echo "Latest: v${info%% *} — upgrade with:  ika panel upgrade"
+               else
+                   echo "Latest: v${info%% *} (up to date)"
+               fi ;;
+        esac
         return 0
     fi
 

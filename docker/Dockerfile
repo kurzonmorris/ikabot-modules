@@ -52,10 +52,12 @@ COPY entrypoint.sh    /usr/local/bin/entrypoint.sh
 COPY ika              /usr/local/bin/ika
 COPY ika-modules      /usr/local/bin/ika-modules
 COPY ika-update       /usr/local/bin/ika-update
-COPY ika-panel        /usr/local/bin/ika-panel
+COPY ika-panel_v*     /tmp/panel/
 COPY ika-panel-host   /usr/local/bin/ika-panel-host
 COPY ika-web-attach   /usr/local/bin/ika-web-attach
-RUN chmod +x /usr/local/bin/entrypoint.sh \
+RUN mv /tmp/panel/ika-panel_v* /usr/local/bin/ika-panel \
+ && rmdir /tmp/panel \
+ && chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/ika \
              /usr/local/bin/ika-modules \
              /usr/local/bin/ika-update \
