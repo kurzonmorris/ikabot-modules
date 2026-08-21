@@ -22,9 +22,16 @@ PASS = os.environ.get("PANEL_PASS") or os.environ.get("TTYD_PASS", "")
 SESSION = os.environ.get("TMUX_SESSION", "ikabot")
 TTYD_PORT = int(os.environ.get("TTYD_PORT", "7681"))
 STATUS_DIR = os.environ.get("STATUS_DIR", "/config/.ikabot/status")
-# Menu options the quick buttons fire. Each sends the number then Enter.
+# Seeds the button file on first run only; buttons are edited in the panel
+# afterwards and live in BUTTONS_FILE.
 QUICK_KEYS = [k.strip() for k in os.environ.get("QUICK_KEYS", "5,6,9,11").split(",")
               if k.strip().isdigit()]
+BUTTONS_FILE = os.environ.get("PANEL_BUTTONS", "/config/panel-buttons.json")
+
+LABEL_OK = re.compile(r"^[\w \-/&().+#]{1,24}$")
+KEY_OK = re.compile(r"^\d{1,3}$")
+ID_OK = re.compile(r"^[A-Za-z0-9]{1,32}$")
+_buttons_lock = threading.RLock()
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 _run_lock = threading.Lock()
@@ -162,6 +169,95 @@ def _versions():
     return out
 
 
+def _new_id():
+    return "b%d" % int(time.time() * 1000 % 1000000000)
+
+
+def save_buttons(buttons):
+    """Atomic write, so a reader never sees a half-written file."""
+    with _buttons_lock:
+        tmp = BUTTONS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"schema": 1, "buttons": buttons}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, BUTTONS_FILE)
+
+
+def load_buttons():
+    with _buttons_lock:
+        try:
+            with open(BUTTONS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("schema") == 1 and isinstance(data.get("buttons"), list):
+                return data["buttons"]
+        except (OSError, ValueError):
+            pass
+        seeded = [{"id": "seed%s" % k, "label": k, "keys": [k], "instances": []}
+                  for k in QUICK_KEYS]
+        try:
+            save_buttons(seeded)
+        except OSError:
+            pass
+        return seeded
+
+
+def clean_button(raw):
+    """Validate one button. Returns (button, error)."""
+    label = str(raw.get("label", "")).strip()
+    if not LABEL_OK.match(label):
+        return None, ("Name must be 1-24 characters, using letters, numbers, "
+                      "spaces or - / & ( ) . + #")
+
+    keys = raw.get("keys")
+    if isinstance(keys, str):
+        keys = keys.replace(" ", ",").split(",")
+    keys = [str(k).strip() for k in (keys or []) if str(k).strip()]
+    if not keys:
+        return None, "Give at least one menu number."
+    if len(keys) > 8:
+        return None, "At most 8 menu numbers in one button."
+    for k in keys:
+        if not KEY_OK.match(k):
+            return None, "Menu numbers only, e.g. 9 or 9,1 — got '%s'." % k
+
+    raw_inst = raw.get("instances") or []
+    if isinstance(raw_inst, str):
+        raw_inst = [x for x in raw_inst.replace(" ", ",").split(",") if x]
+    instances = []
+    for x in raw_inst:
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            return None, "Instance numbers must be whole numbers, e.g. 3,7."
+        if not 1 <= n <= 99:
+            return None, "Instance numbers must be between 1 and 99."
+        instances.append(n)
+
+    bid = str(raw.get("id") or "").strip()
+    if bid and not ID_OK.match(bid):
+        return None, "Bad button id."
+
+    return {"id": bid or _new_id(), "label": label, "keys": keys,
+            "instances": sorted(set(instances))}, ""
+
+
+def applies_to(button, num):
+    return not button.get("instances") or num in button["instances"]
+
+
+def press(window, keys):
+    """Send each menu number followed by Enter, pausing so the menu redraws."""
+    notes = []
+    for k in keys:
+        out = _sh(["tmux", "send-keys", "-t", "%s:%s" % (SESSION, window), k, "Enter"],
+                  timeout=15)
+        if out.strip():
+            notes.append(out.strip())
+        time.sleep(0.4)
+    return notes
+
+
 def read_status():
     """Per-account task state written by ikabot (mod 1.8.1+).
 
@@ -287,7 +383,7 @@ def state():
         "avail_error": avail_err,
         "status_available": os.path.isdir(STATUS_DIR),
         "status_orphans": orphans,
-        "quick_keys": QUICK_KEYS,
+        "buttons": load_buttons(),
         "instances": instances,
         "modules": modules,
         "versions": _versions(),
@@ -310,14 +406,6 @@ def command_for(action, arg):
         if not (arg or "").isdigit():
             return None
         return ["ika", "crash", str(int(arg))]
-    if action == "key":
-        m = re.match(r"^(\d{1,3}):(\d{1,3})$", arg or "")
-        if not m:
-            return None
-        num, key = int(m.group(1)), m.group(2)
-        if key not in QUICK_KEYS:
-            return None
-        return ["tmux", "send-keys", "-t", "%s:ika%02d" % (SESSION, num), key, "Enter"]
     if action == "module_one":
         if not arg or not SAFE_NAME.match(arg):
             return None
@@ -384,6 +472,48 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._authed():
             return self._deny()
+        if self.path.startswith("/api/buttons"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or "{}")
+            except (ValueError, OSError):
+                return self._send(400, json.dumps({"error": "bad request"}))
+
+            with _buttons_lock:
+                buttons = load_buttons()
+                op = body.get("op")
+
+                if op == "delete":
+                    bid = str(body.get("id", ""))
+                    kept = [b for b in buttons if b["id"] != bid]
+                    if len(kept) == len(buttons):
+                        return self._send(400, json.dumps({"error": "no such button"}))
+                    save_buttons(kept)
+                    return self._send(200, json.dumps({"buttons": kept,
+                                                       "output": "Button deleted."}))
+
+                if op == "save":
+                    button, err = clean_button(body.get("button") or {})
+                    if err:
+                        return self._send(400, json.dumps({"error": err}))
+                    replaced = False
+                    for idx, existing in enumerate(buttons):
+                        if existing["id"] == button["id"]:
+                            buttons[idx] = button
+                            replaced = True
+                            break
+                    if not replaced:
+                        buttons.append(button)
+                    save_buttons(buttons)
+                    scope = ("all instances" if not button["instances"]
+                             else "instances " + ",".join(str(n) for n in button["instances"]))
+                    return self._send(200, json.dumps({
+                        "buttons": buttons,
+                        "output": "Saved '%s' (%s) for %s."
+                                  % (button["label"], " then ".join(button["keys"]), scope)}))
+
+            return self._send(400, json.dumps({"error": "unknown operation"}))
+
         if not self.path.startswith("/api/run"):
             return self._send(404, json.dumps({"error": "not found"}))
         try:
@@ -392,30 +522,52 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             return self._send(400, json.dumps({"error": "bad request"}))
 
-        if payload.get("action") == "key_all":
-            key = str(payload.get("arg", ""))
-            if key not in QUICK_KEYS:
-                return self._send(400, json.dumps({"error": "key not allowed"}))
-            lines = []
+        act = payload.get("action")
+
+        if act in ("button", "button_all"):
+            arg = str(payload.get("arg", ""))
+            bid, _, target = arg.partition(":")
+            wanted = next((b for b in load_buttons() if b["id"] == bid), None)
+            if wanted is None:
+                return self._send(400, json.dumps({"error": "no such button"}))
+
             with _run_lock:
-                for inst in state()["instances"]:
+                instances = state()["instances"]
+                if act == "button":
+                    if not target.isdigit():
+                        return self._send(400, json.dumps({"error": "bad instance"}))
+                    num = int(target)
+                    inst = next((i for i in instances if i["num"] == num), None)
+                    if inst is None:
+                        return self._send(400, json.dumps({"error": "no such instance"}))
                     if inst["dead"]:
-                        lines.append("%s skipped (crashed)" % inst["name"])
-                        continue
-                    _sh(["tmux", "send-keys", "-t",
-                         "%s:%s" % (SESSION, inst["name"]), key, "Enter"], timeout=15)
-                    lines.append("%s <- %s" % (inst["name"], key))
-            return self._send(200, json.dumps({
-                "output": "Sent '%s' + Enter to every running instance:\n\n%s"
-                          % (key, "\n".join(lines)),
-                "ran": "send-keys all"}))
+                        return self._send(200, json.dumps({
+                            "output": "%s has crashed — restart it first." % inst["name"],
+                            "ran": "button"}))
+                    press(inst["name"], wanted["keys"])
+                    out = "Sent %s to %s." % (" then ".join(wanted["keys"]), inst["name"])
+                else:
+                    lines, sent = [], 0
+                    for inst in instances:
+                        if not applies_to(wanted, inst["num"]):
+                            continue
+                        if inst["dead"]:
+                            lines.append("%s skipped (crashed)" % inst["name"])
+                            continue
+                        press(inst["name"], wanted["keys"])
+                        lines.append("%s <- %s" % (inst["name"], " then ".join(wanted["keys"])))
+                        sent += 1
+                    out = ("Ran '%s' on %d instance(s):\n\n%s"
+                           % (wanted["label"], sent, "\n".join(lines) or "none"))
+            return self._send(200, json.dumps({"output": out, "ran": wanted["label"]}))
+
 
         if payload.get("action") == "check_updates":
             with _run_lock:
                 msg = refresh_available()
             return self._send(200, json.dumps({"output": msg, "ran": "check versions"}))
 
-        cmd = command_for(payload.get("action", ""), payload.get("arg", ""))
+        cmd = command_for(act, payload.get("arg", ""))
         if cmd is None:
             return self._send(400, json.dumps({"error": "unknown or malformed action"}))
 
@@ -492,6 +644,14 @@ border:1px solid var(--rule);color:var(--soft)}
 .tcount{font-family:ui-monospace,monospace;font-size:11px;padding:1px 6px;border-radius:99px;
 border:1px solid var(--rule);color:var(--soft);margin-left:6px}
 .tcount.busy2{border-color:var(--ok);color:var(--ok)}
+.form{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:12px}
+.f{display:flex;flex-direction:column;gap:3px}
+.f label{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--soft)}
+.f input,.f select{font:inherit;font-size:13px;padding:5px 8px;border-radius:5px;
+border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
+.f input{min-width:130px}
+.scope{font-family:ui-monospace,monospace;font-size:11.5px;color:var(--soft)}
+.err{color:var(--bad);font-size:12.5px;margin:0 0 10px}
 </style></head><body><div class="wrap">
 
 <h1>ikabot control panel</h1>
@@ -509,6 +669,30 @@ border:1px solid var(--rule);color:var(--soft);margin-left:6px}
   </div>
   <div class="grid" id="grid"></div>
   <p class="hint" id="statushint"></p>
+</section>
+
+<section>
+  <h2>Buttons</h2>
+  <p class="err" id="berr"></p>
+  <div class="form">
+    <div class="f"><label for="blabel">Name</label>
+      <input id="blabel" placeholder="Daily login" maxlength="24"></div>
+    <div class="f"><label for="bkeys">Menu numbers</label>
+      <input id="bkeys" placeholder="9,1" size="10"></div>
+    <div class="f"><label for="bscope">Applies to</label>
+      <select id="bscope">
+        <option value="global">All instances</option>
+        <option value="some">Only these…</option>
+      </select></div>
+    <div class="f" id="binstwrap" style="display:none"><label for="binst">Instance numbers</label>
+      <input id="binst" placeholder="3,7,12" size="10"></div>
+    <button class="p" id="bsave">Add button</button>
+    <button id="bcancel" style="display:none">Cancel</button>
+  </div>
+  <table><thead><tr><th>Name</th><th>Presses</th><th>Applies to</th><th></th></tr></thead>
+  <tbody id="blist"></tbody></table>
+  <p class="hint">Each press is a menu number followed by Enter, in order — so
+     <code>9,1</code> picks option 9 then option 1 in its submenu.</p>
 </section>
 
 <section>
@@ -563,6 +747,85 @@ document.addEventListener('click',function(e){
   run(b.dataset.a,b.dataset.arg,b.textContent.trim());
 });
 
+var editing=null;
+var el=function(id){return document.getElementById(id);};
+
+el('bscope').addEventListener('change',function(){
+  el('binstwrap').style.display=this.value==='some'?'':'none';
+});
+
+function renderButtons(list){
+  el('blist').innerHTML=list.map(function(b){
+    var scope=b.instances.length?('instances '+b.instances.join(', ')):'all instances';
+    return '<tr><td>'+esc(b.label)+'</td>'+
+      '<td class="mono">'+esc(b.keys.join(' → '))+'</td>'+
+      '<td class="scope">'+scope+'</td>'+
+      '<td style="text-align:right">'+
+      '<button data-edit="'+b.id+'">Edit</button> '+
+      '<button class="d" data-del="'+b.id+'">Delete</button></td></tr>';
+  }).join('') || '<tr><td colspan="4" class="sub">No buttons yet — add one above.</td></tr>';
+}
+
+function resetForm(){
+  editing=null;
+  el('blabel').value=''; el('bkeys').value=''; el('binst').value='';
+  el('bscope').value='global'; el('binstwrap').style.display='none';
+  el('bsave').textContent='Add button'; el('bcancel').style.display='none';
+  el('berr').textContent='';
+}
+
+function buttonsApi(body,done){
+  fetch('api/buttons',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)})
+  .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};})})
+  .then(function(res){
+    if(!res.ok){el('berr').textContent=res.d.error||'Could not save.';return;}
+    el('berr').textContent='';
+    out.textContent=res.d.output||'Saved.';
+    last.buttons=res.d.buttons;
+    renderButtons(res.d.buttons);
+    el('allkeys').dataset.sig='';
+    if(done)done();
+    refresh();
+  }).catch(function(e){el('berr').textContent='Request failed: '+e;});
+}
+
+el('bsave').addEventListener('click',function(){
+  var scope=el('bscope').value;
+  buttonsApi({op:'save',button:{
+    id: editing||'',
+    label: el('blabel').value,
+    keys: el('bkeys').value,
+    instances: scope==='some'?el('binst').value:''
+  }}, resetForm);
+});
+
+el('bcancel').addEventListener('click',resetForm);
+
+document.addEventListener('click',function(e){
+  var ed=e.target.closest('button[data-edit]');
+  if(ed){
+    var b=(last.buttons||[]).filter(function(x){return x.id===ed.dataset.edit;})[0];
+    if(!b)return;
+    editing=b.id;
+    el('blabel').value=b.label; el('bkeys').value=b.keys.join(',');
+    el('bscope').value=b.instances.length?'some':'global';
+    el('binstwrap').style.display=b.instances.length?'':'none';
+    el('binst').value=b.instances.join(',');
+    el('bsave').textContent='Save changes'; el('bcancel').style.display='';
+    el('berr').textContent='';
+    window.scrollTo({top:0,behavior:'smooth'});
+    return;
+  }
+  var dl=e.target.closest('button[data-del]');
+  if(dl){
+    var t=(last.buttons||[]).filter(function(x){return x.id===dl.dataset.del;})[0];
+    if(t&&confirm('Delete the "'+t.label+'" button?')){
+      buttonsApi({op:'delete',id:dl.dataset.del},resetForm);
+    }
+  }
+});
+
 document.getElementById('openweb').addEventListener('click',function(){
   var host=last.host,n=0,total=0;
   if(!host){out.textContent='No reachable address for this server yet.';return;}
@@ -597,14 +860,18 @@ function ago(ts){
 function refresh(){
   fetch('api/state').then(function(r){return r.json()}).then(function(s){
     last=s;
-    var ak=document.getElementById('allkeys');
-    if(!ak.dataset.done&&(s.quick_keys||[]).length){
-      ak.innerHTML='<span class="hint" style="margin:0 4px 0 10px">send to all:</span>'+
-        s.quick_keys.map(function(k){
-          return '<button data-a="key_all" data-arg="'+k+'" '+
-                 'title="Press '+k+' then Enter in every running instance">'+k+'</button>';
-        }).join(' ');
-      ak.dataset.done='1';
+    var ak=document.getElementById('allkeys'),sig=JSON.stringify(s.buttons||[]);
+    if(ak.dataset.sig!==sig){
+      ak.innerHTML=(s.buttons||[]).length
+        ? '<span class="hint" style="margin:0 4px 0 10px">run everywhere:</span>'+
+          s.buttons.map(function(b){
+            return '<button data-a="button_all" data-arg="'+b.id+'" title="'+
+                   esc(b.keys.join(' then '))+' in every instance it applies to">'+
+                   esc(b.label)+'</button>';
+          }).join(' ')
+        : '';
+      ak.dataset.sig=sig;
+      renderButtons(s.buttons||[]);
     }
     var v=s.versions||{};
     head.textContent='ikabot '+(v.ikabot||'?')+' / mod '+(v.mod||'?')+
@@ -630,9 +897,11 @@ function refresh(){
         drop='<details class="tasks"><summary>Active processes (0)</summary>'+
              '<p class="st" style="margin:6px 0 0">Idle — logged in, nothing running.</p></details>';
       }
-      var keys=(last.quick_keys||[]).map(function(k){
-        return '<button data-a="key" data-arg="'+i.num+':'+k+'" title="Press '+k+
-               ' then Enter in '+i.name+'">'+k+'</button>';
+      var keys=(last.buttons||[]).filter(function(b){
+        return !b.instances.length||b.instances.indexOf(i.num)>=0;
+      }).map(function(b){
+        return '<button data-a="button" data-arg="'+b.id+':'+i.num+'" title="'+
+               esc(b.keys.join(' then '))+' in '+i.name+'">'+esc(b.label)+'</button>';
       }).join('');
       return '<div class="inst'+(i.dead?' dead':'')+'">'+
         '<div class="n"><span class="dot"></span>'+i.name+badge+'</div>'+
