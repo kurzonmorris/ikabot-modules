@@ -422,15 +422,26 @@ cmd_panel() {
         return 1
     fi
 
+    mkdir -p "$LOGS_DIR"
+    echo "--- $(date -u '+%Y-%m-%d %H:%M:%S') starting panel ---" >> "$LOGS_DIR/panel.log"
+
     PANEL_PASS="${PANEL_PASS:-$TTYD_PASS}" PANEL_PORT="$port" \
-        nohup ika-panel >> "$LOGS_DIR/panel.log" 2>&1 &
-    sleep 1
-    if [ -n "$(panel_pid)" ]; then
-        echo "panel restarted on port $port"
-    else
-        echo "panel did not come up — check $LOGS_DIR/panel.log" >&2
-        return 1
-    fi
+        setsid nohup ika-panel >> "$LOGS_DIR/panel.log" 2>&1 < /dev/null &
+
+    # Give it a few seconds: a slow first start should not read as a failure.
+    local waited=0
+    while [ "$waited" -lt 10 ]; do
+        if [ -n "$(panel_pid)" ]; then
+            echo "panel restarted on port $port (v$(panel_version))"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    echo "panel did not come up. Last lines of $LOGS_DIR/panel.log:" >&2
+    tail -n 15 "$LOGS_DIR/panel.log" >&2
+    return 1
 }
 
 cmd_logs() {
