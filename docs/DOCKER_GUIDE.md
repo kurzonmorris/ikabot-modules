@@ -883,9 +883,15 @@ The default of `0.4s` suits most menus; raise it if a step gets missed because
 the game was slow to respond, or drop it to `0` for a single-press button where
 it makes no difference. There is no pause after the last press.
 
-> Remember the pause multiplies on **run everywhere**: a three-press button at
-> 2 seconds across 24 instances takes around a minute and a half, and the panel
-> waits for it. Keep it as low as reliably works.
+A button holds up to 64 presses, which is plenty for a whole daily routine in
+one press.
+
+> Remember both the length and the pause multiply on **run everywhere**. A
+> three-press button at 2 seconds across 24 instances is about a minute and a
+> half; a twenty-press routine at the same pause is over ten minutes, and the
+> panel sits waiting with its buttons disabled for the duration. Keep the pause
+> as low as reliably works, and prefer running long routines on one instance at
+> a time.
 
 Buttons live in `/config/panel-buttons.json`, so they survive restarts,
 rebuilds and updates. On first run the file is seeded from `QUICK_KEYS`

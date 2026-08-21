@@ -38,6 +38,9 @@ _buttons_lock = threading.RLock()
 # Seconds between keypresses, so the menu has time to redraw before the next one.
 DEFAULT_DELAY = 0.4
 MIN_DELAY, MAX_DELAY = 0.0, 30.0
+# Only a guard against an absurd payload; a long sequence is fine, it just
+# takes proportionally longer when run across every instance.
+MAX_KEYS = 64
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 _run_lock = threading.Lock()
@@ -222,8 +225,8 @@ def clean_button(raw):
     keys = [str(k).strip() for k in (keys or []) if str(k).strip()]
     if not keys:
         return None, "Give at least one menu number."
-    if len(keys) > 8:
-        return None, "At most 8 menu numbers in one button."
+    if len(keys) > MAX_KEYS:
+        return None, "At most %d presses in one button." % MAX_KEYS
     cleaned = []
     for k in keys:
         if k.lower() == ENTER_TOKEN:
