@@ -826,7 +826,7 @@ Sign in with the same username and password as the terminal.
 | **Modules** | Installed version next to the version on GitHub — **green** when up to date, **red** when a newer one exists. Update one, update all, or reinstall from the app folder |
 | **ikabot** | Download and install an update, or roll the last one back |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going |
-| **Quick keys** | Buttons that press a menu option and Enter in an instance, or in every running instance at once |
+| **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Output** | What the command you just pressed actually printed |
 
 The list refreshes every five seconds, and each web server port is a link
@@ -862,16 +862,38 @@ A task count that is blank means no status file — either the instance has neve
 finished starting, or ikabot is older than 1.8.1. `0 tasks` genuinely means
 idle at the menu.
 
-### Quick keys
+### Buttons
 
-Each instance card has small numbered buttons — **5, 6, 9, 11** by default.
-Pressing one types that number and Enter into that instance, the same as doing
-it by hand in the terminal. **Send to all** does it to every running instance,
-skipping crashed ones.
+The **Buttons** section is a small editor. Buttons you create appear on every
+instance card automatically, and in the **run everywhere** row at the top.
 
-Change which numbers appear with `-e QUICK_KEYS=5,6,9,11` on the container.
-Only numbers in that list are accepted — the panel refuses anything else rather
-than passing it on.
+| Field | Means |
+|---|---|
+| **Name** | What the button says — `Daily login`, not `6` |
+| **Menu numbers** | What it presses, in order. `9,1` picks option 9 then option 1 in its submenu. Write `enter` for a bare Enter — `6,enter` runs option 6 then clears the "[Enter] to continue" screen |
+| **Applies to** | *All instances* (the default), or only the instance numbers you list |
+| **Pause between presses** | A slider, `0`–`10` seconds. How long to wait before the next press so the menu can redraw |
+
+So a change to a global button changes it everywhere at once, and an instance
+that needs something different gets its own button scoped just to it.
+
+Each number is sent followed by Enter, with the pause you set between them so
+the menu has time to redraw — which is why multi-step options like Donate work.
+The default of `0.4s` suits most menus; raise it if a step gets missed because
+the game was slow to respond, or drop it to `0` for a single-press button where
+it makes no difference. There is no pause after the last press.
+
+> Remember the pause multiplies on **run everywhere**: a three-press button at
+> 2 seconds across 24 instances takes around a minute and a half, and the panel
+> waits for it. Keep it as low as reliably works.
+
+Buttons live in `/config/panel-buttons.json`, so they survive restarts,
+rebuilds and updates. On first run the file is seeded from `QUICK_KEYS`
+(default `5,6,9,11`); after that the editor is the only thing that changes it.
+
+Names and numbers are both validated — a name has to be ordinary text, and the
+presses have to be plain menu numbers, so nothing typed into the editor can
+reach a command.
 
 > **These type into whatever is on screen.** If an instance is sitting at a
 > submenu or a prompt rather than the main menu, the keypress goes there
