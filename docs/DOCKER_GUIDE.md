@@ -883,8 +883,8 @@ The default of `0.4s` suits most menus; raise it if a step gets missed because
 the game was slow to respond, or drop it to `0` for a single-press button where
 it makes no difference. There is no pause after the last press.
 
-A button holds up to 64 presses, which is plenty for a whole daily routine in
-one press.
+A button holds up to 30 presses, which covers a whole daily routine in one
+press.
 
 > Remember both the length and the pause multiply on **run everywhere**. A
 > three-press button at 2 seconds across 24 instances is about a minute and a
