@@ -870,7 +870,7 @@ instance card automatically, and in the **run everywhere** row at the top.
 | Field | Means |
 |---|---|
 | **Name** | What the button says — `Daily login`, not `6` |
-| **Menu numbers** | What it presses, in order. `9,1` picks option 9 then option 1 in its submenu |
+| **Menu numbers** | What it presses, in order. `9,1` picks option 9 then option 1 in its submenu. Write `enter` for a bare Enter — `6,enter` runs option 6 then clears the "[Enter] to continue" screen |
 | **Applies to** | *All instances* (the default), or only the instance numbers you list |
 | **Pause between presses** | A slider, `0`–`10` seconds. How long to wait before the next press so the menu can redraw |
 

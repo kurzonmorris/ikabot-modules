@@ -30,6 +30,8 @@ BUTTONS_FILE = os.environ.get("PANEL_BUTTONS", "/config/panel-buttons.json")
 
 LABEL_OK = re.compile(r"^[\w \-/&().+#]{1,24}$")
 KEY_OK = re.compile(r"^\d{1,3}$")
+# "enter" sends a bare Enter, for ikabot's "[Enter] to continue" screens.
+ENTER_TOKEN = "enter"
 ID_OK = re.compile(r"^[A-Za-z0-9]{1,32}$")
 _buttons_lock = threading.RLock()
 
@@ -222,9 +224,15 @@ def clean_button(raw):
         return None, "Give at least one menu number."
     if len(keys) > 8:
         return None, "At most 8 menu numbers in one button."
+    cleaned = []
     for k in keys:
-        if not KEY_OK.match(k):
-            return None, "Menu numbers only, e.g. 9 or 9,1 — got '%s'." % k
+        if k.lower() == ENTER_TOKEN:
+            cleaned.append(ENTER_TOKEN)
+        elif KEY_OK.match(k):
+            cleaned.append(k)
+        else:
+            return None, ("Use menu numbers or the word 'enter' — got '%s'." % k)
+    keys = cleaned
 
     raw_inst = raw.get("instances") or []
     if isinstance(raw_inst, str):
@@ -255,6 +263,10 @@ def clean_button(raw):
             "instances": sorted(set(instances)), "delay": delay}, ""
 
 
+def describe(keys):
+    return " then ".join("Enter" if k == ENTER_TOKEN else k for k in keys)
+
+
 def applies_to(button, num):
     return not button.get("instances") or num in button["instances"]
 
@@ -263,9 +275,13 @@ def press(window, keys, delay=DEFAULT_DELAY):
     """Send each menu number followed by Enter, pausing so the menu redraws."""
     notes = []
     last = len(keys) - 1
+    target = "%s:%s" % (SESSION, window)
     for idx, k in enumerate(keys):
-        out = _sh(["tmux", "send-keys", "-t", "%s:%s" % (SESSION, window), k, "Enter"],
-                  timeout=15)
+        if k == ENTER_TOKEN:
+            cmd = ["tmux", "send-keys", "-t", target, "Enter"]
+        else:
+            cmd = ["tmux", "send-keys", "-t", target, k, "Enter"]
+        out = _sh(cmd, timeout=15)
         if out.strip():
             notes.append(out.strip())
         if idx != last and delay:
@@ -525,7 +541,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps({
                         "buttons": buttons,
                         "output": "Saved '%s' (%s) for %s."
-                                  % (button["label"], " then ".join(button["keys"]), scope)}))
+                                  % (button["label"], describe(button["keys"]), scope)}))
 
             return self._send(400, json.dumps({"error": "unknown operation"}))
 
@@ -561,7 +577,7 @@ class Handler(BaseHTTPRequestHandler):
                             "ran": "button"}))
                     press(inst["name"], wanted["keys"],
                           wanted.get("delay", DEFAULT_DELAY))
-                    out = "Sent %s to %s." % (" then ".join(wanted["keys"]), inst["name"])
+                    out = "Sent %s to %s." % (describe(wanted["keys"]), inst["name"])
                 else:
                     lines, sent = [], 0
                     for inst in instances:
@@ -572,7 +588,7 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         press(inst["name"], wanted["keys"],
                               wanted.get("delay", DEFAULT_DELAY))
-                        lines.append("%s <- %s" % (inst["name"], " then ".join(wanted["keys"])))
+                        lines.append("%s <- %s" % (inst["name"], describe(wanted["keys"])))
                         sent += 1
                     out = ("Ran '%s' on %d instance(s):\n\n%s"
                            % (wanted["label"], sent, "\n".join(lines) or "none"))
@@ -698,7 +714,7 @@ min-width:42px;display:inline-block;text-align:right}
     <div class="f"><label for="blabel">Name</label>
       <input id="blabel" placeholder="Daily login" maxlength="24"></div>
     <div class="f"><label for="bkeys">Menu numbers</label>
-      <input id="bkeys" placeholder="9,1" size="10"></div>
+      <input id="bkeys" placeholder="9,1,enter" size="12"></div>
     <div class="f"><label for="bscope">Applies to</label>
       <select id="bscope">
         <option value="global">All instances</option>
@@ -714,8 +730,10 @@ min-width:42px;display:inline-block;text-align:right}
   <table><thead><tr><th>Name</th><th>Presses</th><th>Pause</th><th>Applies to</th><th></th></tr></thead>
   <tbody id="blist"></tbody></table>
   <p class="hint">Each press is a menu number followed by Enter, in order — so
-     <code>9,1</code> picks option 9 then option 1 in its submenu. The pause gives
-     the menu time to redraw before the next press; raise it if a step gets missed.</p>
+     <code>9,1</code> picks option 9 then option 1 in its submenu. Write
+     <code>enter</code> for a bare Enter on its own, to get past a
+     &ldquo;[Enter] to continue&rdquo; screen: <code>6,enter</code>. The pause gives the
+     menu time to redraw before the next press; raise it if a step gets missed.</p>
 </section>
 
 <section>
@@ -788,7 +806,8 @@ function renderButtons(list){
     var scope=b.instances.length?('instances '+b.instances.join(', ')):'all instances';
     var d=(b.delay===undefined?0.4:b.delay);
     return '<tr><td>'+esc(b.label)+'</td>'+
-      '<td class="mono">'+esc(b.keys.join(' → '))+'</td>'+
+      '<td class="mono">'+esc(b.keys.map(function(k){
+          return k==='enter'?'↵':k;}).join(' → '))+'</td>'+
       '<td class="mono">'+(b.keys.length>1?d+'s':'—')+'</td>'+
       '<td class="scope">'+scope+'</td>'+
       '<td style="text-align:right">'+
@@ -900,8 +919,8 @@ function refresh(){
         ? '<span class="hint" style="margin:0 4px 0 10px">run everywhere:</span>'+
           s.buttons.map(function(b){
             return '<button data-a="button_all" data-arg="'+b.id+'" title="'+
-                   esc(b.keys.join(' then '))+' in every instance it applies to">'+
-                   esc(b.label)+'</button>';
+                   esc(b.keys.map(function(k){return k==='enter'?'Enter':k;}).join(' then '))+
+                   ' in every instance it applies to">'+esc(b.label)+'</button>';
           }).join(' ')
         : '';
       ak.dataset.sig=sig;
@@ -935,7 +954,8 @@ function refresh(){
         return !b.instances.length||b.instances.indexOf(i.num)>=0;
       }).map(function(b){
         return '<button data-a="button" data-arg="'+b.id+':'+i.num+'" title="'+
-               esc(b.keys.join(' then '))+' in '+i.name+'">'+esc(b.label)+'</button>';
+               esc(b.keys.map(function(k){return k==='enter'?'Enter':k;}).join(' then '))+
+               ' in '+i.name+'">'+esc(b.label)+'</button>';
       }).join('');
       return '<div class="inst'+(i.dead?' dead':'')+'">'+
         '<div class="n"><span class="dot"></span>'+i.name+badge+'</div>'+
