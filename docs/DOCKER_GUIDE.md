@@ -870,7 +870,7 @@ instance card automatically, and in the **run everywhere** row at the top.
 | Field | Means |
 |---|---|
 | **Name** | What the button says — `Daily login`, not `6` |
-| **Menu numbers** | What it presses, in order. `9,1` picks option 9 then option 1 in its submenu. Write `enter` for a bare Enter — `6,enter` runs option 6 then clears the "[Enter] to continue" screen |
+| **Entries** | What it types, in order, each followed by Enter. Not just numbers — anything a prompt accepts, such as `s`, `all`, `y` or `a-20k`. Separate them with commas, so a value can contain spaces. Write `enter` for a bare Enter — `6,enter` runs option 6 then clears the "[Enter] to continue" screen |
 | **Applies to** | *All instances* (the default), or only the instance numbers you list |
 | **Pause between presses** | A slider, `0`–`10` seconds. How long to wait before the next press so the menu can redraw |
 
@@ -906,6 +906,34 @@ reach a command.
 > instead. Options that open a submenu or ask a question (Donate, Activate
 > miracle) will need the rest of the answers typed in the terminal — the button
 > only sends the first keypress.
+
+### Updating just the panel
+
+Most panel changes do not need a rebuild. The panel is a single file, so it can
+be swapped into the running container and reloaded — instances keep running and
+nobody has to log in again.
+
+From the Unraid terminal, with the new files downloaded into `build/`:
+
+```bash
+docker cp /mnt/user/appdata/ikabot/build/ika-panel ikabot:/usr/local/bin/ika-panel
+docker cp /mnt/user/appdata/ikabot/build/ika       ikabot:/usr/local/bin/ika
+docker exec ikabot chmod +x /usr/local/bin/ika-panel /usr/local/bin/ika
+docker exec ikabot ika panel restart
+```
+
+`ika panel` on its own shows the address and whether it is running.
+
+**What can be hot-swapped this way:** `ika`, `ika-panel`, `ika-modules`,
+`ika-update`, `ika-panel-host`. The helper scripts run fresh on every command,
+so copying them is enough — only the panel needs the reload.
+
+**What still needs a rebuild and recreate:** `Dockerfile`, `requirements.txt`,
+and `entrypoint.sh`, since those only take effect when the container is built
+or started. The tmux settings live in the entrypoint, so those count too.
+
+> A hot-swapped file lives only in the running container. Rebuild at some point
+> or the next `docker rm`/`docker run` silently puts the old version back.
 
 ### Serving it over HTTPS
 

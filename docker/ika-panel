@@ -29,7 +29,11 @@ QUICK_KEYS = [k.strip() for k in os.environ.get("QUICK_KEYS", "5,6,9,11").split(
 BUTTONS_FILE = os.environ.get("PANEL_BUTTONS", "/config/panel-buttons.json")
 
 LABEL_OK = re.compile(r"^[\w \-/&().+#]{1,24}$")
-KEY_OK = re.compile(r"^\d{1,3}$")
+# Anything printable is allowed — ikabot prompts take "s", "all", "a-20k",
+# "y", city names and so on, not just menu numbers. Control characters are
+# refused because an embedded newline would fire an extra Enter.
+KEY_BAD = re.compile(r"[\x00-\x1f\x7f]")
+MAX_KEY_LEN = 64
 # "enter" sends a bare Enter, for ikabot's "[Enter] to continue" screens.
 ENTER_TOKEN = "enter"
 ID_OK = re.compile(r"^[A-Za-z0-9]{1,32}$")
@@ -221,7 +225,8 @@ def clean_button(raw):
 
     keys = raw.get("keys")
     if isinstance(keys, str):
-        keys = keys.replace(" ", ",").split(",")
+        # Commas only: a value may legitimately contain spaces, e.g. a city name.
+        keys = keys.split(",")
     keys = [str(k).strip() for k in (keys or []) if str(k).strip()]
     if not keys:
         return None, "Give at least one menu number."
@@ -231,10 +236,12 @@ def clean_button(raw):
     for k in keys:
         if k.lower() == ENTER_TOKEN:
             cleaned.append(ENTER_TOKEN)
-        elif KEY_OK.match(k):
-            cleaned.append(k)
-        else:
-            return None, ("Use menu numbers or the word 'enter' — got '%s'." % k)
+            continue
+        if KEY_BAD.search(k):
+            return None, "Entries cannot contain control characters."
+        if len(k) > MAX_KEY_LEN:
+            return None, "Each entry must be %d characters or fewer." % MAX_KEY_LEN
+        cleaned.append(k)
     keys = cleaned
 
     raw_inst = raw.get("instances") or []
@@ -281,10 +288,14 @@ def press(window, keys, delay=DEFAULT_DELAY):
     target = "%s:%s" % (SESSION, window)
     for idx, k in enumerate(keys):
         if k == ENTER_TOKEN:
-            cmd = ["tmux", "send-keys", "-t", target, "Enter"]
+            out = _sh(["tmux", "send-keys", "-t", target, "Enter"], timeout=15)
         else:
-            cmd = ["tmux", "send-keys", "-t", target, k, "Enter"]
-        out = _sh(cmd, timeout=15)
+            # -l types the value literally. Without it tmux reads arguments as
+            # key names, so an entry like "C-c" would interrupt the instance
+            # instead of typing three characters. "--" keeps a leading dash
+            # from being taken as an option.
+            out = _sh(["tmux", "send-keys", "-t", target, "-l", "--", k], timeout=15)
+            out += _sh(["tmux", "send-keys", "-t", target, "Enter"], timeout=15)
         if out.strip():
             notes.append(out.strip())
         if idx != last and delay:
@@ -717,7 +728,7 @@ min-width:42px;display:inline-block;text-align:right}
     <div class="f"><label for="blabel">Name</label>
       <input id="blabel" placeholder="Daily login" maxlength="24"></div>
     <div class="f"><label for="bkeys">Menu numbers</label>
-      <input id="bkeys" placeholder="9,1,enter" size="12"></div>
+      <input id="bkeys" placeholder="9,1,enter" size="14"></div>
     <div class="f"><label for="bscope">Applies to</label>
       <select id="bscope">
         <option value="global">All instances</option>
@@ -735,8 +746,11 @@ min-width:42px;display:inline-block;text-align:right}
   <p class="hint">Each press is a menu number followed by Enter, in order — so
      <code>9,1</code> picks option 9 then option 1 in its submenu. Write
      <code>enter</code> for a bare Enter on its own, to get past a
-     &ldquo;[Enter] to continue&rdquo; screen: <code>6,enter</code>. The pause gives the
-     menu time to redraw before the next press; raise it if a step gets missed.</p>
+     &ldquo;[Enter] to continue&rdquo; screen: <code>6,enter</code>. Entries are not
+     limited to numbers — anything a prompt accepts works, such as <code>s</code>,
+     <code>all</code>, <code>y</code> or <code>a-20k</code>. Separate them with commas,
+     so a value may contain spaces. The pause gives the menu time to redraw before the
+     next press; raise it if a step gets missed.</p>
 </section>
 
 <section>

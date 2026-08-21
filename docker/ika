@@ -27,6 +27,7 @@ ika — ikabot container maintenance
   ika logs              List account log files
   ika logs <name>       Follow one log file
   ika panel             Show the control panel address
+  ika panel restart     Reload the panel after swapping in a new one
   ika shell             Plain shell inside the container
 
 Leaving the screens: press Ctrl-B, let go, then press D.
@@ -283,6 +284,81 @@ cmd_crash() {
     tmux capture-pane -p -t "$SESSION:$w" | grep -vE "^[[:space:]]*$" | tail -30
 }
 
+# Finding the panel by the port it holds, rather than by matching its name:
+# a name match also matches the very command doing the matching.
+panel_pid() {
+    python3 - "${PANEL_PORT:-7682}" <<'PY'
+import os, sys
+want = int(sys.argv[1])
+ports = {}
+for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        with open(path) as f:
+            next(f, None)
+            for line in f:
+                c = line.split()
+                if len(c) > 9 and c[3] == "0A":
+                    ports[c[9]] = int(c[1].rpartition(":")[2], 16)
+    except OSError:
+        pass
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    pid = int(entry)
+    try:
+        fds = os.listdir("/proc/%d/fd" % pid)
+    except OSError:
+        continue
+    for fd in fds:
+        try:
+            target = os.readlink("/proc/%d/fd/%s" % (pid, fd))
+        except OSError:
+            continue
+        if target.startswith("socket:[") and ports.get(target[8:-1]) == want:
+            print(pid)
+            sys.exit(0)
+PY
+}
+
+cmd_panel() {
+    local host port
+    port="${PANEL_PORT:-7682}"
+
+    if [ "${1:-}" != "restart" ]; then
+        host="$(ika-panel-host)"
+        echo "Control panel: http://${host}:${port}"
+        echo "Sign in with TTYD_USER / TTYD_PASS (or PANEL_USER / PANEL_PASS)."
+        if [ -n "$(panel_pid)" ]; then
+            echo "Status: running"
+        else
+            echo "Status: NOT running — start it with:  ika panel restart"
+        fi
+        return 0
+    fi
+
+    local pid
+    pid="$(panel_pid)"
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null && echo "stopped panel (pid $pid)"
+        sleep 1
+    fi
+
+    if [ -z "${PANEL_PASS:-${TTYD_PASS:-}}" ]; then
+        echo "No PANEL_PASS or TTYD_PASS set — the panel will not serve without one." >&2
+        return 1
+    fi
+
+    PANEL_PASS="${PANEL_PASS:-$TTYD_PASS}" PANEL_PORT="$port" \
+        nohup ika-panel >> "$LOGS_DIR/panel.log" 2>&1 &
+    sleep 1
+    if [ -n "$(panel_pid)" ]; then
+        echo "panel restarted on port $port"
+    else
+        echo "panel did not come up — check $LOGS_DIR/panel.log" >&2
+        return 1
+    fi
+}
+
 cmd_logs() {
     local name="${1:-}"
     if [ -z "$name" ]; then
@@ -308,9 +384,7 @@ case "${1:-}" in
     web)         shift; cmd_web "${1:-}" ;;
     crash)       shift; cmd_crash "$@" ;;
     logs)        shift; cmd_logs "$@" ;;
-    panel)       host="$(IKA_WEB_HOST="${IKA_WEB_HOST:-}" ika-panel-host)"
-                 echo "Control panel: http://${host}:${PANEL_PORT:-7682}"
-                 echo "Sign in with TTYD_USER / TTYD_PASS (or PANEL_USER / PANEL_PASS)." ;;
+    panel)       shift; cmd_panel "${1:-}" ;;
     shell)       exec /bin/bash ;;
     -h|--help|help) usage ;;
     *)           echo "Unknown command: $1" >&2; echo; usage; exit 1 ;;
