@@ -872,12 +872,20 @@ instance card automatically, and in the **run everywhere** row at the top.
 | **Name** | What the button says — `Daily login`, not `6` |
 | **Menu numbers** | What it presses, in order. `9,1` picks option 9 then option 1 in its submenu |
 | **Applies to** | *All instances* (the default), or only the instance numbers you list |
+| **Pause between presses** | A slider, `0`–`10` seconds. How long to wait before the next press so the menu can redraw |
 
 So a change to a global button changes it everywhere at once, and an instance
 that needs something different gets its own button scoped just to it.
 
-Each number is sent followed by Enter, with a short pause between so the menu
-has time to redraw — which is why multi-step options like Donate work.
+Each number is sent followed by Enter, with the pause you set between them so
+the menu has time to redraw — which is why multi-step options like Donate work.
+The default of `0.4s` suits most menus; raise it if a step gets missed because
+the game was slow to respond, or drop it to `0` for a single-press button where
+it makes no difference. There is no pause after the last press.
+
+> Remember the pause multiplies on **run everywhere**: a three-press button at
+> 2 seconds across 24 instances takes around a minute and a half, and the panel
+> waits for it. Keep it as low as reliably works.
 
 Buttons live in `/config/panel-buttons.json`, so they survive restarts,
 rebuilds and updates. On first run the file is seeded from `QUICK_KEYS`

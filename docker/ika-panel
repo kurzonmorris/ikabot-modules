@@ -33,6 +33,10 @@ KEY_OK = re.compile(r"^\d{1,3}$")
 ID_OK = re.compile(r"^[A-Za-z0-9]{1,32}$")
 _buttons_lock = threading.RLock()
 
+# Seconds between keypresses, so the menu has time to redraw before the next one.
+DEFAULT_DELAY = 0.4
+MIN_DELAY, MAX_DELAY = 0.0, 30.0
+
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 _run_lock = threading.Lock()
 
@@ -193,7 +197,8 @@ def load_buttons():
                 return data["buttons"]
         except (OSError, ValueError):
             pass
-        seeded = [{"id": "seed%s" % k, "label": k, "keys": [k], "instances": []}
+        seeded = [{"id": "seed%s" % k, "label": k, "keys": [k],
+                   "instances": [], "delay": DEFAULT_DELAY}
                   for k in QUICK_KEYS]
         try:
             save_buttons(seeded)
@@ -234,27 +239,37 @@ def clean_button(raw):
             return None, "Instance numbers must be between 1 and 99."
         instances.append(n)
 
+    delay = raw.get("delay", DEFAULT_DELAY)
+    try:
+        delay = round(float(delay), 2)
+    except (TypeError, ValueError):
+        return None, "Delay must be a number of seconds, e.g. 0.4."
+    if not MIN_DELAY <= delay <= MAX_DELAY:
+        return None, "Delay must be between %g and %g seconds." % (MIN_DELAY, MAX_DELAY)
+
     bid = str(raw.get("id") or "").strip()
     if bid and not ID_OK.match(bid):
         return None, "Bad button id."
 
     return {"id": bid or _new_id(), "label": label, "keys": keys,
-            "instances": sorted(set(instances))}, ""
+            "instances": sorted(set(instances)), "delay": delay}, ""
 
 
 def applies_to(button, num):
     return not button.get("instances") or num in button["instances"]
 
 
-def press(window, keys):
+def press(window, keys, delay=DEFAULT_DELAY):
     """Send each menu number followed by Enter, pausing so the menu redraws."""
     notes = []
-    for k in keys:
+    last = len(keys) - 1
+    for idx, k in enumerate(keys):
         out = _sh(["tmux", "send-keys", "-t", "%s:%s" % (SESSION, window), k, "Enter"],
                   timeout=15)
         if out.strip():
             notes.append(out.strip())
-        time.sleep(0.4)
+        if idx != last and delay:
+            time.sleep(delay)
     return notes
 
 
@@ -544,7 +559,8 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(200, json.dumps({
                             "output": "%s has crashed — restart it first." % inst["name"],
                             "ran": "button"}))
-                    press(inst["name"], wanted["keys"])
+                    press(inst["name"], wanted["keys"],
+                          wanted.get("delay", DEFAULT_DELAY))
                     out = "Sent %s to %s." % (" then ".join(wanted["keys"]), inst["name"])
                 else:
                     lines, sent = [], 0
@@ -554,7 +570,8 @@ class Handler(BaseHTTPRequestHandler):
                         if inst["dead"]:
                             lines.append("%s skipped (crashed)" % inst["name"])
                             continue
-                        press(inst["name"], wanted["keys"])
+                        press(inst["name"], wanted["keys"],
+                              wanted.get("delay", DEFAULT_DELAY))
                         lines.append("%s <- %s" % (inst["name"], " then ".join(wanted["keys"])))
                         sent += 1
                     out = ("Ran '%s' on %d instance(s):\n\n%s"
@@ -652,6 +669,9 @@ border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
 .f input{min-width:130px}
 .scope{font-family:ui-monospace,monospace;font-size:11.5px;color:var(--soft)}
 .err{color:var(--bad);font-size:12.5px;margin:0 0 10px}
+.f input[type=range]{min-width:130px;padding:0;background:none;border:0}
+.dval{font-family:ui-monospace,monospace;font-size:12px;color:var(--ink);
+min-width:42px;display:inline-block;text-align:right}
 </style></head><body><div class="wrap">
 
 <h1>ikabot control panel</h1>
@@ -686,13 +706,16 @@ border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
       </select></div>
     <div class="f" id="binstwrap" style="display:none"><label for="binst">Instance numbers</label>
       <input id="binst" placeholder="3,7,12" size="10"></div>
+    <div class="f"><label for="bdelay">Pause between presses <span class="dval" id="bdval">0.4s</span></label>
+      <input id="bdelay" type="range" min="0" max="10" step="0.1" value="0.4"></div>
     <button class="p" id="bsave">Add button</button>
     <button id="bcancel" style="display:none">Cancel</button>
   </div>
-  <table><thead><tr><th>Name</th><th>Presses</th><th>Applies to</th><th></th></tr></thead>
+  <table><thead><tr><th>Name</th><th>Presses</th><th>Pause</th><th>Applies to</th><th></th></tr></thead>
   <tbody id="blist"></tbody></table>
   <p class="hint">Each press is a menu number followed by Enter, in order — so
-     <code>9,1</code> picks option 9 then option 1 in its submenu.</p>
+     <code>9,1</code> picks option 9 then option 1 in its submenu. The pause gives
+     the menu time to redraw before the next press; raise it if a step gets missed.</p>
 </section>
 
 <section>
@@ -754,11 +777,19 @@ el('bscope').addEventListener('change',function(){
   el('binstwrap').style.display=this.value==='some'?'':'none';
 });
 
+function showDelay(){
+  var v=parseFloat(el('bdelay').value);
+  el('bdval').textContent=(v===0?'none':v.toFixed(1)+'s');
+}
+el('bdelay').addEventListener('input',showDelay);
+
 function renderButtons(list){
   el('blist').innerHTML=list.map(function(b){
     var scope=b.instances.length?('instances '+b.instances.join(', ')):'all instances';
+    var d=(b.delay===undefined?0.4:b.delay);
     return '<tr><td>'+esc(b.label)+'</td>'+
       '<td class="mono">'+esc(b.keys.join(' → '))+'</td>'+
+      '<td class="mono">'+(b.keys.length>1?d+'s':'—')+'</td>'+
       '<td class="scope">'+scope+'</td>'+
       '<td style="text-align:right">'+
       '<button data-edit="'+b.id+'">Edit</button> '+
@@ -770,6 +801,7 @@ function resetForm(){
   editing=null;
   el('blabel').value=''; el('bkeys').value=''; el('binst').value='';
   el('bscope').value='global'; el('binstwrap').style.display='none';
+  el('bdelay').value='0.4'; showDelay();
   el('bsave').textContent='Add button'; el('bcancel').style.display='none';
   el('berr').textContent='';
 }
@@ -796,7 +828,8 @@ el('bsave').addEventListener('click',function(){
     id: editing||'',
     label: el('blabel').value,
     keys: el('bkeys').value,
-    instances: scope==='some'?el('binst').value:''
+    instances: scope==='some'?el('binst').value:'',
+    delay: el('bdelay').value
   }}, resetForm);
 });
 
@@ -812,6 +845,7 @@ document.addEventListener('click',function(e){
     el('bscope').value=b.instances.length?'some':'global';
     el('binstwrap').style.display=b.instances.length?'':'none';
     el('binst').value=b.instances.join(',');
+    el('bdelay').value=(b.delay===undefined?0.4:b.delay); showDelay();
     el('bsave').textContent='Save changes'; el('bcancel').style.display='';
     el('berr').textContent='';
     window.scrollTo({top:0,behavior:'smooth'});
