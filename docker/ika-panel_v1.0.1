@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.0"
+PANEL_VERSION = "1.0.1"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -706,9 +706,7 @@ border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
 .scope{font-family:ui-monospace,monospace;font-size:11.5px;color:var(--soft)}
 .err{color:var(--bad);font-size:12.5px;margin:0 0 10px}
 .f input[type=range]{min-width:130px;padding:0;background:none;border:0}
-.ver{font-family:ui-monospace,monospace;font-size:12px;font-weight:400;
-color:var(--soft);border:1px solid var(--rule);border-radius:99px;
-padding:2px 8px;vertical-align:middle;margin-left:6px}
+.ver{font-weight:400;color:var(--soft)}
 .dval{font-family:ui-monospace,monospace;font-size:12px;color:var(--ink);
 min-width:42px;display:inline-block;text-align:right}
 </style></head><body><div class="wrap">
@@ -953,7 +951,7 @@ function refresh(){
       renderButtons(s.buttons||[]);
     }
     var v=s.versions||{};
-    document.getElementById('pver').textContent='panel v'+(s.panel_version||'?');
+    document.getElementById('pver').textContent='v'+(s.panel_version||'?');
     document.title='ikabot panel v'+(s.panel_version||'?');
     head.textContent='ikabot '+(v.ikabot||'?')+' / mod '+(v.mod||'?')+
       ' — '+s.running+' running'+(s.dead?', '+s.dead+' crashed':'');
