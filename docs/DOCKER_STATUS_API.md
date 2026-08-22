@@ -140,3 +140,42 @@ them — say which and they can go in a follow-up:
 - `events` array of recent task starts/stops/failures
 - Last login time and session-expiry state
 - Per-task progress where the module knows it (e.g. "3 of 10 buildings")
+
+---
+
+## 7. Also relevant to the compose file: decaptcha worker seats
+
+From **mod v1.8.3** the local captcha solver sizes its worker pool to the
+machine rather than running a fixed pool per account, coordinating through
+`flock` "seat" files so several instances do not all grab every core.
+
+**The seats must be on a path shared by every ikabot container**, or each one
+sees an empty seat directory, believes it has the machine to itself, and the
+coordination does nothing. Measured here with 6 instances on 4 cores: shared
+directory → 4 get seats and 2 correctly fall back to serial; per-container
+directories → all 6 claim seats.
+
+They default to `$IKABOT_DATA_DIR/decaptcha_seats`, which is already the
+shared volume if you mount `ikabot-data:/root/.ikabot` in every container — so
+**with the mount from §1 this works with no extra configuration**.
+
+If the data dir is *not* shared, point them somewhere that is:
+
+```yaml
+environment:
+  - IKABOT_DECAPTCHA_SEAT_DIR=/shared/decaptcha_seats
+volumes:
+  - decaptcha-seats:/shared/decaptcha_seats
+```
+
+The directory must be on a filesystem where `flock` works — a Docker volume or
+bind mount is fine, NFS generally is not. Seat locks are released by the
+kernel when a process exits, so a crashed instance cannot leave a seat stuck.
+
+**Container limits are respected.** Worker count and memory headroom come from
+the cgroup (`memory.max` / `cpu.max`, and the v1 equivalents) rather than
+`/proc/meminfo` and `os.cpu_count()`, which report the host from inside a
+container. A container with `--memory=300m` plans zero workers and solves
+serially instead of being OOM-killed. No action needed — just be aware that
+tightening `--cpus` or `--memory` will make captcha solving slower rather than
+failing.

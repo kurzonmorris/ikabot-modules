@@ -8,7 +8,7 @@ import os
 IKABOT_VERSION = "7.5.1"
 IKABOT_VERSION_TAG = "v" + IKABOT_VERSION
 
-IKABOT_MOD_VERSION = "1.8.2"
+IKABOT_MOD_VERSION = "1.8.3"
 IKABOT_MOD_VERSION_TAG = "modded by kurzon v" + IKABOT_MOD_VERSION
 
 
@@ -18,9 +18,23 @@ update_msg = ""
 
 isWindows = os.name == "nt"
 
-# Multiprocessing configuration for pure-Python local decaptcha
-# Set to False if your environment struggles with Python multiprocessing
+# Multiprocessing configuration for pure-Python local decaptcha.
+# Safe to leave on even with many accounts: the solver claims worker "seats"
+# machine-wide, sizes itself to the free cores and RAM it finds at solve time
+# (respecting container CPU/memory limits), and drops to a single-process
+# solve when everything is busy. Set False if multiprocessing misbehaves here.
 USE_MULTIPROCESSING_DECAPTCHA = True
+
+# Log how long each local captcha solve took, to the ikabot log file. One line
+# per solve tagged [decaptcha-timing], with worker count, free RAM and CPU
+# topology. Off by default; turn on to compare machines or report a slow solve.
+DECAPTCHA_TIMING_LOG = False
+
+# Where the decaptcha worker "seats" live. Defaults to IKABOT_DATA_DIR, which
+# is normally the shared volume in a multi-account Docker setup, so instances
+# coordinate across containers. Set IKABOT_DECAPTCHA_SEAT_DIR to override —
+# point it at a shared mount if the data dir is per-container, or at /tmp for
+# per-machine behaviour. Must be on a filesystem where flock works.
 
 
 # --- Regional context -------------------------------------------------------
