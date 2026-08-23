@@ -180,18 +180,40 @@ serially instead of being OOM-killed. No action needed — just be aware that
 tightening `--cpus` or `--memory` will make captcha solving slower rather than
 failing.
 
-### Scaling numbers (measured, 4 cores)
+### Scaling numbers (measured, 4 cores, worst case)
 
-| Instances | Coordination | Wall | Throughput | Median per solve |
+Every instance solving a captcha *at the same moment* — the pathological case,
+not the norm, since captchas are sporadic.
+
+| Instances | Wall | Median per solve | Throughput | Correct |
 |---|---|---|---|---|
-| 1 | — | 5.3 s | 0.19 /s | 5.3 s |
-| 20 | shared seats | 67 s | **0.30 /s** | 66 s |
-| 20 | none (per-container /tmp) | 85 s | 0.24 /s | 84 s |
+| 1 | 7.0 s | 7.0 s | 0.14 /s | 1/1 |
+| 2 | 11.4 s | 11.4 s | 0.18 /s | 2/2 |
+| 4 | 13.3 s | 13.2 s | **0.30 /s** | 4/4 |
+| 8 | 25.5 s | 25.0 s | 0.31 /s | 8/8 |
+| 12 | 37.5 s | 36.9 s | 0.32 /s | 12/12 |
+| 20 | 67.3 s | 66.4 s | 0.30 /s | 20/20 |
 
-All 20 decoded correctly in every case. Coordination buys ~25% more
-throughput; beyond that the box is simply CPU-bound, so **individual captcha
-latency grows with instance count** — plan for it rather than expecting
-per-solve speed to hold.
+**Throughput saturates at the core count** (~0.31 solves/s here) and stays
+flat. Past that, extra instances buy nothing and simply queue: latency grows
+linearly.
+
+Rules of thumb, per core count `C`:
+
+- **Aggregate ceiling** ≈ `0.08 × C` solves per second.
+- **Median latency** ≈ `(N / C) × 13 s` when all N solve at once.
+- **RAM** ≈ `N × 316 MB` peak while solving, `N × 70 MB` once idle for 120 s.
+
+So on 4 cores, 12 instances is comfortable (~37 s worst case) and 20 is
+usable (~67 s). Double the cores and both halve. Since a pirate mission runs
+for minutes to hours, even a minute of captcha delay rarely matters — but if
+it does, add cores, not instances.
+
+Accuracy never degraded: every solve decoded correctly at all N.
+
+To measure your own box, set `DECAPTCHA_TIMING_LOG = True` in `config.py`.
+Each solve then logs one `[decaptcha-timing]` line with worker count, free RAM
+and CPU topology.
 
 Memory per instance: **~316 MB while solving**, dropping to **~70 MB** after
 the 120 s idle release (verified: the weights really are returned to the OS,
