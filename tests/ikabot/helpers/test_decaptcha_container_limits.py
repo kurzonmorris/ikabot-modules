@@ -152,3 +152,39 @@ def test_seats_are_capped_by_core_count(monkeypatch):
         assert len(held) <= pdp._MP_CORES
     finally:
         pdp._release_seats()
+
+
+# ------------------------------------------------------- memory admission ---
+
+def test_cold_solve_is_refused_when_memory_is_tight(cgroup, monkeypatch):
+    """The worker planner backs off under pressure, but a serial solve still
+    loads ~268 MB of weights. With many instances on one box that is the
+    dominant cost, so it needs its own gate — otherwise the process is
+    OOM-killed rather than falling back to the remote solver."""
+    monkeypatch.setattr(pdp, "_WEIGHTS_CACHE", None)
+    cgroup({"/sys/fs/cgroup/memory.max": str(200 * 1024 * 1024),
+            "/sys/fs/cgroup/memory.current": "0"})
+    assert pdp._memory_allows_local_solve() is False
+
+
+def test_warm_solve_is_allowed_when_memory_is_tight(cgroup, monkeypatch):
+    """Weights already resident: no new allocation, so let it proceed."""
+    monkeypatch.setattr(pdp, "_WEIGHTS_CACHE", {"already": "loaded"})
+    cgroup({"/sys/fs/cgroup/memory.max": str(200 * 1024 * 1024),
+            "/sys/fs/cgroup/memory.current": "0"})
+    assert pdp._memory_allows_local_solve() is True
+
+
+def test_unknown_memory_does_not_block(cgroup, monkeypatch):
+    """If free memory cannot be determined, behave as before rather than
+    refusing to solve locally on every machine that hides /proc/meminfo."""
+    monkeypatch.setattr(pdp, "_WEIGHTS_CACHE", None)
+    monkeypatch.setattr(pdp, "_available_mb", lambda: float("inf"))
+    assert pdp._memory_allows_local_solve() is True
+
+
+def test_refusal_raises_so_the_caller_falls_back(cgroup, monkeypatch):
+    monkeypatch.setattr(pdp, "_WEIGHTS_CACHE", None)
+    monkeypatch.setattr(pdp, "_available_mb", lambda: 50.0)
+    with pytest.raises(pdp.LocalSolveUnavailable):
+        pdp.get_captcha_string(b"not-a-png")

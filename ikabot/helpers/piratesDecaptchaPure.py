@@ -61,6 +61,10 @@ _MB_PER_WORKER = 60
 # Free RAM to leave for the parent process (weights + interpreter) before
 # even considering a pool.
 _MB_BASE = 300
+# Resident cost of the weight tables once loaded, measured at ~268 MB. Used to
+# refuse a local solve outright when the machine has no room for them.
+_MB_WEIGHTS = 300
+_MB_SOLVE_HEADROOM = 100
 
 
 def _init_spawn_wino(packed):
@@ -1373,10 +1377,42 @@ def _timing_context(workers):
     ]
 
 
+class LocalSolveUnavailable(RuntimeError):
+    """Raised when this machine has no room to solve locally right now.
+
+    autoPirate catches any exception from the local solver and falls back to
+    the remote decaptcha API, so raising here turns "would have been
+    OOM-killed" into "solved remotely, a bit slower".
+    """
+
+
+def _memory_allows_local_solve():
+    """True if the weights can be held without risking an OOM kill.
+
+    The worker-count planning already backs off under memory pressure, but it
+    only decides how many *workers* to add — a serial solve still loads the
+    ~268 MB of weights. With many instances on one box that is the dominant
+    cost, so it needs its own gate.
+    """
+    if _WEIGHTS_CACHE is not None:
+        return True                      # already resident, nothing new to allocate
+    free = _available_mb()
+    if free == float("inf"):
+        return True                      # cannot tell; behave as before
+    return free >= (_MB_WEIGHTS + _MB_SOLVE_HEADROOM)
+
+
 def get_captcha_string(image_bytes):
     """Main entrypoint required by piratesDecaptcha.py."""
     global _LAST_SOLVE, _SOLVING
     import time
+
+    if not _memory_allows_local_solve():
+        raise LocalSolveUnavailable(
+            "not enough free memory to load the decaptcha weights "
+            "(need ~%d MB); falling back to the remote solver"
+            % (_MB_WEIGHTS + _MB_SOLVE_HEADROOM)
+        )
 
     now = time.time()
     if _LAST_SOLVE and now - _LAST_SOLVE > _IDLE_TIMEOUT:

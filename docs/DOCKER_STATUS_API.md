@@ -179,3 +179,30 @@ container. A container with `--memory=300m` plans zero workers and solves
 serially instead of being OOM-killed. No action needed — just be aware that
 tightening `--cpus` or `--memory` will make captcha solving slower rather than
 failing.
+
+### Scaling numbers (measured, 4 cores)
+
+| Instances | Coordination | Wall | Throughput | Median per solve |
+|---|---|---|---|---|
+| 1 | — | 5.3 s | 0.19 /s | 5.3 s |
+| 20 | shared seats | 67 s | **0.30 /s** | 66 s |
+| 20 | none (per-container /tmp) | 85 s | 0.24 /s | 84 s |
+
+All 20 decoded correctly in every case. Coordination buys ~25% more
+throughput; beyond that the box is simply CPU-bound, so **individual captcha
+latency grows with instance count** — plan for it rather than expecting
+per-solve speed to hold.
+
+Memory per instance: **~316 MB while solving**, dropping to **~70 MB** after
+the 120 s idle release (verified: the weights really are returned to the OS,
+not just freed inside Python). So 20 instances cost ~1.4 GB idle and up to
+~6.3 GB if they all happen to solve at once.
+
+From **v1.8.4** a solve is refused outright when there is not enough free
+memory to hold the weights, and the caller falls back to the remote decaptcha
+API. That turns the worst case from "OOM-killed container" into "solved
+remotely, a bit slower".
+
+If you run many instances on a small box, either give the host enough RAM for
+the peak, or set `USE_MULTIPROCESSING_DECAPTCHA = False` and accept serial
+solving.
