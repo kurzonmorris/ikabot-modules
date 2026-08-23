@@ -140,3 +140,91 @@ them — say which and they can go in a follow-up:
 - `events` array of recent task starts/stops/failures
 - Last login time and session-expiry state
 - Per-task progress where the module knows it (e.g. "3 of 10 buildings")
+
+---
+
+## 7. Also relevant to the compose file: decaptcha worker seats
+
+From **mod v1.8.3** the local captcha solver sizes its worker pool to the
+machine rather than running a fixed pool per account, coordinating through
+`flock` "seat" files so several instances do not all grab every core.
+
+**The seats must be on a path shared by every ikabot container**, or each one
+sees an empty seat directory, believes it has the machine to itself, and the
+coordination does nothing. Measured here with 6 instances on 4 cores: shared
+directory → 4 get seats and 2 correctly fall back to serial; per-container
+directories → all 6 claim seats.
+
+They default to `$IKABOT_DATA_DIR/decaptcha_seats`, which is already the
+shared volume if you mount `ikabot-data:/root/.ikabot` in every container — so
+**with the mount from §1 this works with no extra configuration**.
+
+If the data dir is *not* shared, point them somewhere that is:
+
+```yaml
+environment:
+  - IKABOT_DECAPTCHA_SEAT_DIR=/shared/decaptcha_seats
+volumes:
+  - decaptcha-seats:/shared/decaptcha_seats
+```
+
+The directory must be on a filesystem where `flock` works — a Docker volume or
+bind mount is fine, NFS generally is not. Seat locks are released by the
+kernel when a process exits, so a crashed instance cannot leave a seat stuck.
+
+**Container limits are respected.** Worker count and memory headroom come from
+the cgroup (`memory.max` / `cpu.max`, and the v1 equivalents) rather than
+`/proc/meminfo` and `os.cpu_count()`, which report the host from inside a
+container. A container with `--memory=300m` plans zero workers and solves
+serially instead of being OOM-killed. No action needed — just be aware that
+tightening `--cpus` or `--memory` will make captcha solving slower rather than
+failing.
+
+### Scaling numbers (measured, 4 cores, worst case)
+
+Every instance solving a captcha *at the same moment* — the pathological case,
+not the norm, since captchas are sporadic.
+
+| Instances | Wall | Median per solve | Throughput | Correct |
+|---|---|---|---|---|
+| 1 | 7.0 s | 7.0 s | 0.14 /s | 1/1 |
+| 2 | 11.4 s | 11.4 s | 0.18 /s | 2/2 |
+| 4 | 13.3 s | 13.2 s | **0.30 /s** | 4/4 |
+| 8 | 25.5 s | 25.0 s | 0.31 /s | 8/8 |
+| 12 | 37.5 s | 36.9 s | 0.32 /s | 12/12 |
+| 20 | 67.3 s | 66.4 s | 0.30 /s | 20/20 |
+
+**Throughput saturates at the core count** (~0.31 solves/s here) and stays
+flat. Past that, extra instances buy nothing and simply queue: latency grows
+linearly.
+
+Rules of thumb, per core count `C`:
+
+- **Aggregate ceiling** ≈ `0.08 × C` solves per second.
+- **Median latency** ≈ `(N / C) × 13 s` when all N solve at once.
+- **RAM** ≈ `N × 316 MB` peak while solving, `N × 70 MB` once idle for 120 s.
+
+So on 4 cores, 12 instances is comfortable (~37 s worst case) and 20 is
+usable (~67 s). Double the cores and both halve. Since a pirate mission runs
+for minutes to hours, even a minute of captcha delay rarely matters — but if
+it does, add cores, not instances.
+
+Accuracy never degraded: every solve decoded correctly at all N.
+
+To measure your own box, set `DECAPTCHA_TIMING_LOG = True` in `config.py`.
+Each solve then logs one `[decaptcha-timing]` line with worker count, free RAM
+and CPU topology.
+
+Memory per instance: **~316 MB while solving**, dropping to **~70 MB** after
+the 120 s idle release (verified: the weights really are returned to the OS,
+not just freed inside Python). So 20 instances cost ~1.4 GB idle and up to
+~6.3 GB if they all happen to solve at once.
+
+From **v1.8.4** a solve is refused outright when there is not enough free
+memory to hold the weights, and the caller falls back to the remote decaptcha
+API. That turns the worst case from "OOM-killed container" into "solved
+remotely, a bit slower".
+
+If you run many instances on a small box, either give the host enough RAM for
+the peak, or set `USE_MULTIPROCESSING_DECAPTCHA = False` and accept serial
+solving.

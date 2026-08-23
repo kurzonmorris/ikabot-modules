@@ -43,6 +43,7 @@ our own way, deliberately · **Present** = already in the fork before the audit
 | #420 | Research improvements (`Research.py` → `research.py`) | **Ported** | 1.8.0 |
 | #407 | Fix queue tracking and phantom tasks in constructionList | **Ported, bug fixed** | 1.8.0 |
 | #387 | Discord webhook notifications | **Equivalent** | pre-existing |
+| nfontan#4 | Size the local decaptcha to the machine | **Ported, adapted** | 1.8.3 |
 
 ---
 
@@ -236,6 +237,43 @@ cells as 0. One latent fragility, pre-existing and not introduced here: the
 units/ships split is a hardcoded `i <= 14` index into a list that is now longer
 than before. Worth watching if totals ever look wrong.
 
+### nfontan#4 — machine-wide decaptcha sizing  *(ported, adapted for containers)*
+
+From `nfontan/ikabot` PR #4, not upstream. Replaces the fixed 8-worker pool
+per task (~1.4 GB per account) with a machine-wide worker budget: workers are
+claimed as `flock` "seats", weights ship as `array.array('d')` with zero-copy
+memoryviews (152 MB → 37.5 MB per worker), and the pool is built lazily and
+dropped after 120 s idle. Their measurements: one solve 13.2 s serial → 4.96 s
+on 8 workers; six concurrent accounts 10.93 s → 3.88 s each. Measured here, a
+single solve went 9.6 s → 4.0 s.
+
+Two changes were required for containers, both verified by test:
+
+⚠️ **It was not cgroup-aware.** Worker count came from `os.cpu_count()` and
+headroom from `/proc/meminfo`, both of which report the **host** inside a
+container. A container capped at 300 MB on a 15 GB host would plan a full pool
+and be OOM-killed. Added `_cgroup_available_mb()` and `_cgroup_cpu_limit()`
+(v2 `memory.max` / `cpu.max` and the v1 equivalents), plus `_usable_cores()`
+which also honours the CPU affinity mask. `_available_mb()` now takes the
+smaller of host and cgroup. A 300 MB container plans **zero** workers and
+solves serially.
+
+⚠️ **The seat directory was `/tmp`, which is per-container.** With one
+container per account each instance sees an empty seat dir and sizes itself to
+the whole machine — the coordination silently does nothing, which is the
+contention the PR exists to prevent. Demonstrated: 6 instances on 4 cores with
+per-container dirs → all 6 claim seats; with a shared dir → 4 seats, 2 serial.
+Default moved to `$IKABOT_DATA_DIR/decaptcha_seats` (already the shared volume
+in a multi-account Docker setup), overridable with `IKABOT_DECAPTCHA_SEAT_DIR`.
+
+Public API is unchanged, so our ONNX-first ordering and `warm_up()` are
+unaffected — the idle timer only starts after a solve, so warm-up is not
+undone. Their 13 tests pass as-is; `tests/ikabot/helpers/` also now holds our
+container-limit tests and their two real-captcha fixtures, which verify the
+solver still decodes `QKB24JC` and `DEVL5KA` correctly.
+
+Brought `config.DECAPTCHA_TIMING_LOG` with it.
+
 ---
 
 ## 3. Fork-only features that must survive future ports
@@ -281,6 +319,11 @@ If a port would remove or bypass any of these, stop and flag it:
 ---
 
 ## 5. Changelog
+
+### 2026-08-22 — nfontan#4 decaptcha sizing (mod 1.8.3)
+Ported the machine-wide worker budget, adapted for containers: cgroup-aware
+CPU/memory limits and a shared seat directory. Two container bugs in the
+original fixed; see section 2.
 
 ### 2026-08-19 — parity with 7.5.1 (mod 1.8.0)
 Audited 7.4.5 → 7.5.1 (8 changes) by diffing a local clone. Ported #424, #421,
