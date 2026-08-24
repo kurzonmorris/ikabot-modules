@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.5.1"
+MODULE_VERSION = "10.6.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -5326,6 +5326,7 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
     TRANSPORT_WORKER_PREFS["log_path"] = log_path
     # Remember them so ikabot auto-start can resume the scheduler headlessly.
     _remember_worker_settings(session, notif_config, log_path)
+    _warn_if_previous_worker_died(session, notif_config)
 
     try:
         os.remove(transport_stop_flag_path(session))
@@ -6805,6 +6806,27 @@ def transport_scheduler_loop(session, stop_event):
             now = int(time.time())
             schedules = transport_csv_load(session)
             _tick_errors = 0
+
+            # Housekeeping runs BEFORE the "nothing active" early exit:
+            # once a one-time schedule completes it is no longer active, so
+            # running this later meant finished schedules were never tidied
+            # up if they were the only ones left.
+            # Removal is 24h AFTER the schedule ran. It used to key off
+            # created_at with no check that it had ever run, so a one-time
+            # schedule created while the scheduler was stopped was deleted,
+            # unsent, the moment the scheduler came back more than 24h later.
+            for s in schedules:
+                if s.get("interval_hours", 0) != 0:
+                    continue
+                if s.get("status") != "completed":
+                    continue          # never had its turn — leave it alone
+                ran_at = s.get("last_run", "")
+                if not isinstance(ran_at, int) or ran_at <= 0:
+                    continue
+                if now - ran_at > 86400:
+                    transport_csv_delete(session, s.get("schedule_id"))
+                    schedules = transport_csv_load(session)
+
             active = [s for s in schedules if s.get("status") == "active"]
 
             if not active:
@@ -6813,7 +6835,12 @@ def transport_scheduler_loop(session, stop_event):
                 continue
 
             for sched in active:
-                if stop_event.is_set():
+                # Check the flag file too: a long cycle (a big bulk run can
+                # take hours) would otherwise ignore (o) until every
+                # schedule in this tick had been attempted.
+                if (stop_event.is_set()
+                        or os.path.exists(transport_stop_flag_path(session))):
+                    stop_event.set()
                     break
 
                 next_run = sched.get("next_run", "")
@@ -6856,16 +6883,14 @@ def transport_scheduler_loop(session, stop_event):
                         total_shipments=total, status="active",
                     )
                 else:
-                    transport_csv_delete(session, sid)
-
-            # Auto-cleanup: delete one-time schedules older than 24h
-            schedules = transport_csv_load(session)
-            for s in schedules:
-                if s.get("interval_hours", 0) == 0:
-                    created = s.get("created_at", 0)
-                    if isinstance(created, int) and created > 0:
-                        if now - created > 86400:
-                            transport_csv_delete(session, s.get("schedule_id"))
+                    # One-time schedule: mark it done rather than delete it,
+                    # so it stays visible in Manage Schedules instead of
+                    # silently vanishing the moment it ships.
+                    transport_csv_update(
+                        session, sid,
+                        last_run=now, next_run="",
+                        total_shipments=total, status="completed",
+                    )
 
             schedules = transport_csv_load(session)
             active = [s for s in schedules if s.get("status") == "active"]
@@ -6902,7 +6927,11 @@ def transport_scheduler_loop(session, stop_event):
                     f"retrying in {TICK_BUDGET_SECONDS}s")
             except Exception:
                 pass
-            if _tick_errors == 3 and should_notify(notif_config, "error"):
+            # Report at the 3rd consecutive failure, then every 30th (~30
+            # min) — going permanently quiet after one message hid a
+            # scheduler that was spinning on an unrecoverable error.
+            if (_tick_errors == 3 or (_tick_errors > 3 and _tick_errors % 30 == 0)) \
+                    and should_notify(notif_config, "error"):
                 try:
                     sendToBot(
                         session,
@@ -6993,6 +7022,7 @@ def _autostart_resume(session, event):
 
         TRANSPORT_WORKER_PREFS["notif_config"] = notif_config
         TRANSPORT_WORKER_PREFS["log_path"] = log_path
+        _warn_if_previous_worker_died(session, notif_config)
 
         global _WORKER_LOCK_TOKEN
         wlock = transport_worker_lock_path(session)
@@ -7018,6 +7048,46 @@ def _autostart_resume(session, event):
     except Exception:
         try:
             event.set()
+        except Exception:
+            pass
+
+
+def _warn_if_previous_worker_died(session, notif_config):
+    """Report a scheduler that died without shutting down cleanly.
+
+    A killed process (Task Manager, power loss, OOM) cannot send anything
+    itself, so the death is detected here instead: its worker lock is still
+    on disk but its process is gone and no stop was ever requested. Called
+    just before we take the lock for a new run.
+    """
+    wlock = transport_worker_lock_path(session)
+    if not os.path.exists(wlock):
+        return
+    if _worker_lock_is_fresh(wlock):
+        return                       # still running; not a death
+    if os.path.exists(transport_stop_flag_path(session)):
+        return                       # it was asked to stop — expected
+    try:
+        with open(wlock, "r") as f:
+            data = json.load(f)
+        died_pid = data.get("pid")
+        last_seen = float(data.get("timestamp", 0) or 0)
+        ago = int(max(0, time.time() - last_seen))
+    except Exception:
+        died_pid, ago = None, None
+    if should_notify(notif_config, "error"):
+        try:
+            when = (f"about {ago // 60} min ago" if ago is not None
+                    else "at an unknown time")
+            sendToBot(
+                session,
+                f"TRANSPORT SCHEDULER HAD STOPPED\n"
+                f"The previous scheduler (process {died_pid}) stopped "
+                f"without shutting down cleanly — it was last alive "
+                f"{when}. Nothing was sent between then and now.\n"
+                f"It is being started again now, so no action is needed. "
+                f"Common causes: the process was killed, or the machine "
+                f"restarted.")
         except Exception:
             pass
 
@@ -7202,6 +7272,7 @@ def _activate_transport_worker(session, event):
     TRANSPORT_WORKER_PREFS["log_path"] = log_path
     # Remember them so ikabot auto-start can resume the scheduler headlessly.
     _remember_worker_settings(session, notif_config, log_path)
+    _warn_if_previous_worker_died(session, notif_config)
 
     try:
         os.remove(transport_stop_flag_path(session))
