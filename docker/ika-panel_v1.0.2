@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.1"
+PANEL_VERSION = "1.0.2"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -424,6 +424,22 @@ def state():
         else:
             m["status"] = "current"
 
+    # Modules that exist upstream but have never been installed here. Without
+    # this the table only ever shows what is already installed, so a newly
+    # published module can never be found or added from the panel.
+    installed = {m["name"] for m in modules}
+    for name in sorted(avail):
+        if name not in installed:
+            modules.append({
+                "name": name,
+                "file": name + ".py",
+                "version": "",
+                "live": False,
+                "available": avail[name],
+                "status": "new",
+            })
+    modules.sort(key=lambda m: m["name"].lower())
+
     for i in instances:
         i["ports"].sort()
 
@@ -684,6 +700,7 @@ border:1px solid var(--rule);color:var(--soft)}
 .v-current{color:var(--ok);font-weight:600}
 .v-outdated{color:var(--bad);font-weight:600}
 .v-unknown{color:var(--soft)}
+.v-new{color:var(--accent);font-weight:600}
 .hint{font-size:12px;color:var(--soft);margin:10px 0 0}
 .keys{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .keys button{padding:3px 9px;font-size:12px;min-width:34px}
@@ -996,15 +1013,18 @@ function refresh(){
     }).join('') || '<p class="sub">No instances found.</p>';
 
     mods.innerHTML=(s.modules||[]).map(function(m){
-      var cls=m.status==='outdated'?'v-outdated':(m.status==='current'?'v-current':'v-unknown');
+      var cls={outdated:'v-outdated',current:'v-current',new:'v-new'}[m.status]||'v-unknown';
       var av=m.status==='unknown'?'not checked':(m.available||'—');
-      return '<tr><td class="mono">'+m.name+'</td>'+
-        '<td class="mono '+cls+'">'+(m.version||'—')+'</td>'+
-        '<td class="mono '+cls+'">'+av+'</td>'+
+      var inst=m.status==='new'?'not installed':(m.version||'—');
+      var act=m.status==='new'?'Install':'Update';
+      var hi=(m.status==='outdated'||m.status==='new')?' class="p"':'';
+      return '<tr><td class="mono">'+esc(m.name)+'</td>'+
+        '<td class="mono '+cls+'">'+inst+'</td>'+
+        '<td class="mono '+cls+'">'+esc(av)+'</td>'+
         '<td>'+(m.live?'<span class="badge">yes</span>':
                 '<span class="badge" style="color:var(--bad)">no</span>')+'</td>'+
         '<td style="text-align:right"><button data-a="module_one" data-arg="'+
-        m.name+'"'+(m.status==='outdated'?' class="p"':'')+'>Update</button></td></tr>';
+        esc(m.name)+'"'+hi+'>'+act+'</button></td></tr>';
     }).join('') || '<tr><td colspan="5" class="sub">No modules installed.</td></tr>';
 
     if(!s.status_available){
@@ -1015,7 +1035,8 @@ function refresh(){
     if(s.avail_error){checked.textContent='Version check failed: '+s.avail_error;}
     else if(s.checked){checked.textContent='Versions checked '+
       new Date(s.checked*1000).toLocaleTimeString()+
-      '. Green = up to date, red = a newer version is on GitHub.';}
+      '. Green = up to date, red = a newer version is on GitHub, '+
+      'blue = available but not installed.';}
     else {checked.textContent='Checking GitHub for newer versions…';}
 
     if(busy)setBusy(true);
