@@ -628,6 +628,7 @@ numbers below drift.**
 | `islandColonizeMonitor_v1.5.0.py` | Watches islands for free colonisation slots. |
 | `resourceReservationSystem_v1.0.0.py` | Shared reservation data layer, not a user-facing module. See §26. |
 | `sequenceRunner_v1.1.2.py` | Stores named input sequences and replays them through `predetermined_input` (§9). Replaces the AutoHotkey scripts. |
+| `schedulerMonitor_v1.0.0.py` | Watches the worker locks of constructionManager, resourceTransportManager and autoRecruitmentManager on a timer and relaunches any scheduler that is down while work is still queued. Starts them headlessly — through the module's own auto-start path where it has one, otherwise by driving its worker loop directly. |
 
 **Before writing a new module, check whether one of these already does part of
 the job** — §12's rule against duplicating logic applies to modules too.

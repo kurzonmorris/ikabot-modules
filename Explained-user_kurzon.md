@@ -194,6 +194,7 @@ All modules — internal and external — must look and behave the same way.
 | Auto Recruitment Manager | `modules/autoRecruitmentManager_v2.12.1.py` | Automates unit and ship training across barracks/shipyards |
 | Island Colonize Monitor | `modules/islandColonizeMonitor_v1.5.0.py` | Monitors islands for colonisation opportunities |
 | Sequence Runner | `modules/sequenceRunner_v1.1.2.py` | Stores named input sequences to automate daily routines |
+| Scheduler Monitor | `modules/schedulerMonitor_v1.0.0.py` | Watches other modules' background workers and restarts any that stopped |
 
 **Filenames drift.** Always `ls modules/` rather than trusting this table — the
 versions move faster than the docs.
