@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.5"
+__version__ = "2.2.6"
 
 import csv
 import glob
@@ -198,6 +198,64 @@ def stop_flag_path(session):
         os.path.expanduser("~"),
         f".ikabot_construction_stop_{_account_suffix(session)}",
     )
+
+
+def prefs_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_construction_prefs_{_account_suffix(session)}.json",
+    )
+
+
+# How a city picks what to work on when it can't afford the next item.
+#   wait_in_order — stay on the head of the queue, ship and re-check until the
+#                   resources arrive; nothing is cancelled.
+#   skip_ahead    — build whichever queued building the city can already
+#                   afford, leaving the rest queued for later.
+QUEUE_STRATEGIES = ("wait_in_order", "skip_ahead")
+DEFAULT_QUEUE_STRATEGY = "wait_in_order"
+SKIP_AHEAD_MAX_CANDIDATES = 12   # bounds the per-tick scan
+
+
+def load_prefs(session):
+    """Read the per-account preferences sidecar; {} when absent or unreadable."""
+    try:
+        with open(prefs_path(session), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_prefs(session, prefs):
+    path = prefs_path(session)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(prefs, f)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def get_queue_strategy(session):
+    value = load_prefs(session).get("queue_strategy")
+    return value if value in QUEUE_STRATEGIES else DEFAULT_QUEUE_STRATEGY
+
+
+def set_queue_strategy(session, value):
+    prefs = load_prefs(session)
+    prefs["queue_strategy"] = value
+    save_prefs(session, prefs)
+
+
+def _strategy_label(value):
+    return ("Skip ahead — build whatever is affordable now"
+            if value == "skip_ahead"
+            else "Wait in order — finish the queue in order")
 
 
 def _legacy_path(session, template):
@@ -2285,6 +2343,34 @@ def _cancel_all_pending(session):
 # Stop worker
 # ---------------------------------------------------------------------------
 
+def _choose_queue_strategy(session):
+    """Pick what a city does when it can't afford the next queued item."""
+    banner()
+    current = get_queue_strategy(session)
+    print("Queue strategy\n")
+    print("  When a city can't afford the next building on its list:\n")
+    print("  (1) Wait in order — ship what's missing and keep re-checking "
+          "until it can\n      be built. The queue always runs in order and "
+          "nothing is cancelled.\n")
+    print("  (2) Skip ahead — try the next building on the list, and the one "
+          "after,\n      until it finds one the city can already afford. "
+          "Skipped items stay\n      queued and are picked up later.\n")
+    print(f"  Current: {bcolors.GREEN}{_strategy_label(current)}"
+          f"{bcolors.ENDC}\n")
+    print("  Levels of the same building always run in order in both modes.\n")
+
+    choice = read(min=1, max=2, empty=True, additionalValues=["'"])
+    if choice == "'" or choice == "":
+        return
+    value = "wait_in_order" if choice == 1 else "skip_ahead"
+    set_queue_strategy(session, value)
+    print(f"\n  Set to: {_strategy_label(value)}")
+    if _is_worker_running(session):
+        print("  The running worker will pick this up within "
+              f"{TICK_BUDGET_SECONDS}s — no restart needed.")
+    enter()
+
+
 def _stop_worker(session):
     flag = stop_flag_path(session)
     wlock = worker_lock_path(session)
@@ -2513,6 +2599,7 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
                 f"  CSV: {csv_path(session)}\n"
                 f"  {_worker_status_line(session)}\n"
                 f"  {pending} pending row(s) across {n_cities} city/cities\n"
+                f"  Strategy: {_strategy_label(get_queue_strategy(session))}\n"
             )
             print(f"  {bcolors.BOLD}(s){bcolors.ENDC} Start worker   "
                   f"{bcolors.BOLD}(o){bcolors.ENDC} Stop worker   "
@@ -2521,8 +2608,9 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
             print("(2) View queue")
             print("(3) Edit queue (modify / delete / reorder) [interactive only]")
             print("(4) Resource requirements per city")
+            print("(5) Queue strategy (wait in order / skip ahead)")
             print("(') Back")
-            choice = read(min=1, max=4,
+            choice = read(min=1, max=5,
                           additionalValues=["'", "s", "S", "o", "O", "x", "X"])
 
             if isinstance(choice, str):
@@ -2554,6 +2642,8 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
                 _edit_queue(session)
             elif choice == 4:
                 _resource_requirements(session)
+            elif choice == 5:
+                _choose_queue_strategy(session)
     except KeyboardInterrupt:
         pass
     finally:
@@ -2726,6 +2816,21 @@ def spawn_shipment(session, city_id, row, cost):
             routes    = rtm.allocate_from_suppliers(need, suppliers, city, island)
 
             if routes is None:
+                if (WORKER_PREFS.get("queue_strategy", DEFAULT_QUEUE_STRATEGY)
+                        == "wait_in_order"):
+                    # Don't cancel: drop back to pending so the scheduler
+                    # retries once production or trade has topped things up.
+                    csv_update(session, queue_id, status="pending")
+                    shortage_event_queue.put({
+                        "city_id": city_id,
+                        "row_id":  queue_id,
+                        "msg": (
+                            f"City {city.get('cityName', city_id)}: not enough "
+                            f"resources anywhere for row {queue_id} — waiting "
+                            f"and retrying."
+                        ),
+                    })
+                    return
                 csv_update(
                     session, queue_id,
                     status="skipped",
@@ -2812,6 +2917,47 @@ def next_pending_row(rows):
     if not pending:
         return None
     return min(pending, key=lambda r: r["queue_id"])
+
+
+def candidate_rows(rows):
+    """The next pending row of each queued building, in queue order.
+
+    Levels within one building must run in sequence, so only a building's
+    lowest pending row is ever a candidate — skipping ahead means moving to a
+    different building, never skipping a level.
+    """
+    seen, out = set(), []
+    for r in sorted(rows, key=lambda x: x["queue_id"]):
+        if r["status"] != "pending":
+            continue
+        key = (int(r["slot_position"]), r["building"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def pick_affordable_row(city, rows, positions):
+    """First queued building this city can start right now, or None.
+
+    Uses the costs already stored on each row as a cheap filter — no extra
+    requests during the scan.  The chosen row's cost is re-fetched by the
+    caller before the build is issued, so a stale stored cost can only affect
+    which building is tried first, never what is actually paid.
+    """
+    for cand in candidate_rows(rows)[:SKIP_AHEAD_MAX_CANDIDATES]:
+        slot_pos = int(cand["slot_position"])
+        if slot_pos >= len(positions):
+            continue
+        if positions[slot_pos].get("canUpgrade") is False:
+            continue        # the game itself refuses this one
+        cost = cost_tuple(cand)
+        if not any(cost):
+            continue        # cost unknown until fetched; not a cheap candidate
+        if stock_covers(city, cost):
+            return cand
+    return None
 
 
 def find_row(rows, queue_id):
@@ -3114,8 +3260,28 @@ def service_city(session, city_id, st, rows, stop_event):
             st["next_check"]       = eta + ETA_FUDGE_SECONDS
             return
 
-        # Bounds check: city layout may differ from what was queued (Bug 8).
         positions = city.get("position", [])
+
+        # Skip-ahead: rather than idling while the head of the queue waits for
+        # resources, start whichever queued building this city can already
+        # afford.  Nothing is cancelled — the rest stays queued in order.
+        # If none is affordable we fall through to the head row so shipping
+        # still gets kicked off for it.
+        if (WORKER_PREFS.get("queue_strategy", DEFAULT_QUEUE_STRATEGY)
+                == "skip_ahead"):
+            chosen = pick_affordable_row(city, rows, positions)
+            if chosen is not None and int(chosen["queue_id"]) != int(row["queue_id"]):
+                # set_wait_note replaces its own prefixed note in place and
+                # no-ops when unchanged, so this doesn't rewrite each tick.
+                set_wait_note(
+                    session, row,
+                    f"skipped ahead to {chosen['building']} "
+                    f"(slot {chosen['slot_position']}) — that one is "
+                    f"affordable now; this stays queued",
+                )
+                row = chosen
+
+        # Bounds check: city layout may differ from what was queued (Bug 8).
         slot_pos = int(row["slot_position"])
         if slot_pos >= len(positions):
             csv_update(
@@ -3201,6 +3367,28 @@ def service_city(session, city_id, st, rows, stop_event):
             issue_and_confirm(session, city_id, st, row, city, cost)
             return
         if now >= (st.get("ship_deadline") or 0):
+            if (WORKER_PREFS.get("queue_strategy", DEFAULT_QUEUE_STRATEGY)
+                    == "wait_in_order"):
+                # Keep waiting rather than cancelling: back to pending so the
+                # next tick re-ships and re-checks.  Notification is throttled
+                # by maybe_notify_shortage's cooldown.
+                csv_update(session, row["queue_id"], status="pending")
+                row["status"] = "pending"
+                set_wait_note(
+                    session, row,
+                    "resources haven't arrived yet — still waiting and "
+                    "re-checking (queue strategy: wait in order)",
+                )
+                st["phase"]            = "idle"
+                st["current_queue_id"] = None
+                maybe_notify_shortage(
+                    session, city_id, st,
+                    f"City {city.get('cityName', city_id)}: still short for "
+                    f"row {row['queue_id']} ({row['building']} lv "
+                    f"{row['target_level']}) — waiting for resources.",
+                    now,
+                )
+                return
             csv_update(
                 session, row["queue_id"],
                 status="skipped",
@@ -3373,6 +3561,10 @@ def scheduler_loop(session, stop_event, worker_token=None):
         # stale while this process is running, or a second worker could start.
         if worker_token is not None:
             _worker_lock_heartbeat(worker_lock_path(session), worker_token)
+
+        # Re-read each tick so changing the strategy from the menu takes
+        # effect on a running worker rather than needing a restart.
+        WORKER_PREFS["queue_strategy"] = get_queue_strategy(session)
 
         now = int(time.time())
         drain_shortage_events(session, city_state, now)
