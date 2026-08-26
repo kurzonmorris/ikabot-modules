@@ -98,18 +98,25 @@ VALID_STATUSES = ["pending", "active", "complete", "paused", "error"]
 #  Market Parsing
 # ============================================================
 
-def getActionPoints(html):
-    """Parse action points from a full city page. -1 when unparseable."""
+def getMaxActionPoints(html):
+    """The city's action point capacity. -1 when unparseable.
+    The header exposes no used/remaining counter, so this is a ceiling only —
+    it never tells you whether an action can be started right now.
+    """
     match = re.search(r'js_GlobalMenu_maxActionPoints"[^>]*>(\d+)<', html)
     return int(match.group(1)) if match else -1
 
 
 def getPriceLimits(html):
-    """Per-resource (min, max) price bounds from the own-offers page."""
-    limits = [(int(lower), int(upper)) for upper, lower in
-              re.findall(r"'upper':\s*(\d+),\s*'lower':\s*(\d+)", html)[:5]]
-    while len(limits) < 5:
-        limits.append((1, 999999))
+    """Per-resource (min, max) price bounds from the own-offers page.
+    Read out of boundariesConfig by resource name; the page prints upper first.
+    """
+    limits = []
+    for amt_key, _, _ in RESOURCE_PARAMS:
+        found = re.search(
+            r"'{}'\s*:\s*\{{\s*'upper'\s*:\s*(\d+)\s*,\s*'lower'\s*:\s*(\d+)".format(
+                re.escape(amt_key)), html)
+        limits.append((int(found.group(2)), int(found.group(1))) if found else (1, 999999))
     return limits
 
 
@@ -127,16 +134,23 @@ def getOwnOfferPrices(html):
 
 
 def getOwnOfferTradeTypes(html):
-    """Trade type of each own-offer slot, defaulting to sell."""
+    """Trade type of each own-offer slot, defaulting to sell.
+    Scoped to one <select> at a time so a slot with no selected option cannot
+    pick up the next slot's answer.
+    """
     types = []
     for _, _, type_key in RESOURCE_PARAMS:
-        name = re.escape(type_key)
-        found = (
-            re.search(r'<input[^>]*\bname="{}"[^>]*\bvalue="(333|444)"[^>]*\bchecked'.format(name), html)
-            or re.search(r'<input[^>]*\bchecked[^>]*\bname="{}"[^>]*\bvalue="(333|444)"'.format(name), html)
-            or re.search(r'<select[^>]*\bname="{}"[^>]*>[\s\S]*?<option[^>]*\bvalue="(333|444)"[^>]*\bselected'.format(name), html)
-        )
-        types.append(found.group(1) if found else TRADE_SELL)
+        block = re.search(
+            r'<select[^>]*\bname="{}"[^>]*>([\s\S]*?)</select>'.format(re.escape(type_key)), html)
+        chosen = TRADE_SELL
+        if block:
+            for option in re.findall(r'<option[^>]*>', block.group(1)):
+                if re.search(r'\bselected\b', option):
+                    value = re.search(r'\bvalue="(333|444)"', option)
+                    if value:
+                        chosen = value.group(1)
+                    break
+        types.append(chosen)
     return types
 
 
@@ -174,7 +188,13 @@ def filter_offers_by_max_price(offers, max_price):
 
 
 def sort_offers_by_distance(offers):
-    """Closest first — bienesXminuto is goods per minute, so higher is nearer."""
+    """Closest first, whichever list the offers came from.
+    The sell-goods list (333) reports a distance, where lower is nearer. The
+    buy-goods list (444) has no distance column in the place ikabot reads and
+    reports goods per minute instead, where higher is nearer.
+    """
+    if any("distance" in o for o in offers):
+        return sorted(offers, key=lambda o: o.get("distance", 10 ** 9))
     return sorted(offers, key=lambda o: -o.get("bienesXminuto", 0))
 
 
@@ -609,13 +629,13 @@ def _show_city_info(session, city):
     """Display city resources, gold, and action points."""
     gold, gold_prod = getGold(session, city)
     html = session.get(city_url + city["id"])
-    ap = getActionPoints(html)
+    ap = getMaxActionPoints(html)
 
     print("City: {}".format(city["name"]))
     print("Gold: {} (production: {}/hr)".format(
         addThousandSeparator(gold), addThousandSeparator(gold_prod)))
     if ap >= 0:
-        print("Action Points: {}".format(ap))
+        print("Action point capacity: {}".format(ap))
     print("")
     print("Resources:")
     for i in range(5):
@@ -1485,10 +1505,6 @@ def run_auto_trader(session, csv_path, interval_minutes, settings):
         # Sort by priority then order_id
         orders.sort(key=lambda o: (o.get("priority", 2), o.get("order_id", 0)))
 
-        # Check action points
-        any_html = session.get(city_url + str(commercial_cities[0]["id"]))
-        action_points = getActionPoints(any_html)
-
         # Group orders by city
         city_groups = {}
         for o in orders:
@@ -1521,13 +1537,13 @@ def run_auto_trader(session, csv_path, interval_minutes, settings):
                     _, notifs, gold = process_own_offers(session, city, own_offer_orders, gold)
                     all_notifications.extend(notifs)
 
-                # Process active trading orders
+                # Process active trading orders. Ship availability is the real
+                # gate here — the header only exposes the action point ceiling,
+                # never how many are left.
                 active_orders = [o for o in city_orders if o["mode"] == "active" and o["status"] == "active"]
-                if active_orders and action_points != 0:
+                if active_orders:
                     notifs = process_active_orders(session, city, active_orders, gold)
                     all_notifications.extend(notifs)
-                elif active_orders and action_points == 0:
-                    all_notifications.append("Skipped active orders - 0 action points")
 
                 # Price tracking
                 if settings.get("price_tracking"):
@@ -1711,11 +1727,16 @@ def _get_buy_offers(session, city, resource_index):
 
     offers = []
     for row in re.findall(r'<tr[^>]*>([\s\S]*?)</tr>', html):
-        city_match = re.search(r'<td class="short_text80">(.*?)<br/>\((.*?)\)', row)
-        amount_match = re.search(r'<div class="tooltip">([\d,.\xa0\s]+)</div>', row)
+        city_match = re.search(r'<td class="short_text80">([\s\S]*?)<br\s*/?>\s*\((.*?)\)', row)
+        # The visible amount is abbreviated ("2.00M"); the tooltip carries the
+        # real figure. It can arrive with extra attributes on the div.
+        amount_match = re.search(r'<div class="tooltip"[^>]*>([\d,.\xa0\s]+)</div>', row)
         price_match = re.search(r'<td style="white-space:nowrap;">(\d+)', row)
-        speed_match = re.search(r'<td>(\d+)</td>', row)
-        dest_match = re.search(r'href="\?view=takeOffer&destinationCityId=(\d+)', row)
+        # On this list the only bare numeric cell is Distance, where lower is
+        # nearer — the opposite of the goods-per-minute column ikabot reads on
+        # the buy-goods list.
+        distance_match = re.search(r'<td>(\d+)</td>', row)
+        dest_match = re.search(r'href="\?view=takeOffer&(?:amp;)?destinationCityId=(\d+)', row)
 
         if not all([city_match, amount_match, price_match, dest_match]):
             continue
@@ -1729,7 +1750,7 @@ def _get_buy_offers(session, city, resource_index):
             "jugadorAComprar": city_match.group(2).strip(),
             "amountAvailable": int(raw_amount),
             "precio": int(price_match.group(1)),
-            "bienesXminuto": int(speed_match.group(1)) if speed_match else 0,
+            "distance": int(distance_match.group(1)) if distance_match else 10 ** 9,
             "destinationCityId": dest_match.group(1),
         })
 

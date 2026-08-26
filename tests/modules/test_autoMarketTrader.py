@@ -29,37 +29,71 @@ def amt():
 
 # ---------------------------------------------------------------- parsers
 
-def test_action_points_parsed(amt):
-    html = '<span id="js_GlobalMenu_maxActionPoints" class="ap">7</span>'
-    assert amt.getActionPoints(html) == 7
+# Markup below is copied from the live game (cities Jokios and Lluhios),
+# not invented, so these tests fail if the game changes shape.
+
+_OWN_OFFERS_HTML = """
+boundariesConfig = {
+    'resource': {
+        'upper': 10,
+        'lower': 4},
+    'tradegood1': {
+        'upper': 12,
+        'lower': 5},
+    'tradegood2': {
+        'upper': 11,
+        'lower': 4},
+    'tradegood3': {
+        'upper': 50,
+        'lower': 18},
+    'tradegood4': {
+        'upper': 12,
+        'lower': 5}};
+<input type="text" class="textfield" size="4" name="resource" id="resource" value="518400">
+<input type="text" class="textfield" size="2" name="resourcePrice" id="resourcePrice" maxlength="2" value="7">
+<td class="select"><select name="resourceTradeType" id="resourceTradeType" size="1" class="dropdown">
+  <option value="333">Buy</option>
+  <option value="444" selected="">Sell</option>
+</select></td>
+<input type="text" class="textfield" size="2" name="tradegood1Price" id="tradegood1Price" maxlength="2" value="12">
+<select name="tradegood1TradeType" id="tradegood1TradeType" size="1" class="dropdown">
+  <option value="333" selected="">Buy</option>
+  <option value="444">Sell</option>
+</select>
+<input type="text" class="textfield" size="2" name="tradegood2Price" id="tradegood2Price" maxlength="2" value="11">
+<input type="text" class="textfield" size="2" name="tradegood3Price" id="tradegood3Price" maxlength="2" value="50">
+<input type="text" class="textfield" size="2" name="tradegood4Price" id="tradegood4Price" maxlength="2" value="5">
+"""
 
 
-def test_action_points_missing_returns_negative(amt):
+def test_action_point_capacity_parsed(amt):
+    html = '<li id="js_GlobalMenu_maxActionPoints" class="actions" title="Action Points">14</li>'
+    assert amt.getMaxActionPoints(html) == 14
+
+
+def test_action_point_capacity_missing_returns_negative(amt):
     """_show_city_info compares with >=, so this must never be None."""
-    assert amt.getActionPoints("<html>nothing here</html>") == -1
+    assert amt.getMaxActionPoints("<html>nothing here</html>") == -1
 
 
-def test_price_limits_are_min_then_max(amt):
-    """The page prints upper before lower; callers unpack (lo, hi)."""
-    html = "".join("{'upper': %d, 'lower': %d}," % (100 + i, 10 + i) for i in range(5))
-    limits = amt.getPriceLimits(html)
-    assert limits[0] == (10, 100)
-    assert limits[4] == (14, 104)
+def test_price_limits_read_boundaries_config(amt):
+    """upper prints before lower, and callers unpack (lo, hi)."""
+    limits = amt.getPriceLimits(_OWN_OFFERS_HTML)
+    assert limits == [(4, 10), (5, 12), (4, 11), (18, 50), (5, 12)]
 
 
-def test_price_limits_pads_to_five_slots(amt):
-    assert len(amt.getPriceLimits("{'upper': 50, 'lower': 5},")) == 5
+def test_price_limits_keyed_by_resource_not_position(amt):
+    """Crystal is the only slot with an upper of 50."""
+    assert amt.getPriceLimits(_OWN_OFFERS_HTML)[3] == (18, 50)
+
+
+def test_price_limits_fall_back_when_absent(amt):
+    assert amt.getPriceLimits("<html></html>") == [(1, 999999)] * 5
 
 
 def test_own_offer_prices_read_by_field_name(amt):
-    html = (
-        '<input type="text" name="resourcePrice" value="11"/>'
-        '<input type="text" name="tradegood1Price" value="22"/>'
-        '<input type="text" name="tradegood2Price" value="33"/>'
-        '<input type="text" name="tradegood3Price" value="44"/>'
-        '<input type="text" name="tradegood4Price" value="55"/>'
-    )
-    assert amt.getOwnOfferPrices(html) == [11, 22, 33, 44, 55]
+    """The amount field is name="resource"; the price is name="resourcePrice"."""
+    assert amt.getOwnOfferPrices(_OWN_OFFERS_HTML) == [7, 12, 11, 50, 5]
 
 
 def test_own_offer_price_unparseable_is_none(amt):
@@ -67,15 +101,20 @@ def test_own_offer_price_unparseable_is_none(amt):
     assert amt.getOwnOfferPrices("<html></html>") == [None] * 5
 
 
-def test_own_offer_trade_types_read_checked_radio(amt):
+def test_own_offer_trade_types_read_selected_option(amt):
+    types = amt.getOwnOfferTradeTypes(_OWN_OFFERS_HTML)
+    assert types[0] == amt.TRADE_SELL   # second option carries selected
+    assert types[1] == amt.TRADE_BUY    # first option carries selected
+    assert types[2] == amt.TRADE_SELL   # no select rendered: default
+
+
+def test_trade_type_does_not_leak_from_the_next_select(amt):
+    """A slot whose select has no selected option must not read the next one."""
     html = (
-        '<input type="radio" name="resourceTradeType" value="333" checked="checked"/>'
-        '<input type="radio" name="tradegood1TradeType" value="444" checked="checked"/>'
+        '<select name="resourceTradeType"><option value="333">Buy</option></select>'
+        '<select name="tradegood1TradeType"><option value="333" selected>Buy</option></select>'
     )
-    types = amt.getOwnOfferTradeTypes(html)
-    assert types[0] == amt.TRADE_BUY
-    assert types[1] == amt.TRADE_SELL
-    assert types[2] == amt.TRADE_SELL  # absent slots default to sell
+    assert amt.getOwnOfferTradeTypes(html)[0] == amt.TRADE_SELL
 
 
 # ----------------------------------------------------------- offer filters
@@ -99,7 +138,16 @@ def test_filter_offers_by_max_price_keeps_the_limit(amt):
     assert [o["precio"] for o in amt.filter_offers_by_max_price(offers, 10)] == [9, 10]
 
 
-def test_sort_offers_by_distance_puts_nearest_first(amt):
+def test_sort_by_distance_on_the_sell_list_treats_lower_as_nearer(amt):
+    """The 333 list reports Distance in squares."""
+    offers = [{"jugadorAComprar": "far", "distance": 9},
+              {"jugadorAComprar": "near", "distance": 2}]
+    assert amt.sort_offers_by_distance(offers)[0]["jugadorAComprar"] == "near"
+
+
+def test_sort_by_distance_on_the_buy_list_treats_higher_as_nearer(amt):
+    """The 444 list has no distance column where ikabot reads; it reports
+    goods per minute, which runs the other way."""
     offers = [_offer("far", 10, speed=2), _offer("near", 10, speed=9)]
     assert amt.sort_offers_by_distance(offers)[0]["jugadorAComprar"] == "near"
 
@@ -250,3 +298,63 @@ def test_unmanaged_slot_price_falls_back_safely(amt, market):
     payload = session.posted[-1]
     assert payload["tradegood1"] == "700"
     assert payload["tradegood1Price"] == "250"
+
+
+# ------------------------------------------------- sell-goods offer list
+
+# One real row from the 333 "Sell goods" list. Six cells: no goods-per-minute
+# column, an abbreviated amount with the true figure in the tooltip, and a
+# Distance cell where lower is nearer.
+_SELL_LIST_ROW = """
+<tr>
+  <td class="short_text80">Irana <br>(Dzohaars)</td>
+  <td>2.00M <div class="tooltip" updated="true">2,000,000</div></td>
+  <td><img src="//gf2.geo.gfsrv.net/x.png" alt="Building material"></td>
+  <td style="white-space:nowrap;">7 <img src="//x.png" class="icon_gold"> Per Piece</td>
+  <td>5</td>
+  <td><a href="?view=takeOffer&amp;destinationCityId=30485&amp;oldView=branchOffice&amp;activeTab=bargain&amp;cityId=9167&amp;position=9&amp;type=444&amp;resource=resource"><img src="//x.png"></a></td>
+</tr>
+"""
+
+
+class OfferListSession:
+    def __init__(self, rows):
+        self._body = "<table>" + rows + "</table>"
+
+    def post(self, url=None, params=None, **kwargs):
+        import json
+        return json.dumps([["a", "b"], ["c", ["d", self._body]]])
+
+
+def test_buy_offer_row_parsed_from_real_markup(amt):
+    offers = amt._get_buy_offers(OfferListSession(_SELL_LIST_ROW), _city(), 0)
+
+    assert len(offers) == 1
+    offer = offers[0]
+    assert offer["ciudadDestino"] == "Irana"
+    assert offer["jugadorAComprar"] == "Dzohaars"
+    assert offer["amountAvailable"] == 2000000   # from the tooltip, not "2.00M"
+    assert offer["precio"] == 7
+    assert offer["distance"] == 5
+    assert offer["destinationCityId"] == "30485"
+
+
+def test_buy_offer_amount_survives_extra_tooltip_attributes(amt):
+    """updated="true" sits inside the opening div tag."""
+    row = _SELL_LIST_ROW.replace('<div class="tooltip" updated="true">',
+                                 '<div class="tooltip">')
+    plain = amt._get_buy_offers(OfferListSession(row), _city(), 0)
+    assert plain[0]["amountAvailable"] == 2000000
+
+
+def test_buy_offer_accepts_either_br_and_ampersand_form(amt):
+    row = _SELL_LIST_ROW.replace("<br>", "<br/>").replace("&amp;", "&")
+    offers = amt._get_buy_offers(OfferListSession(row), _city(), 0)
+    assert offers[0]["jugadorAComprar"] == "Dzohaars"
+    assert offers[0]["destinationCityId"] == "30485"
+
+
+def test_buy_offers_sorted_best_price_first(amt):
+    cheap = _SELL_LIST_ROW.replace('nowrap;">7 ', 'nowrap;">3 ')
+    offers = amt._get_buy_offers(OfferListSession(_SELL_LIST_ROW + cheap), _city(), 0)
+    assert [o["precio"] for o in offers] == [7, 3]
