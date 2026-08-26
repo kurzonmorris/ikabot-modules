@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 # Auto Market Trader v2.1.0
 
+MODULE_NAME = "Auto Market Trader"
+MODULE_ENTRY = "autoMarketTrader"
+
 import csv
 import json
 import math
@@ -25,7 +28,7 @@ from ikabot.helpers.pedirInfo import read, getShipCapacity
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import addThousandSeparator, wait, getDateTime
-from ikabot.function.sellResources import getMarketInfo, chooseCommercialCity
+from ikabot.function.sellResources import getMarketInfo
 from ikabot.function.buyResources import getOffers, buy
 
 
@@ -92,31 +95,134 @@ VALID_STATUSES = ["pending", "active", "complete", "paused", "error"]
 
 
 # ============================================================
+#  Market Parsing
+# ============================================================
+
+def getMaxActionPoints(html):
+    """The city's action point capacity. -1 when unparseable.
+    The header exposes no used/remaining counter, so this is a ceiling only —
+    it never tells you whether an action can be started right now.
+    """
+    match = re.search(r'js_GlobalMenu_maxActionPoints"[^>]*>(\d+)<', html)
+    return int(match.group(1)) if match else -1
+
+
+def getPriceLimits(html):
+    """Per-resource (min, max) price bounds from the own-offers page.
+    Read out of boundariesConfig by resource name; the page prints upper first.
+    """
+    limits = []
+    for amt_key, _, _ in RESOURCE_PARAMS:
+        found = re.search(
+            r"'{}'\s*:\s*\{{\s*'upper'\s*:\s*(\d+)\s*,\s*'lower'\s*:\s*(\d+)".format(
+                re.escape(amt_key)), html)
+        limits.append((int(found.group(2)), int(found.group(1))) if found else (1, 999999))
+    return limits
+
+
+def _input_value(html, field_name):
+    tag = re.search(r'<input[^>]*\bname="{}"[^>]*>'.format(re.escape(field_name)), html)
+    if tag is None:
+        return None
+    value = re.search(r'\bvalue="(\d+)"', tag.group(0))
+    return int(value.group(1)) if value else None
+
+
+def getOwnOfferPrices(html):
+    """Price of each own-offer slot. None where the page could not be parsed."""
+    return [_input_value(html, price_key) for _, price_key, _ in RESOURCE_PARAMS]
+
+
+def getOwnOfferTradeTypes(html):
+    """Trade type of each own-offer slot, defaulting to sell.
+    Scoped to one <select> at a time so a slot with no selected option cannot
+    pick up the next slot's answer.
+    """
+    types = []
+    for _, _, type_key in RESOURCE_PARAMS:
+        block = re.search(
+            r'<select[^>]*\bname="{}"[^>]*>([\s\S]*?)</select>'.format(re.escape(type_key)), html)
+        chosen = TRADE_SELL
+        if block:
+            for option in re.findall(r'<option[^>]*>', block.group(1)):
+                if re.search(r'\bselected\b', option):
+                    value = re.search(r'\bvalue="(333|444)"', option)
+                    if value:
+                        chosen = value.group(1)
+                    break
+        types.append(chosen)
+    return types
+
+
+def _scan_market(session, city, resource_index, trade_type):
+    """Best price other players offer for a resource, plus the offer count.
+    TRADE_SELL scans their sell offers (lowest wins), TRADE_BUY their buy
+    offers (highest wins). Best price is None when nobody is offering.
+    """
+    if str(trade_type) == TRADE_BUY:
+        offers = _get_buy_offers(session, city, resource_index)
+    else:
+        _set_resource_filter(session, city, resource_index, TRADE_SELL)
+        offers = getOffers(session, city)
+    prices = [o["precio"] for o in offers if o.get("amountAvailable", 0) > 0]
+    if not prices:
+        return None, len(offers)
+    best = max(prices) if str(trade_type) == TRADE_BUY else min(prices)
+    return best, len(offers)
+
+
+def scanMarketPrices(session, city, resource_index, trade_type):
+    try:
+        return _scan_market(session, city, resource_index, trade_type)[0]
+    except Exception:
+        return None
+
+
+def filter_offers_by_player(offers, player_name):
+    target = str(player_name).strip().lower()
+    return [o for o in offers if str(o.get("jugadorAComprar", "")).strip().lower() == target]
+
+
+def filter_offers_by_max_price(offers, max_price):
+    return [o for o in offers if o.get("precio", 0) <= max_price]
+
+
+def sort_offers_by_distance(offers):
+    """Closest first, whichever list the offers came from.
+    The sell-goods list (333) reports a distance, where lower is nearer. The
+    buy-goods list (444) has no distance column in the place ikabot reads and
+    reports goods per minute instead, where higher is nearer.
+    """
+    if any("distance" in o for o in offers):
+        return sorted(offers, key=lambda o: o.get("distance", 10 ** 9))
+    return sorted(offers, key=lambda o: -o.get("bienesXminuto", 0))
+
+
+# ============================================================
 #  CSV Helpers
 # ============================================================
 
-def get_csv_path(session):
-    """Build CSV file path from session info.
-    Returns path like: .ikabot_autotrader_s1-en.csv
-    """
+def _data_path(session, template):
     server = "s{}-{}".format(session.mundo, session.servidor)
-    return ".ikabot_autotrader_{}.csv".format(server)
+    return os.path.join(IKABOT_DATA_DIR, template.format(server))
+
+
+def get_csv_path(session):
+    """Order CSV, per account, under IKABOT_DATA_DIR."""
+    return _data_path(session, "autotrader_{}.csv")
 
 
 def get_price_log_path(session):
-    """Build price log CSV file path."""
-    server = "s{}-{}".format(session.mundo, session.servidor)
-    return ".ikabot_autotrader_prices_{}.csv".format(server)
+    return _data_path(session, "autotrader_prices_{}.csv")
 
 
 def get_settings_path(session):
-    """Build settings JSON file path."""
-    server = "s{}-{}".format(session.mundo, session.servidor)
-    return ".ikabot_autotrader_{}_settings.json".format(server)
+    return _data_path(session, "autotrader_{}_settings.json")
 
 
 def save_settings(path, interval, daily_summary, price_tracking, city_id):
     """Persist scheduler settings to JSON."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     data = {
         "interval": interval,
         "daily_summary": daily_summary,
@@ -167,7 +273,7 @@ def read_orders(csv_path):
                     if "daily_reset_date" not in row or not row["daily_reset_date"]:
                         row["daily_reset_date"] = ""
                     orders.append(row)
-    except Exception as e:
+    except Exception:
         err_path = csv_path + ".read_error.log"
         try:
             with open(err_path, "a") as ef:
@@ -180,6 +286,7 @@ def read_orders(csv_path):
 
 def write_orders(csv_path, orders):
     """Write orders to CSV with backup and atomic replace."""
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
     backup = csv_path + ".bak"
     if os.path.exists(csv_path):
         shutil.copy2(csv_path, backup)
@@ -386,7 +493,6 @@ def verify_csv(csv_path, commercial_cities=None):
                 # Logic checks
                 try:
                     qty_remaining = int(row.get("quantity_remaining", 0) or 0)
-                    qty_fulfilled = int(row.get("quantity_fulfilled", 0) or 0)
                     if status == "active" and qty_remaining <= 0:
                         row_warnings.append("status is 'active' but quantity_remaining is 0 (should be 'complete')")
                     if status == "complete" and qty_remaining > 0:
@@ -445,6 +551,7 @@ def make_order(order_id, resource, order_type, mode, price, quantity,
 
 def log_price(price_log_path, resource, lowest_sell, highest_buy, num_offers, city_id):
     """Append a price observation to the price log CSV."""
+    os.makedirs(os.path.dirname(price_log_path) or ".", exist_ok=True)
     file_exists = os.path.exists(price_log_path)
     with open(price_log_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=PRICE_LOG_COLUMNS)
@@ -499,7 +606,7 @@ def _refresh_city(session, city):
 # ============================================================
 
 def print_module_banner(page_title=None):
-    print("\n")
+    banner()
     print("╔═══════════════════════════════════════════════════════════╗")
     print("║                AUTO MARKET TRADER  {}                 ║".format(MODULE_VERSION))
     print("╚═══════════════════════════════════════════════════════════╝")
@@ -522,13 +629,13 @@ def _show_city_info(session, city):
     """Display city resources, gold, and action points."""
     gold, gold_prod = getGold(session, city)
     html = session.get(city_url + city["id"])
-    ap = getActionPoints(html)
+    ap = getMaxActionPoints(html)
 
     print("City: {}".format(city["name"]))
     print("Gold: {} (production: {}/hr)".format(
         addThousandSeparator(gold), addThousandSeparator(gold_prod)))
     if ap >= 0:
-        print("Action Points: {}".format(ap))
+        print("Action point capacity: {}".format(ap))
     print("")
     print("Resources:")
     for i in range(5):
@@ -930,6 +1037,14 @@ def autoMarketTrader(session, event, stdin_fd, predetermined_input):
     except KeyboardInterrupt:
         event.set()
         return
+    except Exception:
+        if event.is_set():
+            raise
+        print("\n{}Auto Market Trader setup failed:{}\n{}".format(
+            bcolors.RED, bcolors.ENDC, traceback.format_exc()))
+        enter()
+        event.set()
+        return
 
 
 def _launch_background(session, event, csv_path, city, orders, interval,
@@ -975,7 +1090,8 @@ def _resource_index(resource_name):
         return -1
 
 
-def _build_own_offer_payload(city, resource_configs, existing_amounts, existing_prices, existing_types):
+def _build_own_offer_payload(city, resource_configs, existing_amounts, existing_prices,
+                             existing_types, price_limits):
     """Build updateOffers payload. Preserves non-managed resources.
     resource_configs: dict mapping resource_index -> {type, amount, price}
     """
@@ -998,9 +1114,14 @@ def _build_own_offer_payload(city, resource_configs, existing_amounts, existing_
             payload[amt_key] = str(cfg["amount"])
             payload[price_key] = str(cfg["price"])
         else:
-            payload[type_key] = existing_types[i] if i < len(existing_types) else TRADE_SELL
+            slot_type = existing_types[i] if i < len(existing_types) else TRADE_SELL
+            price = existing_prices[i] if i < len(existing_prices) else None
+            if price is None:
+                lo, hi = price_limits[i]
+                price = lo if slot_type == TRADE_BUY else hi
+            payload[type_key] = slot_type
             payload[amt_key] = str(existing_amounts[i])
-            payload[price_key] = str(existing_prices[i])
+            payload[price_key] = str(price)
     return payload
 
 
@@ -1040,12 +1161,15 @@ def process_own_offers(session, city, orders, gold):
         if not res_orders:
             continue
 
-        # The active order for this slot (highest priority)
+        # One marketplace slot per resource: the highest-priority order owns it.
+        # The rest must forget what they posted or they will read the owner's
+        # trades as their own the next time they take the slot over.
         active_order = res_orders[0]
         active_order["status"] = "active"
+        for other in res_orders[1:]:
+            _set_last_posted(other, 0)
 
         # Detect fulfillment: if current amount is less than what we posted last time
-        # We track this via the notes field storing last posted amount
         last_posted = _get_last_posted(active_order)
         current = current_amounts[idx]
         if last_posted > 0 and current < last_posted:
@@ -1074,11 +1198,28 @@ def process_own_offers(session, city, orders, gold):
                 notifications.append("ORDER #{} COMPLETE: {} {} total".format(
                     active_order["order_id"], active_order["order_type"].upper(),
                     addThousandSeparator(active_order["quantity_fulfilled"])))
-                continue
 
-        # Skip if order is now complete
-        if active_order["quantity_remaining"] <= 0:
+        # A finished order hands the slot to the next one waiting on this
+        # resource. With nobody waiting the slot is emptied, otherwise the
+        # completed offer keeps trading untracked.
+        while active_order["quantity_remaining"] <= 0:
             active_order["status"] = "complete"
+            _set_last_posted(active_order, 0)
+            res_orders = res_orders[1:]
+            if not res_orders:
+                active_order = None
+                break
+            active_order = res_orders[0]
+            active_order["status"] = "active"
+
+        if active_order is None:
+            existing_type = current_types[idx] if idx < len(current_types) else TRADE_SELL
+            existing_price = current_prices[idx] if idx < len(current_prices) else None
+            if existing_price is None:
+                lo, hi = price_limits[idx]
+                existing_price = lo if existing_type == TRADE_BUY else hi
+            resource_configs[idx] = {
+                "type": existing_type, "amount": 0, "price": existing_price}
             continue
 
         # Handle undercutting
@@ -1086,11 +1227,11 @@ def process_own_offers(session, city, orders, gold):
         if active_order.get("undercutting") == "yes" and idx < len(price_limits):
             lo, hi = price_limits[idx]
             if active_order["order_type"] == "sell":
-                lowest = scanMarketPrices(session, city, idx, "444")
+                lowest = scanMarketPrices(session, city, idx, TRADE_SELL)
                 if lowest is not None and lowest > lo:
                     price = max(lo, lowest - 1)
             else:
-                highest = scanMarketPrices(session, city, idx, "333")
+                highest = scanMarketPrices(session, city, idx, TRADE_BUY)
                 if highest is not None and highest < hi:
                     price = min(hi, highest + 1)
             active_order["price"] = price
@@ -1104,9 +1245,13 @@ def process_own_offers(session, city, orders, gold):
             # Limit by city available resources
             city_avail = city["availableResources"][idx] if idx < len(city.get("availableResources", [])) else 0
             desired = min(desired, city_avail)
-            # Limit by storage capacity (account for other resources in storage)
-            other_storage = sum(current_amounts[j] for j in range(5) if j != idx and j not in resource_configs)
-            managed_storage = sum(resource_configs[j]["amount"] for j in resource_configs if resource_configs[j]["type"] == TRADE_SELL)
+            # Only goods on sale occupy trading-post storage; buy offers do not.
+            other_storage = sum(
+                current_amounts[j] for j in range(5)
+                if j != idx and j not in resource_configs
+                and (current_types[j] if j < len(current_types) else TRADE_SELL) == TRADE_SELL)
+            managed_storage = sum(cfg["amount"] for j, cfg in resource_configs.items()
+                                  if cfg["type"] == TRADE_SELL)
             available_storage = max(0, storage_cap - other_storage - managed_storage)
             desired = min(desired, available_storage)
             trade_type = TRADE_SELL
@@ -1114,20 +1259,22 @@ def process_own_offers(session, city, orders, gold):
             # Buy order: limit by gold and max buy
             desired = min(desired, MAX_BUY_AMOUNT)
             if price > 0:
-                affordable = gold // price
-                desired = min(desired, affordable)
-                gold -= desired * price
+                desired = min(desired, gold // price)
             # Limit by warehouse space
             free_space = city["freeSpaceForResources"][idx] if idx < len(city.get("freeSpaceForResources", [])) else 0
             desired = min(desired, free_space)
             trade_type = TRADE_BUY
 
         amount = max(0, desired)
+        # Reserve gold only for what is actually posted, after every cap.
+        if trade_type == TRADE_BUY and price > 0:
+            gold -= amount * price
         resource_configs[idx] = {"type": trade_type, "amount": amount, "price": price}
         _set_last_posted(active_order, amount)
 
     if resource_configs:
-        payload = _build_own_offer_payload(city, resource_configs, current_amounts, current_prices, current_types)
+        payload = _build_own_offer_payload(city, resource_configs, current_amounts,
+                                           current_prices, current_types, price_limits)
         session.post(params=payload)
 
     return orders, notifications, gold
@@ -1319,6 +1466,9 @@ def run_auto_trader(session, csv_path, interval_minutes, settings):
     Re-reads CSV each cycle for hot-reload support.
     """
     commercial_cities = getCommercialCities(session)
+    if not commercial_cities:
+        sendToBot(session, "Auto Trader: no city has a Trading Post, stopping.")
+        return
     city_lookup = {str(c["id"]): c for c in commercial_cities}
 
     orders = read_orders(csv_path)
@@ -1333,13 +1483,12 @@ def run_auto_trader(session, csv_path, interval_minutes, settings):
         wait(interval_minutes * 60, maxrandom=60)
 
         # Hot-reload CSV with verification
-        orders, csv_warnings = verify_csv(csv_path, commercial_cities)
+        _, csv_warnings = verify_csv(csv_path, commercial_cities)
         if csv_warnings:
             warn_msg = "Auto Trader CSV warnings:\n" + "\n".join("  " + w for w in csv_warnings[:10])
             if len(csv_warnings) > 10:
                 warn_msg += "\n  ...and {} more".format(len(csv_warnings) - 10)
             sendToBot(session, warn_msg)
-        # Re-read with integer conversion for verified orders
         orders = read_orders(csv_path)
         if not any(o["status"] in ("pending", "active") for o in orders):
             sendToBot(session, "Auto Trader: all orders complete or paused.")
@@ -1356,10 +1505,6 @@ def run_auto_trader(session, csv_path, interval_minutes, settings):
         # Sort by priority then order_id
         orders.sort(key=lambda o: (o.get("priority", 2), o.get("order_id", 0)))
 
-        # Check action points
-        any_html = session.get(city_url + str(commercial_cities[0]["id"]))
-        action_points = getActionPoints(any_html)
-
         # Group orders by city
         city_groups = {}
         for o in orders:
@@ -1369,6 +1514,7 @@ def run_auto_trader(session, csv_path, interval_minutes, settings):
             city_groups[cid].append(o)
 
         all_notifications = []
+        errors_before = {id(o): int(o.get("error_count", 0)) for o in orders}
 
         # Process each city's orders with per-city error handling
         for cid, city_orders in city_groups.items():
@@ -1391,13 +1537,13 @@ def run_auto_trader(session, csv_path, interval_minutes, settings):
                     _, notifs, gold = process_own_offers(session, city, own_offer_orders, gold)
                     all_notifications.extend(notifs)
 
-                # Process active trading orders
+                # Process active trading orders. Ship availability is the real
+                # gate here — the header only exposes the action point ceiling,
+                # never how many are left.
                 active_orders = [o for o in city_orders if o["mode"] == "active" and o["status"] == "active"]
-                if active_orders and action_points != 0:
+                if active_orders:
                     notifs = process_active_orders(session, city, active_orders, gold)
                     all_notifications.extend(notifs)
-                elif active_orders and action_points == 0:
-                    all_notifications.append("Skipped active orders - 0 action points")
 
                 # Price tracking
                 if settings.get("price_tracking"):
@@ -1410,13 +1556,16 @@ def run_auto_trader(session, csv_path, interval_minutes, settings):
                         res_idx = _resource_index(res_name)
                         if res_idx < 0:
                             continue
-                        lowest = scanMarketPrices(session, city, res_idx, "444")
-                        highest = scanMarketPrices(session, city, res_idx, "333")
-                        log_price(price_log_path, res_name, lowest, highest, 0, str(city["id"]))
+                        lowest, num_sell = _scan_market(session, city, res_idx, TRADE_SELL)
+                        highest, num_buy = _scan_market(session, city, res_idx, TRADE_BUY)
+                        log_price(price_log_path, res_name, lowest, highest,
+                                  num_sell + num_buy, str(city["id"]))
 
-                # Reset error count for orders that processed successfully
+                # Clear the error count only for orders that raised nothing
+                # this cycle — otherwise escalation could never reach the
+                # threshold.
                 for o in city_orders:
-                    if o["status"] == "active":
+                    if o["status"] == "active" and int(o.get("error_count", 0)) == errors_before.get(id(o), 0):
                         o["error_count"] = 0
 
             except Exception:
@@ -1575,20 +1724,37 @@ def _get_buy_offers(session, city, resource_index):
     }
     resp = session.post(params=data)
     html = json.loads(resp, strict=False)[1][1][1]
-    hits = re.findall(
-        r'<td class="short_text80">(.*?)<br/>\((.*?)\)[\s\S]*?<div class="tooltip">([\d,]+)</div>[\s\S]*?<td style="white-space:nowrap;">(\d+)[\s\S]*?<td>(\d+)</td>[\s\S]*?href="\?view=takeOffer&destinationCityId=(\d+)',
-        html
-    )
+
     offers = []
-    for city_name, player_name, amount_str, price, dist, dest_id in hits:
+    for row in re.findall(r'<tr[^>]*>([\s\S]*?)</tr>', html):
+        city_match = re.search(r'<td class="short_text80">([\s\S]*?)<br\s*/?>\s*\((.*?)\)', row)
+        # The visible amount is abbreviated ("2.00M"); the tooltip carries the
+        # real figure. It can arrive with extra attributes on the div.
+        amount_match = re.search(r'<div class="tooltip"[^>]*>([\d,.\xa0\s]+)</div>', row)
+        price_match = re.search(r'<td style="white-space:nowrap;">(\d+)', row)
+        # On this list the only bare numeric cell is Distance, where lower is
+        # nearer — the opposite of the goods-per-minute column ikabot reads on
+        # the buy-goods list.
+        distance_match = re.search(r'<td>(\d+)</td>', row)
+        dest_match = re.search(r'href="\?view=takeOffer&(?:amp;)?destinationCityId=(\d+)', row)
+
+        if not all([city_match, amount_match, price_match, dest_match]):
+            continue
+
+        raw_amount = re.sub(r'[^\d]', '', amount_match.group(1))
+        if not raw_amount:
+            continue
+
         offers.append({
-            "ciudadDestino": city_name.strip(),
-            "jugadorAComprar": player_name.strip(),
-            "amountAvailable": int(amount_str.replace(",", "").replace(".", "").replace("\xa0", "")),
-            "precio": int(price),
-            "bienesXminuto": int(dist),
-            "destinationCityId": dest_id,
+            "ciudadDestino": city_match.group(1).strip(),
+            "jugadorAComprar": city_match.group(2).strip(),
+            "amountAvailable": int(raw_amount),
+            "precio": int(price_match.group(1)),
+            "distance": int(distance_match.group(1)) if distance_match else 10 ** 9,
+            "destinationCityId": dest_match.group(1),
         })
+
+    offers.sort(key=lambda o: -o["precio"])
     return offers
 
 
@@ -1849,8 +2015,6 @@ def process_active_orders(session, city, orders, gold):
                     session, city, verified, sell_amount, alloc_ships, ship_capacity, res_idx)
                 amount_sold += actual_sold
                 desired -= actual_sold
-                gold_earned = actual_sold * verified["precio"]
-                order["daily_spent"] += gold_earned
                 last_offer = verified
                 break
             except Exception:
