@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.3"
+PANEL_VERSION = "1.0.4"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -864,8 +864,18 @@ document.addEventListener('click',function(e){
   run(b.dataset.a,b.dataset.arg,b.textContent.trim());
 });
 
-var editing=null;
+var editing=null, openTasks={}, gridSig='';
 var el=function(id){return document.getElementById(id);};
+
+// The grid is rebuilt on every poll, which would throw away an open dropdown a
+// few seconds after opening it. Remember what was open and restore it.
+// 'toggle' does not bubble, so listen in the capture phase.
+document.addEventListener('toggle', function(e){
+  var d=e.target;
+  if(d.tagName==='DETAILS'&&d.dataset.inst){
+    if(d.open)openTasks[d.dataset.inst]=1; else delete openTasks[d.dataset.inst];
+  }
+}, true);
 
 el('bscope').addEventListener('change',function(){
   el('binstwrap').style.display=this.value==='some'?'':'none';
@@ -1021,7 +1031,7 @@ function refresh(){
     head.textContent='ikabot '+(v.ikabot||'?')+' / mod '+(v.mod||'?')+
       ' — '+s.running+' running'+(s.dead?', '+s.dead+' crashed':'');
 
-    grid.innerHTML=s.instances.map(function(i){
+    var gridHtml=s.instances.map(function(i){
       var ports=i.ports.map(function(p){
         return s.host?'<a href="http://'+s.host+':'+p+'" target="_blank">'+p+'</a>':p;
       }).join(' ');
@@ -1031,14 +1041,17 @@ function refresh(){
               i.task_count+' task'+(i.task_count===1?'':'s')+'</span>';
       }
       var drop='';
+      var isOpen=openTasks[i.name]?' open':'';
       if(i.tasks&&i.tasks.length){
-        drop='<details class="tasks"><summary>Active processes ('+i.tasks.length+')</summary><ul>'+
+        drop='<details class="tasks" data-inst="'+i.name+'"'+isOpen+
+             '><summary>Active processes ('+i.tasks.length+')</summary><ul>'+
           i.tasks.map(function(t){
             return '<li><span class="act">'+esc(t.action)+'</span><br>'+
                    '<span class="st">'+esc(t.status||'')+ago(t.started)+'</span></li>';
           }).join('')+'</ul></details>';
       } else if(i.task_count===0){
-        drop='<details class="tasks"><summary>Active processes (0)</summary>'+
+        drop='<details class="tasks" data-inst="'+i.name+'"'+isOpen+
+             '><summary>Active processes (0)</summary>'+
              '<p class="st" style="margin:6px 0 0">Idle — logged in, nothing running.</p></details>';
       }
       var keys=(last.buttons||[]).filter(function(b){
@@ -1059,6 +1072,7 @@ function refresh(){
         (keys?'<div class="keys">'+keys+'</div>':'')+
         drop+'</div>';
     }).join('') || '<p class="sub">No instances found.</p>';
+    if(gridHtml!==gridSig){ grid.innerHTML=gridHtml; gridSig=gridHtml; }
 
     mods.innerHTML=(s.modules||[]).map(function(m){
       var cls={outdated:'v-outdated',current:'v-current',new:'v-new'}[m.status]||'v-unknown';
