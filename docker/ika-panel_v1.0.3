@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.2"
+PANEL_VERSION = "1.0.3"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -32,6 +32,13 @@ STATUS_DIR = os.environ.get("STATUS_DIR", "/config/.ikabot/status")
 QUICK_KEYS = [k.strip() for k in os.environ.get("QUICK_KEYS", "5,6,9,11").split(",")
               if k.strip().isdigit()]
 BUTTONS_FILE = os.environ.get("PANEL_BUTTONS", "/config/panel-buttons.json")
+
+REPO = os.environ.get("IKABOT_REPO", "kurzonmorris/ikabot-modules")
+BRANCH = os.environ.get("IKABOT_BRANCH", "main")
+# config.py is read raw rather than through the API: it is one small file and
+# needs no rate-limited call.
+CONFIG_URL = ("https://raw.githubusercontent.com/%s/%s/ikabot/config.py"
+              % (REPO, BRANCH))
 
 LABEL_OK = re.compile(r"^[\w \-/&().+#]{1,24}$")
 # Anything printable is allowed — ikabot prompts take "s", "all", "a-20k",
@@ -56,7 +63,7 @@ _run_lock = threading.Lock()
 
 # GitHub's unauthenticated API allows 60 calls an hour, so remote versions are
 # cached rather than fetched on every poll.
-_avail = {"data": {}, "checked": 0.0, "error": ""}
+_avail = {"data": {}, "ikabot": {}, "checked": 0.0, "error": ""}
 _avail_lock = threading.Lock()
 
 
@@ -78,7 +85,27 @@ def is_newer(remote, local):
     return a + (0,) * (n - len(a)) > b + (0,) * (n - len(b))
 
 
+def remote_ikabot_versions():
+    """IKABOT_VERSION / IKABOT_MOD_VERSION as published in the repo."""
+    import urllib.error
+    import urllib.request
+    try:
+        req = urllib.request.Request(CONFIG_URL,
+                                     headers={"User-Agent": "ika-panel/%s" % PANEL_VERSION})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            text = resp.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+        return {}
+    out = {}
+    for key, label in (("IKABOT_VERSION", "ikabot"), ("IKABOT_MOD_VERSION", "mod")):
+        m = re.search(r'^%s\s*=\s*"([^"]+)"' % key, text, re.M)
+        if m:
+            out[label] = m.group(1)
+    return out
+
+
 def refresh_available():
+    core = remote_ikabot_versions()
     raw = _sh(["ika-modules", "available"], timeout=90).strip()
     data, err = {}, ""
     try:
@@ -93,6 +120,8 @@ def refresh_available():
     with _avail_lock:
         if data:
             _avail["data"] = data
+        if core:
+            _avail["ikabot"] = core
         _avail["error"] = err
         _avail["checked"] = time.time()
 
@@ -413,6 +442,7 @@ def state():
 
     with _avail_lock:
         avail, checked, avail_err = dict(_avail["data"]), _avail["checked"], _avail["error"]
+        core_avail = dict(_avail["ikabot"])
 
     for m in modules:
         remote = avail.get(m["name"], "")
@@ -448,6 +478,7 @@ def state():
         "checked": checked,
         "avail_error": avail_err,
         "panel_version": PANEL_VERSION,
+        "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
         "status_orphans": orphans,
         "buttons": load_buttons(),
@@ -791,12 +822,16 @@ min-width:42px;display:inline-block;text-align:right}
 
 <section>
   <h2>ikabot</h2>
+  <table style="margin-bottom:12px"><thead><tr>
+    <th>Component</th><th>Installed</th><th>Available</th><th></th></tr></thead>
+  <tbody id="corever"></tbody></table>
   <div class="row">
     <button class="p" data-a="update">Download &amp; update ikabot</button>
     <button class="d" data-a="update_rollback">Roll back last update</button>
   </div>
   <p class="sub" style="margin:12px 0 0">
-    Instances keep running the old code until you restart them.
+    Red means a newer version is published. Instances keep running the old code
+    until you restart them.
   </p>
 </section>
 
@@ -938,6 +973,19 @@ document.getElementById('openweb').addEventListener('click',function(){
                'pop-ups for this page in your browser and press again.');
 });
 
+// Compare numerically so 1.10.0 beats 1.9.3, which a string compare gets wrong.
+function newer(remote,local){
+  if(!remote)return false;
+  if(!local)return true;
+  var a=String(remote).split('.'),b=String(local).split('.');
+  for(var i=0;i<Math.max(a.length,b.length);i++){
+    var x=parseInt((a[i]||'0').replace(/\D/g,''),10)||0;
+    var y=parseInt((b[i]||'0').replace(/\D/g,''),10)||0;
+    if(x!==y)return x>y;
+  }
+  return false;
+}
+
 function esc(x){return String(x==null?'':x).replace(/[&<>"]/g,function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 
@@ -1026,6 +1074,19 @@ function refresh(){
         '<td style="text-align:right"><button data-a="module_one" data-arg="'+
         esc(m.name)+'"'+hi+'>'+act+'</button></td></tr>';
     }).join('') || '<tr><td colspan="5" class="sub">No modules installed.</td></tr>';
+
+    var ca=s.versions_available||{}, cv=s.versions||{};
+    document.getElementById('corever').innerHTML=[
+      ['ikabot','ikabot'],['mod','modded by kurzon']
+    ].map(function(pair){
+      var k=pair[0], have=cv[k]||'', want=ca[k]||'';
+      var state=!want?'v-unknown':(newer(want,have)?'v-outdated':'v-current');
+      return '<tr><td>'+pair[1]+'</td>'+
+        '<td class="mono '+state+'">'+(have||'—')+'</td>'+
+        '<td class="mono '+state+'">'+(want||'not checked')+'</td>'+
+        '<td class="scope">'+(!want?'':(newer(want,have)?'update available':'up to date'))+
+        '</td></tr>';
+    }).join('');
 
     if(!s.status_available){
       var h=document.getElementById('statushint');
