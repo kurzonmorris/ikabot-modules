@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.4"
+__version__ = "2.2.5"
 
 import csv
 import glob
@@ -1671,14 +1671,113 @@ def _add_to_queue(session):
 # View queue (menu option 2)
 # ---------------------------------------------------------------------------
 
-def _view_queue(session):
-    banner()
-    rows = csv_load(session)
-    if not rows:
-        print("  Queue is empty.")
-        enter()
-        return
+ACTIVE_STATUSES = ("pending", "shipping", "running")
 
+
+def _build_view_groups(rows):
+    """Collapse rows to one entry per (city, slot, building) for the queue view.
+
+    A build-to-level request becomes one row per level, so a handful of
+    buildings can fill the screen.  Each group reports the span it still has
+    to cover — next level through final target — instead of every step.
+    """
+    from collections import defaultdict
+    key_rows = defaultdict(list)
+    for r in sorted(rows, key=lambda x: x["queue_id"]):
+        key = (r["city_id"], r.get("city_name", ""),
+               int(r["slot_position"]), r["building"])
+        key_rows[key].append(r)
+
+    groups = []
+    for (cid, cname, slot, building), rs in key_rows.items():
+        active  = [r for r in rs if r["status"] in ACTIVE_STATUSES]
+        skipped = [r for r in rs if r["status"] == "skipped"]
+        # Span the still-to-do levels; fall back to the skipped ones so a
+        # fully-skipped building still shows what it was aiming for.
+        levels = [int(r["target_level"]) for r in (active or rs)]
+        running = next((r for r in rs if r["status"] == "running"), None)
+
+        cost = [0] * 5
+        for r in active:
+            for i, v in enumerate(cost_tuple(r)):
+                cost[i] += v
+
+        qids = [int(r["queue_id"]) for r in rs]
+        groups.append({
+            "city_id": cid, "city_name": cname,
+            "slot": slot, "building": building,
+            "next_level": min(levels) if levels else 0,
+            "max_level":  max(levels) if levels else 0,
+            "n_active": len(active), "n_skipped": len(skipped),
+            "running": running,
+            "shipping": any(r["status"] == "shipping" for r in rs),
+            "modes": sorted({r["transport_mode"] for r in rs}),
+            "cost": cost,
+            "qid_lo": min(qids), "qid_hi": max(qids),
+            "notes": [(r["queue_id"], r["notes"]) for r in rs if r.get("notes")],
+        })
+    groups.sort(key=lambda g: (str(g["city_id"]), g["qid_lo"]))
+    return groups
+
+
+def _print_queue_grouped(rows):
+    """One line per building, showing the level span still to be done."""
+    groups = _build_view_groups(rows)
+    by_city = {}
+    for g in groups:
+        by_city.setdefault((g["city_id"], g["city_name"]), []).append(g)
+
+    for (cid, cname), city_groups in by_city.items():
+        print(f"\n  City: {cname}  (id {cid})\n")
+        # ETA is getDateTime()[8:] -> "dd_HH-MM-SS", 11 chars.
+        print(f"  {'Slot':>4}  {'Building':<18}  {'Levels':>10}  "
+              f"{'Mode':>5}  {'Rows':>4}  {'Status':<12}  {'ETA':<11}  QIDs")
+        print("  " + "-" * 88)
+
+        city_cost = [0] * 5
+        for g in city_groups:
+            for i in range(5):
+                city_cost[i] += g["cost"][i]
+
+            if g["next_level"] == g["max_level"]:
+                span = f"lv {g['max_level']}"
+            else:
+                span = f"{g['next_level']} → {g['max_level']}"
+
+            if g["running"] is not None:
+                status, colour = "running", bcolors.GREEN
+            elif g["shipping"]:
+                status, colour = "shipping", bcolors.YELLOW
+            elif g["n_active"]:
+                status, colour = "pending", ""
+            else:
+                status, colour = "skipped", bcolors.RED
+            if g["n_skipped"] and status != "skipped":
+                status = f"{status} +{g['n_skipped']}skip"
+
+            eta = (g["running"] or {}).get("expected_finish", "")
+            eta_str = getDateTime(int(eta))[8:] if eta else "--"
+            qid_str = (str(g["qid_lo"]) if g["qid_lo"] == g["qid_hi"]
+                       else f"{g['qid_lo']}-{g['qid_hi']}")
+            mode = g["modes"][0] if len(g["modes"]) == 1 else "mixed"
+
+            print(f"  {g['slot']:>4}  {g['building']:<18}  {span:>10}  "
+                  f"{mode:>5}  {g['n_active']:>4}  "
+                  f"{colour}{status:<12}{bcolors.ENDC if colour else ''}  "
+                  f"{eta_str:<11}  {qid_str}")
+
+        if any(city_cost):
+            print(f"\n    Remaining cost: {_fmt_res(city_cost)}")
+        # Notes carry the reason a row was skipped or is waiting — the only
+        # place that explains a city sitting entirely on "pending".
+        for g in city_groups:
+            for qid, note in g["notes"]:
+                print(f"    {bcolors.YELLOW}· {g['building']} "
+                      f"(qid {qid}): {note}{bcolors.ENDC}")
+
+
+def _print_queue_detailed(rows):
+    """Original one-line-per-level listing."""
     by_city = {}
     for r in rows:
         by_city.setdefault(r["city_id"], []).append(r)
@@ -1714,8 +1813,32 @@ def _view_queue(session):
                 cost_str = _fmt_res(cost) if any(cost) else "0"
                 suffix = f"  notes: {notes}" if notes else ""
                 print(f"         cost: {cost_str}{suffix}")
-    print("")
-    enter()
+
+
+def _view_queue(session):
+    detailed = False
+    while True:
+        banner()
+        rows = csv_load(session)
+        if not rows:
+            print("  Queue is empty.")
+            enter()
+            return
+
+        if detailed:
+            _print_queue_detailed(rows)
+            print("\n  (c) Compact view    (') Back")
+        else:
+            _print_queue_grouped(rows)
+            print("\n  (d) Detailed per-level view    (') Back")
+
+        ans = str(read(empty=True)).strip().lower()
+        if ans == "d":
+            detailed = True
+        elif ans == "c":
+            detailed = False
+        else:
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -2696,6 +2819,36 @@ def find_row(rows, queue_id):
     return next((r for r in rows if r["queue_id"] == int(queue_id)), None)
 
 
+# Prefix marking a note the worker wrote itself, so user-written notes from
+# the edit menu are never overwritten or cleared.
+WAIT_NOTE_PREFIX = "waiting: "
+
+
+def set_wait_note(session, row, reason):
+    """Record why a pending row hasn't started yet.
+
+    Both deferral paths (another slot busy, game refusing the upgrade) leave
+    the row pending with no ETA and no explanation, which reads as a city
+    stuck on "all pending" for no visible reason.  Only written when the text
+    changes, so a city that waits for hours doesn't rewrite the CSV each tick.
+    """
+    note = WAIT_NOTE_PREFIX + reason
+    current = row.get("notes") or ""
+    if current == note:
+        return
+    if current and not current.startswith(WAIT_NOTE_PREFIX):
+        return          # user's own note — leave it alone
+    csv_update(session, row["queue_id"], notes=note)
+    row["notes"] = note
+
+
+def clear_wait_note(session, row):
+    """Drop a worker-written wait note once the row actually starts."""
+    if (row.get("notes") or "").startswith(WAIT_NOTE_PREFIX):
+        csv_update(session, row["queue_id"], notes="")
+        row["notes"] = ""
+
+
 def reconcile_rows_with_city(session, city, rows):
     """Drop/skip pending rows the city has already moved past.
 
@@ -2939,11 +3092,18 @@ def service_city(session, city_id, st, rows, stop_event):
         # If ANY slot in this city is busy, the game won't accept a new build.
         busy = first_busy_slot(city)
         if busy is not None and busy["position"] != int(row["slot_position"]):
+            set_wait_note(
+                session, row,
+                f"slot {busy['position']} is building until "
+                f"{getDateTime(int(busy['completed']))[8:]} — the game allows "
+                f"only one build per city",
+            )
             st["next_check"] = int(busy["completed"]) + ETA_FUDGE_SECONDS
             return
         if busy is not None and busy["position"] == int(row["slot_position"]):
             # The slot we want is already busy — adopt it as our running row.
             eta = int(busy["completed"])
+            clear_wait_note(session, row)
             csv_update(
                 session, row["queue_id"],
                 status="running", expected_finish=eta,
@@ -3001,8 +3161,15 @@ def service_city(session, city_id, st, rows, stop_event):
             # (insufficient citizens, wine/happiness, or game-side resource check).
             # Retry after a short wait rather than wasting a POST.
             if positions[slot_pos].get("canUpgrade") is False:
+                set_wait_note(
+                    session, row,
+                    "the game won't start this upgrade yet — usually too few "
+                    "citizens, low wine/happiness, or a resource check; "
+                    "retrying every minute",
+                )
                 st["next_check"] = now + SHIP_RETRY_SECONDS
                 return
+            clear_wait_note(session, row)
             issue_and_confirm(session, city_id, st, row, city, cost)
             return
 
