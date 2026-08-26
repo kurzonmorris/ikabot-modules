@@ -858,6 +858,9 @@ instances there are.
 > Earlier versions do not write those files, and the panel says so rather than
 > showing an empty list. Get it with `ika update`.
 
+The dropdown stays open while you read it — the list refreshes underneath
+without closing it.
+
 A task count that is blank means no status file — either the instance has never
 finished starting, or ikabot is older than 1.8.1. `0 tasks` genuinely means
 idle at the menu.
