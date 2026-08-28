@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.6.0"
+MODULE_VERSION = "10.7.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -818,7 +818,7 @@ def release_shipping_lock(session, use_freighters=False):
 #  TRANSPORT SCHEDULE CSV  — persistent state for all shipping modes
 # ============================================================================
 
-SCHEDULE_SCHEMA_VERSION = 2
+SCHEDULE_SCHEMA_VERSION = 3
 
 SCHEDULE_COLUMNS = [
     "schedule_id",
@@ -845,12 +845,33 @@ SCHEDULE_COLUMNS = [
     "created_at",
     "notes",
     "schema_version",
+    "priority",
+    "last_duration",
 ]
+
+# Priority 1 = vital .. 5 = least vital. Everything defaults to 3 (standard).
+PRIORITY_DEFAULT = 3
+PRIORITY_LABELS = {
+    1: "1 Vital",
+    2: "2 Important",
+    3: "3 Standard",
+    4: "4 Not important",
+    5: "5 Least vital",
+}
+
+# Columns added after v1, with the value to backfill for rows that predate
+# them. Keeping this in one place means a schema bump never needs bespoke
+# migration code again.
+SCHEDULE_COLUMN_DEFAULTS = {
+    "run_at_time": "",
+    "priority": PRIORITY_DEFAULT,
+    "last_duration": 0,
+}
 
 SCHEDULE_INT_COLS = {
     "schedule_id", "interval_hours", "total_shipments",
     "created_at", "schema_version", "ap_max_wait_minutes",
-    "min_shipment_threshold",
+    "min_shipment_threshold", "priority", "last_duration",
 }
 SCHEDULE_INT_OR_BLANK_COLS = {"last_run", "next_run"}
 SCHEDULE_JSON_COLS = {
@@ -1341,7 +1362,12 @@ def enforce_transport_schema_or_abort(session):
     on_disk = int(data.get("version", -1))
     if on_disk == SCHEDULE_SCHEMA_VERSION:
         return True
-    if on_disk == 1 and SCHEDULE_SCHEMA_VERSION == 2:
+    if 0 < on_disk < SCHEDULE_SCHEMA_VERSION:
+        # Forward migration: add whatever columns are missing, filled with
+        # their documented defaults, and keep every existing row. Older
+        # builds handled exactly one version step with bespoke code; doing
+        # it from the defaults table means a schema bump can never strand a
+        # user's schedules again.
         csv_file = transport_csv_path(session)
         if os.path.exists(csv_file):
             try:
@@ -1349,9 +1375,14 @@ def enforce_transport_schema_or_abort(session):
                 with open(csv_file, newline="", encoding="utf-8") as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        row.setdefault("run_at_time", "")
+                        for col, default in SCHEDULE_COLUMN_DEFAULTS.items():
+                            if not str(row.get(col, "")).strip():
+                                row[col] = default
                         rows.append(row)
                 write_csv_atomic(csv_file, SCHEDULE_COLUMNS, rows)
+                print(f"  {C.DIM}Upgraded schedule data "
+                      f"v{on_disk} -> v{SCHEDULE_SCHEMA_VERSION} "
+                      f"({len(rows)} schedule(s) kept).{C.RESET}")
             except Exception as e:
                 print(f"  {C.WARN}Migration failed: {e}{C.RESET}")
                 return False
@@ -1517,7 +1548,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
                        min_shipment_threshold=0, interval_hours=0,
                        run_at_time="",
                        notif_level="none", status="pending",
-                       notes=""):
+                       notes="", priority=PRIORITY_DEFAULT):
     now_ts = int(time.time())
     if run_at_time:
         first_run = _next_run_for_time(run_at_time)
@@ -1548,6 +1579,8 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "created_at":      now_ts,
         "notes":           notes,
         "schema_version":  SCHEDULE_SCHEMA_VERSION,
+        "priority":        _clamp_priority(priority),
+        "last_duration":   0,
     }
 
 
@@ -1563,6 +1596,26 @@ def _next_run_for_time(time_str):
     if target <= now:
         target += datetime.timedelta(days=1)
     return int(target.timestamp())
+
+
+def _ask_priority(mode_name):
+    """Ask how important this delivery is. Enter = standard."""
+    def _draw():
+        print_module_banner(f"{mode_name} — Priority")
+        print(f"  {C.DIM}How important is this delivery?{C.RESET}\n")
+        print(f"  {C.BOLD}(1){C.RESET} Vital — sent before everything else")
+        print(f"  {C.BOLD}(2){C.RESET} Important")
+        print(f"  {C.BOLD}(3){C.RESET} Standard {C.DIM}(default){C.RESET}")
+        print(f"  {C.BOLD}(4){C.RESET} Not important")
+        print(f"  {C.BOLD}(5){C.RESET} Least vital — only when nothing else is waiting")
+        print(f"\n  {C.DIM}Higher priorities are sent first, and a vital "
+              f"delivery due soon holds back lower ones.{C.RESET}")
+        print(f"  {C.HINT}Press Enter for standard.{C.RESET}")
+    _draw()
+    _set_redraw(_draw)
+    val = read(min=1, max=5, digit=True, default=PRIORITY_DEFAULT,
+               additionalValues=[""])
+    return _clamp_priority(val if val != "" else PRIORITY_DEFAULT)
 
 
 def _get_schedule_timing(event, mode_name):
@@ -2331,6 +2384,20 @@ def parse_transport_value(val):
     return val.strip().lower() == "f"
 
 
+def ensure_priority_column(fieldnames, rows):
+    """Add a per-row Priority column (1-5) to an older bulk CSV.
+
+    Row priority orders the destinations WITHIN one bulk run, so a vital
+    city is served first even though the whole file is one schedule.
+    """
+    if "Priority" not in fieldnames:
+        fieldnames = list(fieldnames) + ["Priority"]
+    for row in rows:
+        if not str(row.get("Priority", "")).strip():
+            row["Priority"] = str(PRIORITY_DEFAULT)
+    return fieldnames
+
+
 def ensure_from_column(fieldnames, rows):
     """Add From column after Sulphur if missing (backward compatibility)."""
     if "From" not in fieldnames:
@@ -2928,6 +2995,11 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                 else:
                     fd = f"{C.DIM}off{C.RESET}"
                 print(f"  {C.BOLD}(f){C.RESET} Full ships only: {fd}")
+                fw = _freeze_window_seconds(session) // 60
+                fwd = (f"{C.OK}{fw} min{C.RESET}" if fw
+                       else f"{C.DIM}off{C.RESET}")
+                print(f"  {C.BOLD}(h){C.RESET} Hold lower priorities before a "
+                      f"vital delivery: {fwd}")
                 print(f"{C.DIM}  After creating a schedule (options 1-6), start the scheduler"
                       f" to run it.{C.RESET}")
                 print(f"\n  {C.HEADER}── Shipping Modes ──{C.RESET}\n")
@@ -2956,7 +3028,7 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
             shipping_mode = read(min=1, max=8, digit=True,
                                  additionalValues=["'", "s", "S", "o", "O",
                                                     "x", "X", "n", "N",
-                                                    "f", "F", ""])
+                                                    "f", "F", "h", "H", ""])
             if shipping_mode == "":
                 continue
             if shipping_mode == "'":
@@ -2981,6 +3053,27 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                     if result != "CANCEL":
                         notif_preset = result
                         _NOTIF_PRESET = result
+                    continue
+                elif letter == "h":
+                    print(f"\n  {C.DIM}When a priority 1 or 2 delivery is due "
+                          f"within this many minutes, priority 3-5 "
+                          f"deliveries are held back so ships and action "
+                          f"points are free for it.{C.RESET}")
+                    print(f"  {C.DIM}A job that has been timed before and "
+                          f"would finish in time is still allowed "
+                          f"through.{C.RESET}")
+                    print(f"  {C.DIM}0 turns holding off.{C.RESET}\n")
+                    hv = read(msg="  Minutes: ", min=0, max=720, digit=True,
+                              empty=True, additionalValues=["'"])
+                    if hv != "'":
+                        prefs = load_prefs()
+                        prefs["freeze_window_minutes"] = (
+                            int(hv) if isinstance(hv, int)
+                            else FREEZE_WINDOW_DEFAULT_MINUTES)
+                        save_prefs(prefs)
+                        print(f"  {C.OK}Hold window set to "
+                              f"{prefs['freeze_window_minutes']} min.{C.RESET}")
+                        enter()
                     continue
                 elif letter == "f":
                     prefs = load_prefs()
@@ -3371,6 +3464,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         return
 
     src_names = ", ".join(c["name"] for c in origin_cities)
+    priority = _ask_priority("Consolidate")
     schedule_row = build_schedule_row(
         schedule_id=0,
         mode="consolidate",
@@ -3385,6 +3479,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         run_at_time=run_at_time,
         notif_level=notif_config.get("level", "none"),
         notes=f"{src_names} -> {destination_city['name']}",
+        priority=priority,
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
@@ -3527,6 +3622,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         return
 
     dest_names = ", ".join(c["name"] for c in destination_cities)
+    priority = _ask_priority("Distribute")
     schedule_row = build_schedule_row(
         schedule_id=0,
         mode="distribute",
@@ -3540,6 +3636,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         run_at_time=run_at_time,
         notif_level=notif_config.get("level", "none"),
         notes=f"{origin_city['name']} -> {dest_names[:30]}",
+        priority=priority,
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
@@ -3727,6 +3824,7 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         return
 
     city_ids_for_balance = [str(c["id"]) for c in all_cities]
+    priority = _ask_priority("Even Distribution")
     schedule_row = build_schedule_row(
         schedule_id=0,
         mode="even",
@@ -3737,6 +3835,7 @@ def evenDistributionMode(session, event, stdin_fd, predetermined_input,
         interval_hours=0,
         notif_level=notif_config.get("level", "none"),
         notes=f"Balance {selected_names}",
+        priority=priority,
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
@@ -3906,6 +4005,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                     if notif_config is None:
                         return
 
+                    priority = _ask_priority("Auto Send")
                     schedule_row = build_schedule_row(
                         schedule_id=0,
                         mode="autosend",
@@ -3916,6 +4016,7 @@ def autoSendMode(session, event, stdin_fd, predetermined_input,
                         interval_hours=0,
                         notif_level=notif_config.get("level", "none"),
                         notes=f"Auto Send -> {destination_city['name']}",
+                        priority=priority,
                     )
                     _save_and_maybe_activate(
                         session, event, schedule_row,
@@ -4028,6 +4129,7 @@ def render_auto_send_review(destination_city, destination_island, routes,
 BULK_CSV_COLUMNS = [
     "Transport", "X", "Y", "Player", "City", "City_Location",
     "Wood", "Wine", "Marble", "Crystal", "Sulphur", "From", "Hours",
+    "Priority",
 ]
 
 
@@ -4749,6 +4851,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         fieldnames, run_columns = ensure_run_columns(fieldnames, rows)
         fieldnames = ensure_transport_column(fieldnames, rows)
         fieldnames = ensure_from_column(fieldnames, rows)
+        fieldnames = ensure_priority_column(fieldnames, rows)
 
         mode, run_column = choose_run_slot(session, event, rows, run_columns)
         if run_column is None:
@@ -4910,6 +5013,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         event.set()
         return
 
+    priority = _ask_priority("Bulk Distribution")
     schedule_row = build_schedule_row(
         schedule_id=0,
         mode="bulk",
@@ -4920,6 +5024,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         interval_hours=interval_hours,
         notif_level=notif_config.get("level", "none"),
         notes=f"CSV: {os.path.basename(csv_path)}",
+        priority=priority,
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
@@ -5225,6 +5330,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         return
 
     dest_names = ", ".join(d["name"] for d in destinations)
+    priority = _ask_priority("Keep Topped Up")
     schedule_row = build_schedule_row(
         schedule_id=0,
         mode="topup",
@@ -5238,6 +5344,7 @@ def topUpMode(session, event, stdin_fd, predetermined_input,
         run_at_time=run_at_time,
         notif_level=notif_config.get("level", "none"),
         notes=f"TopUp: {dest_names[:30]}",
+        priority=priority,
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
@@ -5626,10 +5733,11 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
 
     cycle_sent = 0
     for idx_c, cid in enumerate(source_city_ids):
-        if _deadline_passed(deadline_ts):
-            _notify_deadline_cut(
-                session, notif_config, "CONSOLIDATE",
-                f"{len(source_city_ids) - idx_c} source city(ies)")
+        if _deadline_passed(deadline_ts) or _should_yield(session):
+            if _deadline_passed(deadline_ts):
+                _notify_deadline_cut(
+                    session, notif_config, "CONSOLIDATE",
+                    f"{len(source_city_ids) - idx_c} source city(ies)")
             break
         if int(cid) in excluded:
             continue
@@ -5718,10 +5826,11 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
     cycle_sent = 0
 
     for idx_d, dcid in enumerate(dest_city_ids):
-        if _deadline_passed(deadline_ts):
-            _notify_deadline_cut(
-                session, notif_config, "DISTRIBUTE",
-                f"{len(dest_city_ids) - idx_d} destination(s)")
+        if _deadline_passed(deadline_ts) or _should_yield(session):
+            if _deadline_passed(deadline_ts):
+                _notify_deadline_cut(
+                    session, notif_config, "DISTRIBUTE",
+                    f"{len(dest_city_ids) - idx_d} destination(s)")
             break
         html = session.get(city_url + str(dcid))
         try:
@@ -5808,10 +5917,11 @@ def run_topup_cycle(session, sched, notif_config, log_path):
 
     cycle_sent = 0
     for idx_d, dcid in enumerate(dest_city_ids):
-        if _deadline_passed(deadline_ts):
-            _notify_deadline_cut(
-                session, notif_config, "TOPUP",
-                f"{len(dest_city_ids) - idx_d} destination(s)")
+        if _deadline_passed(deadline_ts) or _should_yield(session):
+            if _deadline_passed(deadline_ts):
+                _notify_deadline_cut(
+                    session, notif_config, "TOPUP",
+                    f"{len(dest_city_ids) - idx_d} destination(s)")
             break
         dcid_str = str(dcid)
         targets = dest_targets.get(dcid_str)
@@ -5828,7 +5938,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
 
         exhausted_res = set()
         for cid in source_city_ids:
-            if _deadline_passed(deadline_ts):
+            if _deadline_passed(deadline_ts) or _should_yield(session):
                 break
             cid_str = str(cid)
             if int(cid) in excluded:
@@ -5926,10 +6036,11 @@ def run_even_cycle(session, sched, notif_config, log_path):
     cycle_sent = 0
 
     for res_idx in resource_indices:
-        if _deadline_passed(deadline_ts):
-            _notify_deadline_cut(
-                session, notif_config, "EVEN DIST",
-                "remaining balancing shipments")
+        if _deadline_passed(deadline_ts) or _should_yield(session):
+            if _deadline_passed(deadline_ts):
+                _notify_deadline_cut(
+                    session, notif_config, "EVEN DIST",
+                    "remaining balancing shipments")
             break
         if not isinstance(res_idx, int) or res_idx < 0 or res_idx >= len(materials_names):
             continue
@@ -5961,7 +6072,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
         r_rem = receivers[0]["amount"]
 
         while si < len(senders) and ri < len(receivers):
-            if _deadline_passed(deadline_ts):
+            if _deadline_passed(deadline_ts) or _should_yield(session):
                 break
             amount = min(s_rem, r_rem)
 
@@ -6089,10 +6200,11 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
     exhaustion_log = []
     cycle_sent = 0
     for idx_r, route in enumerate(routes):
-        if _deadline_passed(deadline_ts):
-            _notify_deadline_cut(
-                session, notif_config, "AUTO SEND",
-                f"{len(routes) - idx_r} shipment(s)")
+        if _deadline_passed(deadline_ts) or _should_yield(session):
+            if _deadline_passed(deadline_ts):
+                _notify_deadline_cut(
+                    session, notif_config, "AUTO SEND",
+                    f"{len(routes) - idx_r} shipment(s)")
             break
         fs_derived = [
             i < len(requested) and isinstance(requested[i], (tuple, list))
@@ -6170,6 +6282,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     fieldnames = ensure_transport_column(fieldnames, rows)
     fieldnames = ensure_from_column(fieldnames, rows)
+    fieldnames = ensure_priority_column(fieldnames, rows)
     issues_col = issues_col_for_run(run_column)
     for row in rows:
         row[issues_col] = ""
@@ -6389,18 +6502,26 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     if len(routes) > 1:
         from collections import defaultdict
-        groups = defaultdict(list)
+        # Interleave by source city so no one city's action points are
+        # drained first — but do it WITHIN each priority band, so vital
+        # rows are all served before standard ones.
+        by_priority = defaultdict(list)
         for route_info in routes:
-            src_id = str(route_info[1][0]["id"])
-            groups[src_id].append(route_info)
-        interleaved = []
-        while any(groups.values()):
-            for src_id in list(groups.keys()):
-                if groups[src_id]:
-                    interleaved.append(groups[src_id].pop(0))
-                else:
-                    del groups[src_id]
-        routes = interleaved
+            row_pr = _clamp_priority(
+                rows[route_info[0] - 1].get("Priority", PRIORITY_DEFAULT))
+            by_priority[row_pr].append(route_info)
+        ordered = []
+        for pr in sorted(by_priority):
+            groups = defaultdict(list)
+            for route_info in by_priority[pr]:
+                groups[str(route_info[1][0]["id"])].append(route_info)
+            while any(groups.values()):
+                for src_id in list(groups.keys()):
+                    if groups[src_id]:
+                        ordered.append(groups[src_id].pop(0))
+                    else:
+                        del groups[src_id]
+        routes = ordered
 
     if not routes:
         if should_notify(notif_config, "error"):
@@ -6583,6 +6704,11 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
 
     # --- First pass: send all routes, deferring AP-blocked ones ---
     for idx, route_info in enumerate(routes):
+        if _should_yield(session):
+            # Unsent rows stay pending in the run column, so the resumed
+            # cycle carries straight on from here.
+            skipped += total - idx
+            break
         if _deadline_passed(deadline_ts):
             # Unsent rows stay pending in the run column and are picked
             # up by the next cycle.
@@ -6617,7 +6743,8 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     # --- Retry loop: re-check AP-blocked cities every 5 min ---
     retry_round = 0
     while (deferred_routes and retry_round < max_ap_retries
-           and not _deadline_passed(deadline_ts)):
+           and not _deadline_passed(deadline_ts)
+           and not _should_yield(session)):
         retry_round += 1
         session.setStatus(
             f"[AP WAIT] {len(deferred_routes)} shipment(s) deferred, "
@@ -6834,7 +6961,12 @@ def transport_scheduler_loop(session, stop_event):
                 _wait_or_wake(session, stop_event, TICK_BUDGET_SECONDS)
                 continue
 
-            for sched in active:
+            # Most important first, so a big standard run can no longer be
+            # picked ahead of a vital one just for sitting earlier in the
+            # file. Recomputed every tick, so a schedule that becomes due
+            # mid-tick is considered on the next pass.
+            window = _freeze_window_seconds(session)
+            for sched in _priority_order(active, now):
                 # Check the flag file too: a long cycle (a big bulk run can
                 # take hours) would otherwise ignore (o) until every
                 # schedule in this tick had been attempted.
@@ -6843,11 +6975,22 @@ def transport_scheduler_loop(session, stop_event):
                     stop_event.set()
                     break
 
-                next_run = sched.get("next_run", "")
-                if isinstance(next_run, int) and next_run > now:
+                sid = sched["schedule_id"]
+
+                frozen, why = _frozen_for(sched, schedules, now, window)
+                if frozen:
+                    try:
+                        session.setStatus(
+                            f"Schedule #{sid} held: {why}")
+                    except Exception:
+                        pass
                     continue
 
-                sid = sched["schedule_id"]
+                _preempt.update({"schedule_id": sid,
+                                 "priority": _sched_priority(sched),
+                                 "yielded": False})
+                _yield_cache["at"] = 0.0     # force a fresh look this cycle
+                started_at = time.time()
                 try:
                     cycle_sent = execute_schedule(session, sched, notif_config, log_path)
                 except Exception as exc:
@@ -6866,11 +7009,43 @@ def transport_scheduler_loop(session, stop_event):
                         last_run=now, next_run=now + 3600,
                         status="active",
                     )
+                    _preempt["schedule_id"] = None
                     continue
+
+                elapsed = int(max(0, time.time() - started_at))
+                was_preempted = _preempt["yielded"]
+                _preempt["schedule_id"] = None
 
                 total = sched.get("total_shipments", 0) + cycle_sent
                 interval = sched.get("interval_hours", 0)
                 run_at = sched.get("run_at_time", "")
+
+                if was_preempted:
+                    # Stood aside for something more important. The work is
+                    # NOT dropped: leave it due right now so it resumes the
+                    # moment the higher-priority deliveries are done —
+                    # directly behind them in the queue, not a whole
+                    # interval later. Bulk keeps its per-row progress; the
+                    # other modes recompute from live stock, so nothing is
+                    # sent twice.
+                    transport_csv_update(
+                        session, sid,
+                        last_run=now, next_run=now,
+                        total_shipments=total, status="active",
+                    )
+                    if should_notify(notif_config, "error"):
+                        try:
+                            sendToBot(
+                                session,
+                                f"SCHEDULE #{sid} PAUSED FOR A MORE "
+                                f"IMPORTANT DELIVERY\n"
+                                f"It stood aside for higher-priority work "
+                                f"and is queued to resume as soon as that "
+                                f"finishes. Nothing was lost — anything it "
+                                f"had not sent yet is still pending.")
+                        except Exception:
+                            pass
+                    continue
 
                 if interval > 0:
                     if run_at:
@@ -6881,6 +7056,7 @@ def transport_scheduler_loop(session, stop_event):
                         session, sid,
                         last_run=now, next_run=next_ts,
                         total_shipments=total, status="active",
+                        last_duration=elapsed,
                     )
                 else:
                     # One-time schedule: mark it done rather than delete it,
@@ -6890,6 +7066,7 @@ def transport_scheduler_loop(session, stop_event):
                         session, sid,
                         last_run=now, next_run="",
                         total_shipments=total, status="completed",
+                        last_duration=elapsed,
                     )
 
             schedules = transport_csv_load(session)
@@ -7090,6 +7267,154 @@ def _warn_if_previous_worker_died(session, notif_config):
                 f"restarted.")
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+#  Priority scheduling
+# ---------------------------------------------------------------------------
+
+# A vital delivery due within this window freezes lower-priority work, so
+# ships and action points are free when it fires.
+FREEZE_WINDOW_DEFAULT_MINUTES = 30
+HIGH_PRIORITIES = (1, 2)
+
+# Cache for the preemption check so a long cycle does not re-read the CSV
+# for every single shipment.
+_yield_cache = {"at": 0.0, "best": None}
+_YIELD_CACHE_SECONDS = 20
+
+# Set while a cycle is running; the runners consult it between shipments.
+_preempt = {"schedule_id": None, "priority": PRIORITY_DEFAULT, "yielded": False}
+
+
+def _clamp_priority(value):
+    """Coerce anything to a valid priority, defaulting to standard."""
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        return PRIORITY_DEFAULT
+    return min(5, max(1, p))
+
+
+def _sched_priority(sched):
+    return _clamp_priority(sched.get("priority", PRIORITY_DEFAULT))
+
+
+def _is_due(sched, now):
+    nr = sched.get("next_run", "")
+    if isinstance(nr, int):
+        return nr <= now
+    return True          # blank/never set means "run at the next opportunity"
+
+
+def _priority_order(schedules, now):
+    """Due work, most important first; ties broken by who has waited longest.
+
+    Sorting by (priority, next_run, id) is what stops a big low-priority run
+    from being picked simply because it sits earlier in the file.
+    """
+    due = [s for s in schedules if _is_due(s, now)]
+    def _key(s):
+        nr = s.get("next_run", "")
+        return (_sched_priority(s),
+                nr if isinstance(nr, int) else 0,
+                s.get("schedule_id", 0))
+    return sorted(due, key=_key)
+
+
+def _freeze_window_seconds(session):
+    try:
+        mins = int(load_prefs().get("freeze_window_minutes",
+                                    FREEZE_WINDOW_DEFAULT_MINUTES))
+    except Exception:
+        mins = FREEZE_WINDOW_DEFAULT_MINUTES
+    return max(0, mins) * 60
+
+
+def _next_high_priority_due(schedules, now):
+    """When the next vital/important schedule is due, or None."""
+    soonest = None
+    for s in schedules:
+        if s.get("status") != "active":
+            continue
+        if _sched_priority(s) not in HIGH_PRIORITIES:
+            continue
+        nr = s.get("next_run", "")
+        at = nr if isinstance(nr, int) else now
+        if at < now:
+            at = now
+        if soonest is None or at < soonest:
+            soonest = at
+    return soonest
+
+
+def _frozen_for(sched, schedules, now, window_seconds):
+    """(frozen, reason) — should this lower-priority schedule hold off?
+
+    Holds P3-5 while a vital delivery is about to fire, so the ships and
+    action points it needs are not spent on something less important first.
+    Backfill: a job we have timed before, and which would finish before the
+    vital one is due, is still allowed through — freezing the fleet solid
+    for half an hour would waste more capacity than it protects.
+    """
+    if window_seconds <= 0:
+        return False, ""
+    if _sched_priority(sched) in HIGH_PRIORITIES:
+        return False, ""
+    high_at = _next_high_priority_due(schedules, now)
+    if high_at is None or high_at - now > window_seconds:
+        return False, ""
+
+    known = sched.get("last_duration", 0)
+    if isinstance(known, int) and known > 0:
+        # 25% margin, since cycles vary with ship availability.
+        if now + known * 1.25 <= high_at:
+            return False, ""
+    mins = int(max(0, high_at - now) // 60)
+    return True, (f"a priority 1-2 delivery is due in ~{mins} min")
+
+
+def _note_yield_target(session, my_priority):
+    """True if something more important than us is due right now."""
+    nowc = time.time()
+    if nowc - _yield_cache["at"] > _YIELD_CACHE_SECONDS:
+        _yield_cache["at"] = nowc
+        try:
+            rows = transport_csv_load(session)
+            now = int(nowc)
+            best = None
+            for s in rows:
+                if s.get("status") != "active":
+                    continue
+                if s.get("schedule_id") == _preempt["schedule_id"]:
+                    continue
+                if not _is_due(s, now):
+                    continue
+                pr = _sched_priority(s)
+                if best is None or pr < best:
+                    best = pr
+            _yield_cache["best"] = best
+        except Exception:
+            _yield_cache["best"] = None
+    best = _yield_cache["best"]
+    return best is not None and best < my_priority
+
+
+def _should_yield(session):
+    """Called by the mode runners between shipments.
+
+    Yields at a shipment boundary rather than mid-dispatch: stopping inside
+    a delivery would abandon cargo already committed to ships, and the
+    interrupted work is requeued rather than dropped.
+    """
+    if _preempt["schedule_id"] is None:
+        return False
+    if _preempt["yielded"]:
+        return True
+    if _note_yield_target(session, _preempt["priority"]):
+        _preempt["yielded"] = True
+        return True
+    return False
 
 
 def _stop_requested(session, stop_event):
@@ -7401,9 +7726,9 @@ def _view_schedules(session):
         mode_labels[id(r)] = mode
     mode_width = max([13] + [len(m) for m in mode_labels.values()])
 
-    print(f"\n  {C.BOLD}{'ID':>4} {'Mode':<{mode_width}} {'Status':<10} {'Repeat':<10} "
+    print(f"\n  {C.BOLD}{'ID':>4} {'Pri':>4} {'Mode':<{mode_width}} {'Status':<10} {'Repeat':<10} "
           f"{'Ships':<5} {'Sent':>6} {'Last Run':<12} {'Notes'}{C.RESET}")
-    print(f"  {'---':>4} {'---':<{mode_width}} {'---':<10} {'---':<10} "
+    print(f"  {'---':>4} {'---':>4} {'---':<{mode_width}} {'---':<10} {'---':<10} "
           f"{'---':<5} {'---':>6} {'---':<12} {'---'}")
 
     for r in rows:
@@ -7427,7 +7752,11 @@ def _view_schedules(session):
         else:
             last_str = "never"
 
-        print(f"  {sid:>4} {mode:<{mode_width}} {sc}{status:<10}{C.RESET} {interval_str:<10} "
+        pr = _sched_priority(r)
+        pc = C.RED if pr == 1 else (C.YELLOW if pr == 2 else
+                                    (C.DIM if pr >= 4 else ""))
+        print(f"  {sid:>4} {pc}{pr:>4}{C.RESET} {mode:<{mode_width}} "
+              f"{sc}{status:<10}{C.RESET} {interval_str:<10} "
               f"{ship:<5} {total_sent:>6} {last_str:<12} {notes}")
 
     print(f"\n  {C.DIM}Total: {len(rows)} schedule(s){C.RESET}\n")
@@ -7449,6 +7778,7 @@ def _view_schedule_detail(sched):
     print(f"\n  Schedule #{sid}")
     print(f"  {'─' * 40}")
     print(f"  Mode:          {mode.capitalize()}")
+    print(f"  Priority:      {PRIORITY_LABELS.get(_sched_priority(sched), '?')}")
     print(f"  Status:        {_sd.get(status, status)}")
     print(f"  Ship type:     {ship}")
     run_at = sched.get("run_at_time", "")
@@ -7577,16 +7907,27 @@ def _modify_schedule(session):
             if hc:
                 print(f"  {C.BOLD}(8){C.RESET} Source / destination cities")
             print(f"  {C.BOLD}(9){C.RESET} AP wait & min shipment")
+            print(f"  {C.BOLD}(p){C.RESET} Priority "
+                  f"{C.DIM}(now: {PRIORITY_LABELS.get(_sched_priority(t), '?')}){C.RESET}")
             print(f"  {C.BOLD}('){C.RESET} Back")
 
         _draw_modify()
         _set_redraw(_draw_modify)
-        choice = read(min=1, max=9, digit=True, additionalValues=["'", ""])
+        choice = read(min=1, max=9, digit=True,
+                      additionalValues=["'", "", "p", "P"])
         if choice == "":
             continue
         if choice == "'":
-
             return
+
+        if isinstance(choice, str) and choice.lower() == "p":
+            new_pr = _ask_priority(f"Schedule #{sid}")
+            transport_csv_update(session, sid, priority=new_pr)
+            target["priority"] = new_pr
+            print(f"  {C.OK}Priority set to "
+                  f"{PRIORITY_LABELS.get(new_pr, new_pr)}.{C.RESET}")
+            enter()
+            continue
 
         if choice == 1:
             cur_rat = target.get("run_at_time", "")
@@ -7959,4 +8300,5 @@ def _view_schedules_compact(rows):
         status = r.get("status", "?")
         interval = r.get("interval_hours", 0)
         interval_str = f"every {interval}h" if interval > 0 else "once"
-        print(f"    #{sid} {mode} ({interval_str}) [{status}]")
+        print(f"    #{sid} {mode} ({interval_str}) [{status}] "
+              f"P{_sched_priority(r)}")
