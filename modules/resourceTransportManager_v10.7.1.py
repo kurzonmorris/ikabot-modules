@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.0"
+MODULE_VERSION = "10.7.1"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -1519,10 +1519,40 @@ def transport_csv_update(session, schedule_id, **fields):
     _transport_csv_modify(session, _apply)
 
 
-def next_schedule_id(rows):
-    if not rows:
-        return 1
-    return max(r.get("schedule_id", 0) for r in rows) + 1
+def next_schedule_id(session, rows):
+    """Allocate a schedule id that has never been used before.
+
+    max(existing)+1 reused the id of a deleted schedule. That is a real
+    corruption risk: a cycle for the OLD #7 finishing after the user has
+    deleted it and created a new #7 would write its last_run/next_run/
+    status onto the new schedule. A high-water mark in the schema sidecar
+    makes ids monotonic, so a late write can only ever target an id that
+    no longer exists (a harmless no-op).
+    """
+    highest = max([r.get("schedule_id", 0) for r in rows] + [0])
+    sidecar = transport_schema_sidecar_path(session)
+    data = {}
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    try:
+        seen = int(data.get("last_schedule_id", 0))
+    except (TypeError, ValueError):
+        seen = 0
+    new_id = max(highest, seen) + 1
+    data["last_schedule_id"] = new_id
+    data.setdefault("version", SCHEDULE_SCHEMA_VERSION)
+    data.setdefault("columns", SCHEDULE_COLUMNS)
+    try:
+        tmp = sidecar + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, sidecar)
+    except Exception:
+        pass          # worst case we fall back to max+1 next time
+    return new_id
 
 
 def transport_csv_count_active(session):
@@ -5365,7 +5395,7 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
         return
 
     rows = transport_csv_load(session)
-    schedule_row["schedule_id"] = next_schedule_id(rows)
+    schedule_row["schedule_id"] = next_schedule_id(session, rows)
     transport_csv_append(session, schedule_row)
     sid = schedule_row["schedule_id"]
     mode_label = schedule_row.get("mode", "?").capitalize()
@@ -6920,6 +6950,12 @@ def transport_scheduler_loop(session, stop_event):
     )
     log_path = TRANSPORT_WORKER_PREFS.get("log_path", "")
     _tick_errors = 0
+    # Clear any marker left behind by a cycle that died mid-flight, so a
+    # restarted loop cannot inherit a stale "currently running" schedule.
+    _preempt.update({"schedule_id": None, "priority": PRIORITY_DEFAULT,
+                     "yielded": False})
+    _yield_cache["at"] = 0.0
+    starving_reported = set()
 
     while not stop_event.is_set():
         if os.path.exists(transport_stop_flag_path(session)):
@@ -6966,7 +7002,39 @@ def transport_scheduler_loop(session, stop_event):
             # file. Recomputed every tick, so a schedule that becomes due
             # mid-tick is considered on the next pass.
             window = _freeze_window_seconds(session)
-            for sched in _priority_order(active, now):
+            ordered = _priority_order(active, now)
+
+            # Strict priority means a low-priority schedule can be
+            # outranked indefinitely. That is the intended rule, so it is
+            # reported rather than overridden — silently promoting it would
+            # break the very guarantee priority exists to give.
+            for s in ordered:
+                sid_s = s.get("schedule_id")
+                nr = s.get("next_run", "")
+                overdue = (isinstance(nr, int) and now - nr > STARVATION_SECONDS)
+                if overdue and sid_s not in starving_reported:
+                    starving_reported.add(sid_s)
+                    if should_notify(notif_config, "error"):
+                        try:
+                            hrs = int((now - nr) // 3600)
+                            sendToBot(
+                                session,
+                                f"SCHEDULE #{sid_s} HAS BEEN WAITING "
+                                f"{hrs}h\n"
+                                f"It is priority "
+                                f"{_sched_priority(s)} and more important "
+                                f"deliveries keep taking precedence, so it "
+                                f"has not run.\n"
+                                f"This is how priority is meant to work — "
+                                f"but if it should be going out, raise its "
+                                f"priority with (p) in Modify Schedule, or "
+                                f"lower the others.")
+                        except Exception:
+                            pass
+                elif not overdue:
+                    starving_reported.discard(sid_s)
+
+            for sched in ordered:
                 # Check the flag file too: a long cycle (a big bulk run can
                 # take hours) would otherwise ignore (o) until every
                 # schedule in this tick had been attempted.
@@ -7278,6 +7346,9 @@ def _warn_if_previous_worker_died(session, notif_config):
 FREEZE_WINDOW_DEFAULT_MINUTES = 30
 HIGH_PRIORITIES = (1, 2)
 
+# How long a due schedule may be outranked before we say so.
+STARVATION_SECONDS = 24 * 3600
+
 # Cache for the preemption check so a long cycle does not re-read the CSV
 # for every single shipment.
 _yield_cache = {"at": 0.0, "best": None}
@@ -7300,9 +7371,19 @@ def _sched_priority(sched):
     return _clamp_priority(sched.get("priority", PRIORITY_DEFAULT))
 
 
+# A next_run further out than this cannot be legitimate: the longest
+# scheduling horizon the module ever sets is one interval, or the next
+# occurrence of a daily time. Anything beyond it means the clock was wrong
+# when the value was written (VM resume, bad NTP sync) and has since been
+# corrected — without this the schedule would simply never run again.
+MAX_SCHEDULING_HORIZON = 30 * 86400
+
+
 def _is_due(sched, now):
     nr = sched.get("next_run", "")
     if isinstance(nr, int):
+        if nr > now + MAX_SCHEDULING_HORIZON:
+            return True   # implausible future date — treat as due
         return nr <= now
     return True          # blank/never set means "run at the next opportunity"
 
