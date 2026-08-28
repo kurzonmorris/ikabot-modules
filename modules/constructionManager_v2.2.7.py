@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.6"
+__version__ = "2.2.7"
 
 import csv
 import glob
@@ -92,6 +92,7 @@ WORKER_LOCK_STALE_SECONDS = 600
 ADD_SESSION_SLOT_CAP = 10
 HARD_LEVEL_CAP = 150
 BUILD_POST_VERIFY_DELAY_SECONDS = 2
+POST_VERIFY_MAX_ATTEMPTS = 3   # retries before a build row is cancelled
 SUPPLIER_LIST_TTL_SECONDS = 120
 
 # slug → ikipedia buildingId, captured from the live game's help grid
@@ -901,8 +902,15 @@ def fetch_costs_for_building(session, city, building_slug):
     # button, but the listing XHR no longer contains the button_building
     # icons (they are rendered client-side by JS), so scraping can never
     # match.  helpId=1 is constant for every building, so slug → buildingId
-    # is all we need.  Unknown slugs return {} so the scheduler's existing
-    # `cost is None → skip` branch handles them cleanly.
+    # is all we need.
+    #
+    # Return contract — callers depend on the difference:
+    #   {}    the building genuinely has no cost data here (unknown slug).
+    #         Permanent: retrying won't help.
+    #   None  the lookup FAILED (request error, unexpected response, parse
+    #         error).  Transient: retry later.  Returning {} here used to make
+    #         the scheduler cancel the row outright, so one network blip
+    #         permanently skipped a queued building.
     building_id = BUILDING_HELP_IDS.get(building_slug.lower())
     if building_id is None:
         sendToBotDebug(
@@ -929,7 +937,7 @@ def fetch_costs_for_building(session, city, building_slug):
             f"'{building_slug}' city {city.get('id')}:\n{traceback.format_exc()}",
             True,
         )
-        return {}
+        return None      # transient — caller retries instead of cancelling
 
     # Step 4: derive column → resource-index from <th> CDN image hashes.
     # CDN URLs look like //gfN.geo.gfsrv.net/cdn{XX}/{30hex}.png — filenames
@@ -1373,7 +1381,9 @@ def _add_to_queue(session):
                 cost_cache[building_slug] = fetch_costs_for_building(
                     session, city, building_slug
                 )
-            costs_dict = cost_cache[building_slug]
+            # None means the lookup failed rather than returned nothing; treat
+            # it as "no data yet" here — the worker re-fetches before building.
+            costs_dict = cost_cache[building_slug] or {}
             row_costs = []
             missing_levels = []
             for lv, _ in rows_to_add:
@@ -1434,7 +1444,9 @@ def _add_to_queue(session):
                 cost_cache[building_slug] = fetch_costs_for_building(
                     session, city, building_slug
                 )
-            costs_dict = cost_cache[building_slug]
+            # None means the lookup failed rather than returned nothing; treat
+            # it as "no data yet" here — the worker re-fetches before building.
+            costs_dict = cost_cache[building_slug] or {}
             row_costs = []
             missing_levels = []
             for lv, _ in rows_to_add:
@@ -1520,7 +1532,9 @@ def _add_to_queue(session):
                 cost_cache[building_slug] = fetch_costs_for_building(
                     session, city, building_slug
                 )
-            costs_dict = cost_cache[building_slug]
+            # None means the lookup failed rather than returned nothing; treat
+            # it as "no data yet" here — the worker re-fetches before building.
+            costs_dict = cost_cache[building_slug] or {}
 
             rows_to_add  = [
                 (lv, "upgrade")
@@ -2343,6 +2357,53 @@ def _cancel_all_pending(session):
 # Stop worker
 # ---------------------------------------------------------------------------
 
+def _requeue_skipped(session):
+    """Put every skipped row back to pending.
+
+    Rows land in "skipped" for recoverable reasons too — a cost lookup that
+    failed at the wrong moment, resources that hadn't arrived yet — and until
+    now the only way back was editing rows one at a time.
+    """
+    banner()
+    rows = csv_load(session)
+    skipped = [r for r in rows if r["status"] == "skipped"]
+    if not skipped:
+        print("  No skipped rows to retry.")
+        enter()
+        return
+
+    by_city = {}
+    for r in skipped:
+        by_city.setdefault(r.get("city_name") or r["city_id"], []).append(r)
+
+    print(f"Retry skipped rows — {len(skipped)} row(s) across "
+          f"{len(by_city)} city/cities\n")
+    for cname, rs in by_city.items():
+        print(f"  {cname}: {len(rs)} row(s)")
+        for r in rs[:5]:
+            note = r.get("notes", "")
+            print(f"    qid {r['queue_id']:>5}  {r['building']} "
+                  f"lv {r['target_level']}"
+                  + (f"  — {note}" if note else ""))
+        if len(rs) > 5:
+            print(f"    … and {len(rs) - 5} more")
+
+    print(f"\n  Set all {len(skipped)} back to pending? [y/N]:")
+    if str(read(empty=True)).strip().lower() != "y":
+        print("  Nothing changed.")
+        enter()
+        return
+
+    for r in skipped:
+        # Clear the note too: it described why it was skipped and is now stale.
+        csv_update(session, r["queue_id"], status="pending", notes="")
+    print(f"\n  {len(skipped)} row(s) set back to pending.")
+    if _is_worker_running(session):
+        print(f"  The running worker will pick them up within "
+              f"{TICK_BUDGET_SECONDS}s.")
+    enter()
+
+
 def _choose_queue_strategy(session):
     """Pick what a city does when it can't afford the next queued item."""
     banner()
@@ -2603,7 +2664,8 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
             )
             print(f"  {bcolors.BOLD}(s){bcolors.ENDC} Start worker   "
                   f"{bcolors.BOLD}(o){bcolors.ENDC} Stop worker   "
-                  f"{bcolors.BOLD}(x){bcolors.ENDC} Cancel all pending\n")
+                  f"{bcolors.BOLD}(x){bcolors.ENDC} Cancel all pending   "
+                  f"{bcolors.BOLD}(r){bcolors.ENDC} Retry skipped\n")
             print("(1) Add construction(s) to queue        [interactive only]")
             print("(2) View queue")
             print("(3) Edit queue (modify / delete / reorder) [interactive only]")
@@ -2611,7 +2673,8 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
             print("(5) Queue strategy (wait in order / skip ahead)")
             print("(') Back")
             choice = read(min=1, max=5,
-                          additionalValues=["'", "s", "S", "o", "O", "x", "X"])
+                          additionalValues=["'", "s", "S", "o", "O",
+                                            "x", "X", "r", "R"])
 
             if isinstance(choice, str):
                 letter = choice.lower()
@@ -2624,6 +2687,8 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
                     _stop_worker(session)
                 elif letter == "x":
                     _cancel_all_pending(session)
+                elif letter == "r":
+                    _requeue_skipped(session)
                 continue
 
             if choice in (1, 3) and not interactive:
@@ -2894,6 +2959,8 @@ def fresh_state():
         "shipment_thread":        None,
         "next_check":             0,
         "last_shortage_notify_ts": None,
+        "post_fail_qid":          None,
+        "post_fail_count":        0,
     }
 
 
@@ -3122,8 +3189,16 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
             f"construction POST error city {city_id} row {qid}:\n{traceback.format_exc()}",
             True,
         )
-        csv_update(session, qid, status="skipped", notes="POST exception")
-        st["phase"]      = "skip-cooldown"
+        # Network/transport error sending the POST — we don't know whether the
+        # game saw it.  Back to pending and re-check; the next tick adopts the
+        # build if it actually started, so this can't double-build.
+        csv_update(session, qid, status="pending")
+        row["status"] = "pending"
+        set_wait_note(
+            session, row,
+            "the build request failed to send — retrying",
+        )
+        st["phase"]      = "idle"
         st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
         return
 
@@ -3148,22 +3223,47 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
         return
     slot = positions[slot_pos]
     if not slot.get("isBusy") or "completed" not in slot:
+        # The game didn't start it. That can be a genuine refusal, but it's
+        # also what a slow server looks like, so retry a few times before
+        # cancelling — one bad reading used to kill the row outright.
+        if st.get("post_fail_qid") != qid:
+            st["post_fail_qid"], st["post_fail_count"] = qid, 0
+        st["post_fail_count"] = st.get("post_fail_count", 0) + 1
+
+        if st["post_fail_count"] < POST_VERIFY_MAX_ATTEMPTS:
+            csv_update(session, qid, status="pending")
+            row["status"] = "pending"
+            set_wait_note(
+                session, row,
+                f"the game didn't start this build (attempt "
+                f"{st['post_fail_count']} of {POST_VERIFY_MAX_ATTEMPTS}) — "
+                f"retrying",
+            )
+            st["phase"]      = "idle"
+            st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
+            return
+
         csv_update(
             session, qid,
             status="skipped",
-            notes="POST did not start construction",
+            notes=(f"the game refused to start this build "
+                   f"{POST_VERIFY_MAX_ATTEMPTS} times — use (r) in the menu "
+                   f"to retry skipped rows"),
         )
+        st["post_fail_qid"], st["post_fail_count"] = None, 0
         try:
             sendToBot(
                 session,
                 f"City {city.get('cityName', city_id)} slot "
-                f"{row['slot_position']}: build did not start",
+                f"{row['slot_position']}: build did not start after "
+                f"{POST_VERIFY_MAX_ATTEMPTS} attempts — row skipped",
             )
         except Exception:
             pass
         st["phase"]      = "skip-cooldown"
         st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
         return
+    st["post_fail_qid"], st["post_fail_count"] = None, 0
 
     eta = int(slot["completed"])
     csv_update(session, qid, status="running", expected_finish=eta)
@@ -3295,6 +3395,17 @@ def service_city(session, city_id, st, rows, stop_event):
 
         # Pre-execution cost recompute (plan §2b).
         all_costs = fetch_costs_for_building(session, city, row["building"])
+        if all_costs is None:
+            # Lookup failed rather than came back empty — a request error or
+            # an unexpected response.  Retry; cancelling the row over a blip
+            # used to drain a city's queue into "skipped" one row per tick.
+            set_wait_note(
+                session, row,
+                "couldn't read the cost table just now (game or network "
+                "hiccup) — retrying",
+            )
+            st["next_check"] = now + SHIP_RETRY_SECONDS
+            return
         cost = all_costs.get(int(row["target_level"])) if all_costs else None
         if not cost:
             csv_update(
