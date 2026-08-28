@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.1"
+MODULE_VERSION = "10.7.2"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -5563,9 +5563,17 @@ def _is_pid_alive(pid):
 
 
 def _try_recover_stale_lock(session, wlock):
-    """Attempt to recover from a stale scheduler lock.
-    Signals the old process to stop, waits for it to die, then clears the lock.
-    Returns True if the lock was recovered."""
+    """Recover a worker lock left behind by a scheduler that is no longer
+    usable. Returns True if the lock is now free to take.
+
+    A HEALTHY running scheduler is never touched. This used to signal any
+    live lock holder to stop, which meant simply creating a new schedule
+    tried to shut down the perfectly good scheduler already running it —
+    and if that scheduler did not die within 30s (a long cycle only checks
+    the stop flag between ticks) the caller gave up and left the stop flag
+    behind, so the healthy worker stopped moments later and nothing
+    restarted it. Creating a delivery must never stop the scheduler.
+    """
     if not os.path.exists(wlock):
         return True
     try:
@@ -5586,7 +5594,14 @@ def _try_recover_stale_lock(session, wlock):
             pass
         return True
 
-    # Process is alive — signal it to stop via the stop flag
+    if _worker_lock_is_fresh(wlock):
+        # Alive and heartbeating: a working scheduler. Leave it be — it
+        # picks the new schedule up from the CSV on its next tick.
+        return False
+
+    # Alive but not heartbeating: wedged, or the pid has been reused by an
+    # unrelated process. Ask it to stop, and if it will not, clean the flag
+    # back up so we do not leave a landmine that stops a later scheduler.
     stop_path = transport_stop_flag_path(session)
     try:
         with open(stop_path, "w") as f:
@@ -5605,6 +5620,10 @@ def _try_recover_stale_lock(session, wlock):
         if not os.path.exists(wlock):
             return True
 
+    try:
+        os.remove(stop_path)
+    except OSError:
+        pass
     return False
 
 
