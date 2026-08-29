@@ -825,7 +825,7 @@ Sign in with the same username and password as the terminal.
 | **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback. **Open all web servers** opens a tab per running web server, in instance order |
 | **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Download and install an update, or roll the last one back |
-| **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going |
+| **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Output** | What the command you just pressed actually printed |
 
@@ -864,6 +864,38 @@ without closing it.
 A task count that is blank means no status file — either the instance has never
 finished starting, or ikabot is older than 1.8.1. `0 tasks` genuinely means
 idle at the menu.
+
+### Stopping processes
+
+Three ways, all of them asking **yes or no** first:
+
+| To stop | Press |
+|---|---|
+| One process | Click it in that instance's **Active processes** list |
+| Everything on one account | **Stop tasks** on that instance's card |
+| Everything, everywhere | **Stop all processes**, in the row at the top |
+
+**Stop tasks** and the per-instance buttons only appear when that account
+actually has something running, so an idle card stays uncluttered.
+
+This is the same thing as ikabot's own *kill tasks* menu option — the process is
+sent `SIGKILL`, exactly as that menu does — except you do not have to be sitting
+in the instance to do it, and you can do all 24 at once.
+
+> **It stops tasks, not instances.** The account stays logged in and stays at
+> the menu; only the work it had started is stopped. To restart the instance
+> itself, use **Restart**.
+
+The list corrects itself the moment something stops. ikabot only rewrites its
+status file when its menu redraws, which on an idle account can be hours, so the
+panel checks each recorded process against `/proc` and shows only the ones
+genuinely still alive. A stopped task disappears on the next refresh rather than
+lingering as a ghost entry.
+
+Nothing outside that list can be reached: a stop request has to name a process
+the panel is currently showing for that instance, and an instance's own ikabot
+process is excluded from the list, so these buttons cannot kill an instance even
+if a status file claims otherwise.
 
 ### Buttons
 
