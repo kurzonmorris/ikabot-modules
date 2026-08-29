@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.5"
+PANEL_VERSION = "1.0.6"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -28,6 +28,13 @@ PASS = os.environ.get("PANEL_PASS") or os.environ.get("TTYD_PASS", "")
 SESSION = os.environ.get("TMUX_SESSION", "ikabot")
 TTYD_PORT = int(os.environ.get("TTYD_PORT", "7681"))
 STATUS_DIR = os.environ.get("STATUS_DIR", "/config/.ikabot/status")
+# Where modules keep their lock files: most in HOME, the rest in the ikabot
+# data folder or a subfolder of it.
+HOME_DIR = os.environ.get("HOME", "/config")
+DATA_DIR = os.environ.get("IKABOT_DATA_DIR", os.path.join(HOME_DIR, ".ikabot"))
+# Subfolders of the data folder that never hold a module lock. Skipped so a
+# large logs folder is not listed every five seconds.
+LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache"}
 # Seeds the button file on first run only; buttons are edited in the panel
 # afterwards and live in BUTTONS_FILE.
 QUICK_KEYS = [k.strip() for k in os.environ.get("QUICK_KEYS", "5,6,9,11").split(",")
@@ -194,6 +201,84 @@ def stop_tasks(name, tasks):
             lines.append("%s: %s had already stopped" % (name, action))
         except OSError as exc:
             lines.append("%s: could not stop %s — %s" % (name, action, exc))
+    return lines
+
+
+def _safe_part(s):
+    """The filename sanitising every module applies to account fields."""
+    return "".join(c for c in str(s) if c.isalnum() or c in "-_")
+
+
+def lock_suffixes(entry):
+    """The filename endings a module builds for this account.
+
+    Modules name their locks <what>_<server><world>_<player>.lock. The older
+    ones, and the pre-world versions of the newer ones, leave the world out.
+    Both forms are matched so an old lock is still found and cleared.
+    """
+    user = _safe_part(entry.get("username") or "")
+    server = _safe_part(entry.get("server") or "")
+    world = _safe_part(entry.get("world") or "")
+    if not user or not server:
+        return []
+    out = []
+    if world:
+        out.append("%s%s_%s" % (server, world, user))
+    out.append("%s_%s" % (server, user))
+    return out
+
+
+def lock_files():
+    """Every module lock file on disk, as (directory, filename) pairs.
+
+    Scanned at a fixed depth rather than walked, so the size of the logs
+    folder never matters.
+
+    Session locks are deliberately left out. ikabot holds those for
+    milliseconds and clears a dead one after thirty seconds by itself, so they
+    are never what stops a module from starting again — and removing one while
+    an instance is mid-write is the only way this could do harm.
+    """
+    dirs = [HOME_DIR, DATA_DIR]
+    try:
+        for entry in sorted(os.listdir(DATA_DIR)):
+            if entry in LOCK_SKIP_DIRS:
+                continue
+            path = os.path.join(DATA_DIR, entry)
+            if os.path.isdir(path):
+                dirs.append(path)
+    except OSError:
+        pass
+
+    found, seen = [], set()
+    for d in dirs:
+        real = os.path.realpath(d)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".lock") or name.endswith(".session.lock"):
+                continue
+            if os.path.isfile(os.path.join(d, name)):
+                found.append((d, name))
+    return found
+
+
+def delete_locks(pairs):
+    """Remove the given lock files, returning one report line each."""
+    lines = []
+    for directory, name in pairs:
+        try:
+            os.unlink(os.path.join(directory, name))
+            lines.append("deleted %s" % name)
+        except FileNotFoundError:
+            lines.append("%s had already gone" % name)
+        except OSError as exc:
+            lines.append("could not delete %s — %s" % (name, exc))
     return lines
 
 
@@ -484,22 +569,39 @@ def state():
             out.append(task)
         return out
 
+    all_locks = lock_files()
+    claimed = set()
+
+    def locks_for(entry):
+        """Lock files belonging to this account, by filename suffix."""
+        mine = []
+        for suffix in lock_suffixes(entry):
+            tail = "_%s.lock" % suffix
+            for pair in all_locks:
+                if pair[1].endswith(tail) and pair not in mine:
+                    mine.append(pair)
+        return mine
+
     status_seen, orphans = set(), []
     for entry in read_status():
         name = owner_of(int(entry.get("pid") or 0))
         if name and name in by_name:
             tasks = live_tasks(entry)
+            locks = locks_for(entry)
+            claimed.update(locks)
             by_name[name]["account"] = entry.get("account", "")
             by_name[name]["tasks"] = tasks
             # Counted from what is actually alive rather than from the file, so
             # a stopped task disappears at once instead of at the next redraw.
             by_name[name]["task_count"] = len(tasks)
             by_name[name]["updated"] = entry.get("updated", 0)
+            by_name[name]["locks"] = [n for _, n in locks]
             status_seen.add(name)
         else:
             orphans.append(entry.get("account", "?"))
 
     for i in instances:
+        i.setdefault("locks", [])
         i.setdefault("tasks", [])
         i.setdefault("task_count", None if i["name"] not in status_seen else 0)
         i.setdefault("account", "")
@@ -545,6 +647,12 @@ def state():
         "panel_version": PANEL_VERSION,
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
+        "locks_total": len(all_locks),
+        # Locks matching no logged-in account: shared ones such as the
+        # messaging hub's, and leftovers from accounts not running now. Only
+        # the clear-everything action touches these.
+        "locks_shared": sorted(n for pair, n in ((p, p[1]) for p in all_locks)
+                               if pair not in claimed),
         "status_orphans": orphans,
         "buttons": load_buttons(),
         "instances": instances,
@@ -779,6 +887,64 @@ class Handler(BaseHTTPRequestHandler):
 
             return self._send(200, json.dumps({"output": out, "ran": act}))
 
+        # Clearing lock files. The browser sends an instance number or
+        # nothing at all — never a path. The panel rescans and decides which
+        # files those words mean, so nothing outside a module lock is reachable.
+        if act in ("locks_one", "locks_all"):
+            arg = str(payload.get("arg", ""))
+            with _run_lock:
+                s = state()
+                instances = s["instances"]
+
+                if act == "locks_one":
+                    if not arg.isdigit():
+                        return self._send(400, json.dumps({"error": "bad instance"}))
+                    inst = next((i for i in instances if i["num"] == int(arg)), None)
+                    if inst is None:
+                        return self._send(400, json.dumps({"error": "no such instance"}))
+                    # A lock removed while its owner still runs stops being a
+                    # lock: two processes would both believe they hold it and
+                    # ship, build or recruit twice over. Refuse rather than
+                    # warn.
+                    if inst["tasks"]:
+                        out = ("%s still has %d process(es) running:\n\n%s\n\n"
+                               "Deleting a lock while its task is running would let "
+                               "two run at once. Press 'Stop tasks' on %s first, "
+                               "then clear its locks."
+                               % (inst["name"], len(inst["tasks"]),
+                                  "\n".join("  " + (t.get("action") or "unknown")
+                                             for t in inst["tasks"]),
+                                  inst["name"]))
+                    elif not inst["locks"]:
+                        out = "%s has no lock files." % inst["name"]
+                    else:
+                        wanted = set(inst["locks"])
+                        pairs = [x for x in lock_files() if x[1] in wanted]
+                        lines = delete_locks(pairs)
+                        out = ("Cleared %d lock file(s) for %s:\n\n%s"
+                               % (len(lines), inst["name"], "\n".join(lines)))
+
+                else:
+                    busy = [i for i in instances if i["tasks"]]
+                    pairs = lock_files()
+                    if busy:
+                        out = ("%d instance(s) still have processes running:\n\n%s"
+                               "\n\nDeleting a lock while its task is running would "
+                               "let two run at once. Press 'Stop all processes' "
+                               "first, then clear the locks."
+                               % (len(busy),
+                                  "\n".join("  %s — %d task(s)"
+                                             % (i["name"], len(i["tasks"]))
+                                             for i in busy)))
+                    elif not pairs:
+                        out = "No lock files found."
+                    else:
+                        lines = delete_locks(pairs)
+                        out = ("Cleared %d lock file(s) across every instance:\n\n%s"
+                               % (len(lines), "\n".join(lines)))
+
+            return self._send(200, json.dumps({"output": out, "ran": act}))
+
         if payload.get("action") == "check_updates":
             with _run_lock:
                 msg = refresh_available()
@@ -861,7 +1027,8 @@ border:1px solid var(--rule);color:var(--soft)}
 font-size:12px;line-height:1.45;background:var(--card)}
 .tasks li button:hover{border-color:var(--bad);color:var(--ink)}
 .tasks li button:hover .act{color:var(--bad)}
-.tasks .act{display:block;font-family:ui-monospace,monospace;color:var(--ink)}
+.tasks .act{display:block;font-family:ui-monospace,monospace;color:var(--ink);
+overflow-wrap:anywhere}
 .tasks .st{display:block;color:var(--soft)}
 .tasks .tip{color:var(--soft);margin:6px 0 0;font-size:11.5px}
 .tcount{font-family:ui-monospace,monospace;font-size:11px;padding:1px 6px;border-radius:99px;
@@ -896,6 +1063,7 @@ min-width:42px;display:inline-block;text-align:right}
     <button class="d" data-a="kill_all" data-confirm="Stop every running process in every instance?
 
 The instances themselves stay logged in and keep running.">Stop all processes</button>
+    <button class="d" id="alllocks" data-a="locks_all">Clear all lock files</button>
   </div>
   <div class="grid" id="grid"></div>
   <p class="hint" id="statushint"></p>
@@ -1153,6 +1321,11 @@ function refresh(){
       ak.dataset.sig=sig;
       renderButtons(s.buttons||[]);
     }
+    var lk=el('alllocks'), n=s.locks_total||0;
+    lk.textContent='Clear all lock files'+(n?' ('+n+')':'');
+    lk.dataset.confirm='Delete every lock file — '+n+' in total, across all '+
+      'instances?\n\nStop all processes first, or this is refused.';
+
     var v=s.versions||{};
     document.getElementById('pver').textContent='v'+(s.panel_version||'?');
     document.title='ikabot panel v'+(s.panel_version||'?');
@@ -1206,6 +1379,14 @@ function refresh(){
           ? '<button class="d" data-a="kill_instance" data-arg="'+i.num+
             '" data-confirm="Stop all '+i.tasks.length+' process(es) on '+i.name+
             '?&#10;&#10;'+i.name+' itself stays logged in.">Stop tasks</button>'
+          : '')+
+        (i.locks&&i.locks.length
+          ? '<button class="d" data-a="locks_one" data-arg="'+i.num+
+            '" data-confirm="Delete these '+i.locks.length+' lock file(s) for '+
+            i.name+'?&#10;&#10;'+
+            i.locks.map(function(x){return esc(x);}).join('&#10;')+
+            '&#10;&#10;Stop its tasks first, or this is refused.">Clear locks ('+
+            i.locks.length+')</button>'
           : '')+
         '</div>'+
         (keys?'<div class="keys">'+keys+'</div>':'')+

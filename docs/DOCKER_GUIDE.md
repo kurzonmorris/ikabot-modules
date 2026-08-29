@@ -826,6 +826,7 @@ Sign in with the same username and password as the terminal.
 | **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Download and install an update, or roll the last one back |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
+| **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Output** | What the command you just pressed actually printed |
 
@@ -896,6 +897,46 @@ Nothing outside that list can be reached: a stop request has to name a process
 the panel is currently showing for that instance, and an instance's own ikabot
 process is excluded from the list, so these buttons cannot kill an instance even
 if a status file claims otherwise.
+
+### Clearing lock files
+
+Modules that must not run twice at once — the transport manager, the
+construction manager, recruitment, reservations, the island monitor — take a
+lock file while they work. Normally they clean it up on the way out. After a
+crash, or after an update that changes how a module stores its state, a lock
+can be left behind and the module will not start again until it is gone.
+
+| To clear | Press |
+|---|---|
+| One account's locks | **Clear locks (n)** on that instance's card |
+| Every lock, everywhere | **Clear all lock files (n)**, in the row at the top |
+
+Both show you the count, and the per-instance one lists the exact filenames in
+the confirmation box before anything is deleted. Neither button appears unless
+there is actually something to clear.
+
+**Stop the tasks first.** Both actions refuse while the instance has anything
+running, and name what is running so you know what to stop. That is deliberate:
+a lock deleted while its owner is still working stops being a lock, and two
+copies of the transport manager shipping at once is a genuine way to lose
+resources. So the order is:
+
+1. **Stop tasks** on that instance — or **Stop all processes** for all of them
+2. **Clear locks**
+3. Start the module again from the instance, or with one of your buttons
+
+Which files belong to which instance is worked out from the account name each
+instance is logged in as, so an account on two worlds of the same server keeps
+its locks separate — `en135` and `en120` do not clear each other's.
+
+Locks that belong to no logged-in account — the messaging hub's shared one, or
+leftovers from an account not running right now — are only removed by **Clear
+all lock files**.
+
+> **Session locks are left alone**, deliberately. ikabot takes those for
+> milliseconds at a time and clears a dead one after thirty seconds by itself,
+> so they are never what stops a module restarting, and deleting one
+> mid-write is the only way this could do harm.
 
 ### Buttons
 

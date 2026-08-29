@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-set "INSTALLER_VERSION=1.0.1"
+set "INSTALLER_VERSION=1.0.2"
 title ikabot Docker installer v%INSTALLER_VERSION%
 color 0F
 
