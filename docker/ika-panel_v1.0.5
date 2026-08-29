@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -19,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.4"
+PANEL_VERSION = "1.0.5"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -150,6 +151,50 @@ def _parent(pid):
             return int(f.read().rpartition(")")[2].split()[1])
     except (OSError, IndexError, ValueError):
         return 0
+
+
+def _alive(pid):
+    """True when the pid is a real process that has not become a zombie.
+
+    A task killed from here stays listed in ikabot's status file until that
+    instance's menu next redraws, which on an idle account can be hours. Asking
+    /proc directly keeps the panel honest without waiting for the writer.
+    """
+    if pid <= 1:
+        return False
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rpartition(")")[2].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def stop_tasks(name, tasks):
+    """SIGKILL the given tasks, returning one report line each.
+
+    SIGKILL is what ikabot's own "kill tasks" menu sends, so this behaves
+    exactly as stopping the task from inside the instance would. The session
+    lock file self-heals when its owner is dead, so a hard kill cannot leave an
+    instance wedged.
+    """
+    lines = []
+    for t in tasks:
+        try:
+            pid = int(t.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        action = t.get("action") or "unknown"
+        if pid <= 1:
+            lines.append("%s: %s has no process id — skipped" % (name, action))
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            lines.append("%s: stopped %s (pid %d)" % (name, action, pid))
+        except ProcessLookupError:
+            lines.append("%s: %s had already stopped" % (name, action))
+        except OSError as exc:
+            lines.append("%s: could not stop %s — %s" % (name, action, exc))
+    return lines
 
 
 def _listening():
@@ -422,13 +467,33 @@ def state():
             walk = _parent(walk)
         return None
 
+    # A pane's own pid is the ikabot menu, never a background task. Excluding
+    # it means the stop actions below cannot reach an instance itself, only
+    # the work it started.
+    pane_pids = set(panes)
+
+    def live_tasks(entry):
+        out = []
+        for task in entry.get("tasks", []):
+            try:
+                pid = int(task.get("pid") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid in pane_pids or not _alive(pid):
+                continue
+            out.append(task)
+        return out
+
     status_seen, orphans = set(), []
     for entry in read_status():
         name = owner_of(int(entry.get("pid") or 0))
         if name and name in by_name:
+            tasks = live_tasks(entry)
             by_name[name]["account"] = entry.get("account", "")
-            by_name[name]["tasks"] = entry.get("tasks", [])
-            by_name[name]["task_count"] = entry.get("task_count", len(entry.get("tasks", [])))
+            by_name[name]["tasks"] = tasks
+            # Counted from what is actually alive rather than from the file, so
+            # a stopped task disappears at once instead of at the next redraw.
+            by_name[name]["task_count"] = len(tasks)
             by_name[name]["updated"] = entry.get("updated", 0)
             status_seen.add(name)
         else:
@@ -662,6 +727,58 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"output": out, "ran": wanted["label"]}))
 
 
+        # Stopping tasks. The browser never supplies a bare pid to kill: every
+        # target has to appear as a live task in the state built just above, so
+        # the only reachable processes are ones ikabot itself reported.
+        if act in ("kill_task", "kill_instance", "kill_all"):
+            arg = str(payload.get("arg", ""))
+            with _run_lock:
+                instances = state()["instances"]
+
+                if act == "kill_task":
+                    num, _, pid_s = arg.partition(":")
+                    if not num.isdigit() or not pid_s.isdigit():
+                        return self._send(400, json.dumps({"error": "bad target"}))
+                    inst = next((i for i in instances if i["num"] == int(num)), None)
+                    if inst is None:
+                        return self._send(400, json.dumps({"error": "no such instance"}))
+                    pid = int(pid_s)
+                    task = next((x for x in inst["tasks"]
+                                 if str(x.get("pid")) == str(pid)), None)
+                    if task is None:
+                        out = ("That process is no longer running on %s — "
+                               "the list has been refreshed." % inst["name"])
+                    else:
+                        out = "\n".join(stop_tasks(inst["name"], [task]))
+
+                elif act == "kill_instance":
+                    if not arg.isdigit():
+                        return self._send(400, json.dumps({"error": "bad instance"}))
+                    inst = next((i for i in instances if i["num"] == int(arg)), None)
+                    if inst is None:
+                        return self._send(400, json.dumps({"error": "no such instance"}))
+                    lines = stop_tasks(inst["name"], inst["tasks"])
+                    out = ("Stopped %d process(es) on %s:\n\n%s"
+                           % (len(lines), inst["name"], "\n".join(lines))
+                           if lines else
+                           "%s had nothing running." % inst["name"])
+
+                else:
+                    lines, total = [], 0
+                    for inst in instances:
+                        if not inst["tasks"]:
+                            continue
+                        done = stop_tasks(inst["name"], inst["tasks"])
+                        lines.extend(done)
+                        total += len(done)
+                    out = ("Stopped %d process(es) across %d instance(s):\n\n%s"
+                           % (total, sum(1 for i in instances if i["tasks"]),
+                              "\n".join(lines))
+                           if lines else
+                           "Nothing was running in any instance.")
+
+            return self._send(200, json.dumps({"output": out, "ran": act}))
+
         if payload.get("action") == "check_updates":
             with _run_lock:
                 msg = refresh_available()
@@ -738,10 +855,15 @@ border:1px solid var(--rule);color:var(--soft)}
 .tasks{margin-top:6px;font-size:12px}
 .tasks summary{cursor:pointer;color:var(--soft);outline:none}
 .tasks summary::marker{color:var(--soft)}
-.tasks ul{margin:6px 0 0;padding-left:16px}
-.tasks li{margin-bottom:3px}
-.tasks .act{font-family:ui-monospace,monospace;color:var(--ink)}
-.tasks .st{color:var(--soft)}
+.tasks ul{margin:6px 0 0;padding-left:0;list-style:none}
+.tasks li{margin-bottom:4px}
+.tasks li button{display:block;width:100%;text-align:left;padding:4px 8px;
+font-size:12px;line-height:1.45;background:var(--card)}
+.tasks li button:hover{border-color:var(--bad);color:var(--ink)}
+.tasks li button:hover .act{color:var(--bad)}
+.tasks .act{display:block;font-family:ui-monospace,monospace;color:var(--ink)}
+.tasks .st{display:block;color:var(--soft)}
+.tasks .tip{color:var(--soft);margin:6px 0 0;font-size:11.5px}
 .tcount{font-family:ui-monospace,monospace;font-size:11px;padding:1px 6px;border-radius:99px;
 border:1px solid var(--rule);color:var(--soft);margin-left:6px}
 .tcount.busy2{border-color:var(--ok);color:var(--ok)}
@@ -771,6 +893,9 @@ min-width:42px;display:inline-block;text-align:right}
     <button id="openweb">Open all web servers</button>
     <span id="allkeys"></span>
     <button class="d" data-a="web_stop">Stop all web servers</button>
+    <button class="d" data-a="kill_all" data-confirm="Stop every running process in every instance?
+
+The instances themselves stay logged in and keep running.">Stop all processes</button>
   </div>
   <div class="grid" id="grid"></div>
   <p class="hint" id="statushint"></p>
@@ -861,7 +986,10 @@ function run(action,arg,label){
 
 document.addEventListener('click',function(e){
   var b=e.target.closest('button[data-a]'); if(!b)return;
-  run(b.dataset.a,b.dataset.arg,b.textContent.trim());
+  // A native confirm blocks the poll timer too, so the answer cannot be lost
+  // to a grid rebuild underneath the dialog.
+  if(b.dataset.confirm&&!confirm(b.dataset.confirm))return;
+  run(b.dataset.a,b.dataset.arg,(b.dataset.label||b.textContent).trim());
 });
 
 var editing=null, openTasks={}, gridSig='';
@@ -1046,9 +1174,15 @@ function refresh(){
         drop='<details class="tasks" data-inst="'+i.name+'"'+isOpen+
              '><summary>Active processes ('+i.tasks.length+')</summary><ul>'+
           i.tasks.map(function(t){
-            return '<li><span class="act">'+esc(t.action)+'</span><br>'+
-                   '<span class="st">'+esc(t.status||'')+ago(t.started)+'</span></li>';
-          }).join('')+'</ul></details>';
+            var act=esc(t.action||'unknown');
+            return '<li><button data-a="kill_task" data-arg="'+i.num+':'+
+                   esc(t.pid)+'" data-label="stop '+act+'" data-confirm="'+
+                   'Stop '+act+' on '+i.name+'?" title="Click to stop this process">'+
+                   '<span class="act">'+act+'</span>'+
+                   '<span class="st">'+esc(t.status||'')+ago(t.started)+'</span>'+
+                   '</button></li>';
+          }).join('')+'</ul>'+
+          '<p class="tip">Click a process to stop it.</p></details>';
       } else if(i.task_count===0){
         drop='<details class="tasks" data-inst="'+i.name+'"'+isOpen+
              '><summary>Active processes (0)</summary>'+
@@ -1068,6 +1202,11 @@ function refresh(){
         '<div class="row">'+
         '<button data-a="restart_one" data-arg="'+i.num+'">Restart</button>'+
         (i.dead?'<button data-a="crash" data-arg="'+i.num+'">Why?</button>':'')+
+        (i.tasks&&i.tasks.length
+          ? '<button class="d" data-a="kill_instance" data-arg="'+i.num+
+            '" data-confirm="Stop all '+i.tasks.length+' process(es) on '+i.name+
+            '?&#10;&#10;'+i.name+' itself stays logged in.">Stop tasks</button>'
+          : '')+
         '</div>'+
         (keys?'<div class="keys">'+keys+'</div>':'')+
         drop+'</div>';

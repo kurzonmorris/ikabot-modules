@@ -825,7 +825,7 @@ Sign in with the same username and password as the terminal.
 | **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback. **Open all web servers** opens a tab per running web server, in instance order |
 | **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Download and install an update, or roll the last one back |
-| **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going |
+| **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Output** | What the command you just pressed actually printed |
 
@@ -864,6 +864,38 @@ without closing it.
 A task count that is blank means no status file — either the instance has never
 finished starting, or ikabot is older than 1.8.1. `0 tasks` genuinely means
 idle at the menu.
+
+### Stopping processes
+
+Three ways, all of them asking **yes or no** first:
+
+| To stop | Press |
+|---|---|
+| One process | Click it in that instance's **Active processes** list |
+| Everything on one account | **Stop tasks** on that instance's card |
+| Everything, everywhere | **Stop all processes**, in the row at the top |
+
+**Stop tasks** and the per-instance buttons only appear when that account
+actually has something running, so an idle card stays uncluttered.
+
+This is the same thing as ikabot's own *kill tasks* menu option — the process is
+sent `SIGKILL`, exactly as that menu does — except you do not have to be sitting
+in the instance to do it, and you can do all 24 at once.
+
+> **It stops tasks, not instances.** The account stays logged in and stays at
+> the menu; only the work it had started is stopped. To restart the instance
+> itself, use **Restart**.
+
+The list corrects itself the moment something stops. ikabot only rewrites its
+status file when its menu redraws, which on an idle account can be hours, so the
+panel checks each recorded process against `/proc` and shows only the ones
+genuinely still alive. A stopped task disappears on the next refresh rather than
+lingering as a ghost entry.
+
+Nothing outside that list can be reached: a stop request has to name a process
+the panel is currently showing for that instance, and an instance's own ikabot
+process is excluded from the list, so these buttons cannot kill an instance even
+if a status file claims otherwise.
 
 ### Buttons
 
@@ -993,6 +1025,70 @@ Same rule as the terminal: **no password, no listener.** Remove `TTYD_PASS`
 > way you treat the terminal's. It only ever runs a fixed list of commands —
 > anything not on that list is rejected rather than passed to a shell — but it
 > is still a control surface for your bots.
+
+---
+
+## Part 19 — Giving this to someone else
+
+Everything above is your own setup. If someone else wants the same thing on
+**their** hardware, they do not need this guide — there is a one-file installer
+for them.
+
+### Building the release zip
+
+From the repo folder on the server (or anywhere you have the repo):
+
+```
+python3 tools/build-docker-release.py
+```
+
+That writes `releases/ikabot-docker_v1.0.0.zip`. Inside it are `INSTALL.bat`,
+`install.sh`, `README.txt` and the whole `docker/` folder.
+
+The version number in the filename comes from `installer-docker/VERSION`. The
+script refuses to build if that number disagrees with the copies printed inside
+`install.sh`, `INSTALL.bat` and `README.txt`, so what they download and what
+they see on screen can never drift apart.
+
+### Publishing it
+
+Attach the zip to a GitHub Release. Because the version is in the filename, the
+release page shows people exactly what they are downloading.
+
+### What they do
+
+| They have | They do |
+|---|---|
+| Windows or Mac | Unzip, double-click `INSTALL.bat` |
+| Unraid, TrueNAS, Linux | Unzip, `./install.sh` |
+
+Either way it asks three questions — where to keep data, how many accounts, and
+a password for the web pages — then builds and starts the container and prints
+the panel and terminal URLs. Nothing else is typed.
+
+### What they get, and what they do not
+
+They get their own container, on their own machine, with their own vault. None
+of your accounts, sessions or hardware are involved: the zip contains code only.
+
+The one difference on Windows and Mac is that Docker there cannot share the
+host's network, so the installer publishes ports 7681 and 7682 instead. The
+panel and terminal work; the per-instance web servers from Part 17 are not
+reachable. On Unraid, TrueNAS and Linux the installer uses `--network=host` and
+everything behaves exactly as it does for you.
+
+### Bumping the version
+
+Edit `installer-docker/VERSION`, then update the three strings the packager
+checks:
+
+| File | String |
+|---|---|
+| `install.sh` | `INSTALLER_VERSION="1.0.1"` |
+| `INSTALL.bat` | `INSTALLER_VERSION=1.0.1` |
+| `README.txt` | `installer v1.0.1` |
+
+Rebuild, and a new zip appears alongside the old one.
 
 ---
 
