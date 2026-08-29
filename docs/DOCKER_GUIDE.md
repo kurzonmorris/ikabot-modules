@@ -996,6 +996,70 @@ Same rule as the terminal: **no password, no listener.** Remove `TTYD_PASS`
 
 ---
 
+## Part 19 — Giving this to someone else
+
+Everything above is your own setup. If someone else wants the same thing on
+**their** hardware, they do not need this guide — there is a one-file installer
+for them.
+
+### Building the release zip
+
+From the repo folder on the server (or anywhere you have the repo):
+
+```
+python3 tools/build-docker-release.py
+```
+
+That writes `releases/ikabot-docker_v1.0.0.zip`. Inside it are `INSTALL.bat`,
+`install.sh`, `README.txt` and the whole `docker/` folder.
+
+The version number in the filename comes from `installer-docker/VERSION`. The
+script refuses to build if that number disagrees with the copies printed inside
+`install.sh`, `INSTALL.bat` and `README.txt`, so what they download and what
+they see on screen can never drift apart.
+
+### Publishing it
+
+Attach the zip to a GitHub Release. Because the version is in the filename, the
+release page shows people exactly what they are downloading.
+
+### What they do
+
+| They have | They do |
+|---|---|
+| Windows or Mac | Unzip, double-click `INSTALL.bat` |
+| Unraid, TrueNAS, Linux | Unzip, `./install.sh` |
+
+Either way it asks three questions — where to keep data, how many accounts, and
+a password for the web pages — then builds and starts the container and prints
+the panel and terminal URLs. Nothing else is typed.
+
+### What they get, and what they do not
+
+They get their own container, on their own machine, with their own vault. None
+of your accounts, sessions or hardware are involved: the zip contains code only.
+
+The one difference on Windows and Mac is that Docker there cannot share the
+host's network, so the installer publishes ports 7681 and 7682 instead. The
+panel and terminal work; the per-instance web servers from Part 17 are not
+reachable. On Unraid, TrueNAS and Linux the installer uses `--network=host` and
+everything behaves exactly as it does for you.
+
+### Bumping the version
+
+Edit `installer-docker/VERSION`, then update the three strings the packager
+checks:
+
+| File | String |
+|---|---|
+| `install.sh` | `INSTALLER_VERSION="1.0.1"` |
+| `INSTALL.bat` | `INSTALLER_VERSION=1.0.1` |
+| `README.txt` | `installer v1.0.1` |
+
+Rebuild, and a new zip appears alongside the old one.
+
+---
+
 ## Appendix A — What the build files do
 
 You copied these in Part 5; you do not need to create them. This is just so you
