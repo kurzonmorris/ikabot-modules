@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.3"
+MODULE_VERSION = "10.7.4"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -1125,10 +1125,10 @@ def migrate_legacy_account_files(session):
         try:
             with open(legacy_ship, "r") as f:
                 ship_data = json.load(f)
-            ship_pid = int(ship_data.get("pid", 0))
             ship_at = float(ship_data.get("timestamp", 0) or 0)
-            if _is_pid_alive(ship_pid) and time.time() - ship_at < 300:
-                continue
+            if (_holder_liveness(ship_data) is not False
+                    and time.time() - ship_at < 300):
+                continue     # recently touched and not provably dead
         except Exception:
             pass       # unreadable or absent — safe to clear
         try:
@@ -1184,6 +1184,7 @@ def _lock_acquire(lock_path, timeout=45, stale_after=15, token=None,
     # lock exists but is still empty is as small as possible.
     my_payload = json.dumps({
         "pid": os.getpid(),
+        "host": _instance_id(),
         "timestamp": time.time(),
         "token": token,
         "version": MODULE_VERSION,
@@ -1223,9 +1224,13 @@ def _lock_acquire(lock_path, timeout=45, stale_after=15, token=None,
                 # of our clock (skew, corrupt write) makes (now - held_at)
                 # permanently negative, so the lock would never age out and
                 # every waiter would be guaranteed to time out.
-                holder_dead = holder_pid > 0 and not _is_pid_alive(holder_pid)
+                # None = written elsewhere (another container/machine), so
+                # the pid tells us nothing and only the heartbeat counts.
+                alive = _holder_liveness(data)
+                holder_dead = alive is False
+                unknown_holder = alive is None
                 if (holder_dead
-                        or holder_pid <= 0
+                        or (not unknown_holder and holder_pid <= 0)
                         or (now - held_at) > stale_after
                         or held_at > now + 60):
                     try:
@@ -1294,6 +1299,7 @@ def _lock_refresh(lock_path, token=None):
 
     payload = json.dumps({
         "pid": os.getpid(),
+        "host": _instance_id(),
         "timestamp": time.time(),
         "token": token,
         "version": MODULE_VERSION,
@@ -5592,6 +5598,57 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
             pass
 
 
+_INSTANCE_ID = None
+
+
+def _instance_id():
+    """Identify the machine AND pid namespace this process runs in.
+
+    A process id is only meaningful inside the namespace that produced it.
+    With the module running in Docker alongside (or instead of) Windows,
+    two containers sharing a mounted home directory would otherwise read
+    each other's locks and either steal a live one — two schedulers
+    shipping at once — or never break a genuinely dead one, because the
+    number happens to match an unrelated local process.
+    """
+    global _INSTANCE_ID
+    if _INSTANCE_ID is not None:
+        return _INSTANCE_ID
+    parts = []
+    try:
+        import socket
+        parts.append(socket.gethostname())
+    except Exception:
+        parts.append("?")
+    try:
+        # Linux/Docker: the pid namespace inode. Absent on Windows, where
+        # the hostname alone is enough.
+        parts.append(os.readlink("/proc/self/ns/pid"))
+    except Exception:
+        pass
+    _INSTANCE_ID = "|".join(parts)
+    return _INSTANCE_ID
+
+
+def _holder_liveness(data):
+    """Is the recorded lock holder alive?  True / False / None.
+
+    None means "cannot tell" — the lock was written by a different machine
+    or container, or carries no identity — and the caller must fall back to
+    the heartbeat timestamp, which is meaningful everywhere.
+    """
+    host = data.get("host")
+    if host != _instance_id():
+        return None
+    try:
+        pid = int(data.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    return _is_pid_alive(pid)
+
+
 def _is_pid_alive(pid):
     """Check whether a process is running WITHOUT touching it.
 
@@ -5614,7 +5671,15 @@ def _is_pid_alive(pid):
         return False
     if _HAS_PSUTIL:
         try:
-            return psutil.pid_exists(pid)
+            proc = psutil.Process(pid)
+            # A container with ikabot as pid 1 may not reap its children, so
+            # a dead worker can linger as a zombie. psutil.pid_exists() says
+            # yes to those, which would keep a dead lock alive forever.
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                return False
+            return True
+        except psutil.NoSuchProcess:
+            return False
         except Exception:
             return True   # can't tell — assume alive, fall back to staleness
     if os.name == "nt":
@@ -5673,7 +5738,7 @@ def _try_recover_stale_lock(session, wlock):
         return True
 
     lock_pid = data.get("pid")
-    if not lock_pid or not _is_pid_alive(lock_pid):
+    if _holder_liveness(data) is False:
         try:
             os.remove(wlock)
         except OSError:
@@ -5727,12 +5792,12 @@ def _worker_lock_is_fresh(wlock):
     if time.time() - held_at > WORKER_LOCK_STALE_SECONDS:
         return False
     # A crashed worker's lock is dead immediately — don't report RUNNING (or
-    # block a restart) for the whole 10 minute staleness window.
-    try:
-        pid = int(data.get("pid"))
-    except (TypeError, ValueError):
-        return True  # no usable pid; trust the timestamp
-    return _is_pid_alive(pid)
+    # block a restart) for the whole 10 minute staleness window. Across
+    # containers the pid is meaningless, so the heartbeat decides instead.
+    alive = _holder_liveness(data)
+    if alive is None:
+        return True   # can't judge the pid; the fresh timestamp stands
+    return alive
 
 
 def _is_transport_worker_running(session):
