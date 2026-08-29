@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.4"
+MODULE_VERSION = "10.7.5"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -2978,6 +2978,36 @@ def rtm_ignoreCities(session, msg=None, exclude_mode=False):
 #  MAIN ENTRY POINT
 # ============================================================================
 
+def _worker_owner_note(session):
+    """Say WHO holds the worker lock.
+
+    "RUNNING" on its own is ambiguous once several instances share a
+    mounted config directory: the worker may be alive in another container,
+    which is why it is absent from this instance's process list. And a lock
+    written before identities were recorded cannot be verified at all, so
+    say that rather than implying it was checked.
+    """
+    try:
+        with open(transport_worker_lock_path(session), "r") as f:
+            data = json.load(f)
+    except Exception:
+        return ""
+    pid = data.get("pid")
+    host = data.get("host")
+    if host and host == _instance_id():
+        return f"{C.DIM}(pid {pid} here){C.RESET}"
+    if host:
+        where = str(host).split("|")[0]
+        return (f"{C.CYAN}(pid {pid} on {where} — another instance, so it "
+                f"will not appear in this one's process list){C.RESET}")
+    # No identity recorded: written by a build older than v10.7.4.
+    if pid and _is_pid_alive(pid):
+        return f"{C.DIM}(pid {pid}){C.RESET}"
+    return (f"{C.WARN}(pid {pid} unverified — no matching process here. "
+            f"Likely a leftover lock from an older version; if nothing is "
+            f"being sent, press (o) then (s)){C.RESET}")
+
+
 def _scheduler_status_line(session):
     """Return a coloured one-line scheduler status string."""
     worker_running = _is_transport_worker_running(session)
@@ -2987,7 +3017,7 @@ def _scheduler_status_line(session):
     total = sum(counts.values())
 
     if worker_running:
-        status = f"{C.OK}RUNNING{C.RESET}"
+        status = f"{C.OK}RUNNING{C.RESET} {_worker_owner_note(session)}"
         worker_ver = None
         try:
             with open(transport_worker_lock_path(session), "r") as f:
