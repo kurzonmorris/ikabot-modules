@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.2"
+MODULE_VERSION = "10.7.4"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -138,10 +138,19 @@ def _load_island_cache(session):
 
 def _save_island_cache(session, cache):
     path = _island_cache_path(session)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cache, f, indent=2)
-    os.replace(tmp, path)
+    # Per-process temp name: a fixed ".tmp" meant two instances writing the
+    # same account's cache could clobber each other's half-written file.
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _cache_key(x, y):
@@ -208,14 +217,20 @@ def _island_from_cache(entry):
     }
 
 
-def _fetch_and_cache_island(session, x, y, cache):
-    """Fetch a single island by coords, cache it, return (island_dict, cities_list)."""
+def _fetch_and_cache_island(session, x, y, cache, save=True):
+    """Fetch a single island by coords, cache it, return (island_dict, cities_list).
+
+    save=False lets a bulk scan add many islands and write the file once at
+    the end. Saving per island rewrote the whole (growing) cache on every
+    iteration, which made scanning an area cost roughly quadratic disk work.
+    """
     html = session.get(f"view=island&xcoord={x}&ycoord={y}")
     island = getIsland(html)
     cities = [c for c in island.get("cities", []) if c.get("type") == "city"]
     key = _cache_key(x, y)
     cache[key] = _cache_island_entry(island, cities)
-    _save_island_cache(session, cache)
+    if save:
+        _save_island_cache(session, cache)
     return island, cities
 
 
@@ -297,8 +312,14 @@ def _fetch_radius_islands(session, cx, cy, radius=ISLAND_CACHE_DEFAULT_RADIUS):
     fetched = 0
     for isl in nearby:
         try:
-            _fetch_and_cache_island(session, isl["x"], isl["y"], cache)
+            _fetch_and_cache_island(session, isl["x"], isl["y"], cache,
+                                    save=False)
             fetched += 1
+        except Exception:
+            pass
+    if fetched:
+        try:
+            _save_island_cache(session, cache)   # one write, not one per island
         except Exception:
             pass
     return fetched
@@ -316,8 +337,13 @@ def _refresh_all_cached_islands(session):
         if x is None or y is None:
             continue
         try:
-            _fetch_and_cache_island(session, x, y, cache)
+            _fetch_and_cache_island(session, x, y, cache, save=False)
             refreshed += 1
+        except Exception:
+            pass
+    if refreshed:
+        try:
+            _save_island_cache(session, cache)   # one write, not one per island
         except Exception:
             pass
     return refreshed
@@ -693,6 +719,13 @@ def log_shipment(log_path, session, mode, source_city, source_island,
                  next_shipment=None):
     if not log_path:
         return
+    # Every account appends to ONE shared file, so concurrent writes could
+    # interleave rows or write the header twice. Brief hold; if the lock
+    # cannot be taken we still log rather than lose the record.
+    _log_lock = f"{log_path}.lock"
+    _log_token = _new_lock_token()
+    _log_held = _lock_acquire(_log_lock, timeout=20, stale_after=10,
+                              token=_log_token)
     try:
         file_exists = os.path.isfile(log_path)
         now = datetime.datetime.now()
@@ -725,6 +758,9 @@ def log_shipment(log_path, session, mode, source_city, source_island,
             writer.writerow(row)
     except Exception:
         pass  # never crash the main script for a logging failure
+    finally:
+        if _log_held:
+            _lock_release(_log_lock, _log_token)
 
 
 # ============================================================================
@@ -1083,8 +1119,20 @@ def migrate_legacy_account_files(session):
         except OSError:
             pass
     for uf in (False, True):
+        legacy_ship = _legacy_lock_file_path(session, uf)
+        # Only clear it if nothing live holds it: a shipment that was in
+        # flight during the upgrade still owns its old-named lock.
         try:
-            os.remove(_legacy_lock_file_path(session, uf))
+            with open(legacy_ship, "r") as f:
+                ship_data = json.load(f)
+            ship_at = float(ship_data.get("timestamp", 0) or 0)
+            if (_holder_liveness(ship_data) is not False
+                    and time.time() - ship_at < 300):
+                continue     # recently touched and not provably dead
+        except Exception:
+            pass       # unreadable or absent — safe to clear
+        try:
+            os.remove(legacy_ship)
         except OSError:
             pass
     return True
@@ -1136,14 +1184,17 @@ def _lock_acquire(lock_path, timeout=45, stale_after=15, token=None,
     # lock exists but is still empty is as small as possible.
     my_payload = json.dumps({
         "pid": os.getpid(),
+        "host": _instance_id(),
         "timestamp": time.time(),
         "token": token,
         "version": MODULE_VERSION,
     }).encode()
 
-    start = time.time()
+    # Monotonic: a wall-clock correction (NTP, DST, VM resume) during a
+    # wait would otherwise cut it short or stretch it enormously.
+    start = time.monotonic()
     unreadable_since = None
-    while time.time() - start < timeout:
+    while time.monotonic() - start < timeout:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
@@ -1173,9 +1224,13 @@ def _lock_acquire(lock_path, timeout=45, stale_after=15, token=None,
                 # of our clock (skew, corrupt write) makes (now - held_at)
                 # permanently negative, so the lock would never age out and
                 # every waiter would be guaranteed to time out.
-                holder_dead = holder_pid > 0 and not _is_pid_alive(holder_pid)
+                # None = written elsewhere (another container/machine), so
+                # the pid tells us nothing and only the heartbeat counts.
+                alive = _holder_liveness(data)
+                holder_dead = alive is False
+                unknown_holder = alive is None
                 if (holder_dead
-                        or holder_pid <= 0
+                        or (not unknown_holder and holder_pid <= 0)
                         or (now - held_at) > stale_after
                         or held_at > now + 60):
                     try:
@@ -1194,8 +1249,8 @@ def _lock_acquire(lock_path, timeout=45, stale_after=15, token=None,
                 # just passed, so a genuinely corrupt lock was never broken
                 # and blocked everyone until deleted by hand.
                 if unreadable_since is None:
-                    unreadable_since = time.time()
-                elif time.time() - unreadable_since > 2.0:
+                    unreadable_since = time.monotonic()
+                elif time.monotonic() - unreadable_since > 2.0:
                     unreadable_since = None
                     try:
                         os.remove(lock_path)
@@ -1230,18 +1285,21 @@ def _lock_refresh(lock_path, token=None):
         with open(lock_path, "r") as f:
             data = json.load(f)
     except Exception:
-        data = None
+        # Unreadable or gone. Writing anyway would either recreate a lock
+        # we no longer hold or stamp our name on someone else's, so do
+        # nothing: if it really is ours it will be refreshed next tick.
+        return
 
-    if data is not None:
-        if token is not None:
-            owned = data.get("token") == token
-        else:
-            owned = data.get("pid") == os.getpid()
-        if not owned:
-            return  # someone else owns it now; leave it alone
+    if token is not None:
+        owned = data.get("token") == token
+    else:
+        owned = data.get("pid") == os.getpid()
+    if not owned:
+        return  # someone else owns it now; leave it alone
 
     payload = json.dumps({
         "pid": os.getpid(),
+        "host": _instance_id(),
         "timestamp": time.time(),
         "token": token,
         "version": MODULE_VERSION,
@@ -1344,14 +1402,29 @@ class _transport_csv_lock:
 
 # --- Schema enforcement ---
 
+def _write_sidecar_atomic(path, data):
+    """Write the schema sidecar via temp + replace, so a reader can never
+    see a half-written file (a truncated sidecar reads as 'unknown
+    version' and blocks the module)."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def enforce_transport_schema_or_abort(session):
     sidecar = transport_schema_sidecar_path(session)
     if not os.path.exists(sidecar):
-        with open(sidecar, "w", encoding="utf-8") as f:
-            json.dump({
-                "version": SCHEDULE_SCHEMA_VERSION,
-                "columns": SCHEDULE_COLUMNS,
-            }, f)
+        _write_sidecar_atomic(sidecar, {
+            "version": SCHEDULE_SCHEMA_VERSION,
+            "columns": SCHEDULE_COLUMNS,
+        })
         return True
     try:
         with open(sidecar, "r", encoding="utf-8") as f:
@@ -1372,25 +1445,27 @@ def enforce_transport_schema_or_abort(session):
         if os.path.exists(csv_file):
             try:
                 rows = []
-                with open(csv_file, newline="", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        for col, default in SCHEDULE_COLUMN_DEFAULTS.items():
-                            if not str(row.get(col, "")).strip():
-                                row[col] = default
-                        rows.append(row)
-                write_csv_atomic(csv_file, SCHEDULE_COLUMNS, rows)
+                # Under the CSV lock: a running worker updating a schedule
+                # mid-migration would otherwise have its write lost.
+                with _transport_csv_lock(session):
+                    with open(csv_file, newline="", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            for col, default in SCHEDULE_COLUMN_DEFAULTS.items():
+                                if not str(row.get(col, "")).strip():
+                                    row[col] = default
+                            rows.append(row)
+                    write_csv_atomic(csv_file, SCHEDULE_COLUMNS, rows)
                 print(f"  {C.DIM}Upgraded schedule data "
                       f"v{on_disk} -> v{SCHEDULE_SCHEMA_VERSION} "
                       f"({len(rows)} schedule(s) kept).{C.RESET}")
             except Exception as e:
                 print(f"  {C.WARN}Migration failed: {e}{C.RESET}")
                 return False
-        with open(sidecar, "w", encoding="utf-8") as f:
-            json.dump({
-                "version": SCHEDULE_SCHEMA_VERSION,
-                "columns": SCHEDULE_COLUMNS,
-            }, f)
+        _write_sidecar_atomic(sidecar, {
+            "version": SCHEDULE_SCHEMA_VERSION,
+            "columns": SCHEDULE_COLUMNS,
+        })
         return True
     print(f"Schedule data format has changed (was v{on_disk}, now v{SCHEDULE_SCHEMA_VERSION}).")
     print(f"  Your existing schedules can't be loaded with this version.")
@@ -1501,6 +1576,24 @@ def transport_csv_append(session, row):
     _touch_wake_flag(session)
 
 
+def transport_csv_append_with_id(session, row):
+    """Assign the id and append in ONE locked pass.
+
+    Allocating the id in a separate load/unlock/compute step let two
+    instances pick the same number for the same account. Returns the id.
+    """
+    assigned = {}
+
+    def _apply(rows):
+        assigned["id"] = next_schedule_id(session, rows)
+        row["schedule_id"] = assigned["id"]
+        rows.append(row)
+
+    _transport_csv_modify(session, _apply)
+    _touch_wake_flag(session)
+    return assigned.get("id")
+
+
 def transport_csv_delete(session, schedule_id):
     sid = int(schedule_id)
     def _delete(rows):
@@ -1545,13 +1638,7 @@ def next_schedule_id(session, rows):
     data["last_schedule_id"] = new_id
     data.setdefault("version", SCHEDULE_SCHEMA_VERSION)
     data.setdefault("columns", SCHEDULE_COLUMNS)
-    try:
-        tmp = sidecar + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, sidecar)
-    except Exception:
-        pass          # worst case we fall back to max+1 next time
+    _write_sidecar_atomic(sidecar, data)   # worst case: max+1 next time
     return new_id
 
 
@@ -2146,12 +2233,17 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
 
     # 2. Acquire lock with retries
     lock_acquired = False
+    lock_timeout = 300
+    if deadline_ts is not None:
+        # No point waiting 5 minutes x3 for a lock when this cycle is about
+        # to be cut off anyway.
+        lock_timeout = max(5, min(300, int(deadline_ts - time.time())))
     for attempt in range(1, max_lock_retries + 1):
         session.setStatus(
             f"{prefix}Acquiring lock ({attempt}/{max_lock_retries})..."
         )
         if acquire_shipping_lock(session, use_freighters=useFreighters,
-                                 timeout=300):
+                                 timeout=lock_timeout):
             lock_acquired = True
             break
         if attempt < max_lock_retries:
@@ -5395,9 +5487,9 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
         return
 
     rows = transport_csv_load(session)
-    schedule_row["schedule_id"] = next_schedule_id(session, rows)
-    transport_csv_append(session, schedule_row)
-    sid = schedule_row["schedule_id"]
+    # id is assigned under the CSV lock, so two instances creating a
+    # schedule at the same moment cannot land on the same number
+    sid = transport_csv_append_with_id(session, schedule_row)
     mode_label = schedule_row.get("mode", "?").capitalize()
 
     worker_running = _is_transport_worker_running(session)
@@ -5506,6 +5598,57 @@ def _save_and_maybe_activate(session, event, schedule_row, notif_config,
             pass
 
 
+_INSTANCE_ID = None
+
+
+def _instance_id():
+    """Identify the machine AND pid namespace this process runs in.
+
+    A process id is only meaningful inside the namespace that produced it.
+    With the module running in Docker alongside (or instead of) Windows,
+    two containers sharing a mounted home directory would otherwise read
+    each other's locks and either steal a live one — two schedulers
+    shipping at once — or never break a genuinely dead one, because the
+    number happens to match an unrelated local process.
+    """
+    global _INSTANCE_ID
+    if _INSTANCE_ID is not None:
+        return _INSTANCE_ID
+    parts = []
+    try:
+        import socket
+        parts.append(socket.gethostname())
+    except Exception:
+        parts.append("?")
+    try:
+        # Linux/Docker: the pid namespace inode. Absent on Windows, where
+        # the hostname alone is enough.
+        parts.append(os.readlink("/proc/self/ns/pid"))
+    except Exception:
+        pass
+    _INSTANCE_ID = "|".join(parts)
+    return _INSTANCE_ID
+
+
+def _holder_liveness(data):
+    """Is the recorded lock holder alive?  True / False / None.
+
+    None means "cannot tell" — the lock was written by a different machine
+    or container, or carries no identity — and the caller must fall back to
+    the heartbeat timestamp, which is meaningful everywhere.
+    """
+    host = data.get("host")
+    if host != _instance_id():
+        return None
+    try:
+        pid = int(data.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    return _is_pid_alive(pid)
+
+
 def _is_pid_alive(pid):
     """Check whether a process is running WITHOUT touching it.
 
@@ -5528,7 +5671,15 @@ def _is_pid_alive(pid):
         return False
     if _HAS_PSUTIL:
         try:
-            return psutil.pid_exists(pid)
+            proc = psutil.Process(pid)
+            # A container with ikabot as pid 1 may not reap its children, so
+            # a dead worker can linger as a zombie. psutil.pid_exists() says
+            # yes to those, which would keep a dead lock alive forever.
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                return False
+            return True
+        except psutil.NoSuchProcess:
+            return False
         except Exception:
             return True   # can't tell — assume alive, fall back to staleness
     if os.name == "nt":
@@ -5587,7 +5738,7 @@ def _try_recover_stale_lock(session, wlock):
         return True
 
     lock_pid = data.get("pid")
-    if not lock_pid or not _is_pid_alive(lock_pid):
+    if _holder_liveness(data) is False:
         try:
             os.remove(wlock)
         except OSError:
@@ -5641,12 +5792,12 @@ def _worker_lock_is_fresh(wlock):
     if time.time() - held_at > WORKER_LOCK_STALE_SECONDS:
         return False
     # A crashed worker's lock is dead immediately — don't report RUNNING (or
-    # block a restart) for the whole 10 minute staleness window.
-    try:
-        pid = int(data.get("pid"))
-    except (TypeError, ValueError):
-        return True  # no usable pid; trust the timestamp
-    return _is_pid_alive(pid)
+    # block a restart) for the whole 10 minute staleness window. Across
+    # containers the pid is meaningless, so the heartbeat decides instead.
+    alive = _holder_liveness(data)
+    if alive is None:
+        return True   # can't judge the pid; the fresh timestamp stands
+    return alive
 
 
 def _is_transport_worker_running(session):
@@ -6920,6 +7071,9 @@ def execute_schedule(session, sched, notif_config, log_path):
     try:
         cycle_sent = handler(session, sched, notif_config, log_path)
     except Exception:
+        # Returning 0 here was indistinguishable from "ran fine, sent
+        # nothing", so a one-time schedule that CRASHED was marked
+        # completed and never retried. None means failure.
         _rrs_release_all(session)
         if should_notify(notif_config, "error"):
             sendToBot(
@@ -6932,7 +7086,7 @@ def execute_schedule(session, sched, notif_config, log_path):
                 f"Technical detail (useful when reporting the "
                 f"problem):\n{traceback.format_exc()}",
             )
-        return 0
+        return None
 
     if should_notify(notif_config, "complete"):
         sendToBot(
@@ -7099,7 +7253,19 @@ def transport_scheduler_loop(session, stop_event):
                     _preempt["schedule_id"] = None
                     continue
 
+                if cycle_sent is None:
+                    # The cycle failed. Retry it later; never mark a
+                    # one-time schedule done just because it crashed.
+                    transport_csv_update(
+                        session, sid,
+                        last_run=now, next_run=int(time.time()) + 3600,
+                        status="active",
+                    )
+                    _preempt["schedule_id"] = None
+                    continue
+
                 elapsed = int(max(0, time.time() - started_at))
+                finished = int(time.time())
                 was_preempted = _preempt["yielded"]
                 _preempt["schedule_id"] = None
 
@@ -7138,10 +7304,14 @@ def transport_scheduler_loop(session, stop_event):
                     if run_at:
                         next_ts = _next_run_for_time(run_at)
                     else:
-                        next_ts = now + interval * 3600
+                        # From completion, not from when the tick began: a
+                        # cycle lasting longer than its own interval would
+                        # otherwise be due the instant it ended and run
+                        # back-to-back forever.
+                        next_ts = finished + interval * 3600
                     transport_csv_update(
                         session, sid,
-                        last_run=now, next_run=next_ts,
+                        last_run=finished, next_run=next_ts,
                         total_shipments=total, status="active",
                         last_duration=elapsed,
                     )
@@ -7310,6 +7480,18 @@ def _autostart_resume(session, event):
         finally:
             _lock_release(wlock, _WORKER_LOCK_TOKEN)
     except Exception:
+        # Auto-start has no terminal, so a silent swallow here meant the
+        # scheduler simply never came up with no trace of why.
+        try:
+            sendToBot(
+                session,
+                f"TRANSPORT SCHEDULER — AUTO-START FAILED\n"
+                f"The scheduler could not be resumed automatically at "
+                f"login, so nothing is being sent for this account. Open "
+                f"Resource Transport Manager and press (s) to start it.\n"
+                f"Technical detail:\n{traceback.format_exc()}")
+        except Exception:
+            pass
         try:
             event.set()
         except Exception:
@@ -7545,9 +7727,18 @@ def _run_supervised_scheduler(session, stop_event, notif_config):
         wlock = transport_worker_lock_path(session)
         if not _worker_lock_is_fresh(wlock):
             _WORKER_LOCK_TOKEN = _new_lock_token()
-            _lock_acquire(wlock, timeout=10,
-                          stale_after=WORKER_LOCK_STALE_SECONDS,
-                          token=_WORKER_LOCK_TOKEN)
+            if not _lock_acquire(wlock, timeout=10,
+                                 stale_after=WORKER_LOCK_STALE_SECONDS,
+                                 token=_WORKER_LOCK_TOKEN):
+                # Someone else won the lock while we were restarting.
+                # Running anyway would put two schedulers on one account.
+                try:
+                    session.setStatus(
+                        "Transport worker: another scheduler took over; "
+                        "standing down")
+                except Exception:
+                    pass
+                return
 
         crashed = None
         try:
