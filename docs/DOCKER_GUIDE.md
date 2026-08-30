@@ -827,6 +827,7 @@ Sign in with the same username and password as the terminal.
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Download and install an update, or roll the last one back |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
 | **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
+| **Files** | Read any CSV, JSON, TXT or LOG file under `/config` in the browser — CSVs as a sortable-width table you can search — or download it to your PC |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Output** | What the command you just pressed actually printed |
 
@@ -937,6 +938,39 @@ all lock files**.
 > milliseconds at a time and clears a dead one after thirty seconds by itself,
 > so they are never what stops a module restarting, and deleting one
 > mid-write is the only way this could do harm.
+
+### Reading a module's CSV
+
+Module data files live inside the container, owned by root, in folders under
+`/config` — which makes them awkward to look at while 24 instances are busy in
+tmux. The **Files** section reads them in the browser.
+
+1. Pick the file from the dropdown — every data file under `/config` is there,
+   shown with its folder and size, e.g. `modules/bulkdistribution.csv (11.3 KB)`
+2. It opens as a table: proper columns, the header exactly as the file spells
+   it, and the line number from the file down the left
+3. **Find in rows** filters as you type. The line numbers stay the file's own,
+   so a row you find here is the row you will find in the file
+4. **Download** saves it to whatever you are browsing from — the file arrives
+   byte for byte, so you can open it in Excel or LibreOffice
+
+Text in the table selects and copies normally, which is the easy way to get a
+few values out without downloading anything.
+
+A comma inside a quoted field stays one cell, rows with more columns than the
+header still show every value, and a file that is not valid CSV is shown as
+plain text with a note saying so rather than being silently mangled.
+
+Very large files are offered as a download instead of being loaded into the
+page, and a CSV over 3000 rows shows the first 3000 with a note — download it
+for the rest. **Refresh list** picks up files created since the page loaded.
+
+> **What it will not show you.** Only data files: `.csv`, `.tsv`, `.json`,
+> `.txt`, `.log`, `.md` and a few config extensions, and only below `/config`.
+> The vault and the session files are excluded by name — those are your account
+> credentials, and nothing about reading a CSV needs them. A path that resolves
+> outside `/config`, including through a symlink, is refused rather than served,
+> and never appears in the list either.
 
 ### Buttons
 
