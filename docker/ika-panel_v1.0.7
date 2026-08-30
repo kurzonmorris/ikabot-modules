@@ -8,6 +8,8 @@ be driven from a phone, tablet or Steam Deck. Stdlib only — no extra packages.
 import base64
 import hmac
 import json
+import csv
+import io
 import os
 import re
 import signal
@@ -16,11 +18,12 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.6"
+PANEL_VERSION = "1.0.7"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -35,6 +38,26 @@ DATA_DIR = os.environ.get("IKABOT_DATA_DIR", os.path.join(HOME_DIR, ".ikabot"))
 # Subfolders of the data folder that never hold a module lock. Skipped so a
 # large logs folder is not listed every five seconds.
 LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache"}
+
+# --- file viewer ----------------------------------------------------------
+# Only data files, and only below /config. Module CSVs are awkward to reach
+# any other way: they are inside the container, owned by root, and the
+# instances that write them are busy in tmux.
+FILES_ROOT = HOME_DIR
+VIEW_EXT = {".csv", ".tsv", ".json", ".txt", ".log", ".md",
+            ".schema", ".ini", ".conf", ".cfg", ".yml", ".yaml"}
+# Never listed, never served. The vault and the session files are the account
+# credentials themselves; nothing about examining a CSV needs them, and the
+# panel is not the place to hand them out.
+FILES_DENY_NAMES = {"vault", ".ikabot_vault", "credentials"}
+FILES_DENY_EXT = {".session", ".lock", ".key", ".pem"}
+FILES_SKIP_DIRS = {"sessions", "__pycache__", ".git", "node_modules"}
+FILES_MAX_DEPTH = 4
+FILES_MAX_LISTED = 3000
+# A view is for reading, not for shifting the whole file into a browser tab.
+# Anything bigger is offered as a download instead.
+VIEW_MAX_BYTES = 4 * 1024 * 1024
+VIEW_MAX_ROWS = 3000
 # Seeds the button file on first run only; buttons are edited in the panel
 # afterwards and live in BUTTONS_FILE.
 QUICK_KEYS = [k.strip() for k in os.environ.get("QUICK_KEYS", "5,6,9,11").split(",")
@@ -280,6 +303,125 @@ def delete_locks(pairs):
         except OSError as exc:
             lines.append("could not delete %s — %s" % (name, exc))
     return lines
+
+
+def viewable_name(name):
+    """True when a filename may be listed and served."""
+    lower = name.lower()
+    if lower in FILES_DENY_NAMES:
+        return False
+    stem, ext = os.path.splitext(lower)
+    if ext in FILES_DENY_EXT:
+        return False
+    return ext in VIEW_EXT
+
+
+def list_files():
+    """Data files under /config, as dicts of path, size and mtime.
+
+    Walked to a fixed depth with a hard cap on the count, so a folder that
+    grows without bound cannot turn the listing into a denial of service.
+    """
+    root = os.path.realpath(FILES_ROOT)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
+        if depth >= FILES_MAX_DEPTH:
+            dirnames[:] = []
+        else:
+            dirnames[:] = sorted(d for d in dirnames if d not in FILES_SKIP_DIRS)
+        for name in sorted(filenames):
+            if not viewable_name(name):
+                continue
+            full = os.path.join(dirpath, name)
+            # A symlink pointing out of /config is refused when opened, so it
+            # must not be listed either — otherwise the list advertises files
+            # that cannot be read, and the name and size of whatever it points
+            # at leak from the listing alone.
+            real = os.path.realpath(full)
+            if not real.startswith(root + os.sep):
+                continue
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root)
+            out.append({"path": rel, "size": st.st_size, "mtime": int(st.st_mtime)})
+            if len(out) >= FILES_MAX_LISTED:
+                return sorted(out, key=lambda f: f["path"])
+    return sorted(out, key=lambda f: f["path"])
+
+
+def resolve_file(rel):
+    """Turn a browser-supplied path into a real file, or None.
+
+    Everything is decided here: the path is resolved to its real location and
+    has to end up inside /config, be a regular file, and carry a name the
+    listing would have shown. Symlinks and ".." are handled by comparing the
+    resolved path, not the text.
+    """
+    if not rel or "\x00" in rel:
+        return None
+    root = os.path.realpath(FILES_ROOT)
+    target = os.path.realpath(os.path.join(root, rel))
+    if target != root and not target.startswith(root + os.sep):
+        return None
+    if not os.path.isfile(target):
+        return None
+    if not viewable_name(os.path.basename(target)):
+        return None
+    # Nothing below a skipped folder, however it was reached.
+    inner = os.path.relpath(target, root).split(os.sep)[:-1]
+    if any(part in FILES_SKIP_DIRS for part in inner):
+        return None
+    return target
+
+
+def read_file(path):
+    """Contents of one file, as CSV rows where that is what it is."""
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        return {"error": "Could not read the file: %s" % exc}
+
+    info = {"path": os.path.relpath(path, os.path.realpath(FILES_ROOT)),
+            "size": st.st_size, "mtime": int(st.st_mtime)}
+    if st.st_size > VIEW_MAX_BYTES:
+        info["error"] = ("This file is %s — too big to show here. Use Download."
+                         % human_size(st.st_size))
+        return info
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            raw = f.read()
+    except OSError as exc:
+        return {"error": "Could not read the file: %s" % exc}
+
+    if os.path.splitext(path)[1].lower() in (".csv", ".tsv"):
+        delim = "\t" if path.lower().endswith(".tsv") else ","
+        try:
+            rows = list(csv.reader(io.StringIO(raw), delimiter=delim))
+        except csv.Error as exc:
+            info["kind"] = "text"
+            info["text"] = raw
+            info["note"] = "Not valid CSV (%s) — showing it as plain text." % exc
+            return info
+        info["kind"] = "csv"
+        info["total_rows"] = len(rows)
+        info["truncated"] = len(rows) > VIEW_MAX_ROWS
+        info["rows"] = rows[:VIEW_MAX_ROWS]
+        return info
+
+    info["kind"] = "text"
+    info["text"] = raw
+    return info
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "%d %s" % (n, unit) if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024.0
 
 
 def _listening():
@@ -731,11 +873,50 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _query(self):
+        return parse_qs(urlparse(self.path).query)
+
     def do_GET(self):
         if not self._authed():
             return self._deny()
         if self.path.startswith("/api/state"):
             return self._send(200, json.dumps(state()))
+
+        if self.path.startswith("/api/files"):
+            return self._send(200, json.dumps({"root": FILES_ROOT,
+                                               "files": list_files()}))
+
+        if self.path.startswith("/api/file"):
+            rel = (self._query().get("path") or [""])[0]
+            target = resolve_file(rel)
+            if target is None:
+                return self._send(404, json.dumps(
+                    {"error": "No such file below %s, or not a readable data "
+                              "file." % FILES_ROOT}))
+            return self._send(200, json.dumps(read_file(target)))
+
+        if self.path.startswith("/api/download"):
+            rel = (self._query().get("path") or [""])[0]
+            target = resolve_file(rel)
+            if target is None:
+                return self._send(404, json.dumps({"error": "not found"}))
+            try:
+                with open(target, "rb") as f:
+                    body = f.read()
+            except OSError as exc:
+                return self._send(500, json.dumps({"error": str(exc)}))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            # The filename is quoted rather than interpolated bare: a comma or
+            # a space in it would otherwise split the header.
+            self.send_header("Content-Disposition",
+                             'attachment; filename="%s"'
+                             % os.path.basename(target).replace('"', "_"))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return self.wfile.write(body)
+
         if self.path == "/" or self.path.startswith("/?"):
             return self._send(200, PAGE, "text/html; charset=utf-8")
         self._send(404, json.dumps({"error": "not found"}))
@@ -1046,6 +1227,24 @@ border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
 .ver{font-weight:400;color:var(--soft)}
 .dval{font-family:ui-monospace,monospace;font-size:12px;color:var(--ink);
 min-width:42px;display:inline-block;text-align:right}
+.btn{display:inline-block;font:inherit;font-size:12.5px;padding:5px 10px;
+border-radius:5px;border:1px solid var(--rule);background:var(--card);
+color:var(--ink);text-decoration:none;cursor:pointer}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+#fpick{max-width:min(100%,460px)}
+.fwrap{overflow:auto;max-height:460px;border:1px solid var(--rule);border-radius:6px}
+.fwrap table{font-size:12.5px}
+.fwrap td,.fwrap th{white-space:pre;padding:4px 8px}
+/* The page's table headings are small-caps labels; a CSV header is data and
+   has to read exactly as the file spells it. */
+.fwrap thead th{position:sticky;top:0;background:var(--card);z-index:1;
+text-transform:none;letter-spacing:0;font-size:12.5px;color:var(--ink);
+font-weight:600;border-bottom:1px solid var(--rule)}
+.fwrap tbody tr:nth-child(even){background:var(--bg)}
+.rn{color:var(--soft);text-align:right;font-family:ui-monospace,monospace;
+font-size:11px;user-select:none}
+.ftext{background:var(--code);color:var(--codeink);padding:12px;border-radius:6px;
+margin:0;font-size:12.5px;max-height:460px;overflow:auto;white-space:pre}
 </style></head><body><div class="wrap">
 
 <h1>ikabot control panel <span class="ver" id="pver"></span></h1>
@@ -1126,6 +1325,21 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     Red means a newer version is published. Instances keep running the old code
     until you restart them.
   </p>
+</section>
+
+<section>
+  <h2>Files</h2>
+  <div class="form">
+    <div class="f"><label for="fpick">File under /config</label>
+      <select id="fpick"><option value="">loading…</option></select></div>
+    <button class="p" id="fopen">View</button>
+    <a class="btn" id="fdl" href="#" download>Download</a>
+    <button id="frefresh">Refresh list</button>
+    <div class="f"><label for="ffilter">Find in rows</label>
+      <input id="ffilter" placeholder="type to filter" size="16"></div>
+  </div>
+  <p class="hint" id="fmeta" style="margin-top:0"></p>
+  <div id="fview"></div>
 </section>
 
 <section>
@@ -1278,6 +1492,108 @@ document.getElementById('openweb').addEventListener('click',function(){
                (total-n)+' already open.\n\nIf fewer tabs appeared than expected, allow '+
                'pop-ups for this page in your browser and press again.');
 });
+
+// --- file viewer ---------------------------------------------------------
+var shown=null;   // the file currently on screen, as returned by api/file
+
+function fsize(n){
+  if(n<1024)return n+' B';
+  if(n<1048576)return (n/1024).toFixed(1)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+
+function when(ts){
+  if(!ts)return '';
+  var d=new Date(ts*1000), p=function(x){return (x<10?'0':'')+x;};
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+
+         ' '+p(d.getHours())+':'+p(d.getMinutes());
+}
+
+function loadFileList(){
+  var sel=el('fpick'), keep=sel.value;
+  fetch('api/files').then(function(r){return r.json()}).then(function(d){
+    var files=d.files||[];
+    sel.innerHTML = files.length
+      ? files.map(function(f){
+          return '<option value="'+esc(f.path)+'">'+esc(f.path)+
+                 '  ('+fsize(f.size)+')</option>';
+        }).join('')
+      : '<option value="">no data files found under '+esc(d.root||'/config')+'</option>';
+    // Keep the user on the file they had chosen when the list is refreshed.
+    if(keep){ sel.value=keep; }
+    el('fmeta').textContent=files.length
+      ? files.length+' file(s) under '+(d.root||'/config')
+      : 'Nothing to show. CSV, JSON, TXT and LOG files under /config appear here.';
+  }).catch(function(e){ el('fmeta').textContent='Could not list files: '+e; });
+}
+
+function renderFile(){
+  var box=el('fview'), d=shown;
+  if(!d){ box.innerHTML=''; return; }
+  if(d.error){
+    box.innerHTML='<p class="err">'+esc(d.error)+'</p>';
+    return;
+  }
+  if(d.kind==='text'){
+    box.innerHTML=(d.note?'<p class="hint" style="margin-top:0">'+esc(d.note)+'</p>':'')+
+      '<pre class="ftext">'+esc(d.text||'')+'</pre>';
+    return;
+  }
+  var q=el('ffilter').value.trim().toLowerCase();
+  var rows=d.rows||[], head=rows.length?rows[0]:[];
+  // Number each row before filtering, so the number shown is its line in the
+  // file rather than its position in whatever the filter left.
+  var body=[];
+  for(var i=1;i<rows.length;i++){
+    if(!q||rows[i].join(' ').toLowerCase().indexOf(q)>=0){
+      body.push([i+1,rows[i]]);
+    }
+  }
+  var width=head.length;
+  body.forEach(function(r){ if(r[1].length>width)width=r[1].length; });
+  var cell=function(v){return '<td>'+esc(v===undefined?'':v)+'</td>';};
+  var html='<div class="fwrap"><table><thead><tr><th class="rn">#</th>'+
+    head.map(function(h){return '<th>'+esc(h)+'</th>';}).join('')+
+    (width>head.length
+      ? new Array(width-head.length+1).join('<th></th>') : '')+
+    '</tr></thead><tbody>'+
+    body.map(function(r){
+      var cells='';
+      for(var c=0;c<width;c++)cells+=cell(r[1][c]);
+      return '<tr><td class="rn">'+r[0]+'</td>'+cells+'</tr>';
+    }).join('')+
+    '</tbody></table></div>';
+  box.innerHTML=html;
+  el('fmeta').textContent=d.path+' — '+fsize(d.size)+', '+
+    (d.total_rows||0)+' row(s), changed '+when(d.mtime)+
+    (q?'  ·  showing '+body.length+' matching':'')+
+    (d.truncated?'  ·  only the first '+(d.rows.length)+' rows are shown, '+
+                 'use Download for the whole file':'');
+}
+
+function openFile(){
+  var path=el('fpick').value;
+  if(!path){ return; }
+  el('fmeta').textContent='opening '+path+'…';
+  fetch('api/file?path='+encodeURIComponent(path))
+    .then(function(r){return r.json()})
+    .then(function(d){ shown=d; renderFile();
+      if(d.error)el('fmeta').textContent=d.path||path; })
+    .catch(function(e){ el('fview').innerHTML='<p class="err">Could not open it: '+
+      esc(e)+'</p>'; });
+}
+
+el('fopen').addEventListener('click',openFile);
+el('fpick').addEventListener('change',openFile);
+el('frefresh').addEventListener('click',loadFileList);
+el('ffilter').addEventListener('input',function(){ if(shown)renderFile(); });
+el('fdl').addEventListener('click',function(e){
+  var path=el('fpick').value;
+  if(!path){ e.preventDefault(); return; }
+  this.href='api/download?path='+encodeURIComponent(path);
+  this.setAttribute('download', path.split('/').pop());
+});
+loadFileList();
 
 // Compare numerically so 1.10.0 beats 1.9.3, which a string compare gets wrong.
 function newer(remote,local){
