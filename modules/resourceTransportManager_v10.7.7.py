@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.6"
+MODULE_VERSION = "10.7.7"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -1715,24 +1715,34 @@ def _next_run_for_time(time_str):
     return int(target.timestamp())
 
 
-def _ask_priority(mode_name):
-    """Ask how important this delivery is. Enter = standard."""
+def _ask_priority(mode_name, default=PRIORITY_DEFAULT, note=None):
+    """Ask how this delivery ranks against the account's OTHER schedules.
+
+    `default` is what Enter accepts. Bulk passes the most urgent priority
+    found in its CSV, so the obvious answer needs no thought — the file
+    has already said how urgent its contents are.
+    """
+    default = _clamp_priority(default)
+
     def _draw():
         print_module_banner(f"{mode_name} — Priority")
-        print(f"  {C.DIM}How important is this delivery?{C.RESET}\n")
+        print(f"  {C.DIM}How does this rank against your OTHER schedules?{C.RESET}\n")
         print(f"  {C.BOLD}(1){C.RESET} Vital — sent before everything else")
         print(f"  {C.BOLD}(2){C.RESET} Important")
-        print(f"  {C.BOLD}(3){C.RESET} Standard {C.DIM}(default){C.RESET}")
+        print(f"  {C.BOLD}(3){C.RESET} Standard")
         print(f"  {C.BOLD}(4){C.RESET} Not important")
         print(f"  {C.BOLD}(5){C.RESET} Least vital — only when nothing else is waiting")
+        if note:
+            print(f"\n  {C.CYAN}{note}{C.RESET}")
         print(f"\n  {C.DIM}Higher priorities are sent first, and a vital "
               f"delivery due soon holds back lower ones.{C.RESET}")
-        print(f"  {C.HINT}Press Enter for standard.{C.RESET}")
+        print(f"  {C.HINT}Press Enter for "
+              f"{PRIORITY_LABELS.get(default, default)}.{C.RESET}")
     _draw()
     _set_redraw(_draw)
-    val = read(min=1, max=5, digit=True, default=PRIORITY_DEFAULT,
+    val = read(min=1, max=5, digit=True, default=default,
                additionalValues=[""])
-    return _clamp_priority(val if val != "" else PRIORITY_DEFAULT)
+    return _clamp_priority(val if val != "" else default)
 
 
 def _get_schedule_timing(event, mode_name):
@@ -5186,7 +5196,23 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         event.set()
         return
 
-    priority = _ask_priority("Bulk Distribution")
+    # The CSV already states how urgent its destinations are, so offer the
+    # most urgent row as the default rather than asking cold. This prompt
+    # sets a different thing from the Priority column: the column orders
+    # destinations WITHIN this run, this ranks the whole run against the
+    # account's other schedules.
+    try:
+        _row_prs = [_clamp_priority(r.get("Priority", PRIORITY_DEFAULT))
+                    for r in rows]
+        _csv_pr = min(_row_prs) if _row_prs else PRIORITY_DEFAULT
+        _n_at = sum(1 for p in _row_prs if p == _csv_pr)
+        _note = (f"This CSV's most urgent row is priority {_csv_pr} "
+                 f"({_n_at} of {len(_row_prs)} rows). The Priority column "
+                 f"orders destinations inside this run; this sets how the "
+                 f"run competes with your other schedules.")
+    except Exception:
+        _csv_pr, _note = PRIORITY_DEFAULT, None
+    priority = _ask_priority("Bulk Distribution", default=_csv_pr, note=_note)
     schedule_row = build_schedule_row(
         schedule_id=0,
         mode="bulk",
