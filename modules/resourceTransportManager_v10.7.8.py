@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.7"
+MODULE_VERSION = "10.7.8"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -6563,6 +6563,35 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     issues_col = issues_col_for_run(run_column)
     for row in rows:
         row[issues_col] = ""
+
+    # A recurring bulk schedule must start a FRESH pass each cycle.
+    # The run column marks rows already sent so an interrupted cycle can
+    # resume where it left off — but nothing ever cleared it, so once a
+    # pass finished every row stayed marked and every later cycle found
+    # nothing to do. The schedule fired on time and reported "NOTHING TO
+    # SEND" forever, which looked like the interval being ignored.
+    #
+    # Completed pass (nothing pending) -> clear and go round again.
+    # Partly done -> the previous cycle was cut short (deadline, action
+    # points, preemption), so resume rather than resend what already went.
+    interval_hours = sched.get("interval_hours", 0) or 0
+    if interval_hours > 0 and rows:
+        pending = [r for r in rows
+                   if normalize_text(r.get(run_column, "")) != "x"]
+        if not pending:
+            for row in rows:
+                row[run_column] = ""
+                row[issues_col] = ""
+            try:
+                write_csv_atomic(csv_path, fieldnames, rows)
+            except Exception:
+                pass
+            try:
+                session.setStatus(
+                    f"Bulk Dist: previous pass complete, starting a new "
+                    f"pass over {len(rows)} row(s)")
+            except Exception:
+                pass
 
     city_cache = {}
     mismatches = []
