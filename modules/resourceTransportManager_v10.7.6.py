@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.5"
+MODULE_VERSION = "10.7.6"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -4898,6 +4898,29 @@ def _parse_row_selection(raw, total):
     return sorted(indices)
 
 
+def _bulk_csv_pref_key(session):
+    return f"csv_path_{_account_suffix(session)}"
+
+
+def _last_bulk_csv(session, prefs):
+    """The last CSV THIS account used.
+
+    The prefs file is shared by every account, so a single global
+    "csv_path" offered whichever file was typed last in ANY account —
+    with many instances running different files, pressing Enter could
+    silently attach the wrong one. Falls back to the old global value the
+    first time an account is asked, so nothing is lost on upgrade.
+    """
+    return (prefs.get(_bulk_csv_pref_key(session))
+            or prefs.get("csv_path", ""))
+
+
+def _remember_bulk_csv(session, prefs, csv_path):
+    prefs[_bulk_csv_pref_key(session)] = csv_path
+    prefs["csv_path"] = csv_path      # kept for older builds reading prefs
+    save_prefs(prefs)
+
+
 def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                                telegram_enabled, log_path):
     try:
@@ -4905,9 +4928,9 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
         print(f"  {C.DIM}Send resources to many cities using a spreadsheet (CSV file).{C.RESET}")
         print(f"  {C.DIM}You can edit the file in a spreadsheet app or in the built-in editor.{C.RESET}\n")
         prefs = load_prefs()
-        saved_csv = prefs.get("csv_path", "")
+        saved_csv = _last_bulk_csv(session, prefs)
         if saved_csv:
-            print(f"  {C.CYAN}Last used:{C.RESET} {saved_csv}")
+            print(f"  {C.CYAN}Last used by {session.username}:{C.RESET} {saved_csv}")
             print(f"  {C.DIM}Press Enter to reuse, or type a new path.{C.RESET}")
         else:
             print(f"  Enter the full path to your CSV file, or create a template.")
@@ -4925,8 +4948,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             template_path = _create_csv_template(session)
             if template_path:
                 csv_path = template_path
-                prefs["csv_path"] = csv_path
-                save_prefs(prefs)
+                _remember_bulk_csv(session, prefs, csv_path)
             else:
                 return "restart"
         else:
@@ -4936,9 +4958,8 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
                 enter()
                 event.set()
                 return
-        # Save for next time
-        prefs["csv_path"] = csv_path
-        save_prefs(prefs)
+        # Save for next time, against THIS account
+        _remember_bulk_csv(session, prefs, csv_path)
 
         if not os.path.isfile(csv_path):
             print(f"  {C.WARN}File not found:{C.RESET} {csv_path}")
