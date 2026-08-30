@@ -358,3 +358,108 @@ def test_buy_offers_sorted_best_price_first(amt):
     cheap = _SELL_LIST_ROW.replace('nowrap;">7 ', 'nowrap;">3 ')
     offers = amt._get_buy_offers(OfferListSession(_SELL_LIST_ROW + cheap), _city(), 0)
     assert [o["precio"] for o in offers] == [7, 3]
+
+
+# ------------------------------------------- searching a player's offers
+
+class ScanSession:
+    """Serves a different offer list per resource filter."""
+
+    def __init__(self, rows_by_index):
+        self._rows = rows_by_index
+        self._current = 0
+        self.filters_set = []
+
+    def post(self, url=None, params=None, **kwargs):
+        import json
+        params = params or {}
+        if "searchResource" in params:
+            raw = params["searchResource"]
+            self._current = 0 if raw == "resource" else int(raw)
+            self.filters_set.append(self._current)
+        body = "<table>" + self._rows.get(self._current, "") + "</table>"
+        return json.dumps([["a", "b"], ["c", ["d", body]]])
+
+    def get(self, *args, **kwargs):
+        return ""
+
+
+def _row(player, price, amount, city_name="Irana", dest="30485", distance=5):
+    return """
+    <tr>
+      <td class="short_text80">{city} <br>({player})</td>
+      <td>x <div class="tooltip" updated="true">{amount}</div></td>
+      <td><img src="//x.png" alt="Building material"></td>
+      <td style="white-space:nowrap;">{price} <img class="icon_gold"> Per Piece</td>
+      <td>{distance}</td>
+      <td><a href="?view=takeOffer&amp;destinationCityId={dest}&amp;oldView=branchOffice"><img></a></td>
+    </tr>
+    """.format(city=city_name, player=player, amount=amount, price=price,
+               dest=dest, distance=distance)
+
+
+def test_find_player_offers_scans_every_resource(amt):
+    """A player may be selling anything; all five slots get checked."""
+    session = ScanSession({
+        1: _row("Dzohaars", 7, "500,000"),
+        3: _row("Dzohaars", 40, "12,000"),
+    })
+
+    found = amt._find_player_offers(session, _city(), "Dzohaars", "sell")
+
+    assert sorted(session.filters_set) == [0, 1, 2, 3, 4]
+    assert [idx for idx, _ in found] == [1, 3]
+    assert found[0][1]["amountAvailable"] == 500000
+    assert found[1][1]["precio"] == 40
+
+
+def test_find_player_offers_ignores_other_players(amt):
+    session = ScanSession({0: _row("Someone", 7, "500") + _row("Dzohaars", 9, "800")})
+    found = amt._find_player_offers(session, _city(), "dzohaars", "sell")
+    assert len(found) == 1
+    assert found[0][1]["precio"] == 9
+
+
+def test_find_player_offers_skips_empty_listings(amt):
+    session = ScanSession({0: _row("Dzohaars", 7, "0")})
+    assert amt._find_player_offers(session, _city(), "Dzohaars", "sell") == []
+
+
+def test_find_player_offers_survives_a_failing_resource(amt):
+    """One bad market response must not lose the other four."""
+    class Flaky(ScanSession):
+        def post(self, url=None, params=None, **kwargs):
+            if (params or {}).get("searchResource") == "2":
+                raise RuntimeError("market unavailable")
+            return ScanSession.post(self, url, params, **kwargs)
+
+    session = Flaky({4: _row("Dzohaars", 11, "300")})
+    found = session and amt._find_player_offers(session, _city(), "Dzohaars", "sell")
+    assert [idx for idx, _ in found] == [4]
+
+
+def test_pick_from_player_offers_returns_the_chosen_row(amt, monkeypatch):
+    session = ScanSession({
+        1: _row("Dzohaars", 7, "500,000"),
+        3: _row("Dzohaars", 40, "12,000"),
+    })
+    monkeypatch.setattr(amt, "read", lambda *a, **k: 2)
+
+    idx, offer = amt._pick_from_player_offers(session, _city(), "Dzohaars", "sell", 0)
+
+    assert idx == 3
+    assert offer["precio"] == 40
+    assert offer["amountAvailable"] == 12000
+
+
+def test_pick_from_player_offers_zero_keeps_manual_entry(amt, monkeypatch):
+    session = ScanSession({1: _row("Dzohaars", 7, "500")})
+    monkeypatch.setattr(amt, "read", lambda *a, **k: 0)
+    assert amt._pick_from_player_offers(session, _city(), "Dzohaars", "sell", 0) is None
+
+
+def test_pick_from_player_offers_none_found_is_not_fatal(amt, monkeypatch):
+    """An order for a player with nothing listed is still worth creating."""
+    session = ScanSession({})
+    monkeypatch.setattr(amt, "read", lambda *a, **k: pytest.fail("must not prompt"))
+    assert amt._pick_from_player_offers(session, _city(), "Ghost", "sell", 0) is None

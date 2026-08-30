@@ -649,6 +649,61 @@ def _show_city_info(session, city):
     print("")
 
 
+def _find_player_offers(session, city, player_name, order_type):
+    """Everything a named player currently has on the market, per resource.
+    Buying looks at their sell offers, selling at their buy offers.
+    Returns a list of (resource_index, offer), cheapest first per resource.
+    """
+    found = []
+    for idx in range(5):
+        try:
+            if order_type == "buy":
+                _set_resource_filter(session, city, idx, TRADE_SELL)
+                offers = getOffers(session, city)
+            else:
+                offers = _get_buy_offers(session, city, idx)
+        except Exception:
+            continue
+        for offer in filter_offers_by_player(offers, player_name):
+            if offer.get("amountAvailable", 0) > 0:
+                found.append((idx, offer))
+    return found
+
+
+def _pick_from_player_offers(session, city, player_name, order_type, res_idx):
+    """Show what the player has on offer and let the user pick one.
+    Returns (resource_index, offer), or None to keep the resource already
+    chosen and set the price by hand.
+    """
+    verb = "selling" if order_type == "buy" else "buying"
+    print("\nSearching the market for {}...".format(player_name))
+    matches = _find_player_offers(session, city, player_name, order_type)
+
+    if not matches:
+        print("{}{} has nothing on offer within trade range.{}".format(
+            bcolors.WARNING, player_name, bcolors.ENDC))
+        print("The order will still be created and will trade if they post later.")
+        return None
+
+    print("\n{} is {}:\n".format(matches[0][1]["jugadorAComprar"], verb))
+    print("{:<4} {:<9} {:<14} {:<8} {:<18}".format(
+        "", "Resource", "Amount", "Price", "City"))
+    print("-" * 58)
+    for i, (idx, offer) in enumerate(matches):
+        print("({:d})  {:<9} {:<14} {:<8} {:<18}".format(
+            i + 1, materials_names[idx],
+            addThousandSeparator(offer["amountAvailable"]),
+            offer["precio"], str(offer.get("ciudadDestino", ""))[:18]))
+    print("")
+
+    print("(0) Ignore this list and set the resource and price myself")
+    choice = read(min=0, max=len(matches))
+    if choice == 0:
+        return None
+
+    return matches[choice - 1]
+
+
 def _create_order(session, city, orders, commercial_cities):
     """Interactive order creation. Returns a new order dict or None if cancelled."""
     oid = next_order_id(orders)
@@ -684,6 +739,8 @@ def _create_order(session, city, orders, commercial_cities):
     # Strategy (active mode only)
     strategy = ""
     target_player = ""
+    seen_price = None
+    seen_amount = None
     if mode == "active":
         print("\nBuy strategy:" if order_type == "buy" else "\nSell strategy:")
         print("(1) Cheapest price")
@@ -696,6 +753,16 @@ def _create_order(session, city, orders, commercial_cities):
             if not target_player.strip():
                 print("No player name entered, cancelled.")
                 return None
+            if len(config.predetermined_input) == 0:
+                picked = _pick_from_player_offers(
+                    session, order_city, target_player.strip(), order_type, res_idx)
+                if picked is not None:
+                    res_idx, seen_offer = picked
+                    resource = materials_names[res_idx]
+                    seen_price = seen_offer["precio"]
+                    seen_amount = seen_offer["amountAvailable"]
+                    # Store the name as the game spells it, not as typed.
+                    target_player = seen_offer["jugadorAComprar"]
 
     # Price
     if mode == "own_offer":
@@ -706,14 +773,25 @@ def _create_order(session, city, orders, commercial_cities):
         price = read(min=lo, max=hi)
     else:
         if order_type == "buy":
-            print("\nMax price willing to pay per unit:")
+            print("\nMax price willing to pay per unit for {}:".format(resource))
         else:
-            print("\nMin price willing to accept per unit:")
-        price = read(min=1, max=999999)
+            print("\nMin price willing to accept per unit for {}:".format(resource))
+        if seen_price is not None:
+            print("Currently offered at {} [ENTER to accept]".format(seen_price))
+            price_input = read(min=1, max=999999, empty=True)
+            price = int(price_input) if price_input != "" else seen_price
+        else:
+            price = read(min=1, max=999999)
 
     # Quantity
     print("\nTotal quantity to {}:".format(order_type))
-    quantity = read(min=1, max=999999999)
+    if seen_amount is not None:
+        print("{} available now [ENTER for all of it]".format(
+            addThousandSeparator(seen_amount)))
+        quantity_input = read(min=1, max=999999999, empty=True)
+        quantity = int(quantity_input) if quantity_input != "" else seen_amount
+    else:
+        quantity = read(min=1, max=999999999)
 
     # Per-cycle limit
     print("\nMax amount per cycle (0 = no limit) [default 0]:")
