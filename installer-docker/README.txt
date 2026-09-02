@@ -1,5 +1,5 @@
 ==========================================================
-  ikabot in Docker  —  installer v1.0.6
+  ikabot in Docker  —  installer v1.0.7
 ==========================================================
 
 Runs ikabot for as many game accounts as you like, in one
@@ -35,6 +35,12 @@ INSTALLING — UNRAID, TRUENAS OR LINUX
       ./install.sh
 
   Same three questions, same result.
+
+  Updating later? Extract the new zip into a FRESH
+  folder rather than over the old one. Unzipping on
+  top leaves the previous panel file behind beside
+  the new one. The build copes -- it takes the newer
+  and says so -- but a clean folder is tidier.
 
 
 AFTER INSTALLING

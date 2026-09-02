@@ -55,9 +55,24 @@ COPY ika-update       /usr/local/bin/ika-update
 COPY ika-panel_v*     /tmp/panel/
 COPY ika-panel-host   /usr/local/bin/ika-panel-host
 COPY ika-web-attach   /usr/local/bin/ika-web-attach
-RUN mv /tmp/panel/ika-panel_v* /usr/local/bin/ika-panel \
- && rmdir /tmp/panel \
- && chmod +x /usr/local/bin/entrypoint.sh \
+# Extracting a newer zip over an older folder leaves both ika-panel_v* files
+# side by side, and a two-source `mv` to a plain filename fails with a message
+# that says nothing about the real cause. Pick the newest by version, say which
+# one was chosen when there is a choice, and fail readably when there is none.
+RUN set -eu; \
+    panel="$(ls -1 /tmp/panel/ika-panel_v* 2>/dev/null | sort -V | tail -1)"; \
+    if [ -z "$panel" ]; then \
+        echo "No ika-panel_v* file next to the Dockerfile — the download is incomplete." >&2; \
+        exit 1; \
+    fi; \
+    if [ "$(ls -1 /tmp/panel/ika-panel_v* | wc -l)" -gt 1 ]; then \
+        echo "Several panel versions present; installing the newest: $(basename "$panel")"; \
+        echo "  (delete the older ika-panel_v* files from docker/ to silence this)"; \
+    fi; \
+    mv "$panel" /usr/local/bin/ika-panel; \
+    rm -rf /tmp/panel
+
+RUN chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/ika \
              /usr/local/bin/ika-modules \
              /usr/local/bin/ika-update \
