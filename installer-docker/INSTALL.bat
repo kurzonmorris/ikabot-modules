@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-set "INSTALLER_VERSION=1.0.7"
+set "INSTALLER_VERSION=1.0.8"
 title ikabot Docker installer v%INSTALLER_VERSION%
 color 0F
 
@@ -64,6 +64,27 @@ echo  Instances     : !INSTANCES!
 echo.
 
 if not exist "!INSTALL_DIR!\config" mkdir "!INSTALL_DIR!\config"
+if not exist "!INSTALL_DIR!\app" mkdir "!INSTALL_DIR!\app"
+
+rem ikabot itself lives on the host and is mounted at /app, so that a later
+rem "ika update" survives the container being rebuilt. Only copied in when the
+rem folder is empty, so re-running this never discards an updated ikabot.
+if exist "!INSTALL_DIR!\app\ikabot" (
+    echo  ikabot is already in !INSTALL_DIR!\app - left as it is.
+    echo    ^(update it later with:  docker exec -it ikabot ika update^)
+) else (
+    echo  Installing ikabot into !INSTALL_DIR!\app ...
+    xcopy /E /I /Q /Y "%~dp0app\*" "!INSTALL_DIR!\app\" >nul
+)
+
+if not exist "!INSTALL_DIR!\app\ikabot\__main__.py" (
+    echo.
+    echo  ikabot did not end up in !INSTALL_DIR!\app.
+    echo  Extract the whole zip and run INSTALL.bat from inside it.
+    echo.
+    pause
+    exit /b 1
+)
 
 echo  Building the image - this takes a few minutes the first time...
 echo.
@@ -92,6 +113,7 @@ docker run -d ^
   -e TTYD_USER=ikabot ^
   -e TTYD_PASS="!PANEL_PASS!" ^
   -e INSTANCES=!INSTANCES! ^
+  -v "!INSTALL_DIR!\app:/app" ^
   -v "!INSTALL_DIR!\config:/config" ^
   ikabot-mod:latest
 if errorlevel 1 (

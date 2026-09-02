@@ -21,6 +21,14 @@ SRC = ROOT / "installer-docker"
 DOCKER = ROOT / "docker"
 OUT = ROOT / "releases"
 
+# ikabot itself travels in the zip under app/. The image does not contain it:
+# it is bind-mounted from the host so that `ika update` can replace it and the
+# new version outlives the container. Without this the container builds and
+# starts and then fails on "No module named ikabot" in every window.
+APP_PARTS = ("ikabot", "modules", "config-examples")
+SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache"}
+SKIP_SUFFIX = (".pyc", ".pyo")
+
 
 def fail(msg):
     print("error: %s" % msg, file=sys.stderr)
@@ -49,6 +57,13 @@ def main():
         fail("expected exactly one docker/ika-panel_v*, found %d" % len(panel))
     panel_version = panel[0].name.split("_v")[1]
 
+    for part in APP_PARTS:
+        if not (ROOT / part).is_dir():
+            fail("%s/ is missing — the zip would install a container that "
+                 "cannot start ikabot" % part)
+    if not (ROOT / "ikabot" / "__main__.py").is_file():
+        fail("ikabot/__main__.py is missing — `python3 -m ikabot` would fail")
+
     OUT.mkdir(exist_ok=True)
     target = OUT / ("ikabot-docker_v%s.zip" % version)
 
@@ -59,6 +74,17 @@ def main():
             if f.is_file() and f.name != "docker-compose.yml":
                 z.write(f, "docker/" + f.name)
         z.write(DOCKER / "docker-compose.yml", "docker/docker-compose.yml")
+
+        app_files = 0
+        for part in APP_PARTS:
+            base = ROOT / part
+            for f in sorted(base.rglob("*")):
+                if not f.is_file() or f.suffix in SKIP_SUFFIX:
+                    continue
+                if any(d in SKIP_DIRS for d in f.relative_to(ROOT).parts):
+                    continue
+                z.write(f, "app/" + str(f.relative_to(ROOT)))
+                app_files += 1
 
     # Modes are carried from the source files by ZipFile.write, so the check
     # that matters is that they were executable in the repo to begin with.
@@ -71,14 +97,22 @@ def main():
                 fail("%s is not executable in the repo — chmod +x it and rebuild"
                      % info.filename)
 
+    # The one file that proves the app payload arrived intact.
+    with zipfile.ZipFile(target) as z:
+        if "app/ikabot/__main__.py" not in z.namelist():
+            fail("app/ikabot/__main__.py is not in the zip")
+
     size = target.stat().st_size / 1024.0
     print("built %s  (%.0f KB)" % (target.name, size))
     print("  installer version : %s" % version)
     print("  control panel     : v%s" % panel_version)
+    print("  ikabot files      : %d under app/" % app_files)
     with zipfile.ZipFile(target) as z:
         print("  contents:")
-        for n in z.namelist():
+        shown = [n for n in z.namelist() if not n.startswith("app/")]
+        for n in shown:
             print("    " + n)
+        print("    app/  (%d files: %s)" % (app_files, ", ".join(APP_PARTS)))
     return 0
 
 

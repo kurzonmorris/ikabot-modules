@@ -1204,7 +1204,15 @@ python3 tools/build-docker-release.py
 ```
 
 That writes `releases/ikabot-docker_v1.0.0.zip`. Inside it are `INSTALL.bat`,
-`install.sh`, `README.txt` and the whole `docker/` folder.
+`install.sh`, `README.txt`, the whole `docker/` folder, and `app/` — ikabot
+itself, plus the modules and the config examples.
+
+`app/` is not optional. The image deliberately does not contain ikabot: the
+installer copies it to `<data folder>/app` on the host and mounts it at
+`/app`, exactly as Part 5 does by hand, so that `ika update` can replace it
+and the new version outlives the container. Without it the container builds,
+starts, and then fails with `No module named ikabot` in every window. The
+packager refuses to build a zip that is missing it.
 
 The version number in the filename comes from `installer-docker/VERSION`. The
 script refuses to build if that number disagrees with the copies printed inside

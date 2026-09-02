@@ -1,5 +1,5 @@
 ==========================================================
-  ikabot in Docker  —  installer v1.0.7
+  ikabot in Docker  —  installer v1.0.8
 ==========================================================
 
 Runs ikabot for as many game accounts as you like, in one
@@ -57,9 +57,12 @@ AFTER INSTALLING
 
 WHERE YOUR DATA LIVES
 ---------------------
-  Everything is in the "config" folder you chose. That
-  includes your saved logins, so keep it backed up and
-  do not share it.
+  Two folders are made where you chose:
+
+    config/  your saved logins, sessions and settings.
+             Keep this backed up. Do not share it.
+    app/     ikabot itself. Replaced by "ika update";
+             re-running this installer leaves it alone.
 
 
 UPDATING LATER
