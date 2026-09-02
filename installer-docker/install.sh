@@ -3,10 +3,26 @@
 # Run from the folder this file was extracted into.
 set -uo pipefail
 
-INSTALLER_VERSION="1.0.4"
+INSTALLER_VERSION="1.0.5"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say()  { printf '%s\n' "$*"; }
+
+# Only Debian-family systems have /etc/timezone. Arch, SteamOS, Fedora and
+# macOS keep the zone as the tail of what /etc/localtime points at, and
+# without this every one of them silently ran on the fallback zone.
+host_tz() {
+    if [ -s /etc/timezone ]; then
+        tr -d '[:space:]' < /etc/timezone
+        return
+    fi
+    local link
+    link="$(readlink /etc/localtime 2>/dev/null || true)"
+    case "$link" in
+        */zoneinfo/*) printf '%s' "${link#*/zoneinfo/}" ;;
+        *)            printf 'Etc/UTC' ;;
+    esac
+}
 ask()  { local p="$1" d="$2" a; read -r -p "$p [$d]: " a </dev/tty; printf '%s' "${a:-$d}"; }
 
 say ""
@@ -18,15 +34,19 @@ say ""
 if ! command -v docker >/dev/null 2>&1; then
     say "Docker is not installed."
     say ""
-    say "  Unraid   : Settings -> Docker -> Enable = Yes"
-    say "  TrueNAS  : Apps -> install Docker"
-    say "  Linux PC : https://docs.docker.com/engine/install/"
+    say "  Unraid     : Settings -> Docker -> Enable = Yes"
+    say "  TrueNAS    : Apps -> install Docker"
+    say "  Steam Deck : see docs/STEAMDECK_GUIDE.md"
+    say "  Linux PC   : https://docs.docker.com/engine/install/"
     exit 1
 fi
 
 if ! docker info >/dev/null 2>&1; then
     say "Docker is installed but not running (or this user cannot reach it)."
-    say "Start Docker, or re-run with sudo, then try again."
+    say ""
+    say "  Start it   : sudo systemctl enable --now docker"
+    say "  Then allow this user to reach it, and log out and back in:"
+    say "               sudo usermod -aG docker \"$USER\""
     exit 1
 fi
 
@@ -84,7 +104,7 @@ docker run -d \
   -e TTYD_USER=ikabot \
   -e TTYD_PASS="$PANEL_PASS" \
   -e INSTANCES="$INSTANCES" \
-  -e TZ="$(cat /etc/timezone 2>/dev/null || echo Europe/London)" \
+  -e TZ="$(host_tz)" \
   -v "$INSTALL_DIR/config":/config \
   ikabot-mod:latest >/dev/null || { say "Could not start the container."; exit 1; }
 
