@@ -1239,4 +1239,11 @@ want to edit a CSV from Windows.
 
 ---
 
+> **On a Steam Deck?** See `docs/STEAMDECK_GUIDE.md` — same container,
+> but SteamOS needs Docker switching on, the Deck has to be stopped from
+> going to sleep, and a system update wipes anything installed with
+> `pacman`.
+
+---
+
 *Written against ikabot 7.4.5 / mod v1.7.7, Unraid 6.12.3.*
