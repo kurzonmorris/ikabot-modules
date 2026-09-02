@@ -937,6 +937,51 @@ the account order is the order you saved them in.
 **Name in ikabot** is the label the account list shows, so make it something
 you can tell apart at a glance: `StDa en70` rather than `account 1`.
 
+### Keeping them in the order you typed them
+
+ikabot lists vault accounts **sorted by name**, not in the order they were
+added — so its `(1) (2) (3)` follows the alphabet. Enter `StDa`, `14thfloor`,
+`Kurzon`, `aardvark` and ikabot numbers them `14thfloor, aardvark, Kurzon,
+StDa`: the one you typed first is number 4, and window `ika01` lands on it.
+
+**Number them, so ikabot lists them in the order you entered them** — ticked by
+default — fixes that by writing the position into the label:
+
+```
+01 StDa en70
+02 14thfloor en70
+03 Kurzon en135
+```
+
+The sort then agrees with the order you typed, so the first row is account 1
+and window `ika01` gets it. Two digits, so 10 comes after 9 rather than after
+1. A second batch carries on from the highest number already there rather than
+starting again at 1.
+
+The panel shows what is in the vault under the form, numbered exactly as
+ikabot will ask for them, so you can check the mapping without opening an
+instance.
+
+Untick the box if you would rather name them yourself. The same account is
+recognised either way — the number is ignored when checking for duplicates, so
+`StDa en70` will not go in twice as `01 StDa en70` and `07 StDa en70`.
+
+### Emptying the vault
+
+**Empty the vault** removes every account from it. The vault file and its
+master password stay, so you can save a new set straight afterwards — which is
+the point: it is for starting the list again, not for scrapping the vault.
+
+It asks for three things, because it cannot be undone:
+
+1. The **master password**, in the field above — a wrong one removes nothing
+2. A confirmation naming how many accounts will go
+3. The word **DELETE**, typed
+
+Instances already logged in keep running; they hold their session, not the
+vault. They will have nothing to log into next time they restart, so save the
+new set before restarting them.
+
 What it will not do:
 
 - **Overwrite anything.** A label already in the vault is skipped and named in
