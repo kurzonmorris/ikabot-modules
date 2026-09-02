@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.8"
+PANEL_VERSION = "1.0.9"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -90,6 +90,11 @@ MIN_DELAY, MAX_DELAY = 0.0, 30.0
 MAX_KEYS = 30
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+# Bulk account entry. Generous caps: they exist to stop an absurd payload,
+# not to second-guess what a label or a password may contain.
+MAX_ACCOUNTS_PER_SAVE = 100
+MAX_FIELD_LEN = 256
 _run_lock = threading.Lock()
 
 # GitHub's unauthenticated API allows 60 calls an hour, so remote versions are
@@ -225,6 +230,64 @@ def stop_tasks(name, tasks):
         except OSError as exc:
             lines.append("%s: could not stop %s — %s" % (name, action, exc))
     return lines
+
+
+def vault_api():
+    """ikabot's credential vault, imported only when it is actually needed.
+
+    The panel is otherwise stdlib-only, so that it still starts and still
+    reports on the instances when /app is broken mid-update. Reaching into
+    ikabot lazily keeps that true, and turns a missing or older ikabot into a
+    sentence on screen rather than a panel that will not boot.
+    """
+    try:
+        from ikabot.helpers import credentialStore
+        return credentialStore, ""
+    except BaseException as exc:
+        # BaseException, not Exception: a mismatched build of the cryptography
+        # wheel raises pyo3's PanicException, which is not an Exception, and
+        # letting that through takes the whole panel down with it -- which is
+        # the exact failure this lazy import exists to avoid.
+        return None, ("Could not load ikabot's vault code (%s: %s). Accounts "
+                      "need a working ikabot in %s."
+                      % (type(exc).__name__, exc,
+                         os.environ.get("APP_DIR", "/app")))
+
+
+def vault_present():
+    store, _ = vault_api()
+    if store is None:
+        return False
+    try:
+        return bool(store.vault_exists())
+    except BaseException:
+        return False
+
+
+def clean_account(raw):
+    """Validate one pasted account row. Returns (account, error).
+
+    Nothing here is written anywhere by the panel: the row goes straight into
+    ikabot's encrypted vault and is then dropped.
+    """
+    if not isinstance(raw, dict):
+        return None, "not an account"
+    out = {}
+    for field in ("label", "email", "password"):
+        value = raw.get(field)
+        if not isinstance(value, str):
+            return None, "%s is missing" % field
+        value = value.strip() if field != "password" else value
+        if not value:
+            return None, "%s is empty" % field
+        if len(value) > MAX_FIELD_LEN:
+            return None, "%s is longer than %d characters" % (field, MAX_FIELD_LEN)
+        # A control character cannot be typed into ikabot's own prompts and
+        # would corrupt the label list, so it is refused rather than stripped.
+        if KEY_BAD.search(value):
+            return None, "%s contains a control character" % field
+        out[field] = value
+    return out, ""
 
 
 def _safe_part(s):
@@ -851,6 +914,7 @@ def state():
         "panel_version": PANEL_VERSION,
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
+        "vault": vault_present(),
         "locks_total": len(all_locks),
         # Locks matching no logged-in account: shared ones such as the
         # messaging hub's, and leftovers from accounts not running now. Only
@@ -986,6 +1050,102 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._authed():
             return self._deny()
+        # Bulk account entry. Deliberately POST-only with the fields in the
+        # body: a password must never reach a URL, where it would land in
+        # browser history. Nothing here is logged — log_message is a no-op —
+        # and nothing is kept once the vault has been written.
+        if self.path.startswith("/api/accounts"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or "{}")
+            except (ValueError, OSError):
+                return self._send(400, json.dumps({"error": "bad request"}))
+
+            store, why = vault_api()
+            if store is None:
+                return self._send(500, json.dumps({"error": why}))
+
+            master = body.get("master")
+            if not isinstance(master, str) or not master:
+                return self._send(400, json.dumps(
+                    {"error": "The vault's master password is required."}))
+
+            rows = body.get("accounts")
+            if not isinstance(rows, list) or not rows:
+                return self._send(400, json.dumps(
+                    {"error": "No accounts to save."}))
+            if len(rows) > MAX_ACCOUNTS_PER_SAVE:
+                return self._send(400, json.dumps(
+                    {"error": "Too many accounts at once (limit %d)."
+                              % MAX_ACCOUNTS_PER_SAVE}))
+
+            wanted, problems = [], []
+            for n, raw in enumerate(rows, 1):
+                account, err = clean_account(raw)
+                if err:
+                    problems.append("row %d: %s" % (n, err))
+                else:
+                    wanted.append(account)
+            if problems:
+                return self._send(400, json.dumps(
+                    {"error": "Nothing was saved:\n\n" + "\n".join(problems)}))
+
+            with _run_lock:
+                try:
+                    existed = store.vault_exists()
+                    if existed:
+                        vault = store.open_vault(master)
+                        # Adding under a key derived from the wrong password
+                        # would encrypt these accounts so that ikabot itself
+                        # could never read them, and the vault would look fine
+                        # until the day one was needed. Refuse instead.
+                        if not vault.verify_password():
+                            return self._send(400, json.dumps(
+                                {"error": "That is not the vault's master "
+                                          "password. Nothing was saved."}))
+                    else:
+                        vault = store.create_vault(master)
+                except Exception as exc:
+                    return self._send(500, json.dumps(
+                        {"error": "Could not open the vault: %s" % exc}))
+
+                have = {label for _, label in vault.list_accounts()}
+                added, skipped, failed = [], [], []
+                for account in wanted:
+                    if account["label"] in have:
+                        skipped.append(account["label"])
+                        continue
+                    try:
+                        vault.add_account(account["label"], account["email"],
+                                          account["password"])
+                        have.add(account["label"])
+                        added.append(account["label"])
+                    except Exception as exc:
+                        failed.append("%s (%s)" % (account["label"], exc))
+
+                labels = [label for _, label in vault.list_accounts()]
+
+            lines = []
+            if added:
+                lines.append("Saved %d account(s): %s" % (len(added), ", ".join(added)))
+            if skipped:
+                lines.append("Already in the vault, left alone: %s" % ", ".join(skipped))
+            if failed:
+                lines.append("Could not save: %s" % ", ".join(failed))
+            if not existed:
+                lines.append("")
+                lines.append("A new vault was created. Remember this master "
+                             "password — it cannot be recovered.")
+            if added:
+                lines.append("")
+                lines.append("Now press 'Restart all' above, so each instance "
+                             "picks up its account.")
+
+            return self._send(200, json.dumps({
+                "output": "\n".join(lines) or "Nothing to do.",
+                "labels": labels,
+                "vault": True}))
+
         if self.path.startswith("/api/buttons"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1316,6 +1476,12 @@ font-weight:600;border-bottom:1px solid var(--rule)}
 font-size:11px;user-select:none}
 .ftext{background:var(--code);color:var(--codeink);padding:12px;border-radius:6px;
 margin:0;font-size:12.5px;max-height:460px;overflow:auto;white-space:pre}
+textarea{width:100%;font:inherit;font-size:13px;padding:8px;border-radius:5px;
+border:1px solid var(--rule);background:var(--bg);color:var(--ink);resize:vertical}
+#arows input{font:inherit;font-size:13px;padding:4px 6px;width:100%;
+border-radius:4px;border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
+#arows td{padding:4px 6px}
+.warn2{color:var(--warn)}
 </style></head><body><div class="wrap">
 
 <h1>ikabot control panel <span class="ver" id="pver"></span></h1>
@@ -1337,6 +1503,33 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   </div>
   <div class="grid" id="grid"></div>
   <p class="hint" id="statushint"></p>
+</section>
+
+<section>
+  <h2>Accounts <span class="ver" id="vstate"></span></h2>
+  <p class="err" id="aerr"></p>
+  <p class="hint" style="margin:0 0 10px">
+    Paste your accounts, check the rows, then save them all in one go. They go
+    straight into ikabot's encrypted vault — the panel keeps no copy.
+  </p>
+  <textarea id="apaste" rows="4" spellcheck="false"
+    placeholder="One account per line:   name, email, password&#10;&#10;StDa en70, me@example.com, hunter2&#10;14thfloor en70, other@example.com, hunter3&#10;&#10;Tab-separated works too, so you can paste three columns straight from a spreadsheet."></textarea>
+  <div class="row" style="margin:8px 0 12px">
+    <button class="p" id="aread">Read the lines</button>
+    <button id="aaddrow">Add an empty row</button>
+    <button class="d" id="aclear">Clear the rows</button>
+  </div>
+  <table><thead><tr><th style="width:26%">Name in ikabot</th><th style="width:34%">Email</th>
+    <th style="width:30%">Password</th><th></th></tr></thead>
+  <tbody id="arows"></tbody></table>
+  <div class="form" style="margin:12px 0 0">
+    <div class="f"><label for="amaster">Vault master password</label>
+      <input id="amaster" type="password" autocomplete="new-password"></div>
+    <div class="f" id="aconfirmwrap"><label for="aconfirm">Type it again</label>
+      <input id="aconfirm" type="password" autocomplete="new-password"></div>
+    <button class="p" id="asave">Save all to the vault</button>
+  </div>
+  <p class="hint" id="ahint"></p>
 </section>
 
 <section>
@@ -1564,6 +1757,100 @@ document.getElementById('openweb').addEventListener('click',function(){
                'pop-ups for this page in your browser and press again.');
 });
 
+// --- accounts ------------------------------------------------------------
+// Rows live only in these inputs and in the one POST that saves them. Nothing
+// here is put in localStorage, in the URL, or in the output pane.
+function acctRows(){
+  return Array.prototype.map.call(el('arows').querySelectorAll('tr'),function(tr){
+    var i=tr.querySelectorAll('input');
+    return {label:i[0].value.trim(), email:i[1].value.trim(), password:i[2].value};
+  });
+}
+
+function addAcctRow(label,email,password){
+  var tr=document.createElement('tr');
+  tr.innerHTML='<td><input class="mono" placeholder="StDa en70"></td>'+
+               '<td><input type="text" autocomplete="off" spellcheck="false" '+
+                    'placeholder="me@example.com"></td>'+
+               '<td><input type="password" autocomplete="new-password"></td>'+
+               '<td style="text-align:right"><button class="d" data-arow>Remove</button></td>';
+  var i=tr.querySelectorAll('input');
+  i[0].value=label||''; i[1].value=email||''; i[2].value=password||'';
+  el('arows').appendChild(tr);
+  return tr;
+}
+
+function acctCount(){
+  var n=0;
+  acctRows().forEach(function(r){ if(r.label||r.email||r.password)n++; });
+  el('ahint').textContent = n
+    ? n+' row(s) ready. Check them, then save.'
+    : 'Paste some lines above, or add an empty row.';
+}
+
+el('aread').addEventListener('click',function(){
+  var text=el('apaste').value, lines=text.split(/\r?\n/), added=0;
+  lines.forEach(function(line){
+    if(!line.trim())return;
+    // Tabs win over commas, so a spreadsheet paste survives a password that
+    // happens to contain a comma.
+    var parts = line.indexOf('\t')>=0 ? line.split('\t') : line.split(',');
+    addAcctRow((parts[0]||'').trim(), (parts[1]||'').trim(),
+               (parts.slice(2).join(line.indexOf('\t')>=0?'\t':',')||'').trim());
+    added++;
+  });
+  el('apaste').value='';
+  el('aerr').textContent = added ? '' : 'Nothing to read — the box was empty.';
+  acctCount();
+});
+
+el('aaddrow').addEventListener('click',function(){ addAcctRow(); acctCount(); });
+el('aclear').addEventListener('click',function(){
+  if(!acctRows().length||confirm('Clear every row typed in below?')){
+    el('arows').innerHTML=''; acctCount();
+  }
+});
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-arow]'); if(!b)return;
+  b.closest('tr').remove(); acctCount();
+});
+el('arows').addEventListener('input',acctCount);
+
+el('asave').addEventListener('click',function(){
+  var rows=acctRows().filter(function(r){return r.label||r.email||r.password;});
+  var err=el('aerr'); err.textContent='';
+  if(!rows.length){ err.textContent='There are no accounts to save.'; return; }
+  var bad=[];
+  rows.forEach(function(r,n){
+    if(!r.label||!r.email||!r.password)bad.push('row '+(n+1)+' is not filled in');
+    else if(r.email.indexOf('@')<0)bad.push('row '+(n+1)+': "'+r.email+'" is not an email');
+  });
+  if(bad.length){ err.textContent=bad.join('; '); return; }
+  var master=el('amaster').value;
+  if(!master){ err.textContent='Enter the vault master password.'; return; }
+  if(el('aconfirmwrap').style.display!=='none'&&master!==el('aconfirm').value){
+    err.textContent='The two master passwords do not match.'; return;
+  }
+  if(!confirm('Save '+rows.length+' account(s) to the vault?')) return;
+
+  setBusy(true); out.textContent='Saving accounts…';
+  fetch('api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({master:master, accounts:rows})})
+  .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};})})
+  .then(function(res){
+    if(!res.ok){ err.textContent=res.d.error||'Could not save.';
+                 out.textContent=res.d.error||'Could not save.'; return; }
+    out.textContent=res.d.output||'Saved.';
+    // Clear everything the moment it is safely in the vault.
+    el('arows').innerHTML=''; el('amaster').value=''; el('aconfirm').value='';
+    el('apaste').value=''; acctCount();
+  })
+  .catch(function(e){ err.textContent='Request failed: '+e; })
+  .then(function(){ setBusy(false); refresh(); });
+});
+
+acctCount();
+
 // --- file viewer ---------------------------------------------------------
 var shown=null;   // the file currently on screen, as returned by api/file
 
@@ -1727,6 +2014,13 @@ function refresh(){
       ak.dataset.sig=sig;
       renderButtons(s.buttons||[]);
     }
+    var vs=el('vstate'), have=!!s.vault;
+    vs.textContent = have ? 'vault ready' : 'no vault yet';
+    vs.className = have ? 'ver' : 'ver warn2';
+    // Confirming only matters while the vault is being created; afterwards the
+    // password is checked against the vault itself.
+    el('aconfirmwrap').style.display = have ? 'none' : '';
+
     var lk=el('alllocks'), n=s.locks_total||0;
     lk.textContent='Clear all lock files'+(n?' ('+n+')':'');
     lk.dataset.confirm='Delete every lock file — '+n+' in total, across all '+
