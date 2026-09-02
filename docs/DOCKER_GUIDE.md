@@ -442,6 +442,26 @@ disk and retried if the transfer drops. That is slow but it works. Either way
 a failed download leaves `/app` exactly as it was; nothing is replaced until
 the new copy is complete.
 
+### Updating with no usable connection
+
+On a connection too slow to finish the download at all, fetch the archive by
+any means you like — another machine, a phone, a USB stick — drop it in the
+config folder, and point the updater at it:
+
+```bash
+docker exec -it ikabot ika update --from /config/ikabot.zip
+```
+
+`/config` inside the container is the `config` folder in your data directory,
+so anything you put there is immediately visible to it.
+
+It takes whatever shape the archive happens to have: the repository zip that
+unpacks to `ikabot-modules-main/ikabot`, a release zip with `app/ikabot`, or a
+folder you have already extracted. It looks for `ikabot/config.py` and works
+back from there, and says so plainly rather than half-updating if the archive
+turns out to be something else. Everything after that is the ordinary update —
+version comparison, the backup for `--rollback`, and the module refresh.
+
 ### Changing the number of instances
 
 Say you want 12 instead of 24:

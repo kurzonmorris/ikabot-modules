@@ -205,6 +205,54 @@ def fetch_zip(dest):
     return roots[0]
 
 
+def find_root(base):
+    """The folder inside *base* that holds ikabot/config.py.
+
+    Accepts whatever shape the download happens to have: the repository zip
+    unpacks to <repo>-<branch>/ikabot, a release zip to app/ikabot, and an
+    already-extracted folder has ikabot at the top. Searched two levels deep,
+    which covers all three without wandering off into the tree.
+    """
+    base = Path(base)
+    if (base / "ikabot" / "config.py").is_file():
+        return base
+    for depth in (1, 2):
+        for candidate in base.glob("/".join(["*"] * depth)):
+            if candidate.is_dir() and (candidate / "ikabot" / "config.py").is_file():
+                return candidate
+    return None
+
+
+def from_local(source, dest):
+    """Use a zip or folder already on disk instead of downloading anything.
+
+    For a connection too slow or too unreliable to pull even the small
+    listing: fetch the archive by whatever means work, drop it in, and point
+    this at it.
+    """
+    source = Path(source).expanduser()
+    if not source.exists():
+        raise RuntimeError("no such file or folder: %s" % source)
+
+    if source.is_dir():
+        root = find_root(source)
+        if root is None:
+            raise RuntimeError("%s does not contain ikabot/config.py" % source)
+        print("Using %s" % root)
+        return root
+
+    print("Unpacking %s (%.1f MB)..."
+          % (source.name, source.stat().st_size / 1048576.0))
+    out = Path(dest) / "local"
+    with zipfile.ZipFile(source) as z:
+        z.extractall(out)
+    root = find_root(out)
+    if root is None:
+        raise RuntimeError("%s has no ikabot/config.py in it — is it the "
+                           "right archive?" % source.name)
+    return root
+
+
 def download(dest):
     try:
         return fetch_tracked(dest)
@@ -220,6 +268,9 @@ def main():
                     help="do not ask for confirmation")
     ap.add_argument("--rollback", action="store_true",
                     help="restore the copy saved by the last update")
+    ap.add_argument("--from", dest="source", metavar="PATH",
+                    help="install from a zip or folder already on this "
+                         "machine instead of downloading")
     args = ap.parse_args()
 
     if args.rollback:
@@ -241,11 +292,16 @@ def main():
     tmp = tempfile.mkdtemp(prefix="ika-update-")
     try:
         try:
-            new = download(tmp)
+            new = from_local(args.source, tmp) if args.source else download(tmp)
         except FAIL_ERRORS as exc:
+            if args.source:
+                print("Could not use %s: %s" % (args.source, exc), file=sys.stderr)
+                return 1
             print("Download failed: %s" % exc, file=sys.stderr)
             print("Check the server has internet access, and that IKABOT_BRANCH "
                   "(%s) exists." % BRANCH, file=sys.stderr)
+            print("\nOn a slow connection, download the archive yourself and "
+                  "use:\n  ika update --from /config/main.zip", file=sys.stderr)
             return 1
 
         if not (new / "ikabot" / "config.py").is_file():
