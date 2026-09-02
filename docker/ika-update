@@ -6,13 +6,17 @@ kept so a bad update can be rolled back without another download.
 """
 
 import argparse
-import io
+import http.client
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -22,10 +26,22 @@ BRANCH = os.environ.get("IKABOT_BRANCH", "main")
 APP = Path(os.environ.get("APP_DIR", "/app"))
 BACKUP = APP / ".previous"
 
-ZIP_URL = "https://github.com/%s/archive/refs/heads/%s.zip" % (REPO, BRANCH)
+ZIP_URL = "https://codeload.github.com/%s/zip/refs/heads/%s" % (REPO, BRANCH)
+TREE_URL = ("https://api.github.com/repos/%s/git/trees/%s?recursive=1"
+            % (REPO, BRANCH))
+RAW_URL = "https://raw.githubusercontent.com/%s/%s/" % (REPO, BRANCH)
 
 # Copied wholesale from the downloaded tree; anything else in /app is left alone.
 TRACKED = ("ikabot", "modules", "config-examples")
+
+UA = {"User-Agent": "ika-update/2.0"}
+# A dropped transfer raises http.client.IncompleteRead, which is an
+# HTTPException and so is caught by none of urllib's error classes. Listing it
+# here is what turns a network blip into a message instead of a traceback.
+NET_ERRORS = (urllib.error.URLError, urllib.error.HTTPError,
+              http.client.HTTPException, OSError)
+# What main() will report rather than let escape as a traceback.
+FAIL_ERRORS = NET_ERRORS + (zipfile.BadZipFile, RuntimeError, ValueError)
 
 
 def versions(tree):
@@ -50,18 +66,152 @@ def describe(v):
                                    v.get("IKABOT_MOD_VERSION", "?"))
 
 
-def download(dest):
-    print("Downloading %s (%s)..." % (REPO, BRANCH))
-    req = urllib.request.Request(ZIP_URL, headers={"User-Agent": "ika-update/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        blob = resp.read()
-    print("  %.1f MB" % (len(blob) / 1048576.0))
-    with zipfile.ZipFile(io.BytesIO(blob)) as z:
-        z.extractall(dest)
-    roots = [p for p in Path(dest).iterdir() if p.is_dir()]
+def get(url, tries=4, timeout=60):
+    """Fetch a URL, retrying a dropped or refused transfer.
+
+    A definite answer from the server -- not found, forbidden -- is returned
+    at once rather than asked for three more times: it will not change, and
+    the caller has a fallback that should be reached quickly. Only 429 and the
+    5xx range are worth waiting out.
+    """
+    delay = 2
+    for attempt in range(1, tries + 1):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 and exc.code != 429:
+                raise
+            if attempt == tries:
+                raise
+            print("  retrying (%s)" % exc)
+            time.sleep(delay)
+            delay *= 2
+        except NET_ERRORS as exc:
+            if attempt == tries:
+                raise
+            print("  retrying (%s)" % exc)
+            time.sleep(delay)
+            delay *= 2
+
+
+def safe_under(root, rel):
+    """Resolve rel under root, or None if it would escape.
+
+    Paths come from GitHub, so they are checked rather than trusted: one
+    entry of "../../usr/local/bin" would otherwise be written outside the
+    temporary folder.
+    """
+    root = Path(root).resolve()
+    target = (root / rel).resolve()
+    if target != root and root not in target.parents:
+        return None
+    return target
+
+
+def fetch_tracked(dest):
+    """Download only ikabot, modules and config-examples.
+
+    The repository archive is a quarter of a gigabyte -- it carries the
+    releases, dist and archive folders -- while the code being updated is
+    under a megabyte of it. One call lists the tree, then each wanted file
+    comes from raw.githubusercontent, which is not rate limited. Falls back to
+    the whole archive if anything about that is not available.
+    """
+    print("Listing %s (%s)..." % (REPO, BRANCH))
+    tree = json.loads(get(TREE_URL, timeout=60).decode("utf-8"))
+    if tree.get("truncated"):
+        raise RuntimeError("tree listing truncated")
+
+    wanted = []
+    for entry in tree.get("tree", []):
+        if entry.get("type") != "blob":
+            continue
+        path = entry.get("path", "")
+        if any(path == name or path.startswith(name + "/") for name in TRACKED):
+            wanted.append(path)
+    if not wanted:
+        raise RuntimeError("no %s files in the listing" % ", ".join(TRACKED))
+
+    root = Path(dest) / "tree"
+    print("  %d file(s) to fetch" % len(wanted))
+    done = 0
+    for path in sorted(wanted):
+        target = safe_under(root, path)
+        if target is None:
+            raise RuntimeError("refusing path from the listing: %r" % path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(get(RAW_URL + urllib.parse.quote(path)))
+        done += 1
+        if done % 25 == 0 or done == len(wanted):
+            print("  %d/%d" % (done, len(wanted)))
+    return root
+
+
+def fetch_zip(dest):
+    """The whole repository archive: the fallback, streamed to disk.
+
+    Written out in chunks rather than read into memory, and checked twice
+    before it is trusted. A cut-off transfer does not always raise: with a
+    Content-Length reply the read loop can simply end early and hand back a
+    truncated file, so the bytes written are compared against the length the
+    server declared. The archive is then opened, because a file of the right
+    size can still be corrupt, and both failures are retried.
+    """
+    print("Downloading the full archive of %s (%s)..." % (REPO, BRANCH))
+    blob = Path(dest) / "repo.zip"
+    out = Path(dest) / "zip"
+    delay = 2
+
+    for attempt in range(1, 5):
+        got = 0
+        try:
+            req = urllib.request.Request(ZIP_URL, headers=UA)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                declared = resp.headers.get("Content-Length")
+                declared = int(declared) if declared and declared.isdigit() else 0
+                with open(blob, "wb") as fh:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        got += len(chunk)
+                        if got % (32 * 1024 * 1024) < 1024 * 1024:
+                            print("  %.0f MB" % (got / 1048576.0))
+            if declared and got != declared:
+                raise http.client.IncompleteRead(b"", declared - got)
+
+            print("  %.1f MB, unpacking" % (got / 1048576.0))
+            if out.is_dir():
+                shutil.rmtree(out)
+            with zipfile.ZipFile(blob) as z:
+                z.extractall(out)
+            blob.unlink()
+            break
+
+        except (NET_ERRORS + (zipfile.BadZipFile,)) as exc:
+            if attempt == 4:
+                raise
+            print("  transfer failed after %.0f MB (%s) — retrying"
+                  % (got / 1048576.0, exc))
+            time.sleep(delay)
+            delay *= 2
+
+    roots = [p for p in out.iterdir() if p.is_dir()]
     if len(roots) != 1:
         raise RuntimeError("unexpected archive layout: %s" % roots)
     return roots[0]
+
+
+def download(dest):
+    try:
+        return fetch_tracked(dest)
+    except Exception as exc:
+        print("  could not fetch the file list (%s)" % exc)
+        print("  falling back to the whole archive")
+        return fetch_zip(dest)
 
 
 def main():
@@ -88,12 +238,11 @@ def main():
         print("Restored. Now run:  ika restart all")
         return 0
 
-    import tempfile
     tmp = tempfile.mkdtemp(prefix="ika-update-")
     try:
         try:
             new = download(tmp)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        except FAIL_ERRORS as exc:
             print("Download failed: %s" % exc, file=sys.stderr)
             print("Check the server has internet access, and that IKABOT_BRANCH "
                   "(%s) exists." % BRANCH, file=sys.stderr)
@@ -143,7 +292,12 @@ def main():
             print("  updated %s/" % name)
 
         print("\nRefreshing modules...")
-        subprocess.run(["ika-modules", "sync", "--local"], check=False)
+        try:
+            subprocess.run(["ika-modules", "sync", "--local"], check=False)
+        except OSError as exc:
+            # Never fail an otherwise-good update over the module refresh.
+            print("  could not run ika-modules (%s) — run it yourself with:"
+                  "  ika modules" % exc)
 
         print("\nUpdated to %s" % describe(versions(APP)))
         print("Previous copy saved — undo with:  ika update --rollback")

@@ -430,6 +430,18 @@ Only one previous copy is kept, so roll back before updating again.
 > Skip the confirmation with `ika update --yes`. To pull from a branch other
 > than `main`, add `-e IKABOT_BRANCH=some-branch` when you create the container.
 
+**It only downloads the code.** This repository is a quarter of a gigabyte —
+`releases`, `dist`, `build` and `archive` account for nearly all of it — while
+ikabot itself is under a megabyte. The update lists the repository once and
+fetches only `ikabot`, `modules` and `config-examples`, so it moves about half
+a megabyte rather than 250.
+
+If that listing cannot be reached — GitHub's API allows 60 unauthenticated
+calls an hour — it falls back to downloading the whole archive, streamed to
+disk and retried if the transfer drops. That is slow but it works. Either way
+a failed download leaves `/app` exactly as it was; nothing is replaced until
+the new copy is complete.
+
 ### Changing the number of instances
 
 Say you want 12 instead of 24:
