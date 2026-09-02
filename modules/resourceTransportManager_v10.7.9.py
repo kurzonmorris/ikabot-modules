@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.8"
+MODULE_VERSION = "10.7.9"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -7421,16 +7421,74 @@ def transport_scheduler_loop(session, stop_event):
                         total_shipments=total, status="active",
                         last_duration=elapsed,
                     )
-                else:
-                    # One-time schedule: mark it done rather than delete it,
-                    # so it stays visible in Manage Schedules instead of
-                    # silently vanishing the moment it ships.
+                elif total > 0:
+                    # One-time schedule that actually shipped: mark it done
+                    # rather than delete it, so it stays visible in Manage
+                    # Schedules instead of silently vanishing.
                     transport_csv_update(
                         session, sid,
-                        last_run=now, next_run="",
+                        last_run=finished, next_run="",
                         total_shipments=total, status="completed",
                         last_duration=elapsed,
                     )
+                else:
+                    # Nothing was shipped, so this is NOT done. A cycle can
+                    # run start to finish and send zero — no free ships of
+                    # the required type, no action points, a blockade —
+                    # and closing it as "done, 0 sent" silently threw the
+                    # delivery away. Keep it and try again.
+                    created = sched.get("created_at", 0)
+                    age = (finished - created
+                           if isinstance(created, int) and created > 0 else 0)
+                    first_try = sched.get("last_run", "") in ("", 0)
+                    if age > ONE_SHOT_GIVEUP_SECONDS:
+                        transport_csv_update(
+                            session, sid,
+                            last_run=finished, next_run="",
+                            status="error", last_duration=elapsed,
+                        )
+                        if should_notify(notif_config, "error"):
+                            try:
+                                sendToBot(
+                                    session,
+                                    f"SCHEDULE #{sid} GAVE UP — NOTHING "
+                                    f"WAS EVER SENT\n"
+                                    f"It has been retrying for over 24 "
+                                    f"hours and has still shipped nothing, "
+                                    f"so it has stopped and is marked as an "
+                                    f"error rather than done.\n"
+                                    f"The shipment log records why each "
+                                    f"attempt was skipped — the usual "
+                                    f"causes are no free ships of the "
+                                    f"required type, no action points, or "
+                                    f"a blockade.")
+                            except Exception:
+                                pass
+                    else:
+                        transport_csv_update(
+                            session, sid,
+                            last_run=finished,
+                            next_run=finished + ONE_SHOT_RETRY_SECONDS,
+                            status="active", last_duration=elapsed,
+                        )
+                        if first_try and should_notify(notif_config, "error"):
+                            try:
+                                sendToBot(
+                                    session,
+                                    f"SCHEDULE #{sid} SENT NOTHING — "
+                                    f"WILL KEEP TRYING\n"
+                                    f"The cycle ran but shipped nothing, so "
+                                    f"it has NOT been marked done. It "
+                                    f"retries every "
+                                    f"{ONE_SHOT_RETRY_SECONDS // 60} "
+                                    f"minutes.\n"
+                                    f"Most often this is no free ships of "
+                                    f"the type the schedule uses — check "
+                                    f"whether merchant ships are all out "
+                                    f"on other deliveries. The shipment log "
+                                    f"records the exact reason.")
+                            except Exception:
+                                pass
 
             schedules = transport_csv_load(session)
             active = [s for s in schedules if s.get("status") == "active"]
@@ -7655,6 +7713,12 @@ HIGH_PRIORITIES = (1, 2)
 
 # How long a due schedule may be outranked before we say so.
 STARVATION_SECONDS = 24 * 3600
+
+# A one-time schedule that shipped nothing is retried on this cadence
+# rather than being closed as done, and abandoned after the longer window
+# so it cannot retry silently forever.
+ONE_SHOT_RETRY_SECONDS = 15 * 60
+ONE_SHOT_GIVEUP_SECONDS = 24 * 3600
 
 # Cache for the preemption check so a long cycle does not re-read the CSV
 # for every single shipment.
