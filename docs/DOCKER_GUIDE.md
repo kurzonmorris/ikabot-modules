@@ -827,9 +827,13 @@ Sign in with the same username and password as the terminal.
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Download and install an update, or roll the last one back |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
 | **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
-| **Files** | Read any CSV, JSON, TXT or LOG file under `/config` in the browser — CSVs as a sortable-width table you can search — or download it to your PC |
+| **Files** | Read any CSV, JSON, TXT or LOG file under `/config` in the browser — CSVs as a table you can search — or download it to your PC. Each instance card also carries a button straight to that account's own files |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Output** | What the command you just pressed actually printed |
+
+The instance cards sit five to a row, and the page stays the same width
+whatever the screen: on a tablet it drops to three, on a phone to two, and it
+never scrolls sideways.
 
 The list refreshes every five seconds, and each web server port is a link
 straight into that account.
@@ -956,6 +960,32 @@ tmux. The **Files** section reads them in the browser.
 
 Text in the table selects and copies normally, which is the easy way to get a
 few values out without downloading anything.
+
+### Per-account logs, straight from the card
+
+A module that writes one file per account names it after the account, the way
+the shipment log does:
+
+```
+/config/shipment_log_en70_StDa.csv
+/config/shipment_log_en70_14thfloor.csv
+```
+
+Any file named like that shows up as a button on that account's own instance
+card — labelled with the part of the name that is not the account, so the
+button above just says **shipment_log**. Press it and the file opens in the
+**Files** section below, already selected. One press, from the card, no
+hunting through a dropdown of 24 similar names.
+
+Matching is on the account itself — server, world and player, exactly as the
+modules build their filenames — so `en70_StDa` and `ar42_StDa` are two
+different buttons on two different cards even though the player name is the
+same. Older files that leave the world out (`_en_StDa`) are matched too, and a
+player name containing an underscore is handled correctly.
+
+A file with no account in its name — an old shared `shipment_log.csv`, say —
+belongs to no instance and so appears on no card. It is still in the **Files**
+dropdown.
 
 A comma inside a quoted field stays one cell, rows with more columns than the
 header still show every value, and a file that is not valid CSV is shown as
