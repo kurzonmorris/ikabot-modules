@@ -152,6 +152,12 @@ You get the ikabot screens, one per account:
 Log each account in once. After that the control panel at port **7682** does
 the day-to-day work — restarts, updates, modules, logs.
 
+> **No vault on this Deck?** There will not be one on a fresh install, so
+> nothing logs itself in. Rather than typing every account into every window,
+> open the control panel on port **7682**, go to **Accounts**, paste them all
+> in and save once. Then press **Restart all** and each window starts on its
+> own account. Full details in `docs/DOCKER_GUIDE.md`.
+
 ---
 
 ## Part 6 — Stop the Deck going to sleep

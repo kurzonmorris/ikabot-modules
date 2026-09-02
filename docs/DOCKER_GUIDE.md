@@ -826,6 +826,7 @@ Sign in with the same username and password as the terminal.
 | **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Download and install an update, or roll the last one back |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
+| **Accounts** | Paste every account in at once and save them to ikabot's vault in one press — for a fresh install, or a machine that has no vault yet |
 | **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
 | **Files** | Read any CSV, JSON, TXT or LOG file under `/config` in the browser — CSVs as a table you can search — or download it to your PC. Each instance card also carries a button straight to that account's own files |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
@@ -902,6 +903,61 @@ Nothing outside that list can be reached: a stop request has to name a process
 the panel is currently showing for that instance, and an instance's own ikabot
 process is excluded from the list, so these buttons cannot kill an instance even
 if a status file claims otherwise.
+
+### Adding accounts in one go
+
+Normally the vault is already there and instances log themselves in. On a
+machine with no vault — a fresh install, a new Deck — every account has to be
+typed into every instance by hand. The **Accounts** section does the lot in one
+press.
+
+1. Paste your accounts into the box, one per line:
+
+   ```
+   StDa en70, stda@example.com, hunter2
+   14thfloor en70, floor@example.com, hunter3
+   ```
+
+   Tab-separated works too, so three columns copied from a spreadsheet paste
+   straight in — and that is the safer form if a password contains a comma.
+
+2. Press **Read the lines**. Each line becomes an editable row, so you can
+   check them and fix anything the split got wrong before it is saved
+3. Enter the **vault master password**. If there is no vault yet you are asked
+   for it twice, and the one you choose becomes the vault's password
+4. **Save all to the vault**, confirm, done
+
+The heading says **no vault yet** or **vault ready**, so you can see which case
+you are in.
+
+Afterwards press **Restart all** in the Instances section. Each window then
+starts on its matching account — window `ika03` on vault account 3 — because
+the account order is the order you saved them in.
+
+**Name in ikabot** is the label the account list shows, so make it something
+you can tell apart at a glance: `StDa en70` rather than `account 1`.
+
+What it will not do:
+
+- **Overwrite anything.** A label already in the vault is skipped and named in
+  the result, so pressing Save twice cannot duplicate an account
+- **Save half a batch.** A row missing a field, or with a control character in
+  it, stops the whole save with the row number — nothing is written
+- **Write under the wrong password.** With an existing vault the password is
+  checked against it first. Saving under a wrong password would encrypt those
+  accounts so that ikabot itself could never read them, and the vault would
+  look perfectly fine until the day you needed one, so it refuses instead
+
+The rows and the master password exist only in the page and in the one request
+that saves them. Nothing is logged — checked by searching the panel's log and
+every file it writes for a password that had just been saved, and finding it
+only inside the encrypted vault.
+
+> **The panel speaks plain HTTP.** Its own password already crosses the network
+> in the clear on every request, and so does anything typed into the web
+> terminal, so this form is no new exposure — but it is still worth using over
+> Tailscale, or on a network you trust, rather than over a forwarded port on
+> the open internet.
 
 ### Clearing lock files
 
