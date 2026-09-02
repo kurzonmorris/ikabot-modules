@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.7.9"
+MODULE_VERSION = "10.8.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -688,29 +688,93 @@ def save_prefs(prefs):
         pass
 
 
+def _account_log_path(base_path, session):
+    """Turn a chosen log location into a per-account, per-world filename.
+
+    One shared log meant every instance appended to the same file. With
+    many running at once that is pure contention — and a single corrupt
+    or locked file takes logging down for every account. Splitting by
+    account removes the sharing rather than guarding it.
+    """
+    directory = os.path.dirname(base_path) or "."
+    stem, ext = os.path.splitext(os.path.basename(base_path))
+    ext = ext or ".csv"
+    suffix = _account_suffix(session)
+    if stem.endswith(f"_{suffix}"):
+        return base_path                     # already per-account
+    return os.path.join(directory, f"{stem}_{suffix}{ext}")
+
+
+def _split_shared_log(shared_path, own_path, session):
+    """Carry this account's history out of the old shared log, once.
+
+    Only runs when the per-account file does not exist yet, and never
+    modifies the shared file — it stays as the combined historical
+    record.
+    """
+    if os.path.exists(own_path) or not os.path.isfile(shared_path):
+        return 0
+    if os.path.abspath(shared_path) == os.path.abspath(own_path):
+        return 0
+    moved = 0
+    try:
+        with open(shared_path, newline="", encoding="utf-8") as src:
+            reader = csv.DictReader(src)
+            mine = [r for r in reader
+                    if str(r.get("Account", "")) == str(session.username)]
+        if not mine:
+            return 0
+        with open(own_path, "w", newline="", encoding="utf-8") as dst:
+            writer = csv.DictWriter(dst, fieldnames=LOG_COLUMNS,
+                                    extrasaction="ignore")
+            writer.writeheader()
+            for row in mine:
+                writer.writerow(row)
+                moved += 1
+    except Exception:
+        return 0
+    return moved
+
+
 def get_log_path(session):
-    """Get path to the shared shipment log file.
-    Remembers the last-used path so you can just press Enter next time.
+    """Path to THIS account's shipment log.
+
+    The log is per account and world. The remembered value is the chosen
+    location; the account suffix is applied to it every time, so an old
+    shared setting is upgraded rather than reused as-is.
     """
     prefs = load_prefs()
-    saved = prefs.get("log_path", "")
+    key = f"log_path_{_account_suffix(session)}"
+    saved = prefs.get(key) or prefs.get("log_path", "")
     fallback = os.path.join(os.path.expanduser("~"), "shipment_log.csv")
-    default_path = saved if saved else fallback
+    base = saved if saved else fallback
+    own = _account_log_path(base, session)
 
     if saved:
-        # Already have a saved path — use it silently
-        print(f"  {C.DIM}Shipment log:{C.RESET} {default_path}")
-        return default_path
-    # First time — ask the user
+        moved = _split_shared_log(base, own, session)
+        prefs[key] = own
+        save_prefs(prefs)
+        print(f"  {C.DIM}Shipment log:{C.RESET} {own}")
+        if moved:
+            print(f"  {C.DIM}Carried {moved} past row(s) over from the "
+                  f"shared log (which is left intact).{C.RESET}")
+        return own
+
     print(f"  {C.DIM}Shipment log records every shipment to a CSV file.{C.RESET}")
-    print(f"  {C.DIM}Press Enter to use the default path:{C.RESET}")
-    print(f"  {C.CYAN}{default_path}{C.RESET}")
-    print(f"  {C.HINT}All accounts share one file — each row has an Account column.{C.RESET}")
+    print(f"  {C.DIM}Press Enter to use the default location:{C.RESET}")
+    print(f"  {C.CYAN}{own}{C.RESET}")
+    print(f"  {C.HINT}Each account and world writes its own file, so many "
+          f"instances never contend for one log.{C.RESET}")
     user_path = read(msg="Log path: ", empty=True)
-    chosen = user_path.strip() if user_path.strip() else default_path
-    prefs["log_path"] = chosen
+    chosen_base = user_path.strip() if user_path.strip() else base
+    own = _account_log_path(chosen_base, session)
+    moved = _split_shared_log(chosen_base, own, session)
+    if moved:
+        print(f"  {C.DIM}Carried {moved} past row(s) over from "
+              f"{chosen_base}.{C.RESET}")
+    prefs[key] = own
     save_prefs(prefs)
-    return chosen
+    return own
 
 
 def log_shipment(log_path, session, mode, source_city, source_island,
