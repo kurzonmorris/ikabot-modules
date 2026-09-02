@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.7"
+PANEL_VERSION = "1.0.8"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -251,16 +251,12 @@ def lock_suffixes(entry):
     return out
 
 
-def lock_files():
-    """Every module lock file on disk, as (directory, filename) pairs.
+def data_dirs():
+    """The folders modules keep per-account files in.
 
-    Scanned at a fixed depth rather than walked, so the size of the logs
-    folder never matters.
-
-    Session locks are deliberately left out. ikabot holds those for
-    milliseconds and clears a dead one after thirty seconds by itself, so they
-    are never what stops a module from starting again — and removing one while
-    an instance is mid-write is the only way this could do harm.
+    /config, the ikabot data folder, and one level of its subfolders — which
+    is where every module writes. Listed rather than walked, and the big
+    folders are skipped, so this stays cheap enough to run on every poll.
     """
     dirs = [HOME_DIR, DATA_DIR]
     try:
@@ -272,9 +268,72 @@ def lock_files():
                 dirs.append(path)
     except OSError:
         pass
+    return dirs
 
+
+def account_files():
+    """Data files in those folders, as (directory, filename) pairs.
+
+    Used to work out which files belong to which account, so a per-account log
+    can be opened from the instance's own card.
+    """
+    out, seen = [], set()
+    for d in data_dirs():
+        real = os.path.realpath(d)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            if viewable_name(name) and os.path.isfile(os.path.join(d, name)):
+                out.append((d, name))
+    return out
+
+
+def files_for(entry, pool):
+    """The files in *pool* belonging to this account, newest name first.
+
+    Matched on the same suffix the modules build their filenames from, so
+    shipment_log_en70_StDa.csv lands on the en70 StDa instance and nowhere
+    else. The label is what is left once the account part is stripped, which
+    is the name of the log rather than a wall of server and player.
+    """
+    root = os.path.realpath(FILES_ROOT)
+    out = []
+    for suffix in lock_suffixes(entry):
+        for directory, name in pool:
+            stem, ext = os.path.splitext(name)
+            if not stem.endswith("_" + suffix):
+                continue
+            full = os.path.join(directory, name)
+            real = os.path.realpath(full)
+            if not real.startswith(root + os.sep):
+                continue
+            rel = os.path.relpath(full, root)
+            if any(f["path"] == rel for f in out):
+                continue
+            label = stem[: -(len(suffix) + 1)].lstrip(".") or name
+            out.append({"path": rel, "label": label, "name": name})
+    out.sort(key=lambda f: f["label"].lower())
+    return out
+
+
+def lock_files():
+    """Every module lock file on disk, as (directory, filename) pairs.
+
+    Scanned at a fixed depth rather than walked, so the size of the logs
+    folder never matters.
+
+    Session locks are deliberately left out. ikabot holds those for
+    milliseconds and clears a dead one after thirty seconds by itself, so they
+    are never what stops a module from starting again — and removing one while
+    an instance is mid-write is the only way this could do harm.
+    """
     found, seen = [], set()
-    for d in dirs:
+    for d in data_dirs():
         real = os.path.realpath(d)
         if real in seen:
             continue
@@ -712,6 +771,7 @@ def state():
         return out
 
     all_locks = lock_files()
+    all_files = account_files()
     claimed = set()
 
     def locks_for(entry):
@@ -738,11 +798,13 @@ def state():
             by_name[name]["task_count"] = len(tasks)
             by_name[name]["updated"] = entry.get("updated", 0)
             by_name[name]["locks"] = [n for _, n in locks]
+            by_name[name]["files"] = files_for(entry, all_files)
             status_seen.add(name)
         else:
             orphans.append(entry.get("account", "?"))
 
     for i in instances:
+        i.setdefault("files", [])
         i.setdefault("locks", [])
         i.setdefault("tasks", [])
         i.setdefault("task_count", None if i["name"] not in status_seen else 0)
@@ -1165,7 +1227,12 @@ section{background:var(--card);border:1px solid var(--rule);border-radius:8px;
 padding:14px 16px;margin-bottom:16px}
 h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);
 margin:0 0 12px;font-family:ui-monospace,monospace}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:8px}
+/* Five accounts to a row. minmax(0,1fr) rather than 1fr so a long module
+   name inside a card cannot push the column wider than its share. Stepped
+   down on narrow screens, since five would be unreadable on a phone. */
+.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}
+@media(max-width:860px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:560px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .inst{border:1px solid var(--rule);border-radius:6px;padding:8px 10px;background:var(--bg)}
 .inst.dead{border-color:var(--bad)}
 .inst .n{font-family:ui-monospace,monospace;font-weight:600;font-size:13px}
@@ -1199,6 +1266,10 @@ border:1px solid var(--rule);color:var(--soft)}
 .hint{font-size:12px;color:var(--soft);margin:10px 0 0}
 .keys{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .keys button{padding:3px 9px;font-size:12px;min-width:34px}
+.files{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.files button{padding:3px 9px;font-size:11.5px;max-width:100%;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.files button::before{content:"\2630\00a0";color:var(--soft)}
 .tasks{margin-top:6px;font-size:12px}
 .tasks summary{cursor:pointer;color:var(--soft);outline:none}
 .tasks summary::marker{color:var(--soft)}
@@ -1571,6 +1642,19 @@ function renderFile(){
                  'use Download for the whole file':'');
 }
 
+function openFileByPath(path){
+  var sel=el('fpick');
+  // The picker is filled once at load, so a file created since then has no
+  // option yet. Add it rather than silently doing nothing.
+  if(!Array.prototype.some.call(sel.options,function(o){return o.value===path;})){
+    var o=document.createElement('option');
+    o.value=path; o.textContent=path; sel.appendChild(o);
+  }
+  sel.value=path;
+  openFile();
+  document.getElementById('fpick').scrollIntoView({behavior:'smooth',block:'center'});
+}
+
 function openFile(){
   var path=el('fpick').value;
   if(!path){ return; }
@@ -1582,6 +1666,12 @@ function openFile(){
     .catch(function(e){ el('fview').innerHTML='<p class="err">Could not open it: '+
       esc(e)+'</p>'; });
 }
+
+// A file button on an instance card opens that account's file below.
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-file]'); if(!b)return;
+  openFileByPath(b.dataset.file);
+});
 
 el('fopen').addEventListener('click',openFile);
 el('fpick').addEventListener('change',openFile);
@@ -1706,6 +1796,12 @@ function refresh(){
           : '')+
         '</div>'+
         (keys?'<div class="keys">'+keys+'</div>':'')+
+        (i.files&&i.files.length
+          ? '<div class="files">'+i.files.map(function(f){
+              return '<button data-file="'+esc(f.path)+'" title="Open '+
+                     esc(f.path)+'">'+esc(f.label)+'</button>';
+            }).join('')+'</div>'
+          : '')+
         drop+'</div>';
     }).join('') || '<p class="sub">No instances found.</p>';
     if(gridHtml!==gridSig){ grid.innerHTML=gridHtml; gridSig=gridHtml; }
