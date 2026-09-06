@@ -1146,6 +1146,34 @@ instance card automatically, and in the **run everywhere** row at the top.
 | **Entries** | What it types, in order, each followed by Enter. Not just numbers — anything a prompt accepts, such as `s`, `all`, `y` or `a-20k`. Separate them with commas, so a value can contain spaces. Write `enter` for a bare Enter — `6,enter` runs option 6 then clears the "[Enter] to continue" screen |
 | **Applies to** | *All instances* (the default), or only the instance numbers you list |
 | **Pause between presses** | A slider, `0`–`10` seconds. How long to wait before the next press so the menu can redraw |
+| **Start at the main menu** | On by default. Sends ikabot's `/menu` before the entries, so the button works from whatever screen that instance was left on |
+
+#### Starting from a known screen
+
+A button used to assume the instance was sitting at the main menu. If it was
+halfway through a module, or on an `[Enter] to continue` screen, the entries
+landed wherever they landed.
+
+Two things now happen before a button's own entries, so it does not matter what
+was on screen:
+
+1. **The scroll view is closed.** Scrolling a pane with the wheel puts tmux
+   into copy mode, and while it is there tmux gives keys to the viewer instead
+   of to ikabot — so a button pressed on an instance somebody had scrolled up
+   did **nothing at all**, silently. That is now cleared first, every time,
+   whether or not the box below is ticked.
+2. **`/menu` is sent**, which is ikabot's own command for returning to the main
+   menu from anywhere.
+
+**Start at the main menu** controls the second one and is on by default,
+including for every button that already existed. Untick it for a button meant
+to answer a prompt where the instance already is — a bare `y`, say — which is
+what the **From** column in the table shows: *main menu* or *where it is*.
+
+> If you used to write `q,/menu,…` at the start of your entries by hand, drop
+> both: the panel does them now, and a leftover `q` would be typed at the main
+> menu, where it is not a valid option. The editor points this out if it sees
+> one.
 
 So a change to a global button changes it everywhere at once, and an instance
 that needs something different gets its own button scoped just to it.
