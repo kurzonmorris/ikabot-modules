@@ -107,6 +107,11 @@ def read(
     # call redraw() (which invokes the module's hook if set, otherwise falls
     # back to the ikabot banner) then re-ask the same question.  Retry counter
     # not incremented so this can't time out.
+    # "/menu" at any prompt abandons the current module and returns to the main
+    # menu.  Checked before validation so it works even where the prompt only
+    # accepts digits — the whole point is that it is valid everywhere.
+    check_menu_token(read_input)
+
     if read_input.strip('\n').strip('\r') == _REFRESH_CHAR:
         from ikabot.helpers.gui import redraw
         redraw()

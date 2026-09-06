@@ -12,27 +12,49 @@ Available from **mod v1.8.1**.
 Each running ikabot writes a JSON file for its account:
 
 ```
-$IKABOT_DATA_DIR/status/<username>_<server><world>.json
+$IKABOT_STATUS_DIR/<username>_<server><world>.json
 ```
 
-`IKABOT_DATA_DIR` is `~/.ikabot` on Linux (`%APPDATA%\.ikabot` on Windows), so
-in a container it is normally:
+which defaults to `$IKABOT_DATA_DIR/status/` — `~/.ikabot/status/` on Linux,
+`%APPDATA%\.ikabot\status\` on Windows.
 
-```
-/root/.ikabot/status/kurzon_s55en.json
-```
-
-**No HTTP, no auth, no port discovery.** Mount that directory (or its parent)
-into the panel container read-only and read the files directly:
+**No HTTP, no auth, no port discovery.** Point every ikabot container at one
+shared status directory and mount it into the panel read-only:
 
 ```yaml
-volumes:
-  - ikabot-data:/root/.ikabot          # in each ikabot container
-  - ikabot-data:/data/ikabot:ro        # in the panel container
+services:
+  ikabot-1:
+    environment:
+      - IKABOT_STATUS_DIR=/shared/status
+    volumes:
+      - ikabot-1-data:/root/.ikabot     # PER CONTAINER — see the warning below
+      - ikabot-status:/shared/status
+  panel:
+    volumes:
+      - ikabot-status:/data/status:ro
 ```
 
-One file per account. `ls /data/ikabot/status/*.json` enumerates every instance
+One file per account. `ls /data/status/*.json` enumerates every instance
 without needing to be told how many there are.
+
+### Two topologies, and which one you have
+
+The shipped `docker/` image runs **one container with `INSTANCES` ikabot
+processes** in tmux, all sharing `/config/.ikabot`. `IKABOT_STATUS_DIR` is not
+needed there — one data directory is already one status directory, and the
+decaptcha seats coordinate naturally too. Nothing to configure.
+
+`IKABOT_STATUS_DIR` exists for the other shape: **one container per account**.
+There, do *not* mount a single data volume into every container, as an earlier
+revision of this document suggested. That directory also holds **the credential
+vault**, and several ikabots on one vault file is a needless single point of
+failure. Give each container its own data volume and share only the status
+directory and the decaptcha seats (§7).
+
+Either way, several ikabot processes do share one vault, so the vault has been
+hardened for it: writes merge under the lock instead of overwriting a snapshot,
+accounts are addressed by a stable id rather than by list position, and the
+stale-lock check no longer compares PIDs across PID namespaces.
 
 ---
 
@@ -108,7 +130,7 @@ Example read:
 ```python
 import json, glob, time
 
-for path in sorted(glob.glob("/data/ikabot/status/*.json")):
+for path in sorted(glob.glob("/data/status/*.json")):
     with open(path) as f:
         s = json.load(f)
     if s.get("schema") != 1:
@@ -155,11 +177,10 @@ coordination does nothing. Measured here with 6 instances on 4 cores: shared
 directory → 4 get seats and 2 correctly fall back to serial; per-container
 directories → all 6 claim seats.
 
-They default to `$IKABOT_DATA_DIR/decaptcha_seats`, which is already the
-shared volume if you mount `ikabot-data:/root/.ikabot` in every container — so
-**with the mount from §1 this works with no extra configuration**.
-
-If the data dir is *not* shared, point them somewhere that is:
+They default to `$IKABOT_DATA_DIR/decaptcha_seats`. In the shipped
+single-container image every instance shares that directory already, so there is
+nothing to do. With **one container per account** the default is not shared, and
+setting this is required:
 
 ```yaml
 environment:
