@@ -1,0 +1,2168 @@
+#!/usr/bin/env python3
+"""Web control panel for the ikabot container.
+
+Serves the same actions as the `ika` command over HTTP, so the container can
+be driven from a phone, tablet or Steam Deck. Stdlib only — no extra packages.
+"""
+
+import base64
+import hmac
+import json
+import csv
+import io
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+# Single source of truth for the panel version. The repo file is named
+# ika-panel_v<this>, and the _v suffix is stripped on install, matching the
+# convention the modules already use.
+PANEL_VERSION = "1.0.9"
+
+PORT = int(os.environ.get("PANEL_PORT", "7682"))
+USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
+PASS = os.environ.get("PANEL_PASS") or os.environ.get("TTYD_PASS", "")
+SESSION = os.environ.get("TMUX_SESSION", "ikabot")
+TTYD_PORT = int(os.environ.get("TTYD_PORT", "7681"))
+STATUS_DIR = os.environ.get("STATUS_DIR", "/config/.ikabot/status")
+# Where modules keep their lock files: most in HOME, the rest in the ikabot
+# data folder or a subfolder of it.
+HOME_DIR = os.environ.get("HOME", "/config")
+DATA_DIR = os.environ.get("IKABOT_DATA_DIR", os.path.join(HOME_DIR, ".ikabot"))
+# Subfolders of the data folder that never hold a module lock. Skipped so a
+# large logs folder is not listed every five seconds.
+LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache"}
+
+# --- file viewer ----------------------------------------------------------
+# Only data files, and only below /config. Module CSVs are awkward to reach
+# any other way: they are inside the container, owned by root, and the
+# instances that write them are busy in tmux.
+FILES_ROOT = HOME_DIR
+VIEW_EXT = {".csv", ".tsv", ".json", ".txt", ".log", ".md",
+            ".schema", ".ini", ".conf", ".cfg", ".yml", ".yaml"}
+# Never listed, never served. The vault and the session files are the account
+# credentials themselves; nothing about examining a CSV needs them, and the
+# panel is not the place to hand them out.
+FILES_DENY_NAMES = {"vault", ".ikabot_vault", "credentials"}
+FILES_DENY_EXT = {".session", ".lock", ".key", ".pem"}
+FILES_SKIP_DIRS = {"sessions", "__pycache__", ".git", "node_modules"}
+FILES_MAX_DEPTH = 4
+FILES_MAX_LISTED = 3000
+# A view is for reading, not for shifting the whole file into a browser tab.
+# Anything bigger is offered as a download instead.
+VIEW_MAX_BYTES = 4 * 1024 * 1024
+VIEW_MAX_ROWS = 3000
+# Seeds the button file on first run only; buttons are edited in the panel
+# afterwards and live in BUTTONS_FILE.
+QUICK_KEYS = [k.strip() for k in os.environ.get("QUICK_KEYS", "5,6,9,11").split(",")
+              if k.strip().isdigit()]
+BUTTONS_FILE = os.environ.get("PANEL_BUTTONS", "/config/panel-buttons.json")
+
+REPO = os.environ.get("IKABOT_REPO", "kurzonmorris/ikabot-modules")
+BRANCH = os.environ.get("IKABOT_BRANCH", "main")
+# config.py is read raw rather than through the API: it is one small file and
+# needs no rate-limited call.
+CONFIG_URL = ("https://raw.githubusercontent.com/%s/%s/ikabot/config.py"
+              % (REPO, BRANCH))
+
+LABEL_OK = re.compile(r"^[\w \-/&().+#]{1,24}$")
+# Anything printable is allowed — ikabot prompts take "s", "all", "a-20k",
+# "y", city names and so on, not just menu numbers. Control characters are
+# refused because an embedded newline would fire an extra Enter.
+KEY_BAD = re.compile(r"[\x00-\x1f\x7f]")
+MAX_KEY_LEN = 64
+# "enter" sends a bare Enter, for ikabot's "[Enter] to continue" screens.
+ENTER_TOKEN = "enter"
+ID_OK = re.compile(r"^[A-Za-z0-9]{1,32}$")
+_buttons_lock = threading.RLock()
+
+# Seconds between keypresses, so the menu has time to redraw before the next one.
+DEFAULT_DELAY = 0.4
+MIN_DELAY, MAX_DELAY = 0.0, 30.0
+# Only a guard against an absurd payload; a long sequence is fine, it just
+# takes proportionally longer when run across every instance.
+MAX_KEYS = 30
+
+SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+# Bulk account entry. Generous caps: they exist to stop an absurd payload,
+# not to second-guess what a label or a password may contain.
+MAX_ACCOUNTS_PER_SAVE = 100
+MAX_FIELD_LEN = 256
+_run_lock = threading.Lock()
+
+# GitHub's unauthenticated API allows 60 calls an hour, so remote versions are
+# cached rather than fetched on every poll.
+_avail = {"data": {}, "ikabot": {}, "checked": 0.0, "error": ""}
+_avail_lock = threading.Lock()
+
+
+def _ver_tuple(v):
+    out = []
+    for part in str(v).split("."):
+        digits = re.sub(r"\D", "", part)
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
+
+
+def is_newer(remote, local):
+    if not remote:
+        return False
+    if not local:
+        return True
+    a, b = _ver_tuple(remote), _ver_tuple(local)
+    n = max(len(a), len(b))
+    return a + (0,) * (n - len(a)) > b + (0,) * (n - len(b))
+
+
+def remote_ikabot_versions():
+    """IKABOT_VERSION / IKABOT_MOD_VERSION as published in the repo."""
+    import urllib.error
+    import urllib.request
+    try:
+        req = urllib.request.Request(CONFIG_URL,
+                                     headers={"User-Agent": "ika-panel/%s" % PANEL_VERSION})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            text = resp.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+        return {}
+    out = {}
+    for key, label in (("IKABOT_VERSION", "ikabot"), ("IKABOT_MOD_VERSION", "mod")):
+        m = re.search(r'^%s\s*=\s*"([^"]+)"' % key, text, re.M)
+        if m:
+            out[label] = m.group(1)
+    return out
+
+
+def refresh_available():
+    core = remote_ikabot_versions()
+    raw = _sh(["ika-modules", "available"], timeout=90).strip()
+    data, err = {}, ""
+    try:
+        parsed = json.loads(raw.splitlines()[-1]) if raw else {}
+        if "modules" in parsed:
+            data = parsed["modules"]
+        else:
+            err = parsed.get("error", "could not read remote versions")
+    except (ValueError, IndexError):
+        err = raw[:300] or "could not read remote versions"
+
+    with _avail_lock:
+        if data:
+            _avail["data"] = data
+        if core:
+            _avail["ikabot"] = core
+        _avail["error"] = err
+        _avail["checked"] = time.time()
+
+    if err:
+        return "Could not check GitHub: %s" % err
+    return "Checked %d module version(s) on GitHub." % len(data)
+
+
+# --------------------------------------------------------------------------
+# State
+# --------------------------------------------------------------------------
+
+def _sh(args, timeout=600):
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return (p.stdout or "") + (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        return "Timed out after %ds: %s" % (timeout, " ".join(args))
+    except OSError as exc:
+        return "Could not run %s: %s" % (" ".join(args), exc)
+
+
+def _parent(pid):
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return int(f.read().rpartition(")")[2].split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def _alive(pid):
+    """True when the pid is a real process that has not become a zombie.
+
+    A task killed from here stays listed in ikabot's status file until that
+    instance's menu next redraws, which on an idle account can be hours. Asking
+    /proc directly keeps the panel honest without waiting for the writer.
+    """
+    if pid <= 1:
+        return False
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rpartition(")")[2].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def stop_tasks(name, tasks):
+    """SIGKILL the given tasks, returning one report line each.
+
+    SIGKILL is what ikabot's own "kill tasks" menu sends, so this behaves
+    exactly as stopping the task from inside the instance would. The session
+    lock file self-heals when its owner is dead, so a hard kill cannot leave an
+    instance wedged.
+    """
+    lines = []
+    for t in tasks:
+        try:
+            pid = int(t.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        action = t.get("action") or "unknown"
+        if pid <= 1:
+            lines.append("%s: %s has no process id — skipped" % (name, action))
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            lines.append("%s: stopped %s (pid %d)" % (name, action, pid))
+        except ProcessLookupError:
+            lines.append("%s: %s had already stopped" % (name, action))
+        except OSError as exc:
+            lines.append("%s: could not stop %s — %s" % (name, action, exc))
+    return lines
+
+
+def vault_api():
+    """ikabot's credential vault, imported only when it is actually needed.
+
+    The panel is otherwise stdlib-only, so that it still starts and still
+    reports on the instances when /app is broken mid-update. Reaching into
+    ikabot lazily keeps that true, and turns a missing or older ikabot into a
+    sentence on screen rather than a panel that will not boot.
+    """
+    try:
+        from ikabot.helpers import credentialStore
+        return credentialStore, ""
+    except BaseException as exc:
+        # BaseException, not Exception: a mismatched build of the cryptography
+        # wheel raises pyo3's PanicException, which is not an Exception, and
+        # letting that through takes the whole panel down with it -- which is
+        # the exact failure this lazy import exists to avoid.
+        return None, ("Could not load ikabot's vault code (%s: %s). Accounts "
+                      "need a working ikabot in %s."
+                      % (type(exc).__name__, exc,
+                         os.environ.get("APP_DIR", "/app")))
+
+
+def vault_present():
+    store, _ = vault_api()
+    if store is None:
+        return False
+    try:
+        return bool(store.vault_exists())
+    except BaseException:
+        return False
+
+
+def clean_account(raw):
+    """Validate one pasted account row. Returns (account, error).
+
+    Nothing here is written anywhere by the panel: the row goes straight into
+    ikabot's encrypted vault and is then dropped.
+    """
+    if not isinstance(raw, dict):
+        return None, "not an account"
+    out = {}
+    for field in ("label", "email", "password"):
+        value = raw.get(field)
+        if not isinstance(value, str):
+            return None, "%s is missing" % field
+        value = value.strip() if field != "password" else value
+        if not value:
+            return None, "%s is empty" % field
+        if len(value) > MAX_FIELD_LEN:
+            return None, "%s is longer than %d characters" % (field, MAX_FIELD_LEN)
+        # A control character cannot be typed into ikabot's own prompts and
+        # would corrupt the label list, so it is refused rather than stripped.
+        if KEY_BAD.search(value):
+            return None, "%s contains a control character" % field
+        out[field] = value
+    return out, ""
+
+
+def _safe_part(s):
+    """The filename sanitising every module applies to account fields."""
+    return "".join(c for c in str(s) if c.isalnum() or c in "-_")
+
+
+def lock_suffixes(entry):
+    """The filename endings a module builds for this account.
+
+    Modules name their locks <what>_<server><world>_<player>.lock. The older
+    ones, and the pre-world versions of the newer ones, leave the world out.
+    Both forms are matched so an old lock is still found and cleared.
+    """
+    user = _safe_part(entry.get("username") or "")
+    server = _safe_part(entry.get("server") or "")
+    world = _safe_part(entry.get("world") or "")
+    if not user or not server:
+        return []
+    out = []
+    if world:
+        out.append("%s%s_%s" % (server, world, user))
+    out.append("%s_%s" % (server, user))
+    return out
+
+
+def data_dirs():
+    """The folders modules keep per-account files in.
+
+    /config, the ikabot data folder, and one level of its subfolders — which
+    is where every module writes. Listed rather than walked, and the big
+    folders are skipped, so this stays cheap enough to run on every poll.
+    """
+    dirs = [HOME_DIR, DATA_DIR]
+    try:
+        for entry in sorted(os.listdir(DATA_DIR)):
+            if entry in LOCK_SKIP_DIRS:
+                continue
+            path = os.path.join(DATA_DIR, entry)
+            if os.path.isdir(path):
+                dirs.append(path)
+    except OSError:
+        pass
+    return dirs
+
+
+def account_files():
+    """Data files in those folders, as (directory, filename) pairs.
+
+    Used to work out which files belong to which account, so a per-account log
+    can be opened from the instance's own card.
+    """
+    out, seen = [], set()
+    for d in data_dirs():
+        real = os.path.realpath(d)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            if viewable_name(name) and os.path.isfile(os.path.join(d, name)):
+                out.append((d, name))
+    return out
+
+
+def files_for(entry, pool):
+    """The files in *pool* belonging to this account, newest name first.
+
+    Matched on the same suffix the modules build their filenames from, so
+    shipment_log_en70_StDa.csv lands on the en70 StDa instance and nowhere
+    else. The label is what is left once the account part is stripped, which
+    is the name of the log rather than a wall of server and player.
+    """
+    root = os.path.realpath(FILES_ROOT)
+    out = []
+    for suffix in lock_suffixes(entry):
+        for directory, name in pool:
+            stem, ext = os.path.splitext(name)
+            if not stem.endswith("_" + suffix):
+                continue
+            full = os.path.join(directory, name)
+            real = os.path.realpath(full)
+            if not real.startswith(root + os.sep):
+                continue
+            rel = os.path.relpath(full, root)
+            if any(f["path"] == rel for f in out):
+                continue
+            label = stem[: -(len(suffix) + 1)].lstrip(".") or name
+            out.append({"path": rel, "label": label, "name": name})
+    out.sort(key=lambda f: f["label"].lower())
+    return out
+
+
+def lock_files():
+    """Every module lock file on disk, as (directory, filename) pairs.
+
+    Scanned at a fixed depth rather than walked, so the size of the logs
+    folder never matters.
+
+    Session locks are deliberately left out. ikabot holds those for
+    milliseconds and clears a dead one after thirty seconds by itself, so they
+    are never what stops a module from starting again — and removing one while
+    an instance is mid-write is the only way this could do harm.
+    """
+    found, seen = [], set()
+    for d in data_dirs():
+        real = os.path.realpath(d)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".lock") or name.endswith(".session.lock"):
+                continue
+            if os.path.isfile(os.path.join(d, name)):
+                found.append((d, name))
+    return found
+
+
+def delete_locks(pairs):
+    """Remove the given lock files, returning one report line each."""
+    lines = []
+    for directory, name in pairs:
+        try:
+            os.unlink(os.path.join(directory, name))
+            lines.append("deleted %s" % name)
+        except FileNotFoundError:
+            lines.append("%s had already gone" % name)
+        except OSError as exc:
+            lines.append("could not delete %s — %s" % (name, exc))
+    return lines
+
+
+def viewable_name(name):
+    """True when a filename may be listed and served."""
+    lower = name.lower()
+    if lower in FILES_DENY_NAMES:
+        return False
+    stem, ext = os.path.splitext(lower)
+    if ext in FILES_DENY_EXT:
+        return False
+    return ext in VIEW_EXT
+
+
+def list_files():
+    """Data files under /config, as dicts of path, size and mtime.
+
+    Walked to a fixed depth with a hard cap on the count, so a folder that
+    grows without bound cannot turn the listing into a denial of service.
+    """
+    root = os.path.realpath(FILES_ROOT)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
+        if depth >= FILES_MAX_DEPTH:
+            dirnames[:] = []
+        else:
+            dirnames[:] = sorted(d for d in dirnames if d not in FILES_SKIP_DIRS)
+        for name in sorted(filenames):
+            if not viewable_name(name):
+                continue
+            full = os.path.join(dirpath, name)
+            # A symlink pointing out of /config is refused when opened, so it
+            # must not be listed either — otherwise the list advertises files
+            # that cannot be read, and the name and size of whatever it points
+            # at leak from the listing alone.
+            real = os.path.realpath(full)
+            if not real.startswith(root + os.sep):
+                continue
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root)
+            out.append({"path": rel, "size": st.st_size, "mtime": int(st.st_mtime)})
+            if len(out) >= FILES_MAX_LISTED:
+                return sorted(out, key=lambda f: f["path"])
+    return sorted(out, key=lambda f: f["path"])
+
+
+def resolve_file(rel):
+    """Turn a browser-supplied path into a real file, or None.
+
+    Everything is decided here: the path is resolved to its real location and
+    has to end up inside /config, be a regular file, and carry a name the
+    listing would have shown. Symlinks and ".." are handled by comparing the
+    resolved path, not the text.
+    """
+    if not rel or "\x00" in rel:
+        return None
+    root = os.path.realpath(FILES_ROOT)
+    target = os.path.realpath(os.path.join(root, rel))
+    if target != root and not target.startswith(root + os.sep):
+        return None
+    if not os.path.isfile(target):
+        return None
+    if not viewable_name(os.path.basename(target)):
+        return None
+    # Nothing below a skipped folder, however it was reached.
+    inner = os.path.relpath(target, root).split(os.sep)[:-1]
+    if any(part in FILES_SKIP_DIRS for part in inner):
+        return None
+    return target
+
+
+def read_file(path):
+    """Contents of one file, as CSV rows where that is what it is."""
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        return {"error": "Could not read the file: %s" % exc}
+
+    info = {"path": os.path.relpath(path, os.path.realpath(FILES_ROOT)),
+            "size": st.st_size, "mtime": int(st.st_mtime)}
+    if st.st_size > VIEW_MAX_BYTES:
+        info["error"] = ("This file is %s — too big to show here. Use Download."
+                         % human_size(st.st_size))
+        return info
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            raw = f.read()
+    except OSError as exc:
+        return {"error": "Could not read the file: %s" % exc}
+
+    if os.path.splitext(path)[1].lower() in (".csv", ".tsv"):
+        delim = "\t" if path.lower().endswith(".tsv") else ","
+        try:
+            rows = list(csv.reader(io.StringIO(raw), delimiter=delim))
+        except csv.Error as exc:
+            info["kind"] = "text"
+            info["text"] = raw
+            info["note"] = "Not valid CSV (%s) — showing it as plain text." % exc
+            return info
+        info["kind"] = "csv"
+        info["total_rows"] = len(rows)
+        info["truncated"] = len(rows) > VIEW_MAX_ROWS
+        info["rows"] = rows[:VIEW_MAX_ROWS]
+        return info
+
+    info["kind"] = "text"
+    info["text"] = raw
+    return info
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "%d %s" % (n, unit) if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024.0
+
+
+def _listening():
+    ports = {}
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                next(f, None)
+                for line in f:
+                    c = line.split()
+                    if len(c) > 9 and c[3] == "0A":
+                        ports[c[9]] = int(c[1].rpartition(":")[2], 16)
+        except OSError:
+            pass
+    return ports
+
+
+def _sockets(pid):
+    out = []
+    try:
+        for fd in os.listdir("/proc/%d/fd" % pid):
+            try:
+                t = os.readlink("/proc/%d/fd/%s" % (pid, fd))
+            except OSError:
+                continue
+            if t.startswith("socket:["):
+                out.append(t[8:-1])
+    except OSError:
+        pass
+    return out
+
+
+def _address():
+    if os.environ.get("IKA_WEB_HOST"):
+        return os.environ["IKA_WEB_HOST"]
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr"],
+                             capture_output=True, text=True).stdout
+    except OSError:
+        out = ""
+    found = re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+    for a in found:
+        p = [int(x) for x in a.split(".")]
+        if p[0] == 100 and 64 <= p[1] <= 127:
+            return a
+    for a in found:
+        if not a.startswith(("127.", "172.17.")):
+            return a
+    return ""
+
+
+def _versions():
+    cfg = os.path.join(os.environ.get("APP_DIR", "/app"), "ikabot", "config.py")
+    out = {}
+    try:
+        with open(cfg, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return out
+    for key, label in (("IKABOT_VERSION", "ikabot"), ("IKABOT_MOD_VERSION", "mod")):
+        m = re.search(r'^%s\s*=\s*"([^"]+)"' % key, text, re.M)
+        if m:
+            out[label] = m.group(1)
+    return out
+
+
+def _new_id():
+    return "b%d" % int(time.time() * 1000 % 1000000000)
+
+
+def save_buttons(buttons):
+    """Atomic write, so a reader never sees a half-written file."""
+    with _buttons_lock:
+        tmp = BUTTONS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"schema": 1, "buttons": buttons}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, BUTTONS_FILE)
+
+
+def load_buttons():
+    with _buttons_lock:
+        try:
+            with open(BUTTONS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("schema") == 1 and isinstance(data.get("buttons"), list):
+                return data["buttons"]
+        except (OSError, ValueError):
+            pass
+        seeded = [{"id": "seed%s" % k, "label": k, "keys": [k],
+                   "instances": [], "delay": DEFAULT_DELAY}
+                  for k in QUICK_KEYS]
+        try:
+            save_buttons(seeded)
+        except OSError:
+            pass
+        return seeded
+
+
+def clean_button(raw):
+    """Validate one button. Returns (button, error)."""
+    label = str(raw.get("label", "")).strip()
+    if not LABEL_OK.match(label):
+        return None, ("Name must be 1-24 characters, using letters, numbers, "
+                      "spaces or - / & ( ) . + #")
+
+    keys = raw.get("keys")
+    if isinstance(keys, str):
+        # Commas only: a value may legitimately contain spaces, e.g. a city name.
+        keys = keys.split(",")
+    keys = [str(k).strip() for k in (keys or []) if str(k).strip()]
+    if not keys:
+        return None, "Give at least one menu number."
+    if len(keys) > MAX_KEYS:
+        return None, "At most %d presses in one button." % MAX_KEYS
+    cleaned = []
+    for k in keys:
+        if k.lower() == ENTER_TOKEN:
+            cleaned.append(ENTER_TOKEN)
+            continue
+        if KEY_BAD.search(k):
+            return None, "Entries cannot contain control characters."
+        if len(k) > MAX_KEY_LEN:
+            return None, "Each entry must be %d characters or fewer." % MAX_KEY_LEN
+        cleaned.append(k)
+    keys = cleaned
+
+    raw_inst = raw.get("instances") or []
+    if isinstance(raw_inst, str):
+        raw_inst = [x for x in raw_inst.replace(" ", ",").split(",") if x]
+    instances = []
+    for x in raw_inst:
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            return None, "Instance numbers must be whole numbers, e.g. 3,7."
+        if not 1 <= n <= 99:
+            return None, "Instance numbers must be between 1 and 99."
+        instances.append(n)
+
+    delay = raw.get("delay", DEFAULT_DELAY)
+    try:
+        delay = round(float(delay), 2)
+    except (TypeError, ValueError):
+        return None, "Delay must be a number of seconds, e.g. 0.4."
+    if not MIN_DELAY <= delay <= MAX_DELAY:
+        return None, "Delay must be between %g and %g seconds." % (MIN_DELAY, MAX_DELAY)
+
+    bid = str(raw.get("id") or "").strip()
+    if bid and not ID_OK.match(bid):
+        return None, "Bad button id."
+
+    return {"id": bid or _new_id(), "label": label, "keys": keys,
+            "instances": sorted(set(instances)), "delay": delay}, ""
+
+
+def describe(keys):
+    return " then ".join("Enter" if k == ENTER_TOKEN else k for k in keys)
+
+
+def applies_to(button, num):
+    return not button.get("instances") or num in button["instances"]
+
+
+def press(window, keys, delay=DEFAULT_DELAY):
+    """Send each menu number followed by Enter, pausing so the menu redraws."""
+    notes = []
+    last = len(keys) - 1
+    target = "%s:%s" % (SESSION, window)
+    for idx, k in enumerate(keys):
+        if k == ENTER_TOKEN:
+            out = _sh(["tmux", "send-keys", "-t", target, "Enter"], timeout=15)
+        else:
+            # -l types the value literally. Without it tmux reads arguments as
+            # key names, so an entry like "C-c" would interrupt the instance
+            # instead of typing three characters. "--" keeps a leading dash
+            # from being taken as an option.
+            out = _sh(["tmux", "send-keys", "-t", target, "-l", "--", k], timeout=15)
+            out += _sh(["tmux", "send-keys", "-t", target, "Enter"], timeout=15)
+        if out.strip():
+            notes.append(out.strip())
+        if idx != last and delay:
+            time.sleep(delay)
+    return notes
+
+
+def read_status():
+    """Per-account task state written by ikabot (mod 1.8.1+).
+
+    Writes are atomic on ikabot's side, so no locking is needed here.
+    """
+    out = []
+    try:
+        names = sorted(os.listdir(STATUS_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(STATUS_DIR, name), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if data.get("schema") != 1:
+            continue
+        out.append(data)
+    return out
+
+
+def state():
+    raw = subprocess.run(
+        ["tmux", "list-windows", "-t", SESSION, "-F",
+         "#{window_name}|#{pane_dead}|#{pane_pid}"],
+        capture_output=True, text=True).stdout
+
+    panes, instances = {}, []
+    for line in raw.split("\n"):
+        if not line.strip():
+            continue
+        name, dead, pid = line.split("|")
+        pid = int(pid or 0)
+        panes[pid] = name
+        instances.append({
+            "name": name,
+            "num": int(re.sub(r"\D", "", name) or 0),
+            "dead": dead == "1",
+            "pid": pid,
+            "ports": [],
+        })
+
+    by_name = {i["name"]: i for i in instances}
+    inode_port = _listening()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        hits = [inode_port[i] for i in _sockets(pid) if i in inode_port]
+        if not hits:
+            continue
+        walk, owner = pid, None
+        for _ in range(40):
+            if walk in panes:
+                owner = panes[walk]
+                break
+            if walk <= 1:
+                break
+            walk = _parent(walk)
+        if owner and owner in by_name:
+            for p in hits:
+                if p != TTYD_PORT and p not in by_name[owner]["ports"]:
+                    by_name[owner]["ports"].append(p)
+
+    try:
+        modules = json.loads(_sh(["ika-modules", "json"], timeout=30) or "[]")
+    except ValueError:
+        modules = []
+
+    # Match each status file to a window by walking its main pid up to a pane.
+    # The file records the ikabot menu process, which is the pane's own process
+    # or a descendant of it.
+    def owner_of(pid):
+        walk = pid
+        for _ in range(40):
+            if walk in panes:
+                return panes[walk]
+            if walk <= 1:
+                return None
+            walk = _parent(walk)
+        return None
+
+    # A pane's own pid is the ikabot menu, never a background task. Excluding
+    # it means the stop actions below cannot reach an instance itself, only
+    # the work it started.
+    pane_pids = set(panes)
+
+    def live_tasks(entry):
+        out = []
+        for task in entry.get("tasks", []):
+            try:
+                pid = int(task.get("pid") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid in pane_pids or not _alive(pid):
+                continue
+            out.append(task)
+        return out
+
+    all_locks = lock_files()
+    all_files = account_files()
+    claimed = set()
+
+    def locks_for(entry):
+        """Lock files belonging to this account, by filename suffix."""
+        mine = []
+        for suffix in lock_suffixes(entry):
+            tail = "_%s.lock" % suffix
+            for pair in all_locks:
+                if pair[1].endswith(tail) and pair not in mine:
+                    mine.append(pair)
+        return mine
+
+    status_seen, orphans = set(), []
+    for entry in read_status():
+        name = owner_of(int(entry.get("pid") or 0))
+        if name and name in by_name:
+            tasks = live_tasks(entry)
+            locks = locks_for(entry)
+            claimed.update(locks)
+            by_name[name]["account"] = entry.get("account", "")
+            by_name[name]["tasks"] = tasks
+            # Counted from what is actually alive rather than from the file, so
+            # a stopped task disappears at once instead of at the next redraw.
+            by_name[name]["task_count"] = len(tasks)
+            by_name[name]["updated"] = entry.get("updated", 0)
+            by_name[name]["locks"] = [n for _, n in locks]
+            by_name[name]["files"] = files_for(entry, all_files)
+            status_seen.add(name)
+        else:
+            orphans.append(entry.get("account", "?"))
+
+    for i in instances:
+        i.setdefault("files", [])
+        i.setdefault("locks", [])
+        i.setdefault("tasks", [])
+        i.setdefault("task_count", None if i["name"] not in status_seen else 0)
+        i.setdefault("account", "")
+        i.setdefault("updated", 0)
+
+    with _avail_lock:
+        avail, checked, avail_err = dict(_avail["data"]), _avail["checked"], _avail["error"]
+        core_avail = dict(_avail["ikabot"])
+
+    for m in modules:
+        remote = avail.get(m["name"], "")
+        m["available"] = remote
+        if not remote:
+            m["status"] = "unknown"
+        elif is_newer(remote, m.get("version", "")):
+            m["status"] = "outdated"
+        else:
+            m["status"] = "current"
+
+    # Modules that exist upstream but have never been installed here. Without
+    # this the table only ever shows what is already installed, so a newly
+    # published module can never be found or added from the panel.
+    installed = {m["name"] for m in modules}
+    for name in sorted(avail):
+        if name not in installed:
+            modules.append({
+                "name": name,
+                "file": name + ".py",
+                "version": "",
+                "live": False,
+                "available": avail[name],
+                "status": "new",
+            })
+    modules.sort(key=lambda m: m["name"].lower())
+
+    for i in instances:
+        i["ports"].sort()
+
+    instances.sort(key=lambda i: i["num"])
+    return {
+        "checked": checked,
+        "avail_error": avail_err,
+        "panel_version": PANEL_VERSION,
+        "versions_available": core_avail,
+        "status_available": os.path.isdir(STATUS_DIR),
+        "vault": vault_present(),
+        "locks_total": len(all_locks),
+        # Locks matching no logged-in account: shared ones such as the
+        # messaging hub's, and leftovers from accounts not running now. Only
+        # the clear-everything action touches these.
+        "locks_shared": sorted(n for pair, n in ((p, p[1]) for p in all_locks)
+                               if pair not in claimed),
+        "status_orphans": orphans,
+        "buttons": load_buttons(),
+        "instances": instances,
+        "modules": modules,
+        "versions": _versions(),
+        "host": _address(),
+        "running": sum(1 for i in instances if not i["dead"]),
+        "dead": sum(1 for i in instances if i["dead"]),
+    }
+
+
+# --------------------------------------------------------------------------
+# Actions — nothing runs that is not in this table
+# --------------------------------------------------------------------------
+
+def command_for(action, arg):
+    if action == "restart_one":
+        if not (arg or "").isdigit():
+            return None
+        return ["ika", "restart", str(int(arg))]
+    if action == "crash":
+        if not (arg or "").isdigit():
+            return None
+        return ["ika", "crash", str(int(arg))]
+    if action == "module_one":
+        if not arg or not SAFE_NAME.match(arg):
+            return None
+        return ["ika-modules", "sync", "--only", arg]
+    return {
+        "restart_all":     ["ika", "restart", "all"],
+        "restart_dead":    ["ika", "restart", "dead"],
+        "web_stop":        ["ika", "web", "--stop"],
+        "modules_all":     ["ika-modules", "sync"],
+        "modules_local":   ["ika-modules", "sync", "--local"],
+        "update":          ["ika-update", "--yes"],
+        "update_rollback": ["ika-update", "--rollback"],
+        "status":          ["ika", "status"],
+    }.get(action)
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "ika-panel"
+
+    def log_message(self, *a):
+        pass
+
+    def _authed(self):
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            raw = base64.b64decode(header[6:]).decode("utf8", "replace")
+        except Exception:
+            return False
+        user, _, pw = raw.partition(":")
+        return (hmac.compare_digest(user, USER)
+                and hmac.compare_digest(pw, PASS))
+
+    def _deny(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="ikabot control panel"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send(self, code, body, ctype="application/json"):
+        if isinstance(body, str):
+            body = body.encode("utf8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _query(self):
+        return parse_qs(urlparse(self.path).query)
+
+    def do_GET(self):
+        if not self._authed():
+            return self._deny()
+        if self.path.startswith("/api/state"):
+            return self._send(200, json.dumps(state()))
+
+        if self.path.startswith("/api/files"):
+            return self._send(200, json.dumps({"root": FILES_ROOT,
+                                               "files": list_files()}))
+
+        if self.path.startswith("/api/file"):
+            rel = (self._query().get("path") or [""])[0]
+            target = resolve_file(rel)
+            if target is None:
+                return self._send(404, json.dumps(
+                    {"error": "No such file below %s, or not a readable data "
+                              "file." % FILES_ROOT}))
+            return self._send(200, json.dumps(read_file(target)))
+
+        if self.path.startswith("/api/download"):
+            rel = (self._query().get("path") or [""])[0]
+            target = resolve_file(rel)
+            if target is None:
+                return self._send(404, json.dumps({"error": "not found"}))
+            try:
+                with open(target, "rb") as f:
+                    body = f.read()
+            except OSError as exc:
+                return self._send(500, json.dumps({"error": str(exc)}))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            # The filename is quoted rather than interpolated bare: a comma or
+            # a space in it would otherwise split the header.
+            self.send_header("Content-Disposition",
+                             'attachment; filename="%s"'
+                             % os.path.basename(target).replace('"', "_"))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return self.wfile.write(body)
+
+        if self.path == "/" or self.path.startswith("/?"):
+            return self._send(200, PAGE, "text/html; charset=utf-8")
+        self._send(404, json.dumps({"error": "not found"}))
+
+    def do_POST(self):
+        if not self._authed():
+            return self._deny()
+        # Bulk account entry. Deliberately POST-only with the fields in the
+        # body: a password must never reach a URL, where it would land in
+        # browser history. Nothing here is logged — log_message is a no-op —
+        # and nothing is kept once the vault has been written.
+        if self.path.startswith("/api/accounts"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or "{}")
+            except (ValueError, OSError):
+                return self._send(400, json.dumps({"error": "bad request"}))
+
+            store, why = vault_api()
+            if store is None:
+                return self._send(500, json.dumps({"error": why}))
+
+            master = body.get("master")
+            if not isinstance(master, str) or not master:
+                return self._send(400, json.dumps(
+                    {"error": "The vault's master password is required."}))
+
+            rows = body.get("accounts")
+            if not isinstance(rows, list) or not rows:
+                return self._send(400, json.dumps(
+                    {"error": "No accounts to save."}))
+            if len(rows) > MAX_ACCOUNTS_PER_SAVE:
+                return self._send(400, json.dumps(
+                    {"error": "Too many accounts at once (limit %d)."
+                              % MAX_ACCOUNTS_PER_SAVE}))
+
+            wanted, problems = [], []
+            for n, raw in enumerate(rows, 1):
+                account, err = clean_account(raw)
+                if err:
+                    problems.append("row %d: %s" % (n, err))
+                else:
+                    wanted.append(account)
+            if problems:
+                return self._send(400, json.dumps(
+                    {"error": "Nothing was saved:\n\n" + "\n".join(problems)}))
+
+            with _run_lock:
+                try:
+                    existed = store.vault_exists()
+                    if existed:
+                        vault = store.open_vault(master)
+                        # Adding under a key derived from the wrong password
+                        # would encrypt these accounts so that ikabot itself
+                        # could never read them, and the vault would look fine
+                        # until the day one was needed. Refuse instead.
+                        if not vault.verify_password():
+                            return self._send(400, json.dumps(
+                                {"error": "That is not the vault's master "
+                                          "password. Nothing was saved."}))
+                    else:
+                        vault = store.create_vault(master)
+                except Exception as exc:
+                    return self._send(500, json.dumps(
+                        {"error": "Could not open the vault: %s" % exc}))
+
+                have = {label for _, label in vault.list_accounts()}
+                added, skipped, failed = [], [], []
+                for account in wanted:
+                    if account["label"] in have:
+                        skipped.append(account["label"])
+                        continue
+                    try:
+                        vault.add_account(account["label"], account["email"],
+                                          account["password"])
+                        have.add(account["label"])
+                        added.append(account["label"])
+                    except Exception as exc:
+                        failed.append("%s (%s)" % (account["label"], exc))
+
+                labels = [label for _, label in vault.list_accounts()]
+
+            lines = []
+            if added:
+                lines.append("Saved %d account(s): %s" % (len(added), ", ".join(added)))
+            if skipped:
+                lines.append("Already in the vault, left alone: %s" % ", ".join(skipped))
+            if failed:
+                lines.append("Could not save: %s" % ", ".join(failed))
+            if not existed:
+                lines.append("")
+                lines.append("A new vault was created. Remember this master "
+                             "password — it cannot be recovered.")
+            if added:
+                lines.append("")
+                lines.append("Now press 'Restart all' above, so each instance "
+                             "picks up its account.")
+
+            return self._send(200, json.dumps({
+                "output": "\n".join(lines) or "Nothing to do.",
+                "labels": labels,
+                "vault": True}))
+
+        if self.path.startswith("/api/buttons"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or "{}")
+            except (ValueError, OSError):
+                return self._send(400, json.dumps({"error": "bad request"}))
+
+            with _buttons_lock:
+                buttons = load_buttons()
+                op = body.get("op")
+
+                if op == "delete":
+                    bid = str(body.get("id", ""))
+                    kept = [b for b in buttons if b["id"] != bid]
+                    if len(kept) == len(buttons):
+                        return self._send(400, json.dumps({"error": "no such button"}))
+                    save_buttons(kept)
+                    return self._send(200, json.dumps({"buttons": kept,
+                                                       "output": "Button deleted."}))
+
+                if op == "save":
+                    button, err = clean_button(body.get("button") or {})
+                    if err:
+                        return self._send(400, json.dumps({"error": err}))
+                    replaced = False
+                    for idx, existing in enumerate(buttons):
+                        if existing["id"] == button["id"]:
+                            buttons[idx] = button
+                            replaced = True
+                            break
+                    if not replaced:
+                        buttons.append(button)
+                    save_buttons(buttons)
+                    scope = ("all instances" if not button["instances"]
+                             else "instances " + ",".join(str(n) for n in button["instances"]))
+                    return self._send(200, json.dumps({
+                        "buttons": buttons,
+                        "output": "Saved '%s' (%s) for %s."
+                                  % (button["label"], describe(button["keys"]), scope)}))
+
+            return self._send(400, json.dumps({"error": "unknown operation"}))
+
+        if not self.path.startswith("/api/run"):
+            return self._send(404, json.dumps({"error": "not found"}))
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or "{}")
+        except (ValueError, OSError):
+            return self._send(400, json.dumps({"error": "bad request"}))
+
+        act = payload.get("action")
+
+        if act in ("button", "button_all"):
+            arg = str(payload.get("arg", ""))
+            bid, _, target = arg.partition(":")
+            wanted = next((b for b in load_buttons() if b["id"] == bid), None)
+            if wanted is None:
+                return self._send(400, json.dumps({"error": "no such button"}))
+
+            with _run_lock:
+                instances = state()["instances"]
+                if act == "button":
+                    if not target.isdigit():
+                        return self._send(400, json.dumps({"error": "bad instance"}))
+                    num = int(target)
+                    inst = next((i for i in instances if i["num"] == num), None)
+                    if inst is None:
+                        return self._send(400, json.dumps({"error": "no such instance"}))
+                    if inst["dead"]:
+                        return self._send(200, json.dumps({
+                            "output": "%s has crashed — restart it first." % inst["name"],
+                            "ran": "button"}))
+                    press(inst["name"], wanted["keys"],
+                          wanted.get("delay", DEFAULT_DELAY))
+                    out = "Sent %s to %s." % (describe(wanted["keys"]), inst["name"])
+                else:
+                    lines, sent = [], 0
+                    for inst in instances:
+                        if not applies_to(wanted, inst["num"]):
+                            continue
+                        if inst["dead"]:
+                            lines.append("%s skipped (crashed)" % inst["name"])
+                            continue
+                        press(inst["name"], wanted["keys"],
+                              wanted.get("delay", DEFAULT_DELAY))
+                        lines.append("%s <- %s" % (inst["name"], describe(wanted["keys"])))
+                        sent += 1
+                    out = ("Ran '%s' on %d instance(s):\n\n%s"
+                           % (wanted["label"], sent, "\n".join(lines) or "none"))
+            return self._send(200, json.dumps({"output": out, "ran": wanted["label"]}))
+
+
+        # Stopping tasks. The browser never supplies a bare pid to kill: every
+        # target has to appear as a live task in the state built just above, so
+        # the only reachable processes are ones ikabot itself reported.
+        if act in ("kill_task", "kill_instance", "kill_all"):
+            arg = str(payload.get("arg", ""))
+            with _run_lock:
+                instances = state()["instances"]
+
+                if act == "kill_task":
+                    num, _, pid_s = arg.partition(":")
+                    if not num.isdigit() or not pid_s.isdigit():
+                        return self._send(400, json.dumps({"error": "bad target"}))
+                    inst = next((i for i in instances if i["num"] == int(num)), None)
+                    if inst is None:
+                        return self._send(400, json.dumps({"error": "no such instance"}))
+                    pid = int(pid_s)
+                    task = next((x for x in inst["tasks"]
+                                 if str(x.get("pid")) == str(pid)), None)
+                    if task is None:
+                        out = ("That process is no longer running on %s — "
+                               "the list has been refreshed." % inst["name"])
+                    else:
+                        out = "\n".join(stop_tasks(inst["name"], [task]))
+
+                elif act == "kill_instance":
+                    if not arg.isdigit():
+                        return self._send(400, json.dumps({"error": "bad instance"}))
+                    inst = next((i for i in instances if i["num"] == int(arg)), None)
+                    if inst is None:
+                        return self._send(400, json.dumps({"error": "no such instance"}))
+                    lines = stop_tasks(inst["name"], inst["tasks"])
+                    out = ("Stopped %d process(es) on %s:\n\n%s"
+                           % (len(lines), inst["name"], "\n".join(lines))
+                           if lines else
+                           "%s had nothing running." % inst["name"])
+
+                else:
+                    lines, total = [], 0
+                    for inst in instances:
+                        if not inst["tasks"]:
+                            continue
+                        done = stop_tasks(inst["name"], inst["tasks"])
+                        lines.extend(done)
+                        total += len(done)
+                    out = ("Stopped %d process(es) across %d instance(s):\n\n%s"
+                           % (total, sum(1 for i in instances if i["tasks"]),
+                              "\n".join(lines))
+                           if lines else
+                           "Nothing was running in any instance.")
+
+            return self._send(200, json.dumps({"output": out, "ran": act}))
+
+        # Clearing lock files. The browser sends an instance number or
+        # nothing at all — never a path. The panel rescans and decides which
+        # files those words mean, so nothing outside a module lock is reachable.
+        if act in ("locks_one", "locks_all"):
+            arg = str(payload.get("arg", ""))
+            with _run_lock:
+                s = state()
+                instances = s["instances"]
+
+                if act == "locks_one":
+                    if not arg.isdigit():
+                        return self._send(400, json.dumps({"error": "bad instance"}))
+                    inst = next((i for i in instances if i["num"] == int(arg)), None)
+                    if inst is None:
+                        return self._send(400, json.dumps({"error": "no such instance"}))
+                    # A lock removed while its owner still runs stops being a
+                    # lock: two processes would both believe they hold it and
+                    # ship, build or recruit twice over. Refuse rather than
+                    # warn.
+                    if inst["tasks"]:
+                        out = ("%s still has %d process(es) running:\n\n%s\n\n"
+                               "Deleting a lock while its task is running would let "
+                               "two run at once. Press 'Stop tasks' on %s first, "
+                               "then clear its locks."
+                               % (inst["name"], len(inst["tasks"]),
+                                  "\n".join("  " + (t.get("action") or "unknown")
+                                             for t in inst["tasks"]),
+                                  inst["name"]))
+                    elif not inst["locks"]:
+                        out = "%s has no lock files." % inst["name"]
+                    else:
+                        wanted = set(inst["locks"])
+                        pairs = [x for x in lock_files() if x[1] in wanted]
+                        lines = delete_locks(pairs)
+                        out = ("Cleared %d lock file(s) for %s:\n\n%s"
+                               % (len(lines), inst["name"], "\n".join(lines)))
+
+                else:
+                    busy = [i for i in instances if i["tasks"]]
+                    pairs = lock_files()
+                    if busy:
+                        out = ("%d instance(s) still have processes running:\n\n%s"
+                               "\n\nDeleting a lock while its task is running would "
+                               "let two run at once. Press 'Stop all processes' "
+                               "first, then clear the locks."
+                               % (len(busy),
+                                  "\n".join("  %s — %d task(s)"
+                                             % (i["name"], len(i["tasks"]))
+                                             for i in busy)))
+                    elif not pairs:
+                        out = "No lock files found."
+                    else:
+                        lines = delete_locks(pairs)
+                        out = ("Cleared %d lock file(s) across every instance:\n\n%s"
+                               % (len(lines), "\n".join(lines)))
+
+            return self._send(200, json.dumps({"output": out, "ran": act}))
+
+        if payload.get("action") == "check_updates":
+            with _run_lock:
+                msg = refresh_available()
+            return self._send(200, json.dumps({"output": msg, "ran": "check versions"}))
+
+        cmd = command_for(act, payload.get("arg", ""))
+        if cmd is None:
+            return self._send(400, json.dumps({"error": "unknown or malformed action"}))
+
+        # One at a time: two updates or restarts at once would fight each other.
+        with _run_lock:
+            out = _sh(cmd)
+        self._send(200, json.dumps({"output": out or "(no output)",
+                                    "ran": " ".join(cmd)}))
+
+
+PAGE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ikabot control panel</title>
+<style>
+:root{--bg:#F4F6F8;--card:#fff;--ink:#141D26;--soft:#5A6875;--rule:#D5DDE5;
+--accent:#1B4F8A;--ok:#1F6B4A;--bad:#A8331F;--warn:#A2560B;--code:#101A24;--codeink:#D7E2EC}
+@media(prefers-color-scheme:dark){:root{--bg:#0E141B;--card:#151E27;--ink:#E4EBF2;
+--soft:#9AAABA;--rule:#2A3743;--accent:#79B0E4;--ok:#6FC79B;--bad:#E8836F;--warn:#E0A45C;
+--code:#0A1119;--codeink:#D7E2EC}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,
+BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:16px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+h1{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:19px;
+margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--soft);font-size:13px;margin:0 0 18px}
+.wrap{max-width:1000px;margin:0 auto}
+section{background:var(--card);border:1px solid var(--rule);border-radius:8px;
+padding:14px 16px;margin-bottom:16px}
+h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);
+margin:0 0 12px;font-family:ui-monospace,monospace}
+/* Five accounts to a row. minmax(0,1fr) rather than 1fr so a long module
+   name inside a card cannot push the column wider than its share. Stepped
+   down on narrow screens, since five would be unreadable on a phone. */
+.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}
+@media(max-width:860px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:560px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.inst{border:1px solid var(--rule);border-radius:6px;padding:8px 10px;background:var(--bg)}
+.inst.dead{border-color:var(--bad)}
+.inst .n{font-family:ui-monospace,monospace;font-weight:600;font-size:13px}
+.inst .s{font-size:11.5px;color:var(--soft);margin:2px 0 6px}
+.inst.dead .s{color:var(--bad)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);
+margin-right:5px;vertical-align:middle}
+.inst.dead .dot{background:var(--bad)}
+button{font:inherit;font-size:12.5px;padding:5px 10px;border-radius:5px;cursor:pointer;
+border:1px solid var(--rule);background:var(--card);color:var(--ink)}
+button:hover{border-color:var(--accent);color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.p{background:var(--accent);border-color:var(--accent);color:#fff}
+button.p:hover{opacity:.88;color:#fff}
+button.d{border-color:var(--bad);color:var(--bad)}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--rule)}
+th{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--soft)}
+tr:last-child td{border-bottom:0}
+a{color:var(--accent)}
+pre{background:var(--code);color:var(--codeink);padding:12px;border-radius:6px;
+overflow-x:auto;font-size:12.5px;margin:0;white-space:pre-wrap;max-height:340px;overflow-y:auto}
+.badge{font-family:ui-monospace,monospace;font-size:11px;padding:2px 7px;border-radius:99px;
+border:1px solid var(--rule);color:var(--soft)}
+.busy{color:var(--warn)}
+.v-current{color:var(--ok);font-weight:600}
+.v-outdated{color:var(--bad);font-weight:600}
+.v-unknown{color:var(--soft)}
+.v-new{color:var(--accent);font-weight:600}
+.hint{font-size:12px;color:var(--soft);margin:10px 0 0}
+.keys{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.keys button{padding:3px 9px;font-size:12px;min-width:34px}
+.files{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.files button{padding:3px 9px;font-size:11.5px;max-width:100%;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.files button::before{content:"\2630\00a0";color:var(--soft)}
+.tasks{margin-top:6px;font-size:12px}
+.tasks summary{cursor:pointer;color:var(--soft);outline:none}
+.tasks summary::marker{color:var(--soft)}
+.tasks ul{margin:6px 0 0;padding-left:0;list-style:none}
+.tasks li{margin-bottom:4px}
+.tasks li button{display:block;width:100%;text-align:left;padding:4px 8px;
+font-size:12px;line-height:1.45;background:var(--card)}
+.tasks li button:hover{border-color:var(--bad);color:var(--ink)}
+.tasks li button:hover .act{color:var(--bad)}
+.tasks .act{display:block;font-family:ui-monospace,monospace;color:var(--ink);
+overflow-wrap:anywhere}
+.tasks .st{display:block;color:var(--soft)}
+.tasks .tip{color:var(--soft);margin:6px 0 0;font-size:11.5px}
+.tcount{font-family:ui-monospace,monospace;font-size:11px;padding:1px 6px;border-radius:99px;
+border:1px solid var(--rule);color:var(--soft);margin-left:6px}
+.tcount.busy2{border-color:var(--ok);color:var(--ok)}
+.form{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:12px}
+.f{display:flex;flex-direction:column;gap:3px}
+.f label{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--soft)}
+.f input,.f select{font:inherit;font-size:13px;padding:5px 8px;border-radius:5px;
+border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
+.f input{min-width:130px}
+.scope{font-family:ui-monospace,monospace;font-size:11.5px;color:var(--soft)}
+.err{color:var(--bad);font-size:12.5px;margin:0 0 10px}
+.f input[type=range]{min-width:130px;padding:0;background:none;border:0}
+.ver{font-weight:400;color:var(--soft)}
+.dval{font-family:ui-monospace,monospace;font-size:12px;color:var(--ink);
+min-width:42px;display:inline-block;text-align:right}
+.btn{display:inline-block;font:inherit;font-size:12.5px;padding:5px 10px;
+border-radius:5px;border:1px solid var(--rule);background:var(--card);
+color:var(--ink);text-decoration:none;cursor:pointer}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+#fpick{max-width:min(100%,460px)}
+.fwrap{overflow:auto;max-height:460px;border:1px solid var(--rule);border-radius:6px}
+.fwrap table{font-size:12.5px}
+.fwrap td,.fwrap th{white-space:pre;padding:4px 8px}
+/* The page's table headings are small-caps labels; a CSV header is data and
+   has to read exactly as the file spells it. */
+.fwrap thead th{position:sticky;top:0;background:var(--card);z-index:1;
+text-transform:none;letter-spacing:0;font-size:12.5px;color:var(--ink);
+font-weight:600;border-bottom:1px solid var(--rule)}
+.fwrap tbody tr:nth-child(even){background:var(--bg)}
+.rn{color:var(--soft);text-align:right;font-family:ui-monospace,monospace;
+font-size:11px;user-select:none}
+.ftext{background:var(--code);color:var(--codeink);padding:12px;border-radius:6px;
+margin:0;font-size:12.5px;max-height:460px;overflow:auto;white-space:pre}
+textarea{width:100%;font:inherit;font-size:13px;padding:8px;border-radius:5px;
+border:1px solid var(--rule);background:var(--bg);color:var(--ink);resize:vertical}
+#arows input{font:inherit;font-size:13px;padding:4px 6px;width:100%;
+border-radius:4px;border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
+#arows td{padding:4px 6px}
+.warn2{color:var(--warn)}
+</style></head><body><div class="wrap">
+
+<h1>ikabot control panel <span class="ver" id="pver"></span></h1>
+<p class="sub" id="head">loading…</p>
+
+<section>
+  <h2>Instances</h2>
+  <div class="row" style="margin-bottom:12px">
+    <button class="p" data-a="restart_dead">Restart crashed only</button>
+    <button data-a="restart_all">Restart all</button>
+    <button data-a="status">Show status</button>
+    <button id="openweb">Open all web servers</button>
+    <span id="allkeys"></span>
+    <button class="d" data-a="web_stop">Stop all web servers</button>
+    <button class="d" data-a="kill_all" data-confirm="Stop every running process in every instance?
+
+The instances themselves stay logged in and keep running.">Stop all processes</button>
+    <button class="d" id="alllocks" data-a="locks_all">Clear all lock files</button>
+  </div>
+  <div class="grid" id="grid"></div>
+  <p class="hint" id="statushint"></p>
+</section>
+
+<section>
+  <h2>Accounts <span class="ver" id="vstate"></span></h2>
+  <p class="err" id="aerr"></p>
+  <p class="hint" style="margin:0 0 10px">
+    Paste your accounts, check the rows, then save them all in one go. They go
+    straight into ikabot's encrypted vault — the panel keeps no copy.
+  </p>
+  <textarea id="apaste" rows="4" spellcheck="false"
+    placeholder="One account per line:   name, email, password&#10;&#10;StDa en70, me@example.com, hunter2&#10;14thfloor en70, other@example.com, hunter3&#10;&#10;Tab-separated works too, so you can paste three columns straight from a spreadsheet."></textarea>
+  <div class="row" style="margin:8px 0 12px">
+    <button class="p" id="aread">Read the lines</button>
+    <button id="aaddrow">Add an empty row</button>
+    <button class="d" id="aclear">Clear the rows</button>
+  </div>
+  <table><thead><tr><th style="width:26%">Name in ikabot</th><th style="width:34%">Email</th>
+    <th style="width:30%">Password</th><th></th></tr></thead>
+  <tbody id="arows"></tbody></table>
+  <div class="form" style="margin:12px 0 0">
+    <div class="f"><label for="amaster">Vault master password</label>
+      <input id="amaster" type="password" autocomplete="new-password"></div>
+    <div class="f" id="aconfirmwrap"><label for="aconfirm">Type it again</label>
+      <input id="aconfirm" type="password" autocomplete="new-password"></div>
+    <button class="p" id="asave">Save all to the vault</button>
+  </div>
+  <p class="hint" id="ahint"></p>
+</section>
+
+<section>
+  <h2>Buttons</h2>
+  <p class="err" id="berr"></p>
+  <div class="form">
+    <div class="f"><label for="blabel">Name</label>
+      <input id="blabel" placeholder="Daily login" maxlength="24"></div>
+    <div class="f"><label for="bkeys">Menu numbers</label>
+      <input id="bkeys" placeholder="9,1,enter" size="14"></div>
+    <div class="f"><label for="bscope">Applies to</label>
+      <select id="bscope">
+        <option value="global">All instances</option>
+        <option value="some">Only these…</option>
+      </select></div>
+    <div class="f" id="binstwrap" style="display:none"><label for="binst">Instance numbers</label>
+      <input id="binst" placeholder="3,7,12" size="10"></div>
+    <div class="f"><label for="bdelay">Pause between presses <span class="dval" id="bdval">0.4s</span></label>
+      <input id="bdelay" type="range" min="0" max="10" step="0.1" value="0.4"></div>
+    <button class="p" id="bsave">Add button</button>
+    <button id="bcancel" style="display:none">Cancel</button>
+  </div>
+  <table><thead><tr><th>Name</th><th>Presses</th><th>Pause</th><th>Applies to</th><th></th></tr></thead>
+  <tbody id="blist"></tbody></table>
+  <p class="hint">Each press is a menu number followed by Enter, in order — so
+     <code>9,1</code> picks option 9 then option 1 in its submenu. Write
+     <code>enter</code> for a bare Enter on its own, to get past a
+     &ldquo;[Enter] to continue&rdquo; screen: <code>6,enter</code>. Entries are not
+     limited to numbers — anything a prompt accepts works, such as <code>s</code>,
+     <code>all</code>, <code>y</code> or <code>a-20k</code>. Separate them with commas,
+     so a value may contain spaces. The pause gives the menu time to redraw before the
+     next press; raise it if a step gets missed.</p>
+</section>
+
+<section>
+  <h2>Modules</h2>
+  <div class="row" style="margin-bottom:12px">
+    <button data-a="check_updates">Check for updates</button>
+    <button class="p" data-a="modules_all">Update all from GitHub</button>
+    <button data-a="modules_local">Reinstall from app folder</button>
+  </div>
+  <table><thead><tr><th>Module</th><th>Installed</th><th>Available</th><th>Loaded</th><th></th></tr></thead>
+  <tbody id="mods"></tbody></table>
+  <p class="hint" id="checked"></p>
+</section>
+
+<section>
+  <h2>ikabot</h2>
+  <table style="margin-bottom:12px"><thead><tr>
+    <th>Component</th><th>Installed</th><th>Available</th><th></th></tr></thead>
+  <tbody id="corever"></tbody></table>
+  <div class="row">
+    <button class="p" data-a="update">Download &amp; update ikabot</button>
+    <button class="d" data-a="update_rollback">Roll back last update</button>
+  </div>
+  <p class="sub" style="margin:12px 0 0">
+    Red means a newer version is published. Instances keep running the old code
+    until you restart them.
+  </p>
+</section>
+
+<section>
+  <h2>Files</h2>
+  <div class="form">
+    <div class="f"><label for="fpick">File under /config</label>
+      <select id="fpick"><option value="">loading…</option></select></div>
+    <button class="p" id="fopen">View</button>
+    <a class="btn" id="fdl" href="#" download>Download</a>
+    <button id="frefresh">Refresh list</button>
+    <div class="f"><label for="ffilter">Find in rows</label>
+      <input id="ffilter" placeholder="type to filter" size="16"></div>
+  </div>
+  <p class="hint" id="fmeta" style="margin-top:0"></p>
+  <div id="fview"></div>
+</section>
+
+<section>
+  <h2>Output</h2>
+  <pre id="out">Ready.</pre>
+</section>
+
+</div><script>
+var out=document.getElementById('out'),grid=document.getElementById('grid'),
+mods=document.getElementById('mods'),head=document.getElementById('head'),
+checked=document.getElementById('checked'),busy=false,last={},opened={};
+
+function setBusy(b){busy=b;
+  document.querySelectorAll('button').forEach(function(x){x.disabled=b});}
+
+function run(action,arg,label){
+  if(busy)return; setBusy(true);
+  out.textContent=(label||action)+' — working…';
+  fetch('api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:action,arg:arg||''})})
+  .then(function(r){return r.json()})
+  .then(function(d){out.textContent=d.error?('Error: '+d.error):d.output;})
+  .catch(function(e){out.textContent='Request failed: '+e;})
+  .then(function(){setBusy(false);refresh();});
+}
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-a]'); if(!b)return;
+  // A native confirm blocks the poll timer too, so the answer cannot be lost
+  // to a grid rebuild underneath the dialog.
+  if(b.dataset.confirm&&!confirm(b.dataset.confirm))return;
+  run(b.dataset.a,b.dataset.arg,(b.dataset.label||b.textContent).trim());
+});
+
+var editing=null, openTasks={}, gridSig='';
+var el=function(id){return document.getElementById(id);};
+
+// The grid is rebuilt on every poll, which would throw away an open dropdown a
+// few seconds after opening it. Remember what was open and restore it.
+// 'toggle' does not bubble, so listen in the capture phase.
+document.addEventListener('toggle', function(e){
+  var d=e.target;
+  if(d.tagName==='DETAILS'&&d.dataset.inst){
+    if(d.open)openTasks[d.dataset.inst]=1; else delete openTasks[d.dataset.inst];
+  }
+}, true);
+
+el('bscope').addEventListener('change',function(){
+  el('binstwrap').style.display=this.value==='some'?'':'none';
+});
+
+function showDelay(){
+  var v=parseFloat(el('bdelay').value);
+  el('bdval').textContent=(v===0?'none':v.toFixed(1)+'s');
+}
+el('bdelay').addEventListener('input',showDelay);
+
+function renderButtons(list){
+  el('blist').innerHTML=list.map(function(b){
+    var scope=b.instances.length?('instances '+b.instances.join(', ')):'all instances';
+    var d=(b.delay===undefined?0.4:b.delay);
+    return '<tr><td>'+esc(b.label)+'</td>'+
+      '<td class="mono">'+esc(b.keys.map(function(k){
+          return k==='enter'?'↵':k;}).join(' → '))+'</td>'+
+      '<td class="mono">'+(b.keys.length>1?d+'s':'—')+'</td>'+
+      '<td class="scope">'+scope+'</td>'+
+      '<td style="text-align:right">'+
+      '<button data-edit="'+b.id+'">Edit</button> '+
+      '<button class="d" data-del="'+b.id+'">Delete</button></td></tr>';
+  }).join('') || '<tr><td colspan="4" class="sub">No buttons yet — add one above.</td></tr>';
+}
+
+function resetForm(){
+  editing=null;
+  el('blabel').value=''; el('bkeys').value=''; el('binst').value='';
+  el('bscope').value='global'; el('binstwrap').style.display='none';
+  el('bdelay').value='0.4'; showDelay();
+  el('bsave').textContent='Add button'; el('bcancel').style.display='none';
+  el('berr').textContent='';
+}
+
+function buttonsApi(body,done){
+  fetch('api/buttons',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)})
+  .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};})})
+  .then(function(res){
+    if(!res.ok){el('berr').textContent=res.d.error||'Could not save.';return;}
+    el('berr').textContent='';
+    out.textContent=res.d.output||'Saved.';
+    last.buttons=res.d.buttons;
+    renderButtons(res.d.buttons);
+    el('allkeys').dataset.sig='';
+    if(done)done();
+    refresh();
+  }).catch(function(e){el('berr').textContent='Request failed: '+e;});
+}
+
+el('bsave').addEventListener('click',function(){
+  var scope=el('bscope').value;
+  buttonsApi({op:'save',button:{
+    id: editing||'',
+    label: el('blabel').value,
+    keys: el('bkeys').value,
+    instances: scope==='some'?el('binst').value:'',
+    delay: el('bdelay').value
+  }}, resetForm);
+});
+
+el('bcancel').addEventListener('click',resetForm);
+
+document.addEventListener('click',function(e){
+  var ed=e.target.closest('button[data-edit]');
+  if(ed){
+    var b=(last.buttons||[]).filter(function(x){return x.id===ed.dataset.edit;})[0];
+    if(!b)return;
+    editing=b.id;
+    el('blabel').value=b.label; el('bkeys').value=b.keys.join(',');
+    el('bscope').value=b.instances.length?'some':'global';
+    el('binstwrap').style.display=b.instances.length?'':'none';
+    el('binst').value=b.instances.join(',');
+    el('bdelay').value=(b.delay===undefined?0.4:b.delay); showDelay();
+    el('bsave').textContent='Save changes'; el('bcancel').style.display='';
+    el('berr').textContent='';
+    window.scrollTo({top:0,behavior:'smooth'});
+    return;
+  }
+  var dl=e.target.closest('button[data-del]');
+  if(dl){
+    var t=(last.buttons||[]).filter(function(x){return x.id===dl.dataset.del;})[0];
+    if(t&&confirm('Delete the "'+t.label+'" button?')){
+      buttonsApi({op:'delete',id:dl.dataset.del},resetForm);
+    }
+  }
+});
+
+document.getElementById('openweb').addEventListener('click',function(){
+  var host=last.host,n=0,total=0;
+  if(!host){out.textContent='No reachable address for this server yet.';return;}
+  (last.instances||[]).forEach(function(i){
+    (i.ports||[]).forEach(function(p){
+      total++;
+      var url='http://'+host+':'+p;
+      if(!opened[url]){opened[url]=1;window.open(url,'_blank','noopener');n++;}
+    });
+  });
+  out.textContent = total===0
+    ? 'No web servers are running. Start them with menu option (16) in each instance.'
+    : (n===0 ? 'All '+total+' web server tab(s) are already open — press again after starting more.'
+             : 'Opened '+n+' new tab(s), in instance order. '+
+               (total-n)+' already open.\n\nIf fewer tabs appeared than expected, allow '+
+               'pop-ups for this page in your browser and press again.');
+});
+
+// --- accounts ------------------------------------------------------------
+// Rows live only in these inputs and in the one POST that saves them. Nothing
+// here is put in localStorage, in the URL, or in the output pane.
+function acctRows(){
+  return Array.prototype.map.call(el('arows').querySelectorAll('tr'),function(tr){
+    var i=tr.querySelectorAll('input');
+    return {label:i[0].value.trim(), email:i[1].value.trim(), password:i[2].value};
+  });
+}
+
+function addAcctRow(label,email,password){
+  var tr=document.createElement('tr');
+  tr.innerHTML='<td><input class="mono" placeholder="StDa en70"></td>'+
+               '<td><input type="text" autocomplete="off" spellcheck="false" '+
+                    'placeholder="me@example.com"></td>'+
+               '<td><input type="password" autocomplete="new-password"></td>'+
+               '<td style="text-align:right"><button class="d" data-arow>Remove</button></td>';
+  var i=tr.querySelectorAll('input');
+  i[0].value=label||''; i[1].value=email||''; i[2].value=password||'';
+  el('arows').appendChild(tr);
+  return tr;
+}
+
+function acctCount(){
+  var n=0;
+  acctRows().forEach(function(r){ if(r.label||r.email||r.password)n++; });
+  el('ahint').textContent = n
+    ? n+' row(s) ready. Check them, then save.'
+    : 'Paste some lines above, or add an empty row.';
+}
+
+el('aread').addEventListener('click',function(){
+  var text=el('apaste').value, lines=text.split(/\r?\n/), added=0;
+  lines.forEach(function(line){
+    if(!line.trim())return;
+    // Tabs win over commas, so a spreadsheet paste survives a password that
+    // happens to contain a comma.
+    var parts = line.indexOf('\t')>=0 ? line.split('\t') : line.split(',');
+    addAcctRow((parts[0]||'').trim(), (parts[1]||'').trim(),
+               (parts.slice(2).join(line.indexOf('\t')>=0?'\t':',')||'').trim());
+    added++;
+  });
+  el('apaste').value='';
+  el('aerr').textContent = added ? '' : 'Nothing to read — the box was empty.';
+  acctCount();
+});
+
+el('aaddrow').addEventListener('click',function(){ addAcctRow(); acctCount(); });
+el('aclear').addEventListener('click',function(){
+  if(!acctRows().length||confirm('Clear every row typed in below?')){
+    el('arows').innerHTML=''; acctCount();
+  }
+});
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-arow]'); if(!b)return;
+  b.closest('tr').remove(); acctCount();
+});
+el('arows').addEventListener('input',acctCount);
+
+el('asave').addEventListener('click',function(){
+  var rows=acctRows().filter(function(r){return r.label||r.email||r.password;});
+  var err=el('aerr'); err.textContent='';
+  if(!rows.length){ err.textContent='There are no accounts to save.'; return; }
+  var bad=[];
+  rows.forEach(function(r,n){
+    if(!r.label||!r.email||!r.password)bad.push('row '+(n+1)+' is not filled in');
+    else if(r.email.indexOf('@')<0)bad.push('row '+(n+1)+': "'+r.email+'" is not an email');
+  });
+  if(bad.length){ err.textContent=bad.join('; '); return; }
+  var master=el('amaster').value;
+  if(!master){ err.textContent='Enter the vault master password.'; return; }
+  if(el('aconfirmwrap').style.display!=='none'&&master!==el('aconfirm').value){
+    err.textContent='The two master passwords do not match.'; return;
+  }
+  if(!confirm('Save '+rows.length+' account(s) to the vault?')) return;
+
+  setBusy(true); out.textContent='Saving accounts…';
+  fetch('api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({master:master, accounts:rows})})
+  .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};})})
+  .then(function(res){
+    if(!res.ok){ err.textContent=res.d.error||'Could not save.';
+                 out.textContent=res.d.error||'Could not save.'; return; }
+    out.textContent=res.d.output||'Saved.';
+    // Clear everything the moment it is safely in the vault.
+    el('arows').innerHTML=''; el('amaster').value=''; el('aconfirm').value='';
+    el('apaste').value=''; acctCount();
+  })
+  .catch(function(e){ err.textContent='Request failed: '+e; })
+  .then(function(){ setBusy(false); refresh(); });
+});
+
+acctCount();
+
+// --- file viewer ---------------------------------------------------------
+var shown=null;   // the file currently on screen, as returned by api/file
+
+function fsize(n){
+  if(n<1024)return n+' B';
+  if(n<1048576)return (n/1024).toFixed(1)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+
+function when(ts){
+  if(!ts)return '';
+  var d=new Date(ts*1000), p=function(x){return (x<10?'0':'')+x;};
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+
+         ' '+p(d.getHours())+':'+p(d.getMinutes());
+}
+
+function loadFileList(){
+  var sel=el('fpick'), keep=sel.value;
+  fetch('api/files').then(function(r){return r.json()}).then(function(d){
+    var files=d.files||[];
+    sel.innerHTML = files.length
+      ? files.map(function(f){
+          return '<option value="'+esc(f.path)+'">'+esc(f.path)+
+                 '  ('+fsize(f.size)+')</option>';
+        }).join('')
+      : '<option value="">no data files found under '+esc(d.root||'/config')+'</option>';
+    // Keep the user on the file they had chosen when the list is refreshed.
+    if(keep){ sel.value=keep; }
+    el('fmeta').textContent=files.length
+      ? files.length+' file(s) under '+(d.root||'/config')
+      : 'Nothing to show. CSV, JSON, TXT and LOG files under /config appear here.';
+  }).catch(function(e){ el('fmeta').textContent='Could not list files: '+e; });
+}
+
+function renderFile(){
+  var box=el('fview'), d=shown;
+  if(!d){ box.innerHTML=''; return; }
+  if(d.error){
+    box.innerHTML='<p class="err">'+esc(d.error)+'</p>';
+    return;
+  }
+  if(d.kind==='text'){
+    box.innerHTML=(d.note?'<p class="hint" style="margin-top:0">'+esc(d.note)+'</p>':'')+
+      '<pre class="ftext">'+esc(d.text||'')+'</pre>';
+    return;
+  }
+  var q=el('ffilter').value.trim().toLowerCase();
+  var rows=d.rows||[], head=rows.length?rows[0]:[];
+  // Number each row before filtering, so the number shown is its line in the
+  // file rather than its position in whatever the filter left.
+  var body=[];
+  for(var i=1;i<rows.length;i++){
+    if(!q||rows[i].join(' ').toLowerCase().indexOf(q)>=0){
+      body.push([i+1,rows[i]]);
+    }
+  }
+  var width=head.length;
+  body.forEach(function(r){ if(r[1].length>width)width=r[1].length; });
+  var cell=function(v){return '<td>'+esc(v===undefined?'':v)+'</td>';};
+  var html='<div class="fwrap"><table><thead><tr><th class="rn">#</th>'+
+    head.map(function(h){return '<th>'+esc(h)+'</th>';}).join('')+
+    (width>head.length
+      ? new Array(width-head.length+1).join('<th></th>') : '')+
+    '</tr></thead><tbody>'+
+    body.map(function(r){
+      var cells='';
+      for(var c=0;c<width;c++)cells+=cell(r[1][c]);
+      return '<tr><td class="rn">'+r[0]+'</td>'+cells+'</tr>';
+    }).join('')+
+    '</tbody></table></div>';
+  box.innerHTML=html;
+  el('fmeta').textContent=d.path+' — '+fsize(d.size)+', '+
+    (d.total_rows||0)+' row(s), changed '+when(d.mtime)+
+    (q?'  ·  showing '+body.length+' matching':'')+
+    (d.truncated?'  ·  only the first '+(d.rows.length)+' rows are shown, '+
+                 'use Download for the whole file':'');
+}
+
+function openFileByPath(path){
+  var sel=el('fpick');
+  // The picker is filled once at load, so a file created since then has no
+  // option yet. Add it rather than silently doing nothing.
+  if(!Array.prototype.some.call(sel.options,function(o){return o.value===path;})){
+    var o=document.createElement('option');
+    o.value=path; o.textContent=path; sel.appendChild(o);
+  }
+  sel.value=path;
+  openFile();
+  document.getElementById('fpick').scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+function openFile(){
+  var path=el('fpick').value;
+  if(!path){ return; }
+  el('fmeta').textContent='opening '+path+'…';
+  fetch('api/file?path='+encodeURIComponent(path))
+    .then(function(r){return r.json()})
+    .then(function(d){ shown=d; renderFile();
+      if(d.error)el('fmeta').textContent=d.path||path; })
+    .catch(function(e){ el('fview').innerHTML='<p class="err">Could not open it: '+
+      esc(e)+'</p>'; });
+}
+
+// A file button on an instance card opens that account's file below.
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-file]'); if(!b)return;
+  openFileByPath(b.dataset.file);
+});
+
+el('fopen').addEventListener('click',openFile);
+el('fpick').addEventListener('change',openFile);
+el('frefresh').addEventListener('click',loadFileList);
+el('ffilter').addEventListener('input',function(){ if(shown)renderFile(); });
+el('fdl').addEventListener('click',function(e){
+  var path=el('fpick').value;
+  if(!path){ e.preventDefault(); return; }
+  this.href='api/download?path='+encodeURIComponent(path);
+  this.setAttribute('download', path.split('/').pop());
+});
+loadFileList();
+
+// Compare numerically so 1.10.0 beats 1.9.3, which a string compare gets wrong.
+function newer(remote,local){
+  if(!remote)return false;
+  if(!local)return true;
+  var a=String(remote).split('.'),b=String(local).split('.');
+  for(var i=0;i<Math.max(a.length,b.length);i++){
+    var x=parseInt((a[i]||'0').replace(/\D/g,''),10)||0;
+    var y=parseInt((b[i]||'0').replace(/\D/g,''),10)||0;
+    if(x!==y)return x>y;
+  }
+  return false;
+}
+
+function esc(x){return String(x==null?'':x).replace(/[&<>"]/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+
+function ago(ts){
+  if(!ts)return'';
+  var m=Math.floor((Date.now()/1000-ts)/60);
+  if(m<1)return' · just started';
+  if(m<60)return' · '+m+'m';
+  var h=Math.floor(m/60);
+  if(h<24)return' · '+h+'h '+(m%60)+'m';
+  return ' · '+Math.floor(h/24)+'d '+(h%24)+'h';
+}
+
+function refresh(){
+  fetch('api/state').then(function(r){return r.json()}).then(function(s){
+    last=s;
+    var ak=document.getElementById('allkeys'),sig=JSON.stringify(s.buttons||[]);
+    if(ak.dataset.sig!==sig){
+      ak.innerHTML=(s.buttons||[]).length
+        ? '<span class="hint" style="margin:0 4px 0 10px">run everywhere:</span>'+
+          s.buttons.map(function(b){
+            return '<button data-a="button_all" data-arg="'+b.id+'" title="'+
+                   esc(b.keys.map(function(k){return k==='enter'?'Enter':k;}).join(' then '))+
+                   ' in every instance it applies to">'+esc(b.label)+'</button>';
+          }).join(' ')
+        : '';
+      ak.dataset.sig=sig;
+      renderButtons(s.buttons||[]);
+    }
+    var vs=el('vstate'), have=!!s.vault;
+    vs.textContent = have ? 'vault ready' : 'no vault yet';
+    vs.className = have ? 'ver' : 'ver warn2';
+    // Confirming only matters while the vault is being created; afterwards the
+    // password is checked against the vault itself.
+    el('aconfirmwrap').style.display = have ? 'none' : '';
+
+    var lk=el('alllocks'), n=s.locks_total||0;
+    lk.textContent='Clear all lock files'+(n?' ('+n+')':'');
+    lk.dataset.confirm='Delete every lock file — '+n+' in total, across all '+
+      'instances?\n\nStop all processes first, or this is refused.';
+
+    var v=s.versions||{};
+    document.getElementById('pver').textContent='v'+(s.panel_version||'?');
+    document.title='ikabot panel v'+(s.panel_version||'?');
+    head.textContent='ikabot '+(v.ikabot||'?')+' / mod '+(v.mod||'?')+
+      ' — '+s.running+' running'+(s.dead?', '+s.dead+' crashed':'');
+
+    var gridHtml=s.instances.map(function(i){
+      var ports=i.ports.map(function(p){
+        return s.host?'<a href="http://'+s.host+':'+p+'" target="_blank">'+p+'</a>':p;
+      }).join(' ');
+      var badge='';
+      if(i.task_count!==null&&i.task_count!==undefined){
+        badge='<span class="tcount'+(i.task_count>0?' busy2':'')+'">'+
+              i.task_count+' task'+(i.task_count===1?'':'s')+'</span>';
+      }
+      var drop='';
+      var isOpen=openTasks[i.name]?' open':'';
+      if(i.tasks&&i.tasks.length){
+        drop='<details class="tasks" data-inst="'+i.name+'"'+isOpen+
+             '><summary>Active processes ('+i.tasks.length+')</summary><ul>'+
+          i.tasks.map(function(t){
+            var act=esc(t.action||'unknown');
+            return '<li><button data-a="kill_task" data-arg="'+i.num+':'+
+                   esc(t.pid)+'" data-label="stop '+act+'" data-confirm="'+
+                   'Stop '+act+' on '+i.name+'?" title="Click to stop this process">'+
+                   '<span class="act">'+act+'</span>'+
+                   '<span class="st">'+esc(t.status||'')+ago(t.started)+'</span>'+
+                   '</button></li>';
+          }).join('')+'</ul>'+
+          '<p class="tip">Click a process to stop it.</p></details>';
+      } else if(i.task_count===0){
+        drop='<details class="tasks" data-inst="'+i.name+'"'+isOpen+
+             '><summary>Active processes (0)</summary>'+
+             '<p class="st" style="margin:6px 0 0">Idle — logged in, nothing running.</p></details>';
+      }
+      var keys=(last.buttons||[]).filter(function(b){
+        return !b.instances.length||b.instances.indexOf(i.num)>=0;
+      }).map(function(b){
+        return '<button data-a="button" data-arg="'+b.id+':'+i.num+'" title="'+
+               esc(b.keys.map(function(k){return k==='enter'?'Enter':k;}).join(' then '))+
+               ' in '+i.name+'">'+esc(b.label)+'</button>';
+      }).join('');
+      return '<div class="inst'+(i.dead?' dead':'')+'">'+
+        '<div class="n"><span class="dot"></span>'+i.name+badge+'</div>'+
+        '<div class="s">'+(i.dead?'crashed':'running')+
+          (ports?' · '+ports:'')+'</div>'+
+        '<div class="row">'+
+        '<button data-a="restart_one" data-arg="'+i.num+'">Restart</button>'+
+        (i.dead?'<button data-a="crash" data-arg="'+i.num+'">Why?</button>':'')+
+        (i.tasks&&i.tasks.length
+          ? '<button class="d" data-a="kill_instance" data-arg="'+i.num+
+            '" data-confirm="Stop all '+i.tasks.length+' process(es) on '+i.name+
+            '?&#10;&#10;'+i.name+' itself stays logged in.">Stop tasks</button>'
+          : '')+
+        (i.locks&&i.locks.length
+          ? '<button class="d" data-a="locks_one" data-arg="'+i.num+
+            '" data-confirm="Delete these '+i.locks.length+' lock file(s) for '+
+            i.name+'?&#10;&#10;'+
+            i.locks.map(function(x){return esc(x);}).join('&#10;')+
+            '&#10;&#10;Stop its tasks first, or this is refused.">Clear locks ('+
+            i.locks.length+')</button>'
+          : '')+
+        '</div>'+
+        (keys?'<div class="keys">'+keys+'</div>':'')+
+        (i.files&&i.files.length
+          ? '<div class="files">'+i.files.map(function(f){
+              return '<button data-file="'+esc(f.path)+'" title="Open '+
+                     esc(f.path)+'">'+esc(f.label)+'</button>';
+            }).join('')+'</div>'
+          : '')+
+        drop+'</div>';
+    }).join('') || '<p class="sub">No instances found.</p>';
+    if(gridHtml!==gridSig){ grid.innerHTML=gridHtml; gridSig=gridHtml; }
+
+    mods.innerHTML=(s.modules||[]).map(function(m){
+      var cls={outdated:'v-outdated',current:'v-current',new:'v-new'}[m.status]||'v-unknown';
+      var av=m.status==='unknown'?'not checked':(m.available||'—');
+      var inst=m.status==='new'?'not installed':(m.version||'—');
+      var act=m.status==='new'?'Install':'Update';
+      var hi=(m.status==='outdated'||m.status==='new')?' class="p"':'';
+      return '<tr><td class="mono">'+esc(m.name)+'</td>'+
+        '<td class="mono '+cls+'">'+inst+'</td>'+
+        '<td class="mono '+cls+'">'+esc(av)+'</td>'+
+        '<td>'+(m.live?'<span class="badge">yes</span>':
+                '<span class="badge" style="color:var(--bad)">no</span>')+'</td>'+
+        '<td style="text-align:right"><button data-a="module_one" data-arg="'+
+        esc(m.name)+'"'+hi+'>'+act+'</button></td></tr>';
+    }).join('') || '<tr><td colspan="5" class="sub">No modules installed.</td></tr>';
+
+    var ca=s.versions_available||{}, cv=s.versions||{};
+    document.getElementById('corever').innerHTML=[
+      ['ikabot','ikabot'],['mod','modded by kurzon']
+    ].map(function(pair){
+      var k=pair[0], have=cv[k]||'', want=ca[k]||'';
+      var state=!want?'v-unknown':(newer(want,have)?'v-outdated':'v-current');
+      return '<tr><td>'+pair[1]+'</td>'+
+        '<td class="mono '+state+'">'+(have||'—')+'</td>'+
+        '<td class="mono '+state+'">'+(want||'not checked')+'</td>'+
+        '<td class="scope">'+(!want?'':(newer(want,have)?'update available':'up to date'))+
+        '</td></tr>';
+    }).join('');
+
+    if(!s.status_available){
+      var h=document.getElementById('statushint');
+      if(h)h.textContent='Active-process view needs ikabot mod 1.8.1 or later — '+
+        'no status folder found yet.';
+    }
+    if(s.avail_error){checked.textContent='Version check failed: '+s.avail_error;}
+    else if(s.checked){checked.textContent='Versions checked '+
+      new Date(s.checked*1000).toLocaleTimeString()+
+      '. Green = up to date, red = a newer version is on GitHub, '+
+      'blue = available but not installed.';}
+    else {checked.textContent='Checking GitHub for newer versions…';}
+
+    if(busy)setBusy(true);
+  }).catch(function(){head.textContent='Lost contact with the container.';});
+}
+refresh(); setInterval(function(){if(!busy)refresh();},5000);
+</script></body></html>
+"""
+
+
+def main():
+    if not PASS:
+        print("ika-panel: no password set (PANEL_PASS or TTYD_PASS) — refusing "
+              "to serve a control panel unauthenticated.", file=sys.stderr)
+        return 1
+    threading.Thread(target=refresh_available, daemon=True).start()
+    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    print("ika-panel v%s listening on port %d (user: %s)"
+          % (PANEL_VERSION, PORT, USER))
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -823,11 +823,18 @@ Sign in with the same username and password as the terminal.
 | Section | Does |
 |---|---|
 | **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback. **Open all web servers** opens a tab per running web server, in instance order |
-| **Modules** | Installed version next to the version on GitHub — **green** when up to date, **red** when a newer one exists. Update one, update all, or reinstall from the app folder |
-| **ikabot** | Download and install an update, or roll the last one back |
-| **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going |
+| **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
+| **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Download and install an update, or roll the last one back |
+| **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
+| **Accounts** | Paste every account in at once and save them to ikabot's vault in one press — for a fresh install, or a machine that has no vault yet |
+| **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
+| **Files** | Read any CSV, JSON, TXT or LOG file under `/config` in the browser — CSVs as a table you can search — or download it to your PC. Each instance card also carries a button straight to that account's own files |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Output** | What the command you just pressed actually printed |
+
+The instance cards sit five to a row, and the page stays the same width
+whatever the screen: on a tablet it drops to three, on a phone to two, and it
+never scrolls sideways.
 
 The list refreshes every five seconds, and each web server port is a link
 straight into that account.
@@ -858,9 +865,198 @@ instances there are.
 > Earlier versions do not write those files, and the panel says so rather than
 > showing an empty list. Get it with `ika update`.
 
+The dropdown stays open while you read it — the list refreshes underneath
+without closing it.
+
 A task count that is blank means no status file — either the instance has never
 finished starting, or ikabot is older than 1.8.1. `0 tasks` genuinely means
 idle at the menu.
+
+### Stopping processes
+
+Three ways, all of them asking **yes or no** first:
+
+| To stop | Press |
+|---|---|
+| One process | Click it in that instance's **Active processes** list |
+| Everything on one account | **Stop tasks** on that instance's card |
+| Everything, everywhere | **Stop all processes**, in the row at the top |
+
+**Stop tasks** and the per-instance buttons only appear when that account
+actually has something running, so an idle card stays uncluttered.
+
+This is the same thing as ikabot's own *kill tasks* menu option — the process is
+sent `SIGKILL`, exactly as that menu does — except you do not have to be sitting
+in the instance to do it, and you can do all 24 at once.
+
+> **It stops tasks, not instances.** The account stays logged in and stays at
+> the menu; only the work it had started is stopped. To restart the instance
+> itself, use **Restart**.
+
+The list corrects itself the moment something stops. ikabot only rewrites its
+status file when its menu redraws, which on an idle account can be hours, so the
+panel checks each recorded process against `/proc` and shows only the ones
+genuinely still alive. A stopped task disappears on the next refresh rather than
+lingering as a ghost entry.
+
+Nothing outside that list can be reached: a stop request has to name a process
+the panel is currently showing for that instance, and an instance's own ikabot
+process is excluded from the list, so these buttons cannot kill an instance even
+if a status file claims otherwise.
+
+### Adding accounts in one go
+
+Normally the vault is already there and instances log themselves in. On a
+machine with no vault — a fresh install, a new Deck — every account has to be
+typed into every instance by hand. The **Accounts** section does the lot in one
+press.
+
+1. Paste your accounts into the box, one per line:
+
+   ```
+   StDa en70, stda@example.com, hunter2
+   14thfloor en70, floor@example.com, hunter3
+   ```
+
+   Tab-separated works too, so three columns copied from a spreadsheet paste
+   straight in — and that is the safer form if a password contains a comma.
+
+2. Press **Read the lines**. Each line becomes an editable row, so you can
+   check them and fix anything the split got wrong before it is saved
+3. Enter the **vault master password**. If there is no vault yet you are asked
+   for it twice, and the one you choose becomes the vault's password
+4. **Save all to the vault**, confirm, done
+
+The heading says **no vault yet** or **vault ready**, so you can see which case
+you are in.
+
+Afterwards press **Restart all** in the Instances section. Each window then
+starts on its matching account — window `ika03` on vault account 3 — because
+the account order is the order you saved them in.
+
+**Name in ikabot** is the label the account list shows, so make it something
+you can tell apart at a glance: `StDa en70` rather than `account 1`.
+
+What it will not do:
+
+- **Overwrite anything.** A label already in the vault is skipped and named in
+  the result, so pressing Save twice cannot duplicate an account
+- **Save half a batch.** A row missing a field, or with a control character in
+  it, stops the whole save with the row number — nothing is written
+- **Write under the wrong password.** With an existing vault the password is
+  checked against it first. Saving under a wrong password would encrypt those
+  accounts so that ikabot itself could never read them, and the vault would
+  look perfectly fine until the day you needed one, so it refuses instead
+
+The rows and the master password exist only in the page and in the one request
+that saves them. Nothing is logged — checked by searching the panel's log and
+every file it writes for a password that had just been saved, and finding it
+only inside the encrypted vault.
+
+> **The panel speaks plain HTTP.** Its own password already crosses the network
+> in the clear on every request, and so does anything typed into the web
+> terminal, so this form is no new exposure — but it is still worth using over
+> Tailscale, or on a network you trust, rather than over a forwarded port on
+> the open internet.
+
+### Clearing lock files
+
+Modules that must not run twice at once — the transport manager, the
+construction manager, recruitment, reservations, the island monitor — take a
+lock file while they work. Normally they clean it up on the way out. After a
+crash, or after an update that changes how a module stores its state, a lock
+can be left behind and the module will not start again until it is gone.
+
+| To clear | Press |
+|---|---|
+| One account's locks | **Clear locks (n)** on that instance's card |
+| Every lock, everywhere | **Clear all lock files (n)**, in the row at the top |
+
+Both show you the count, and the per-instance one lists the exact filenames in
+the confirmation box before anything is deleted. Neither button appears unless
+there is actually something to clear.
+
+**Stop the tasks first.** Both actions refuse while the instance has anything
+running, and name what is running so you know what to stop. That is deliberate:
+a lock deleted while its owner is still working stops being a lock, and two
+copies of the transport manager shipping at once is a genuine way to lose
+resources. So the order is:
+
+1. **Stop tasks** on that instance — or **Stop all processes** for all of them
+2. **Clear locks**
+3. Start the module again from the instance, or with one of your buttons
+
+Which files belong to which instance is worked out from the account name each
+instance is logged in as, so an account on two worlds of the same server keeps
+its locks separate — `en135` and `en120` do not clear each other's.
+
+Locks that belong to no logged-in account — the messaging hub's shared one, or
+leftovers from an account not running right now — are only removed by **Clear
+all lock files**.
+
+> **Session locks are left alone**, deliberately. ikabot takes those for
+> milliseconds at a time and clears a dead one after thirty seconds by itself,
+> so they are never what stops a module restarting, and deleting one
+> mid-write is the only way this could do harm.
+
+### Reading a module's CSV
+
+Module data files live inside the container, owned by root, in folders under
+`/config` — which makes them awkward to look at while 24 instances are busy in
+tmux. The **Files** section reads them in the browser.
+
+1. Pick the file from the dropdown — every data file under `/config` is there,
+   shown with its folder and size, e.g. `modules/bulkdistribution.csv (11.3 KB)`
+2. It opens as a table: proper columns, the header exactly as the file spells
+   it, and the line number from the file down the left
+3. **Find in rows** filters as you type. The line numbers stay the file's own,
+   so a row you find here is the row you will find in the file
+4. **Download** saves it to whatever you are browsing from — the file arrives
+   byte for byte, so you can open it in Excel or LibreOffice
+
+Text in the table selects and copies normally, which is the easy way to get a
+few values out without downloading anything.
+
+### Per-account logs, straight from the card
+
+A module that writes one file per account names it after the account, the way
+the shipment log does:
+
+```
+/config/shipment_log_en70_StDa.csv
+/config/shipment_log_en70_14thfloor.csv
+```
+
+Any file named like that shows up as a button on that account's own instance
+card — labelled with the part of the name that is not the account, so the
+button above just says **shipment_log**. Press it and the file opens in the
+**Files** section below, already selected. One press, from the card, no
+hunting through a dropdown of 24 similar names.
+
+Matching is on the account itself — server, world and player, exactly as the
+modules build their filenames — so `en70_StDa` and `ar42_StDa` are two
+different buttons on two different cards even though the player name is the
+same. Older files that leave the world out (`_en_StDa`) are matched too, and a
+player name containing an underscore is handled correctly.
+
+A file with no account in its name — an old shared `shipment_log.csv`, say —
+belongs to no instance and so appears on no card. It is still in the **Files**
+dropdown.
+
+A comma inside a quoted field stays one cell, rows with more columns than the
+header still show every value, and a file that is not valid CSV is shown as
+plain text with a note saying so rather than being silently mangled.
+
+Very large files are offered as a download instead of being loaded into the
+page, and a CSV over 3000 rows shows the first 3000 with a note — download it
+for the rest. **Refresh list** picks up files created since the page loaded.
+
+> **What it will not show you.** Only data files: `.csv`, `.tsv`, `.json`,
+> `.txt`, `.log`, `.md` and a few config extensions, and only below `/config`.
+> The vault and the session files are excluded by name — those are your account
+> credentials, and nothing about reading a CSV needs them. A path that resolves
+> outside `/config`, including through a symlink, is refused rather than served,
+> and never appears in the list either.
 
 ### Buttons
 
@@ -993,6 +1189,70 @@ Same rule as the terminal: **no password, no listener.** Remove `TTYD_PASS`
 
 ---
 
+## Part 19 — Giving this to someone else
+
+Everything above is your own setup. If someone else wants the same thing on
+**their** hardware, they do not need this guide — there is a one-file installer
+for them.
+
+### Building the release zip
+
+From the repo folder on the server (or anywhere you have the repo):
+
+```
+python3 tools/build-docker-release.py
+```
+
+That writes `releases/ikabot-docker_v1.0.0.zip`. Inside it are `INSTALL.bat`,
+`install.sh`, `README.txt` and the whole `docker/` folder.
+
+The version number in the filename comes from `installer-docker/VERSION`. The
+script refuses to build if that number disagrees with the copies printed inside
+`install.sh`, `INSTALL.bat` and `README.txt`, so what they download and what
+they see on screen can never drift apart.
+
+### Publishing it
+
+Attach the zip to a GitHub Release. Because the version is in the filename, the
+release page shows people exactly what they are downloading.
+
+### What they do
+
+| They have | They do |
+|---|---|
+| Windows or Mac | Unzip, double-click `INSTALL.bat` |
+| Unraid, TrueNAS, Linux | Unzip, `./install.sh` |
+
+Either way it asks three questions — where to keep data, how many accounts, and
+a password for the web pages — then builds and starts the container and prints
+the panel and terminal URLs. Nothing else is typed.
+
+### What they get, and what they do not
+
+They get their own container, on their own machine, with their own vault. None
+of your accounts, sessions or hardware are involved: the zip contains code only.
+
+The one difference on Windows and Mac is that Docker there cannot share the
+host's network, so the installer publishes ports 7681 and 7682 instead. The
+panel and terminal work; the per-instance web servers from Part 17 are not
+reachable. On Unraid, TrueNAS and Linux the installer uses `--network=host` and
+everything behaves exactly as it does for you.
+
+### Bumping the version
+
+Edit `installer-docker/VERSION`, then update the three strings the packager
+checks:
+
+| File | String |
+|---|---|
+| `install.sh` | `INSTALLER_VERSION="1.0.1"` |
+| `INSTALL.bat` | `INSTALLER_VERSION=1.0.1` |
+| `README.txt` | `installer v1.0.1` |
+
+Rebuild, and a new zip appears alongside the old one.
+
+---
+
 ## Appendix A — What the build files do
 
 You copied these in Part 5; you do not need to create them. This is just so you
@@ -1032,6 +1292,13 @@ Two details worth knowing:
 
 All of it is reachable over the network at `\\TOWER\appdata\ikabot\` if you
 want to edit a CSV from Windows.
+
+---
+
+> **On a Steam Deck?** See `docs/STEAMDECK_GUIDE.md` — same container,
+> but SteamOS needs Docker switching on, the Deck has to be stopped from
+> going to sleep, and a system update wipes anything installed with
+> `pacman`.
 
 ---
 
