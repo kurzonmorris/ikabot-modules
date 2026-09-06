@@ -1190,6 +1190,13 @@ button above just says **shipment_log**. Press it and the file opens in the
 **Files** section below, already selected. One press, from the card, no
 hunting through a dropdown of 24 similar names.
 
+Only `.csv`, `.tsv`, `.log` and `.txt` earn a button, and any file with *log*
+in its name is listed first. A card is a shortcut to the one or two files you
+actually read, not a listing: modules write a `.schema` sidecar and a `.json`
+of their settings beside every CSV, so without that restriction an account
+running four modules would sprout nine buttons. Everything else is still in
+the **Files** section, which lists the lot.
+
 Matching is on the account itself — server, world and player, exactly as the
 modules build their filenames — so `en70_StDa` and `ar42_StDa` are two
 different buttons on two different cards even though the player name is the

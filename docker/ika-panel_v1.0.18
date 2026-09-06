@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.17"
+PANEL_VERSION = "1.0.18"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -46,6 +46,11 @@ LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache"}
 FILES_ROOT = HOME_DIR
 VIEW_EXT = {".csv", ".tsv", ".json", ".txt", ".log", ".md",
             ".schema", ".ini", ".conf", ".cfg", ".yml", ".yaml"}
+# The Files section browses all of the above. An instance card is not a file
+# browser, though: it gets a button only for the kinds you would sit and read.
+# A module writes a .schema sidecar and a .json of its settings beside every
+# CSV, so without this an account with four modules grows nine buttons.
+CARD_EXT = {".csv", ".tsv", ".log", ".txt"}
 # Never listed, never served. The vault and the session files are the account
 # credentials themselves; nothing about examining a CSV needs them, and the
 # panel is not the place to hand them out.
@@ -402,18 +407,24 @@ def account_files():
 
 
 def files_for(entry, pool):
-    """The files in *pool* belonging to this account, newest name first.
+    """The files in *pool* worth a button on this account's card.
 
     Matched on the same suffix the modules build their filenames from, so
     shipment_log_en70_StDa.csv lands on the en70 StDa instance and nowhere
     else. The label is what is left once the account part is stripped, which
     is the name of the log rather than a wall of server and player.
+
+    Restricted to CARD_EXT, and logs come first: the card is a shortcut to the
+    one or two files that get read, not a listing. Everything else about the
+    account is still in the Files section.
     """
     root = os.path.realpath(FILES_ROOT)
     out = []
     for suffix in lock_suffixes(entry):
         for directory, name in pool:
             stem, ext = os.path.splitext(name)
+            if ext.lower() not in CARD_EXT:
+                continue
             if not stem.endswith("_" + suffix):
                 continue
             full = os.path.join(directory, name)
@@ -425,7 +436,9 @@ def files_for(entry, pool):
                 continue
             label = stem[: -(len(suffix) + 1)].lstrip(".") or name
             out.append({"path": rel, "label": label, "name": name})
-    out.sort(key=lambda f: f["label"].lower())
+    # A log is what someone opens from a card, so put those at the front.
+    out.sort(key=lambda f: (0 if "log" in f["label"].lower() else 1,
+                            f["label"].lower()))
     return out
 
 
