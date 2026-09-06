@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.12"
+PANEL_VERSION = "1.0.13"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -999,6 +999,7 @@ def state():
         "panel_version": PANEL_VERSION,
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
+        "ttyd_port": TTYD_PORT,
         "vault": vault_present(),
         "vault_labels": vault_labels(),
         "locks_total": len(all_locks),
@@ -1526,7 +1527,60 @@ BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:16px}
 h1{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:19px;
 margin:0 0 4px;letter-spacing:-.01em}
 .sub{color:var(--soft);font-size:13px;margin:0 0 18px}
-.wrap{max-width:1000px;margin:0 auto}
+/* Wider than before by exactly the nav rail, so the instance grid keeps
+   the width it had and still fits five cards to a row. */
+.wrap{max-width:1200px;margin:0 auto}
+
+/* --- section switcher ---------------------------------------------------
+   Every section stays in the DOM and keeps being refreshed; only one is
+   shown. Switching is a class change, so it is instant and nothing reloads. */
+.shell{display:grid;grid-template-columns:172px minmax(0,1fr);gap:16px;
+align-items:start}
+.panes{min-width:0}
+.sec{display:none}
+.sec.on{display:block}
+nav{position:sticky;top:16px;display:flex;flex-direction:column;gap:4px;
+background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:8px}
+nav button{text-align:left;border:0;background:none;padding:7px 10px;
+border-radius:5px;font-size:13px;color:var(--ink);width:100%}
+nav button:hover{background:var(--bg);color:var(--accent)}
+nav button.on{background:var(--accent);color:#fff;font-weight:600}
+nav button.on:hover{color:#fff}
+nav .tag{float:right;font-family:ui-monospace,monospace;font-size:11px;
+opacity:.75;font-weight:400}
+
+/* --- embedded pages ---------------------------------------------------- */
+.embed{border:1px solid var(--rule);border-radius:6px;overflow:hidden;
+background:var(--code);min-height:420px}
+.embed iframe{display:block;width:100%;height:min(70vh,620px);border:0}
+.tile{border:1px solid var(--rule);border-radius:6px;overflow:hidden;
+background:var(--card);display:flex;flex-direction:column}
+.tile .cap{display:flex;align-items:center;gap:6px;padding:4px 7px;
+font-size:11.5px;color:var(--soft);border-bottom:1px solid var(--rule)}
+.tile .num{flex:none;width:18px;height:18px;border-radius:4px;
+background:var(--accent);color:#fff;font:600 11px ui-monospace,monospace;
+display:grid;place-items:center}
+.tile .cap a{margin-left:auto;text-decoration:none}
+.tile iframe{width:100%;height:260px;border:0;background:#fff}
+
+@media(max-width:820px){
+  body{padding:10px}
+  .shell{grid-template-columns:minmax(0,1fr);gap:10px}
+  /* The rail becomes a row of chips that scrolls sideways on its own. */
+  nav{position:static;flex-direction:row;overflow-x:auto;gap:6px;padding:6px;
+  scrollbar-width:thin}
+  nav button{width:auto;white-space:nowrap;flex:none;font-size:12.5px;padding:6px 10px}
+  nav .tag{float:none;margin-left:5px}
+  /* 24 full cards is a very long phone page, so a card shows its name and
+     task count until it is tapped. */
+  .inst .row,.inst .keys,.inst .files,.inst .tasks{display:none}
+  .inst.open .row,.inst.open .keys,.inst.open .files,.inst.open .tasks{display:flex}
+  .inst.open .tasks{display:block}
+  .inst .n{cursor:pointer}
+  .inst .n::after{content:"▸";float:right;color:var(--soft);font-weight:400}
+  .inst.open .n::after{content:"▾"}
+  .tile iframe{height:220px}
+}
 section{background:var(--card);border:1px solid var(--rule);border-radius:8px;
 padding:14px 16px;margin-bottom:16px}
 h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);
@@ -1635,12 +1689,17 @@ color:var(--soft);margin-top:10px}
 .vitem{font-family:ui-monospace,monospace;font-size:11.5px;padding:2px 8px;
 border-radius:99px;border:1px solid var(--rule);color:var(--ink)}
 .vitem b{color:var(--accent)}
+.est{color:var(--soft);font-family:inherit;font-size:11px}
 </style></head><body><div class="wrap">
 
 <h1>ikabot control panel <span class="ver" id="pver"></span></h1>
 <p class="sub" id="head">loading…</p>
 
-<section>
+<div class="shell">
+<nav id="nav" aria-label="Sections"></nav>
+<div class="panes">
+
+<section class="sec" id="sec-instances">
   <h2>Instances</h2>
   <div class="row" style="margin-bottom:12px">
     <button class="p" data-a="restart_dead">Restart crashed only</button>
@@ -1658,7 +1717,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <p class="hint" id="statushint"></p>
 </section>
 
-<section>
+<section class="sec" id="sec-accounts">
   <h2>Accounts <span class="ver" id="vstate"></span></h2>
   <p class="err" id="aerr"></p>
   <p class="hint" style="margin:0 0 10px">
@@ -1689,7 +1748,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <div id="avault" style="margin-top:10px"></div>
 </section>
 
-<section>
+<section class="sec" id="sec-buttons">
   <h2>Buttons</h2>
   <p class="err" id="berr"></p>
   <div class="form" id="bform">
@@ -1714,7 +1773,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     works from any screen</label>
   <p class="hint" id="bmenuwarn" style="color:var(--warn)"></p>
   <table><thead><tr><th>Name</th><th>Presses</th><th>Pause</th><th>From</th>
-    <th>Applies to</th><th></th></tr></thead>
+    <th>Applies to</th><th>Takes</th><th>All of them</th><th></th></tr></thead>
   <tbody id="blist"></tbody></table>
   <p class="hint">Each press is a menu number followed by Enter, in order — so
      <code>9,1</code> picks option 9 then option 1 in its submenu. Write
@@ -1726,7 +1785,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
      next press; raise it if a step gets missed.</p>
 </section>
 
-<section>
+<section class="sec" id="sec-modules">
   <h2>Modules</h2>
   <div class="row" style="margin-bottom:12px">
     <button data-a="check_updates">Check for updates</button>
@@ -1738,7 +1797,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <p class="hint" id="checked"></p>
 </section>
 
-<section>
+<section class="sec" id="sec-ikabot">
   <h2>ikabot</h2>
   <table style="margin-bottom:12px"><thead><tr>
     <th>Component</th><th>Installed</th><th>Available</th><th></th></tr></thead>
@@ -1753,7 +1812,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   </p>
 </section>
 
-<section>
+<section class="sec" id="sec-files">
   <h2>Files</h2>
   <div class="form">
     <div class="f"><label for="fpick">File under /config</label>
@@ -1767,6 +1826,32 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <p class="hint" id="fmeta" style="margin-top:0"></p>
   <div id="fview"></div>
 </section>
+
+<section class="sec" id="sec-terminal">
+  <h2>Terminal</h2>
+  <p class="hint" style="margin:0 0 10px">
+    The same screens as <span class="mono">ika attach</span>. Ctrl-B then W lists
+    the instances, Ctrl-B then D leaves them running.
+    <a id="tnew" href="#" target="_blank" rel="noopener">Open in its own tab</a>
+  </p>
+  <div id="tbox" class="embed"></div>
+  <p class="hint" id="tnote"></p>
+</section>
+
+<section class="sec" id="sec-webservers">
+  <h2>Web servers</h2>
+  <div class="row" style="margin-bottom:10px">
+    <button class="p" id="wload">Load them</button>
+    <button id="wreload">Reload</button>
+    <button class="d" id="wclear">Unload</button>
+    <span class="hint" id="wcount"></span>
+  </div>
+  <div class="grid" id="wgrid"></div>
+  <p class="hint" id="wnote"></p>
+</section>
+
+</div>
+</div>
 
 <section>
   <h2>Output</h2>
@@ -1800,12 +1885,23 @@ document.addEventListener('click',function(e){
   run(b.dataset.a,b.dataset.arg,(b.dataset.label||b.textContent).trim());
 });
 
-var editing=null, openTasks={}, gridSig='';
+var editing=null, openTasks={}, gridSig='', instSig=-1;
 var el=function(id){return document.getElementById(id);};
 
 // The grid is rebuilt on every poll, which would throw away an open dropdown a
 // few seconds after opening it. Remember what was open and restore it.
 // 'toggle' does not bubble, so listen in the capture phase.
+// On a phone a card shows only its name until tapped; remembered the same way
+// the task dropdowns are, so a refresh does not fold it back up.
+var openCards={};
+document.addEventListener('click',function(e){
+  var n=e.target.closest('.inst .n'); if(!n)return;
+  if(e.target.closest('button'))return;
+  var card=n.closest('.inst'), name=card.dataset.inst;
+  card.classList.toggle('open');
+  if(card.classList.contains('open'))openCards[name]=1; else delete openCards[name];
+});
+
 document.addEventListener('toggle', function(e){
   var d=e.target;
   if(d.tagName==='DETAILS'&&d.dataset.inst){
@@ -1838,20 +1934,49 @@ el('bdelay').addEventListener('input',showDelay);
 el('bkeys').addEventListener('input',menuWarn);
 el('bmenu').addEventListener('change',menuWarn);
 
+function secs(n){
+  if(n<60)return (Math.round(n*10)/10)+'s';
+  var m=Math.floor(n/60), s=Math.round(n%60);
+  if(m<60)return m+'m'+(s?' '+s+'s':'');
+  var h=Math.floor(m/60);
+  return h+'h '+(m%60)+'m';
+}
+
+// How long one press takes, and how long the same button takes across every
+// instance it applies to. press() pauses between entries and not after the
+// last, and /menu counts as an entry when it is switched on, so the wait is
+// (entries - 1) x pause. Running it everywhere is one instance after another,
+// so it multiplies. Neither figure knows how long the game itself will take to
+// answer, which is why the total is only ever an estimate.
+function buttonTime(b){
+  var n=b.keys.length+(b.menu===false?0:1);
+  var d=(b.delay===undefined?1:b.delay);
+  var one=Math.max(0,n-1)*d;
+  var count=(last.instances||[]).filter(function(i){
+    return !b.instances.length||b.instances.indexOf(i.num)>=0;
+  }).length;
+  return {one:one, count:count, all:one*count};
+}
+
 function renderButtons(list){
   el('blist').innerHTML=list.map(function(b){
     var scope=b.instances.length?('instances '+b.instances.join(', ')):'all instances';
     var d=(b.delay===undefined?1:b.delay);
+    var tm=buttonTime(b);
     return '<tr><td>'+esc(b.label)+'</td>'+
       '<td class="mono">'+esc(b.keys.map(function(k){
           return k==='enter'?'↵':k;}).join(' → '))+'</td>'+
       '<td class="mono">'+(b.keys.length>1?d+'s':'—')+'</td>'+
       '<td class="scope">'+(b.menu===false?'where it is':'main menu')+'</td>'+
       '<td class="scope">'+scope+'</td>'+
+      '<td class="mono">'+secs(tm.one)+'</td>'+
+      '<td class="mono">'+(tm.count
+          ? secs(tm.all)+' <span class="est">(estimated)</span>'
+          : '<span class="est">—</span>')+'</td>'+
       '<td style="text-align:right">'+
       '<button data-edit="'+b.id+'">Edit</button> '+
       '<button class="d" data-del="'+b.id+'">Delete</button></td></tr>';
-  }).join('') || '<tr><td colspan="6" class="sub">No buttons yet — add one above.</td></tr>';
+  }).join('') || '<tr><td colspan="8" class="sub">No buttons yet — add one above.</td></tr>';
 }
 
 function resetForm(){
@@ -1939,6 +2064,97 @@ document.getElementById('openweb').addEventListener('click',function(){
              : 'Opened '+n+' new tab(s), in instance order. '+
                (total-n)+' already open.\n\nIf fewer tabs appeared than expected, allow '+
                'pop-ups for this page in your browser and press again.');
+});
+
+// --- section switcher ----------------------------------------------------
+var SECTIONS=[['instances','Instances'],['terminal','Terminal'],
+              ['webservers','Web servers'],['accounts','Accounts'],
+              ['buttons','Buttons'],['modules','Modules'],
+              ['ikabot','ikabot'],['files','Files']];
+var current='instances';
+
+function showSection(id){
+  if(!SECTIONS.some(function(s){return s[0]===id;}))id='instances';
+  current=id;
+  SECTIONS.forEach(function(s){
+    var sec=el('sec-'+s[0]); if(sec)sec.classList.toggle('on',s[0]===id);
+    var btn=el('nav-'+s[0]); if(btn)btn.classList.toggle('on',s[0]===id);
+  });
+  try{ localStorage.setItem('ikaSection',id); }catch(e){}
+  // Nothing is fetched on a switch — every section is already up to date —
+  // but the two embedded ones only start loading once they are asked for.
+  if(id==='terminal')mountTerminal();
+  if(id==='webservers')renderServers();
+  window.scrollTo({top:0});
+}
+
+el('nav').innerHTML=SECTIONS.map(function(s){
+  return '<button id="nav-'+s[0]+'" data-sec="'+s[0]+'">'+esc(s[1])+
+         '<span class="tag" id="tag-'+s[0]+'"></span></button>';
+}).join('');
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('nav button[data-sec]'); if(!b)return;
+  showSection(b.dataset.sec);
+});
+
+var saved='instances';
+try{ saved=localStorage.getItem('ikaSection')||'instances'; }catch(e){}
+showSection(saved);
+
+// --- the terminal, embedded ----------------------------------------------
+var termUp=false;
+function mountTerminal(){
+  if(termUp)return;
+  var host=(location.hostname||last.host||'localhost');
+  var url='http://'+host+':'+(last.ttyd_port||7681)+'/';
+  el('tnew').href=url;
+  el('tbox').innerHTML='<iframe src="'+esc(url)+'" title="ikabot terminal"></iframe>';
+  el('tnote').textContent='It asks for the same username and password as this '+
+    'page — a frame has its own sign-in. If it stays blank, open it in its own '+
+    'tab instead.';
+  termUp=true;
+}
+
+// --- every instance web server on one page --------------------------------
+var serversUp=false;
+function serverList(){
+  var out=[];
+  (last.instances||[]).forEach(function(i){
+    (i.ports||[]).forEach(function(p){ out.push({num:i.num,name:i.name,port:p}); });
+  });
+  return out;
+}
+
+function renderServers(){
+  var list=serverList(), host=(location.hostname||last.host||'localhost');
+  el('wcount').textContent = list.length
+    ? list.length+' web server(s) running'
+    : 'No web servers are running — start them with menu option (16).';
+  if(!serversUp){
+    el('wgrid').innerHTML='';
+    el('wnote').textContent = list.length
+      ? 'Press "Load them" to open all '+list.length+' in the grid below.'
+      : '';
+    return;
+  }
+  el('wgrid').innerHTML=list.map(function(s){
+    var url='http://'+host+':'+s.port+'/';
+    return '<div class="tile"><div class="cap">'+
+      '<span class="num">'+s.num+'</span>'+esc(s.name)+' · '+s.port+
+      '<a href="'+esc(url)+'" target="_blank" rel="noopener" title="Open in its own tab">↗</a>'+
+      '</div><iframe src="'+esc(url)+'" title="'+esc(s.name)+'" loading="lazy"></iframe></div>';
+  }).join('') || '<p class="sub">Nothing to show yet.</p>';
+  el('wnote').textContent='Each tile is that account\'s own web server. If a '+
+    'tile stays blank, open it with the arrow — some pages refuse to be framed.';
+}
+
+el('wload').addEventListener('click',function(){ serversUp=true; renderServers(); });
+el('wreload').addEventListener('click',function(){
+  serversUp=true; el('wgrid').innerHTML=''; renderServers();
+});
+el('wclear').addEventListener('click',function(){
+  serversUp=false; el('wgrid').innerHTML=''; renderServers();
 });
 
 // --- accounts ------------------------------------------------------------
@@ -2246,6 +2462,25 @@ function refresh(){
       ak.dataset.sig=sig;
       renderButtons(s.buttons||[]);
     }
+    // Counts on the rail, so a section worth looking at says so from here.
+    var mods=(s.modules||[]).filter(function(m){
+      return m.status==='outdated'||m.status==='new';}).length;
+    var srv=serverList().length;
+    var tag=function(id,v){var e=el('tag-'+id); if(e)e.textContent=v||'';};
+    tag('instances', s.running + (s.dead?'/'+(s.running+s.dead):''));
+    tag('webservers', srv||'');
+    tag('buttons', (s.buttons||[]).length||'');
+    tag('modules', mods||'');
+    tag('accounts', (s.vault_labels||[]).length||'');
+
+    // The "All of them" column counts instances, so it has to be redrawn when
+    // that count moves, not only when a button is edited.
+    if(instSig!==s.instances.length){
+      instSig=s.instances.length;
+      renderButtons(s.buttons||[]);
+    }
+    if(current==='webservers')renderServers();
+
     showVault(s.vault_labels);
     var vs=el('vstate'), have=!!s.vault;
     vs.textContent = have ? 'vault ready' : 'no vault yet';
@@ -2301,7 +2536,8 @@ function refresh(){
                esc(b.keys.map(function(k){return k==='enter'?'Enter':k;}).join(' then '))+
                ' in '+i.name+'">'+esc(b.label)+'</button>';
       }).join('');
-      return '<div class="inst'+(i.dead?' dead':'')+'">'+
+      return '<div class="inst'+(i.dead?' dead':'')+
+        (openCards[i.name]?' open':'')+'" data-inst="'+i.name+'">'+
         '<div class="n"><span class="dot"></span>'+i.name+badge+'</div>'+
         '<div class="s">'+(i.dead?'crashed':'running')+
           (ports?' · '+ports:'')+'</div>'+

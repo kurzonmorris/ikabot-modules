@@ -862,7 +862,43 @@ Sign in with the same username and password as the terminal.
 | **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
 | **Files** | Read any CSV, JSON, TXT or LOG file under `/config` in the browser — CSVs as a table you can search — or download it to your PC. Each instance card also carries a button straight to that account's own files |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
-| **Output** | What the command you just pressed actually printed |
+| **Terminal** | The instance screens, embedded — the same thing as opening port 7681 |
+| **Web servers** | Every running instance web server side by side, five to a row |
+| **Output** | What the command you just pressed actually printed — always on screen, whichever section you are in |
+
+### Getting around
+
+The sections are behind a menu down the left rather than stacked one after
+another, with a count beside the ones worth a glance — how many instances are
+running, how many web servers are up, how many modules need an update.
+
+Everything stays loaded and keeps refreshing whichever section you are looking
+at, so switching is instant and nothing reloads. Your choice is remembered, so
+the panel opens where you left it. **Output** sits below the lot and is always
+visible.
+
+On a phone the menu becomes a row of chips you swipe along, and instance cards
+collapse to their name and state — tap one to open its buttons. On a desktop
+nothing has changed.
+
+### Two embedded sections
+
+**Terminal** puts the instance screens in the page, the same as opening port
+7681 yourself. A framed page has its own sign-in, so it asks for the username
+and password once more; if it stays blank, the link beside it opens the
+terminal in its own tab.
+
+**Web servers** shows every running instance web server at once, five to a row,
+each labelled with its instance number and port. It loads nothing until you
+press **Load them** — twenty-four live pages is a lot to open by accident — and
+**Unload** frees them again. The arrow on a tile opens that one in its own tab.
+
+This replaces keeping twenty-four browser tabs open. It needs the ports to be
+reachable from your browser, which they are on Unraid, TrueNAS, Linux and a
+Steam Deck; on Windows and Mac Docker cannot share the host's network, so only
+the panel and terminal are reachable there.
+
+### The instance grid
 
 The instance cards sit five to a row, and the page stays the same width
 whatever the screen: on a tablet it drops to three, on a phone to two, and it
@@ -1146,6 +1182,8 @@ instance card automatically, and in the **run everywhere** row at the top.
 | **Entries** | What it types, in order, each followed by Enter. Not just numbers — anything a prompt accepts, such as `s`, `all`, `y` or `a-20k`. Separate them with commas, so a value can contain spaces. Write `enter` for a bare Enter — `6,enter` runs option 6 then clears the "[Enter] to continue" screen |
 | **Applies to** | *All instances* (the default), or only the instance numbers you list |
 | **Pause between presses** | A slider, `0`–`10` seconds. How long to wait before the next press so the menu can redraw |
+| **Takes** | How long one press of that button takes on one instance |
+| **All of them** | The same button across every instance it applies to, marked *(estimated)* |
 | **Start at the main menu** | On by default. Sends ikabot's `/menu` before the entries, so the button works from whatever screen that instance was left on |
 
 #### Starting from a known screen
@@ -1184,6 +1222,14 @@ The default is `1.0s`, comfortable on a busy machine; raise it if a step gets
 missed because the game was slow to respond, or drop it to `0` for a
 single-press button where it makes no difference. There is no pause after the
 last press.
+
+**Takes** is `(entries − 1) × pause`, because the pause falls between presses
+and not after the last, and `/menu` counts as an entry when it is switched on.
+**All of them** multiplies that by the number of instances the button applies
+to, since running it everywhere works through them one after another.
+
+Both are marked *estimated* for a reason: neither knows how long the game will
+take to answer. Treat them as the floor, not the finish time.
 
 Changing the default does not touch buttons you already saved — each keeps the
 pause it was created with, shown in the **Pause** column. Edit one and save it
