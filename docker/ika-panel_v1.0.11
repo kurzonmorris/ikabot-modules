@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.10"
+PANEL_VERSION = "1.0.11"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -79,6 +79,10 @@ KEY_BAD = re.compile(r"[\x00-\x1f\x7f]")
 MAX_KEY_LEN = 64
 # "enter" sends a bare Enter, for ikabot's "[Enter] to continue" screens.
 ENTER_TOKEN = "enter"
+# ikabot's own command for getting back to the main menu from anywhere. Sent
+# before a button's own entries so a sequence always starts from a known
+# screen, rather than from wherever that instance happened to be left.
+MENU_COMMAND = "/menu"
 ID_OK = re.compile(r"^[A-Za-z0-9]{1,32}$")
 _buttons_lock = threading.RLock()
 
@@ -670,11 +674,16 @@ def load_buttons():
             with open(BUTTONS_FILE, encoding="utf-8") as f:
                 data = json.load(f)
             if data.get("schema") == 1 and isinstance(data.get("buttons"), list):
-                return data["buttons"]
+                out = data["buttons"]
+                # Buttons saved before "menu" existed were written to be
+                # pressed at the main menu, so that is where they still start.
+                for b in out:
+                    b.setdefault("menu", True)
+                return out
         except (OSError, ValueError):
             pass
         seeded = [{"id": "seed%s" % k, "label": k, "keys": [k],
-                   "instances": [], "delay": DEFAULT_DELAY}
+                   "instances": [], "delay": DEFAULT_DELAY, "menu": True}
                   for k in QUICK_KEYS]
         try:
             save_buttons(seeded)
@@ -736,8 +745,14 @@ def clean_button(raw):
     if bid and not ID_OK.match(bid):
         return None, "Bad button id."
 
+    # Absent means yes: a button saved before this existed was written to be
+    # pressed at the main menu, so that is where it should still start.
+    menu = raw.get("menu")
+    menu = True if menu is None else bool(menu)
+
     return {"id": bid or _new_id(), "label": label, "keys": keys,
-            "instances": sorted(set(instances)), "delay": delay}, ""
+            "instances": sorted(set(instances)), "delay": delay,
+            "menu": menu}, ""
 
 
 def describe(keys):
@@ -748,11 +763,40 @@ def applies_to(button, num):
     return not button.get("instances") or num in button["instances"]
 
 
-def press(window, keys, delay=DEFAULT_DELAY):
-    """Send each menu number followed by Enter, pausing so the menu redraws."""
+def in_copy_mode(target):
+    out = subprocess.run(["tmux", "display", "-p", "-t", target,
+                          "#{pane_in_mode}"],
+                         capture_output=True, text=True).stdout.strip()
+    return out == "1"
+
+
+def press(window, keys, delay=DEFAULT_DELAY, menu=True):
+    """Send each entry followed by Enter, pausing so the screen redraws.
+
+    Two things happen before the button's own entries:
+
+    A scrolled-up pane is in tmux's copy mode, and while it is there tmux
+    routes keys to the viewer rather than to ikabot -- so a button pressed on
+    an instance somebody had scrolled up did nothing at all, silently. Copy
+    mode is left first.
+
+    Then ikabot's own /menu, so the sequence starts from the main menu
+    whatever screen that instance was sitting on.
+    """
     notes = []
-    last = len(keys) - 1
     target = "%s:%s" % (SESSION, window)
+
+    if in_copy_mode(target):
+        # Only when it is actually in a mode: tmux writes "not in a mode" to
+        # stderr otherwise, which would show up as a fake error in the output.
+        out = _sh(["tmux", "send-keys", "-t", target, "-X", "cancel"], timeout=15)
+        if out.strip():
+            notes.append(out.strip())
+
+    if menu:
+        keys = [MENU_COMMAND] + list(keys)
+
+    last = len(keys) - 1
     for idx, k in enumerate(keys):
         if k == ENTER_TOKEN:
             out = _sh(["tmux", "send-keys", "-t", target, "Enter"], timeout=15)
@@ -1312,9 +1356,12 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(200, json.dumps({
                             "output": "%s has crashed — restart it first." % inst["name"],
                             "ran": "button"}))
+                    menu = wanted.get("menu", True)
                     press(inst["name"], wanted["keys"],
-                          wanted.get("delay", DEFAULT_DELAY))
-                    out = "Sent %s to %s." % (describe(wanted["keys"]), inst["name"])
+                          wanted.get("delay", DEFAULT_DELAY), menu)
+                    out = "Sent %s%s to %s." % (
+                        "/menu then " if menu else "",
+                        describe(wanted["keys"]), inst["name"])
                 else:
                     lines, sent = [], 0
                     for inst in instances:
@@ -1324,7 +1371,8 @@ class Handler(BaseHTTPRequestHandler):
                             lines.append("%s skipped (crashed)" % inst["name"])
                             continue
                         press(inst["name"], wanted["keys"],
-                              wanted.get("delay", DEFAULT_DELAY))
+                              wanted.get("delay", DEFAULT_DELAY),
+                              wanted.get("menu", True))
                         lines.append("%s <- %s" % (inst["name"], describe(wanted["keys"])))
                         sent += 1
                     out = ("Ran '%s' on %d instance(s):\n\n%s"
@@ -1657,7 +1705,12 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     <button class="p" id="bsave">Add button</button>
     <button id="bcancel" style="display:none">Cancel</button>
   </div>
-  <table><thead><tr><th>Name</th><th>Presses</th><th>Pause</th><th>Applies to</th><th></th></tr></thead>
+  <label class="cb"><input type="checkbox" id="bmenu" checked>
+    Start at the main menu — sends <span class="mono">/menu</span> first, so it
+    works from any screen</label>
+  <p class="hint" id="bmenuwarn" style="color:var(--warn)"></p>
+  <table><thead><tr><th>Name</th><th>Presses</th><th>Pause</th><th>From</th>
+    <th>Applies to</th><th></th></tr></thead>
   <tbody id="blist"></tbody></table>
   <p class="hint">Each press is a menu number followed by Enter, in order — so
      <code>9,1</code> picks option 9 then option 1 in its submenu. Write
@@ -1760,11 +1813,26 @@ el('bscope').addEventListener('change',function(){
   el('binstwrap').style.display=this.value==='some'?'':'none';
 });
 
+// The panel now leaves the scroll view and sends /menu itself, so a sequence
+// that still starts with them would send them twice — and a stray "q" at the
+// main menu is not a menu number. Point it out rather than silently rewriting
+// what was typed.
+function menuWarn(){
+  var first=(el('bkeys').value.split(',')[0]||'').trim().toLowerCase();
+  el('bmenuwarn').textContent =
+    (el('bmenu').checked && (first==='q'||first==='/menu'))
+      ? 'The panel already leaves the scroll view and sends /menu — you can '+
+        'drop the "'+first+'" from the start of the entries.'
+      : '';
+}
+
 function showDelay(){
   var v=parseFloat(el('bdelay').value);
   el('bdval').textContent=(v===0?'none':v.toFixed(1)+'s');
 }
 el('bdelay').addEventListener('input',showDelay);
+el('bkeys').addEventListener('input',menuWarn);
+el('bmenu').addEventListener('change',menuWarn);
 
 function renderButtons(list){
   el('blist').innerHTML=list.map(function(b){
@@ -1774,11 +1842,12 @@ function renderButtons(list){
       '<td class="mono">'+esc(b.keys.map(function(k){
           return k==='enter'?'↵':k;}).join(' → '))+'</td>'+
       '<td class="mono">'+(b.keys.length>1?d+'s':'—')+'</td>'+
+      '<td class="scope">'+(b.menu===false?'where it is':'main menu')+'</td>'+
       '<td class="scope">'+scope+'</td>'+
       '<td style="text-align:right">'+
       '<button data-edit="'+b.id+'">Edit</button> '+
       '<button class="d" data-del="'+b.id+'">Delete</button></td></tr>';
-  }).join('') || '<tr><td colspan="4" class="sub">No buttons yet — add one above.</td></tr>';
+  }).join('') || '<tr><td colspan="6" class="sub">No buttons yet — add one above.</td></tr>';
 }
 
 function resetForm(){
@@ -1786,6 +1855,7 @@ function resetForm(){
   el('blabel').value=''; el('bkeys').value=''; el('binst').value='';
   el('bscope').value='global'; el('binstwrap').style.display='none';
   el('bdelay').value='0.4'; showDelay();
+  el('bmenu').checked=true; menuWarn();
   el('bsave').textContent='Add button'; el('bcancel').style.display='none';
   el('berr').textContent='';
 }
@@ -1813,7 +1883,8 @@ el('bsave').addEventListener('click',function(){
     label: el('blabel').value,
     keys: el('bkeys').value,
     instances: scope==='some'?el('binst').value:'',
-    delay: el('bdelay').value
+    delay: el('bdelay').value,
+    menu: el('bmenu').checked
   }}, resetForm);
 });
 
@@ -1830,6 +1901,7 @@ document.addEventListener('click',function(e){
     el('binstwrap').style.display=b.instances.length?'':'none';
     el('binst').value=b.instances.join(',');
     el('bdelay').value=(b.delay===undefined?0.4:b.delay); showDelay();
+    el('bmenu').checked=(b.menu!==false); menuWarn();
     el('bsave').textContent='Save changes'; el('bcancel').style.display='';
     el('berr').textContent='';
     window.scrollTo({top:0,behavior:'smooth'});
