@@ -92,10 +92,20 @@ and paste it in place of the URL below:
 ```bash
 cd ~/Downloads
 curl -L -o ikabot-docker.zip "PASTE_THE_LINK_HERE"
-unzip -o ikabot-docker.zip -d ikabot-docker
+file ikabot-docker.zip
+rm -rf ikabot-docker
+unzip -q ikabot-docker.zip -d ikabot-docker
 cd ikabot-docker
 ls
 ```
+
+`file` must say **Zip archive data**. If it says *HTML document*, the link
+pointed at GitHub's page for the file rather than the file — use the
+`raw.githubusercontent.com` address, or the *Download raw file* button.
+
+The `rm -rf` matters when you are updating: unzipping over an old copy leaves
+the previous `docker/ika-panel_v*` behind next to the new one, and the build
+then has two panels to choose from.
 
 You should see `INSTALL.bat`, `install.sh`, `README.txt` and a `docker`
 folder. Ignore `INSTALL.bat` — that one is for Windows.

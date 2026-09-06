@@ -3,7 +3,7 @@
 # Run from the folder this file was extracted into.
 set -uo pipefail
 
-INSTALLER_VERSION="1.0.6"
+INSTALLER_VERSION="1.0.11"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say()  { printf '%s\n' "$*"; }
@@ -56,6 +56,12 @@ if [ ! -f "$HERE/docker/Dockerfile" ]; then
     exit 1
 fi
 
+if [ ! -d "$HERE/app/ikabot" ]; then
+    say "Cannot find app/ikabot next to this script — the download is incomplete."
+    say "Extract the whole zip and run install.sh from inside it."
+    exit 1
+fi
+
 # Unraid keeps persistent app data on the array; elsewhere use the home folder.
 if [ -f /etc/unraid-version ]; then
     DEFAULT_DIR=/mnt/user/appdata/ikabot
@@ -83,7 +89,26 @@ say "Installing to : $INSTALL_DIR"
 say "Instances     : $INSTANCES"
 say ""
 
-mkdir -p "$INSTALL_DIR/config" || { say "Cannot create $INSTALL_DIR"; exit 1; }
+mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/app" \
+    || { say "Cannot create $INSTALL_DIR"; exit 1; }
+
+# ikabot itself lives in a folder on the host, mounted at /app, so that
+# `ika update` can replace it and the new version survives the container being
+# rebuilt. Only ever populated when empty: re-running this installer must not
+# throw away an ikabot that has since been updated.
+if [ -d "$INSTALL_DIR/app/ikabot" ]; then
+    say "ikabot is already in $INSTALL_DIR/app — left as it is."
+    say "  (update it later with:  docker exec -it ikabot ika update)"
+else
+    say "Installing ikabot into $INSTALL_DIR/app ..."
+    cp -r "$HERE/app/." "$INSTALL_DIR/app/" \
+        || { say "Could not copy ikabot into $INSTALL_DIR/app"; exit 1; }
+fi
+
+if [ ! -f "$INSTALL_DIR/app/ikabot/__main__.py" ]; then
+    say "ikabot did not end up in $INSTALL_DIR/app — stopping before it fails later."
+    exit 1
+fi
 
 say "Building the image — this takes a few minutes the first time..."
 if ! docker build -t ikabot-mod:latest "$HERE/docker"; then
@@ -105,6 +130,7 @@ docker run -d \
   -e TTYD_PASS="$PANEL_PASS" \
   -e INSTANCES="$INSTANCES" \
   -e TZ="$(host_tz)" \
+  -v "$INSTALL_DIR/app":/app \
   -v "$INSTALL_DIR/config":/config \
   ikabot-mod:latest >/dev/null || { say "Could not start the container."; exit 1; }
 

@@ -1,5 +1,5 @@
 ==========================================================
-  ikabot in Docker  —  installer v1.0.6
+  ikabot in Docker  —  installer v1.0.11
 ==========================================================
 
 Runs ikabot for as many game accounts as you like, in one
@@ -36,6 +36,12 @@ INSTALLING — UNRAID, TRUENAS OR LINUX
 
   Same three questions, same result.
 
+  Updating later? Extract the new zip into a FRESH
+  folder rather than over the old one. Unzipping on
+  top leaves the previous panel file behind beside
+  the new one. The build copes -- it takes the newer
+  and says so -- but a clean folder is tidier.
+
 
 AFTER INSTALLING
 ----------------
@@ -51,9 +57,12 @@ AFTER INSTALLING
 
 WHERE YOUR DATA LIVES
 ---------------------
-  Everything is in the "config" folder you chose. That
-  includes your saved logins, so keep it backed up and
-  do not share it.
+  Two folders are made where you chose:
+
+    config/  your saved logins, sessions and settings.
+             Keep this backed up. Do not share it.
+    app/     ikabot itself. Replaced by "ika update";
+             re-running this installer leaves it alone.
 
 
 UPDATING LATER

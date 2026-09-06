@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.9"
+PANEL_VERSION = "1.0.10"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -95,6 +95,12 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 # not to second-guess what a label or a password may contain.
 MAX_ACCOUNTS_PER_SAVE = 100
 MAX_FIELD_LEN = 256
+# ikabot lists vault accounts sorted by label, not by the order they were
+# added, so its "(1) (2) (3)" numbering follows the alphabet. Prefixing each
+# label with its position makes that sort agree with the order they were
+# entered in — which is what an instance number has to line up with. Two
+# digits so 10 sorts after 9 rather than after 1.
+NUM_PREFIX = re.compile(r"^(\d+)\s+")
 _run_lock = threading.Lock()
 
 # GitHub's unauthenticated API allows 60 calls an hour, so remote versions are
@@ -262,6 +268,39 @@ def vault_present():
         return bool(store.vault_exists())
     except BaseException:
         return False
+
+
+def vault_labels():
+    """The labels already in the vault, in the order they are stored.
+
+    Read straight from the vault file, because every API that lists accounts
+    needs the master password and this is only wanted to show what is there.
+    Labels are the one part of a vault entry that is not encrypted — the
+    credentials themselves are, and nothing here can reach them.
+    """
+    store, _ = vault_api()
+    if store is None:
+        return []
+    try:
+        path = store._vault_path()
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") != 1:
+            return []
+        return [str(a.get("label", "")) for a in data.get("accounts", [])]
+    except BaseException:
+        return []
+
+
+def label_number(label):
+    """The leading position number on a label, or 0 if it has none."""
+    m = NUM_PREFIX.match(label or "")
+    return int(m.group(1)) if m else 0
+
+
+def bare_label(label):
+    """A label without its position number, for comparing like with like."""
+    return NUM_PREFIX.sub("", label or "").strip()
 
 
 def clean_account(raw):
@@ -915,6 +954,7 @@ def state():
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
         "vault": vault_present(),
+        "vault_labels": vault_labels(),
         "locks_total": len(all_locks),
         # Locks matching no logged-in account: shared ones such as the
         # messaging hub's, and leftovers from accounts not running now. Only
@@ -1070,6 +1110,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps(
                     {"error": "The vault's master password is required."}))
 
+            # Emptying the vault. Guarded by the master password as well as the
+            # typed confirmation in the page: knowing the password is what
+            # separates clearing your own accounts from an accidental click.
+            if body.get("op") == "empty":
+                with _run_lock:
+                    try:
+                        if not store.vault_exists():
+                            return self._send(400, json.dumps(
+                                {"error": "There is no vault to empty."}))
+                        vault = store.open_vault(master)
+                        if not vault.verify_password():
+                            return self._send(400, json.dumps(
+                                {"error": "That is not the vault's master "
+                                          "password. Nothing was removed."}))
+                        before = [label for _, label in vault.list_accounts()]
+                        # Highest index first: removing by index shifts every
+                        # later one down, so going forwards would skip accounts.
+                        for idx in sorted(
+                                (i for i, _ in vault.list_accounts()), reverse=True):
+                            vault.remove_account(idx)
+                        after = [label for _, label in vault.list_accounts()]
+                    except Exception as exc:
+                        return self._send(500, json.dumps(
+                            {"error": "Could not empty the vault: %s" % exc}))
+
+                if after:
+                    return self._send(500, json.dumps(
+                        {"error": "%d account(s) are still in the vault."
+                                  % len(after)}))
+                return self._send(200, json.dumps({
+                    "output": ("Removed all %d account(s) from the vault:\n\n%s"
+                               "\n\nThe vault and its master password are still "
+                               "there — save new accounts into it whenever you "
+                               "like." % (len(before), ", ".join(before)))
+                              if before else "The vault was already empty.",
+                    "labels": [], "vault": True}))
+
             rows = body.get("accounts")
             if not isinstance(rows, list) or not rows:
                 return self._send(400, json.dumps(
@@ -1109,19 +1186,31 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(500, json.dumps(
                         {"error": "Could not open the vault: %s" % exc}))
 
-                have = {label for _, label in vault.list_accounts()}
+                existing = [label for _, label in vault.list_accounts()]
+                # Compared without the position number, so the same account
+                # cannot be added twice under two different numbers.
+                have = {bare_label(label).lower() for label in existing}
+                number = body.get("number")
+                number = True if number is None else bool(number)
+                # Carry on from the highest number already in the vault rather
+                # than restarting at 1 and colliding with what is there.
+                next_num = max([label_number(l) for l in existing] or [0]) + 1
+
                 added, skipped, failed = [], [], []
                 for account in wanted:
-                    if account["label"] in have:
+                    name = bare_label(account["label"])
+                    if name.lower() in have:
                         skipped.append(account["label"])
                         continue
+                    label = ("%02d %s" % (next_num, name)) if number else name
                     try:
-                        vault.add_account(account["label"], account["email"],
+                        vault.add_account(label, account["email"],
                                           account["password"])
-                        have.add(account["label"])
-                        added.append(account["label"])
+                        have.add(name.lower())
+                        added.append(label)
+                        next_num += 1
                     except Exception as exc:
-                        failed.append("%s (%s)" % (account["label"], exc))
+                        failed.append("%s (%s)" % (label, exc))
 
                 labels = [label for _, label in vault.list_accounts()]
 
@@ -1136,6 +1225,11 @@ class Handler(BaseHTTPRequestHandler):
                 lines.append("")
                 lines.append("A new vault was created. Remember this master "
                              "password — it cannot be recovered.")
+            if added and number:
+                lines.append("")
+                lines.append("They are numbered in the order you entered them, "
+                             "so ikabot lists them that way too: account 1 is "
+                             "the first row, and window ika01 lands on it.")
             if added:
                 lines.append("")
                 lines.append("Now press 'Restart all' above, so each instance "
@@ -1482,6 +1576,13 @@ border:1px solid var(--rule);background:var(--bg);color:var(--ink);resize:vertic
 border-radius:4px;border:1px solid var(--rule);background:var(--bg);color:var(--ink)}
 #arows td{padding:4px 6px}
 .warn2{color:var(--warn)}
+.cb{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;
+color:var(--soft);margin-top:10px}
+.cb input{margin:0}
+.vlist{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.vitem{font-family:ui-monospace,monospace;font-size:11.5px;padding:2px 8px;
+border-radius:99px;border:1px solid var(--rule);color:var(--ink)}
+.vitem b{color:var(--accent)}
 </style></head><body><div class="wrap">
 
 <h1>ikabot control panel <span class="ver" id="pver"></span></h1>
@@ -1528,8 +1629,12 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     <div class="f" id="aconfirmwrap"><label for="aconfirm">Type it again</label>
       <input id="aconfirm" type="password" autocomplete="new-password"></div>
     <button class="p" id="asave">Save all to the vault</button>
+    <button class="d" id="aempty">Empty the vault</button>
   </div>
+  <label class="cb"><input type="checkbox" id="anumber" checked>
+    Number them, so ikabot lists them in the order you entered them</label>
   <p class="hint" id="ahint"></p>
+  <div id="avault" style="margin-top:10px"></div>
 </section>
 
 <section>
@@ -1788,6 +1893,28 @@ function acctCount(){
     : 'Paste some lines above, or add an empty row.';
 }
 
+// What ikabot will show, in the order it will show it: its list is sorted by
+// label, so this is the numbering each instance will land on.
+function showVault(labels){
+  var box=el('avault');
+  if(!labels||!labels.length){
+    box.innerHTML='<span class="hint">The vault has no accounts in it yet.</span>';
+    return;
+  }
+  var sorted=labels.slice().sort(function(a,b){
+    return a.replace(/(\d+)/g,function(d){return ('00000'+d).slice(-5);})
+            .toLowerCase()
+            .localeCompare(
+           b.replace(/(\d+)/g,function(d){return ('00000'+d).slice(-5);})
+            .toLowerCase());
+  });
+  box.innerHTML='<span class="hint">In the vault — the number is the one '+
+    'ikabot asks for, and the window it lands on:</span><div class="vlist">'+
+    sorted.map(function(l,i){
+      return '<span class="vitem"><b>'+(i+1)+'</b> '+esc(l)+'</span>';
+    }).join('')+'</div>';
+}
+
 el('aread').addEventListener('click',function(){
   var text=el('apaste').value, lines=text.split(/\r?\n/), added=0;
   lines.forEach(function(line){
@@ -1816,6 +1943,31 @@ document.addEventListener('click',function(e){
 });
 el('arows').addEventListener('input',acctCount);
 
+el('aempty').addEventListener('click',function(){
+  var err=el('aerr'); err.textContent='';
+  var master=el('amaster').value;
+  if(!master){ err.textContent='Enter the vault master password to empty it.'; return; }
+  var n=(last.vault_labels||[]).length;
+  if(!confirm('Remove every account from the vault'+(n?' ('+n+' saved)':'')+
+              '?\n\nThis cannot be undone. The vault and its master password '+
+              'stay, so you can save new accounts straight afterwards.')) return;
+  if((prompt('Type DELETE to confirm.')||'').trim().toUpperCase()!=='DELETE'){
+    out.textContent='Nothing was removed.'; return;
+  }
+  setBusy(true); out.textContent='Emptying the vault…';
+  fetch('api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({op:'empty', master:master})})
+  .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};})})
+  .then(function(res){
+    if(!res.ok){ err.textContent=res.d.error||'Could not empty it.';
+                 out.textContent=res.d.error||'Could not empty it.'; return; }
+    out.textContent=res.d.output||'Emptied.';
+    el('amaster').value=''; el('aconfirm').value='';
+  })
+  .catch(function(e){ err.textContent='Request failed: '+e; })
+  .then(function(){ setBusy(false); refresh(); });
+});
+
 el('asave').addEventListener('click',function(){
   var rows=acctRows().filter(function(r){return r.label||r.email||r.password;});
   var err=el('aerr'); err.textContent='';
@@ -1835,7 +1987,8 @@ el('asave').addEventListener('click',function(){
 
   setBusy(true); out.textContent='Saving accounts…';
   fetch('api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({master:master, accounts:rows})})
+    body:JSON.stringify({master:master, accounts:rows,
+                         number:el('anumber').checked})})
   .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};})})
   .then(function(res){
     if(!res.ok){ err.textContent=res.d.error||'Could not save.';
@@ -2014,6 +2167,7 @@ function refresh(){
       ak.dataset.sig=sig;
       renderButtons(s.buttons||[]);
     }
+    showVault(s.vault_labels);
     var vs=el('vstate'), have=!!s.vault;
     vs.textContent = have ? 'vault ready' : 'no vault yet';
     vs.className = have ? 'ver' : 'ver warn2';

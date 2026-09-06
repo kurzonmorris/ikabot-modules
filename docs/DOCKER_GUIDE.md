@@ -430,6 +430,38 @@ Only one previous copy is kept, so roll back before updating again.
 > Skip the confirmation with `ika update --yes`. To pull from a branch other
 > than `main`, add `-e IKABOT_BRANCH=some-branch` when you create the container.
 
+**It only downloads the code.** This repository is a quarter of a gigabyte —
+`releases`, `dist`, `build` and `archive` account for nearly all of it — while
+ikabot itself is under a megabyte. The update lists the repository once and
+fetches only `ikabot`, `modules` and `config-examples`, so it moves about half
+a megabyte rather than 250.
+
+If that listing cannot be reached — GitHub's API allows 60 unauthenticated
+calls an hour — it falls back to downloading the whole archive, streamed to
+disk and retried if the transfer drops. That is slow but it works. Either way
+a failed download leaves `/app` exactly as it was; nothing is replaced until
+the new copy is complete.
+
+### Updating with no usable connection
+
+On a connection too slow to finish the download at all, fetch the archive by
+any means you like — another machine, a phone, a USB stick — drop it in the
+config folder, and point the updater at it:
+
+```bash
+docker exec -it ikabot ika update --from /config/ikabot.zip
+```
+
+`/config` inside the container is the `config` folder in your data directory,
+so anything you put there is immediately visible to it.
+
+It takes whatever shape the archive happens to have: the repository zip that
+unpacks to `ikabot-modules-main/ikabot`, a release zip with `app/ikabot`, or a
+folder you have already extracted. It looks for `ikabot/config.py` and works
+back from there, and says so plainly rather than half-updating if the archive
+turns out to be something else. Everything after that is the ordinary update —
+version comparison, the backup for `--rollback`, and the module refresh.
+
 ### Changing the number of instances
 
 Say you want 12 instead of 24:
@@ -937,6 +969,51 @@ the account order is the order you saved them in.
 **Name in ikabot** is the label the account list shows, so make it something
 you can tell apart at a glance: `StDa en70` rather than `account 1`.
 
+### Keeping them in the order you typed them
+
+ikabot lists vault accounts **sorted by name**, not in the order they were
+added — so its `(1) (2) (3)` follows the alphabet. Enter `StDa`, `14thfloor`,
+`Kurzon`, `aardvark` and ikabot numbers them `14thfloor, aardvark, Kurzon,
+StDa`: the one you typed first is number 4, and window `ika01` lands on it.
+
+**Number them, so ikabot lists them in the order you entered them** — ticked by
+default — fixes that by writing the position into the label:
+
+```
+01 StDa en70
+02 14thfloor en70
+03 Kurzon en135
+```
+
+The sort then agrees with the order you typed, so the first row is account 1
+and window `ika01` gets it. Two digits, so 10 comes after 9 rather than after
+1. A second batch carries on from the highest number already there rather than
+starting again at 1.
+
+The panel shows what is in the vault under the form, numbered exactly as
+ikabot will ask for them, so you can check the mapping without opening an
+instance.
+
+Untick the box if you would rather name them yourself. The same account is
+recognised either way — the number is ignored when checking for duplicates, so
+`StDa en70` will not go in twice as `01 StDa en70` and `07 StDa en70`.
+
+### Emptying the vault
+
+**Empty the vault** removes every account from it. The vault file and its
+master password stay, so you can save a new set straight afterwards — which is
+the point: it is for starting the list again, not for scrapping the vault.
+
+It asks for three things, because it cannot be undone:
+
+1. The **master password**, in the field above — a wrong one removes nothing
+2. A confirmation naming how many accounts will go
+3. The word **DELETE**, typed
+
+Instances already logged in keep running; they hold their session, not the
+vault. They will have nothing to log into next time they restart, so save the
+new set before restarting them.
+
 What it will not do:
 
 - **Overwrite anything.** A label already in the vault is skipped and named in
@@ -1204,7 +1281,15 @@ python3 tools/build-docker-release.py
 ```
 
 That writes `releases/ikabot-docker_v1.0.0.zip`. Inside it are `INSTALL.bat`,
-`install.sh`, `README.txt` and the whole `docker/` folder.
+`install.sh`, `README.txt`, the whole `docker/` folder, and `app/` — ikabot
+itself, plus the modules and the config examples.
+
+`app/` is not optional. The image deliberately does not contain ikabot: the
+installer copies it to `<data folder>/app` on the host and mounts it at
+`/app`, exactly as Part 5 does by hand, so that `ika update` can replace it
+and the new version outlives the container. Without it the container builds,
+starts, and then fails with `No module named ikabot` in every window. The
+packager refuses to build a zip that is missing it.
 
 The version number in the filename comes from `installer-docker/VERSION`. The
 script refuses to build if that number disagrees with the copies printed inside

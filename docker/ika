@@ -17,6 +17,7 @@ ika — ikabot container maintenance
   ika modules           Update modules from GitHub
   ika modules --local   Reinstall modules from the copy in the app folder
   ika update            Update ikabot itself from GitHub
+  ika update --from F   Install from a zip or folder already on this machine
   ika update --rollback Undo the last update
   ika restart <n>       Restart one instance, e.g.  ika restart 3
   ika restart all       Restart every instance
