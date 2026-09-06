@@ -37,18 +37,24 @@ services:
 One file per account. `ls /data/status/*.json` enumerates every instance
 without needing to be told how many there are.
 
-> **Do not share `~/.ikabot` itself between containers.** Earlier revisions of
-> this document suggested mounting one `ikabot-data` volume at `/root/.ikabot`
-> in every container. That directory also holds **the credential vault**, and
-> putting several ikabots on one vault file risks losing writes and corrupting
-> the account list. Give each container its own data volume and share only the
-> status directory (above) and the decaptcha seats (§7), which are designed for
-> it.
->
-> The vault has since been hardened against concurrent writers — writes now merge
-> under the lock instead of overwriting, and the stale-lock check no longer
-> compares PIDs across containers — but a shared vault is still a single point
-> of failure with nothing to gain, so keep it per-container.
+### Two topologies, and which one you have
+
+The shipped `docker/` image runs **one container with `INSTANCES` ikabot
+processes** in tmux, all sharing `/config/.ikabot`. `IKABOT_STATUS_DIR` is not
+needed there — one data directory is already one status directory, and the
+decaptcha seats coordinate naturally too. Nothing to configure.
+
+`IKABOT_STATUS_DIR` exists for the other shape: **one container per account**.
+There, do *not* mount a single data volume into every container, as an earlier
+revision of this document suggested. That directory also holds **the credential
+vault**, and several ikabots on one vault file is a needless single point of
+failure. Give each container its own data volume and share only the status
+directory and the decaptcha seats (§7).
+
+Either way, several ikabot processes do share one vault, so the vault has been
+hardened for it: writes merge under the lock instead of overwriting a snapshot,
+accounts are addressed by a stable id rather than by list position, and the
+stale-lock check no longer compares PIDs across PID namespaces.
 
 ---
 
@@ -171,9 +177,10 @@ coordination does nothing. Measured here with 6 instances on 4 cores: shared
 directory → 4 get seats and 2 correctly fall back to serial; per-container
 directories → all 6 claim seats.
 
-They default to `$IKABOT_DATA_DIR/decaptcha_seats`. With the per-container data
-volumes of §1 that default is **not** shared, so set it explicitly — this is
-required, not optional:
+They default to `$IKABOT_DATA_DIR/decaptcha_seats`. In the shipped
+single-container image every instance shares that directory already, so there is
+nothing to do. With **one container per account** the default is not shared, and
+setting this is required:
 
 ```yaml
 environment:
