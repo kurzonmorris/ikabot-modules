@@ -863,7 +863,7 @@ Sign in with the same username and password as the terminal.
 | **Files** | Read any CSV, JSON, TXT or LOG file under `/config` in the browser — CSVs as a table you can search — or download it to your PC. Each instance card also carries a button straight to that account's own files |
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Terminal** | The instance screens, embedded — the same thing as opening port 7681 |
-| **Web servers** | Every running instance web server side by side, five to a row |
+| **Web servers** | Pick an instance from a numbered strip and read its web server full size |
 | **Output** | What the command you just pressed actually printed — always on screen, whichever section you are in |
 
 ### Getting around
@@ -877,6 +877,11 @@ at, so switching is instant and nothing reloads. Your choice is remembered, so
 the panel opens where you left it. **Output** sits below the lot and is always
 visible.
 
+The **‹** at the top of the menu narrows it to a strip of short labels —
+`Inst`, `Term`, `Web` — which still switch sections in one press, so narrowing
+it costs you nothing but width. **›** widens it again, and which way you left
+it is remembered.
+
 On a phone the menu becomes a row of chips you swipe along, and instance cards
 collapse to their name and state — tap one to open its buttons. On a desktop
 nothing has changed.
@@ -888,10 +893,22 @@ nothing has changed.
 and password once more; if it stays blank, the link beside it opens the
 terminal in its own tab.
 
-**Web servers** shows every running instance web server at once, five to a row,
-each labelled with its instance number and port. It loads nothing until you
-press **Load them** — twenty-four live pages is a lot to open by accident — and
-**Unload** frees them again. The arrow on a tile opens that one in its own tab.
+**Web servers** is one page at a time, read properly, rather than a wall of
+thumbnails.
+
+Down the right is a strip of small numbered squares, five to a row, one per
+instance and in instance order. A **green** square has a web server running; a
+dim one does not and cannot be pressed. Press a square and that account's page
+opens in the large panel to its left, filling most of the window.
+
+An instance is loaded the first time you press it and then kept, hidden, so
+going back to one you have already opened is instant instead of a fresh load.
+**Unload all** frees the lot when you are done. **Reload this one** refetches
+just the page you are looking at, and **Open this one in a tab** does what it
+says.
+
+The **›** at the top of the strip retracts it, giving the page the full width;
+the **‹** brings it back. The choice is remembered.
 
 This replaces keeping twenty-four browser tabs open. It needs the ports to be
 reachable from your browser, which they are on Unraid, TrueNAS, Linux and a
