@@ -813,6 +813,34 @@ redirect, a maintenance page. Older code caught only
 `(AttributeError, TypeError, KeyError)`, so one bad response killed a whole
 background cycle instead of skipping one city. Catch `RuntimeError` too.
 
+### A guarded parser is worthless if it calls an unguarded one
+
+`getCity()` guards its own regex and raises a readable `RuntimeError` — then
+calls `getWarehouseCapacity()`, which did `re.search(...).group(1)` with no
+guard at all. Any page without a warehouse block (a city that is not ours, an
+ajax fragment, a maintenance page) came back as:
+
+```
+'NoneType' object has no attribute 'group'
+```
+
+reported to the user as an unexplained shipment failure. When you harden a
+parser, follow it into everything it calls. `getShipCapacity()` in
+`pedirInfo.py` had the same hole.
+
+**And pick the right failure value.** `getWarehouseCapacity` now returns `0`
+for "unknown", which `getCity` turns into `freeSpaceForResources` of all
+zeros. Read naively that says *the warehouse is full*, and the sender sits in
+an hourly retry forever. Anywhere free space is used, unknown must be treated
+like a foreign city — no destination clamp at all:
+
+```python
+foreign = (str(dest["id"]) != str(wanted_id)) or not dest.get("storageCapacity")
+```
+
+A sentinel that is indistinguishable from a real, meaningful value is a second
+bug wearing the first one's clothes.
+
 ### Pitfalls to avoid
 - **Bare `session.get()`** — hits `index.php?` which 404s on some servers. Always pass a view.
 - **`input()` directly** — breaks `predetermined_input` automation. Always use `read()`.
@@ -1189,7 +1217,7 @@ in your module.
 ## 27. Concurrency, Locks and Multi-Instance Safety
 
 Learned the hard way while hardening `resourceTransportManager` (v10.4.1 →
-v10.8.0) across Windows and Docker. Every rule below caused a real,
+v10.9.0) across Windows and Docker. Every rule below caused a real,
 observed failure.
 
 ### ⚠ NEVER use `os.kill(pid, 0)` to test if a process is alive
@@ -1373,6 +1401,37 @@ race.
   unverifiable lock risks killing a live worker elsewhere.
 - Strict priority means low-priority work can starve indefinitely. That may
   be the intended rule — report it rather than silently overriding it.
+
+### Hold, don't block, on a busy shared resource
+
+A trading port loads **one shipment at a time**. Send a second one while it is
+loading and it queues behind the first, so the sender either sits there for
+the whole loading time or gets rejected. The same shape shows up anywhere a
+city-level resource is serialised.
+
+Blocking is the wrong answer — it burns the cycle deadline on one order while
+every other city sits idle. Instead:
+
+1. **Ask before committing.** The transport view carries `queueTime`, an
+   absolute epoch for when the port is next free (`getTransportLoadingAndTravelTime`
+   in `getJson.py` reads it). 0 or in the past means free.
+2. **Unknown is not busy.** If the value is missing, unreadable, or absurdly
+   far out, treat the port as free. A detection you cannot trust must degrade
+   to today's behaviour, never to a hold.
+3. **Record it per city**, so the other twenty orders out of that city cost no
+   further requests until the hold expires.
+4. **Hold the order and start the next one.** Nothing is lost — the resources
+   never left the source city.
+5. **Come back in priority-then-age order.** Stable-sorting the held queue on
+   priority alone gives exactly that: the queue is already in age order, so
+   the sort only reshuffles bands. Don't add a timestamp key you then have to
+   keep correct.
+6. **Wake on the shortest hold**, not on a fixed retry interval — a
+   two-minute loading queue should not cost a five-minute sleep.
+
+Also: after *you* dispatch a shipment, that port is now busy loading yours.
+Invalidate whatever you cached about it rather than trusting a reading taken
+before you queued work on it.
 
 ### Testing module internals without importing ikabot
 

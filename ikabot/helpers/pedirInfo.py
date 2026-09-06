@@ -381,8 +381,10 @@ def getShipCapacity(session):
         an integer representing the ship capacity of the user's current city
     """
     html = session.get('view=merchantNavy')
-    data = re.search(r'ajax.Responder, (\[\[\S\s]*?\]\])\)\;', html).group(1)
-    data = json.loads(data, strict=False)
+    _m = re.search(r'ajax.Responder, (\[\[\S\s]*?\]\])\)\;', html)
+    if _m is None:
+        raise RuntimeError("Could not read ship capacity from the trading port page (unexpected server response)")
+    data = json.loads(_m.group(1), strict=False)
 
     ship_capacity = data[3][1]['singleTransporterCapacity']
     freighter_capacity = data[3][1]['singleFreighterCapacity']
