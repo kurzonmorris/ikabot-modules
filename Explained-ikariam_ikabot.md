@@ -575,7 +575,17 @@ MY_DATA_FILE = os.path.join(IKABOT_DATA_DIR, "my_module_data.json")
 ```
 This puts data at `%APPDATA%\.ikabot\` (Windows) or `~/.ikabot/` (Linux),
 alongside sessions, logs, and the vault. Never write data next to the module
-file — the installer deletes and replaces files there on update.
+file — the installer deletes and replaces files there on update, and in a
+container that directory may be read-only or part of the image.
+
+**Name per-instance files with server + world + username**, never server +
+username: a player name is only unique within a world. See §27.
+
+In Docker, whether these files survive a container rebuild depends on what
+is mounted. If `$HOME` is the mounted volume (e.g. `HOME=/config`), files
+written to `~` persist; if only `~/.ikabot` is mounted, anything written to
+`~` directly is lost. `IKABOT_DATA_DIR` is inside `.ikabot`, so it is safe
+under either layout.
 
 ---
 
@@ -774,6 +784,34 @@ for item in data:
 wait(3600)           # wait 1 hour exactly
 wait(3600, maxrandom=300)  # wait 1 hour + up to 5 random minutes (anti-detection)
 ```
+
+### ⚠ You cannot fetch another player's city
+
+`session.get(city_url + <id>)` for a city you do not own does **not** return
+that city — the game returns **your own currently-active city**. `getCity()`
+parses it happily, so the code silently continues with the wrong city:
+
+- the confirmation shows *your* city name,
+- the schedule stores *your* city id as the destination,
+- shipments intended for another player are delivered to yourself,
+- and the destination's warehouse space reads as *yours*, so a full
+  warehouse clamps every shipment to zero and the run looks empty.
+
+Detect it by comparing ids, and build foreign cities from **island data**
+(`getIsland`) instead — that is what `chooseForeignCity` does:
+
+```python
+city = getCity(session.get(city_url + str(dest_id)))
+if str(city.get("id", "")) != str(dest_id):
+    ... # foreign: use the island entry, skip warehouse-space checks
+```
+
+### `getCity` / `getIsland` / `getWorldMapIslands` raise `RuntimeError`
+
+They now raise when the page cannot be parsed — an expired session, a login
+redirect, a maintenance page. Older code caught only
+`(AttributeError, TypeError, KeyError)`, so one bad response killed a whole
+background cycle instead of skipping one city. Catch `RuntimeError` too.
 
 ### Pitfalls to avoid
 - **Bare `session.get()`** — hits `index.php?` which 404s on some servers. Always pass a view.
@@ -1076,6 +1114,22 @@ Full details, API and testing recipe: **`docs/AUTOSTART_BRIEF.md`**.
 
 ---
 
+### External modules and auto-start *(mod 1.7.7)*
+
+Auto-start originally resolved names against the built-in menu table only,
+so enabling it for an **external** module silently did nothing. It now also
+matches external modules on the `MODULE_NAME` they declare — which must be
+the same name the module saves its settings under, or the auto-start menu
+and the launcher will disagree.
+
+Windows **spawns** rather than forks, so a `multiprocessing` target must be
+picklable and importable *by name* in the child. A module loaded from a file
+path is not in `sys.modules`, so you cannot target one of its functions —
+pass the **path** and let `_run_external_module_child` load it, which is why
+that indirection exists.
+
+---
+
 ## 25. Session Internals a Module Should Know
 
 Behaviour that is easy to get wrong because it is invisible from the call site.
@@ -1130,4 +1184,215 @@ in your module.
 
 ---
 
-*Last updated: 2026-08-02. Reflects ikabot 7.4.5 / mod v1.7.6.*
+---
+
+## 27. Concurrency, Locks and Multi-Instance Safety
+
+Learned the hard way while hardening `resourceTransportManager` (v10.4.1 →
+v10.8.0) across Windows and Docker. Every rule below caused a real,
+observed failure.
+
+### ⚠ NEVER use `os.kill(pid, 0)` to test if a process is alive
+
+On Windows there is no signal 0. Per the `os.kill` docs, any sig other than
+`CTRL_C_EVENT`/`CTRL_BREAK_EVENT` "will cause the process to be
+unconditionally killed by the TerminateProcess API". So the liveness *probe*
+**terminates the process it is checking**, then returns without raising —
+and the caller concludes it is alive.
+
+Symptom: background workers dying whenever any menu screen checked whether
+they were running.
+
+```python
+import psutil
+
+def _is_pid_alive(pid):
+    try:
+        proc = psutil.Process(int(pid))
+        # A container running ikabot as pid 1 may not reap its children,
+        # so a dead worker can linger as a zombie. pid_exists() says yes
+        # to those, which keeps a dead lock alive forever.
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return True
+    except psutil.NoSuchProcess:
+        return False
+    except Exception:
+        return True     # can't tell — assume alive, never steal a lock
+```
+
+`psutil` is already an ikabot dependency (`ikabot/helpers/process.py`).
+
+### A pid is only meaningful inside its own namespace
+
+With Docker — especially several containers sharing one mounted config
+volume — a pid read from a lock file written by another container means
+nothing locally. It either matches no process (so you **steal a live
+lock**, and two workers run at once) or matches an unrelated one (so a
+**dead lock is never broken**).
+
+Record who wrote the lock, and only trust the pid when it is yours:
+
+```python
+def _instance_id():
+    parts = [socket.gethostname()]
+    try:
+        parts.append(os.readlink("/proc/self/ns/pid"))   # Linux/Docker
+    except Exception:
+        pass                                             # Windows: hostname only
+    return "|".join(parts)
+
+def _holder_liveness(data):
+    """True / False / None — None means 'cannot tell, use the heartbeat'."""
+    if data.get("host") != _instance_id():
+        return None
+    ...
+```
+
+When you cannot judge the pid, fall back to the heartbeat timestamp, which
+is meaningful everywhere.
+
+### File-lock rules that matter
+
+- **`stale_after` MUST be less than `timeout`.** An orphaned lock can only
+  be broken after `stale_after`; if that exceeds the wait, every waiter is
+  *guaranteed* to fail. A 30s timeout with a 60s staleness window is a
+  permanent "could not acquire lock" bug.
+- **Match ownership on a token, not a pid.** Threads in one process share a
+  pid, so a pid check lets thread A's late release delete thread B's lock.
+  Write a unique token (`f"{os.getpid()}-{threading.get_ident()}-{n}"`) at
+  acquisition and only remove the file when it still matches.
+- **Serialise in-process first.** A per-path `threading.RLock` with a depth
+  counter collapses every thread into a single contender for the file lock.
+  Removes same-pid races, cuts churn that starves waiters, and makes
+  nesting safe.
+- **Heartbeat any hold that can outlast `stale_after`.** Otherwise a waiter
+  declares a *live* holder stale. A dead holder stops refreshing and still
+  ages out normally.
+- **Treat a future timestamp as stale.** `now - held_at` is negative if the
+  stored time is ahead of the reader's clock (skew, VM resume), so the lock
+  never ages out and is unbreakable forever.
+- **Give an unreadable lock a grace period (~2s), not instant deletion.**
+  `O_CREAT|O_EXCL` creates the file before the payload is written, so an
+  empty lock is often one being born. Deleting immediately steals it;
+  never deleting means a genuinely corrupt lock blocks everyone forever.
+- **Use `time.monotonic()` for timeouts.** An NTP or DST correction
+  mid-wait otherwise cuts it short or stretches it enormously.
+- **Refresh only what you can prove is yours.** If reading the lock fails,
+  do nothing — writing anyway either recreates a lock you no longer hold or
+  stamps your name on someone else's.
+- **Wrap every `os.remove` in its own try/except.** An exception raised
+  inside an `except FileExistsError` handler escapes the whole retry loop,
+  and Windows raises when the holder still has the file open.
+
+### Per-instance filenames must include the world
+
+`session.servidor` is the community (`en`); `session.mundo` is the world
+number. **A player name is only unique within a world.** Server + username
+alone collides when the same name exists on two worlds — both instances
+then share one queue, one cache and one set of locks.
+
+```python
+def _account_suffix(session):
+    return f"{_safe(session.servidor)}{_safe(session.mundo)}_{_safe(session.username)}"
+```
+
+This applies to *everything* per-instance: data files, locks, flags, caches
+**and logs**. A single shared log across many instances is contention by
+design; give each account its own file (see RTM `_account_log_path`).
+
+Shared *preferences* have the same trap: one global "last used path" key
+offered whichever value was typed last in **any** account, so pressing
+Enter silently attached another account's file. Key remembered paths per
+account.
+
+---
+
+## 28. Background Workers and Schedulers
+
+Also from `resourceTransportManager`. If your module runs a long-lived
+worker that repeats work on a timer, these are the failure modes that
+actually happen.
+
+### Never mark work "done" because a cycle *finished*
+
+A cycle can run start to finish and accomplish nothing — no free ships, no
+action points, a blockade. If completion is judged on "the function
+returned", a one-shot task is closed as **"done, 0 sent"** and silently
+discarded. Judge on what was actually achieved, retry when it was nothing,
+and give up loudly after a bound rather than retrying forever.
+
+Equally: **distinguish "the cycle failed" from "the cycle did nothing".**
+Catching an exception and returning `0` makes a crash indistinguishable
+from a successful empty run. Return a distinct failure signal.
+
+### Recurring work needs its progress reset
+
+If you record per-item progress so an interrupted run can resume, something
+must clear it when a run *completes*, or the second cycle finds everything
+already done and the task silently becomes one-shot. Distinguish the cases:
+nothing pending = last pass finished, start fresh; some pending = last pass
+was cut short, resume.
+
+### Schedule the next run from completion, not from tick start
+
+Capturing `now` at the top of the tick and then setting
+`next_run = now + interval` means a cycle lasting longer than its own
+interval is due again the instant it ends, and runs back-to-back forever.
+
+### Identifiers must be monotonic
+
+`max(existing) + 1` reuses the id of a deleted item. A late write from the
+old holder of that id then corrupts the new one. Keep a high-water mark in
+a sidecar, and allocate the id **inside** the same lock as the append.
+
+### Guard against implausible timestamps
+
+An absolute `next_run` written while the clock was wrong (VM resume, bad
+NTP) and later corrected leaves work dated years out — permanently not due
+with no way back. Treat anything beyond a sane horizon (e.g. 30 days) as
+due.
+
+### A supervisor must own the lock it runs under
+
+If a restart re-acquires the worker lock, **check the result**. Ignoring it
+runs a second worker for the same account when another process won the
+race.
+
+### Reporting
+
+- The worker cannot report its own death. Detect it on the *next* start —
+  a lock on disk whose holder is gone and no stop was requested — and say
+  so then.
+- A process killed outright leaves no trace; supervise the loop in-process
+  for crashes, and use auto-start for reboots.
+- "RUNNING" is ambiguous once instances share a config volume: say *who*
+  holds the lock (pid, and which host), or a worker alive in another
+  container reads as a phantom.
+- Report rather than act when you cannot verify: silently clearing an
+  unverifiable lock risks killing a live worker elsewhere.
+- Strict priority means low-priority work can starve indefinitely. That may
+  be the intended rule — report it rather than silently overriding it.
+
+### Testing module internals without importing ikabot
+
+External modules import the whole ikabot stack, which makes them awkward to
+unit-test. Extract just the functions under test with `ast` and exec them
+into a namespace of stubs:
+
+```python
+tree = ast.parse(open("modules/myModule_v1.0.0.py").read())
+keep = [n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name in WANTED]
+ns = {"os": os, "json": json, "time": time, ...stubs...}
+exec(compile(ast.Module(body=keep, type_ignores=[]), "m", "exec"), ns)
+```
+
+Run the same tests against the **old** code to prove the diagnosis, not
+just the fix. Several times here a test "failure" was the harness missing a
+newly added global — always confirm which side is wrong before believing a
+red result.
+
+---
+
+*Last updated: 2026-08-29. Reflects ikabot 7.4.5 / mod v1.7.7.*
