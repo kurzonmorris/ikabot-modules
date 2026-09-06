@@ -910,6 +910,21 @@ says.
 The **›** at the top of the strip retracts it, giving the page the full width;
 the **‹** brings it back. The choice is remembered.
 
+#### On a phone
+
+The strip becomes a single column down the right that scrolls on its own, so
+all twenty-four are reachable with a thumb without moving the page.
+
+The account page itself is laid out at a desktop width and then scaled down to
+fit, so the whole thing is on screen at once with **nothing to scroll inside
+it** — the awkward part of a framed page on a small screen. Pinch to zoom in on
+whatever you want to read, the way you would with any other page.
+
+> The frame is given 1500px of height to work with. A status page fits inside
+> that comfortably; the cost is a little blank space below a short one. If a
+> real page ever comes out cut off at the bottom, that number is the one to
+> raise.
+
 This replaces keeping twenty-four browser tabs open. It needs the ports to be
 reachable from your browser, which they are on Unraid, TrueNAS, Linux and a
 Steam Deck; on Windows and Mac Docker cannot share the host's network, so only
