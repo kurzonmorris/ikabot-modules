@@ -86,17 +86,19 @@ class Session:
         """
         self.logger.info(f"Changing status to {message}")
 
-        # read from file
-        sessionData = self.getSessionData()
-        try:
-            fileList = sessionData["processList"]
-        except KeyError:
-            fileList = []
-        # modify current process' status message
-        [p.update({"status": message}) for p in fileList if p["pid"] == os.getpid()]
-        # dump back to session data
-        sessionData["processList"] = fileList
-        self.setSessionData(sessionData)
+        # Atomic: a plain read-edit-write here races with the menu's own
+        # updateProcessList() and with every other background task doing the
+        # same, and the loser's changes vanish — including whole processList
+        # entries, which is how a live task disappears from the task table.
+        my_pid = os.getpid()
+
+        def _update(sessionData):
+            fileList = sessionData.get("processList") or []
+            [p.update({"status": message}) for p in fileList if p["pid"] == my_pid]
+            sessionData["processList"] = fileList
+            return sessionData
+
+        self.mutateSessionData(_update)
 
     def __genRand(self):
         return hex(random.randint(0, 65535))[2:]
@@ -148,12 +150,12 @@ class Session:
         return self.__isExpired(html)
 
     def __saveNewCookies(self):
-        sessionData = self.getSessionData()
-
+        # Atomic: this runs on every cookie refresh, in the parent and in every
+        # background task. A plain read-edit-write here would replace the whole
+        # account block from a stale snapshot and silently drop concurrent
+        # changes — most visibly, live processList entries.
         cookie_dict = dict(self.s.cookies.items())
-        sessionData["cookies"] = cookie_dict
-
-        self.setSessionData(sessionData)
+        self.updateSessionKeys({"cookies": cookie_dict})
 
     def __getCookie(self, sessionData=None):
         if sessionData is None:
@@ -1186,8 +1188,11 @@ class Session:
             if rta.lower() == "n":
                 sys.exit()
             else:
-                sessionData["proxy"]["set"] = False
-                self.setSessionData(sessionData)
+                def _disable_proxy(data):
+                    data.setdefault("proxy", {})["set"] = False
+                    return data
+
+                self.mutateSessionData(_disable_proxy)
                 print("Proxy disabled, try again.")
                 enter()
                 sys.exit()
@@ -1559,6 +1564,30 @@ class Session:
     def getSessionData(self):
         """Gets relevant session data from the .ikabot file"""
         return self.cipher.getSessionData(self)
+
+    def updateSessionKeys(self, updates, shared=False):
+        """Atomically merge top-level keys into this account's session data.
+
+        The common safe replacement for getSessionData() + edit +
+        setSessionData(): setSessionData replaces the *whole* account block, so
+        a stale snapshot silently discards anything another process changed in
+        between — including live processList entries.
+        """
+        def _merge(data):
+            data.update(updates)
+            return data
+
+        return self.mutateSessionData(_merge, shared=shared)
+
+    def mutateSessionData(self, mutator, shared=False):
+        """Atomically read-modify-write this account's session data.
+
+        Use this instead of getSessionData() + edit + setSessionData() whenever
+        several processes may touch the same key — the read/write pair is
+        otherwise unsynchronised and one process's changes can be silently
+        discarded by another's write.
+        """
+        return self.cipher.mutateSessionData(self, mutator, shared=shared)
 
 
 def normal_get(url, params={}):

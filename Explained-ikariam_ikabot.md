@@ -130,7 +130,7 @@ Tracks changes made in this fork. Currently `1.7.6`. Banner displays
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
 resourceTransportManager_v10.3.1.py
-constructionManager_v2.1.9.py
+constructionManager_v2.2.8.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
 user's modules folder — *not* by the module loader. `MODULE_NAME` is the display
@@ -215,12 +215,24 @@ Every function receives a `session` object (instance of `ikabot.web.session.Sess
 
 ### Key attributes
 ```python
-session.username   # player username string
-session.servidor   # server string e.g. "s70-en"
-session.mundo      # world/server name
+session.username   # player name on this world, e.g. "StDa"
+session.servidor   # community / language code ONLY, e.g. "en"  (not "s70-en")
+session.mundo      # world NUMBER as a string, e.g. "70"
+session.word       # world NAME, e.g. "Nereus"
+session.host       # "s{mundo}-{servidor}.ikariam.gameforge.com"
 session.urlBase    # "https://s70-en.ikariam.gameforge.com/index.php?"
 session.padre      # True if this is the parent (menu) process
 ```
+
+> **`servidor` is not the full server string and `mundo` is not a name.**
+> The banner shows `Server:en, World:Nereus, Player:StDa` — that is
+> `servidor`, `word`, `username`. Verify against
+> `ikabot/web/session.py` (`self.host = "s{}-{}"`) before assuming.
+
+Getting these two wrong is exactly why per-account filenames used to omit the
+world and collide across worlds — see **§27, "Per-instance filenames must
+include the world"** for the naming rule. If you change an existing naming
+scheme, migrate the old filenames, or users silently lose their saved data.
 
 ### Key methods
 ```python
@@ -575,7 +587,17 @@ MY_DATA_FILE = os.path.join(IKABOT_DATA_DIR, "my_module_data.json")
 ```
 This puts data at `%APPDATA%\.ikabot\` (Windows) or `~/.ikabot/` (Linux),
 alongside sessions, logs, and the vault. Never write data next to the module
-file — the installer deletes and replaces files there on update.
+file — the installer deletes and replaces files there on update, and in a
+container that directory may be read-only or part of the image.
+
+**Name per-instance files with server + world + username**, never server +
+username: a player name is only unique within a world. See §27.
+
+In Docker, whether these files survive a container rebuild depends on what
+is mounted. If `$HOME` is the mounted volume (e.g. `HOME=/config`), files
+written to `~` persist; if only `~/.ikabot` is mounted, anything written to
+`~` directly is lost. `IKABOT_DATA_DIR` is inside `.ikabot`, so it is safe
+under either layout.
 
 ---
 
@@ -621,13 +643,14 @@ numbers below drift.**
 | Module | Does |
 |---|---|
 | `resourceTransportManager_v10.3.1.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
-| `constructionManager_v2.1.9.py` | CSV-backed multi-city construction queue. Polls, triggers upgrades, handles shortages by waiting or requesting transport. |
+| `constructionManager_v2.2.8.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §27. |
 | `autoRecruitmentManager_v2.12.1.py` | Trains units/ships across barracks and shipyards, synchronised completion, retry on shortage. **The working RRS integration example.** |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
 | `resourceProductionManager_v1.0.3.py` | Manages production/luxury assignment per city. Own persistence, predates `modulePrefs`. |
 | `islandColonizeMonitor_v1.5.0.py` | Watches islands for free colonisation slots. |
 | `resourceReservationSystem_v1.0.0.py` | Shared reservation data layer, not a user-facing module. See §26. |
 | `sequenceRunner_v1.1.2.py` | Stores named input sequences and replays them through `predetermined_input` (§9). Replaces the AutoHotkey scripts. |
+| `schedulerMonitor_v1.0.0.py` | Watches the worker locks of constructionManager, resourceTransportManager and autoRecruitmentManager on a timer and relaunches any scheduler that is down while work is still queued. Starts them headlessly — through the module's own auto-start path where it has one, otherwise by driving its worker loop directly. |
 
 **Before writing a new module, check whether one of these already does part of
 the job** — §12's rule against duplicating logic applies to modules too.
@@ -773,6 +796,34 @@ for item in data:
 wait(3600)           # wait 1 hour exactly
 wait(3600, maxrandom=300)  # wait 1 hour + up to 5 random minutes (anti-detection)
 ```
+
+### ⚠ You cannot fetch another player's city
+
+`session.get(city_url + <id>)` for a city you do not own does **not** return
+that city — the game returns **your own currently-active city**. `getCity()`
+parses it happily, so the code silently continues with the wrong city:
+
+- the confirmation shows *your* city name,
+- the schedule stores *your* city id as the destination,
+- shipments intended for another player are delivered to yourself,
+- and the destination's warehouse space reads as *yours*, so a full
+  warehouse clamps every shipment to zero and the run looks empty.
+
+Detect it by comparing ids, and build foreign cities from **island data**
+(`getIsland`) instead — that is what `chooseForeignCity` does:
+
+```python
+city = getCity(session.get(city_url + str(dest_id)))
+if str(city.get("id", "")) != str(dest_id):
+    ... # foreign: use the island entry, skip warehouse-space checks
+```
+
+### `getCity` / `getIsland` / `getWorldMapIslands` raise `RuntimeError`
+
+They now raise when the page cannot be parsed — an expired session, a login
+redirect, a maintenance page. Older code caught only
+`(AttributeError, TypeError, KeyError)`, so one bad response killed a whole
+background cycle instead of skipping one city. Catch `RuntimeError` too.
 
 ### Pitfalls to avoid
 - **Bare `session.get()`** — hits `index.php?` which 404s on some servers. Always pass a view.
@@ -1075,6 +1126,22 @@ Full details, API and testing recipe: **`docs/AUTOSTART_BRIEF.md`**.
 
 ---
 
+### External modules and auto-start *(mod 1.7.7)*
+
+Auto-start originally resolved names against the built-in menu table only,
+so enabling it for an **external** module silently did nothing. It now also
+matches external modules on the `MODULE_NAME` they declare — which must be
+the same name the module saves its settings under, or the auto-start menu
+and the launcher will disagree.
+
+Windows **spawns** rather than forks, so a `multiprocessing` target must be
+picklable and importable *by name* in the child. A module loaded from a file
+path is not in `sys.modules`, so you cannot target one of its functions —
+pass the **path** and let `_run_external_module_child` load it, which is why
+that indirection exists.
+
+---
+
 ## 25. Session Internals a Module Should Know
 
 Behaviour that is easy to get wrong because it is invisible from the call site.
@@ -1129,4 +1196,368 @@ in your module.
 
 ---
 
-*Last updated: 2026-08-02. Reflects ikabot 7.4.5 / mod v1.7.6.*
+---
+
+## 27. Concurrency, Locks and Multi-Instance Safety
+
+Learned the hard way while hardening `resourceTransportManager` (v10.4.1 →
+v10.8.0) across Windows and Docker. Every rule below caused a real,
+observed failure.
+
+### ⚠ NEVER use `os.kill(pid, 0)` to test if a process is alive
+
+On Windows there is no signal 0. Per the `os.kill` docs, any sig other than
+`CTRL_C_EVENT`/`CTRL_BREAK_EVENT` "will cause the process to be
+unconditionally killed by the TerminateProcess API". So the liveness *probe*
+**terminates the process it is checking**, then returns without raising —
+and the caller concludes it is alive.
+
+Symptom: background workers dying whenever any menu screen checked whether
+they were running.
+
+```python
+import psutil
+
+def _is_pid_alive(pid):
+    try:
+        proc = psutil.Process(int(pid))
+        # A container running ikabot as pid 1 may not reap its children,
+        # so a dead worker can linger as a zombie. pid_exists() says yes
+        # to those, which keeps a dead lock alive forever.
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return True
+    except psutil.NoSuchProcess:
+        return False
+    except Exception:
+        return True     # can't tell — assume alive, never steal a lock
+```
+
+`psutil` is already an ikabot dependency (`ikabot/helpers/process.py`).
+
+### A pid is only meaningful inside its own namespace
+
+With Docker — especially several containers sharing one mounted config
+volume — a pid read from a lock file written by another container means
+nothing locally. It either matches no process (so you **steal a live
+lock**, and two workers run at once) or matches an unrelated one (so a
+**dead lock is never broken**).
+
+Record who wrote the lock, and only trust the pid when it is yours:
+
+```python
+def _instance_id():
+    parts = [socket.gethostname()]
+    try:
+        parts.append(os.readlink("/proc/self/ns/pid"))   # Linux/Docker
+    except Exception:
+        pass                                             # Windows: hostname only
+    return "|".join(parts)
+
+def _holder_liveness(data):
+    """True / False / None — None means 'cannot tell, use the heartbeat'."""
+    if data.get("host") != _instance_id():
+        return None
+    ...
+```
+
+When you cannot judge the pid, fall back to the heartbeat timestamp, which
+is meaningful everywhere.
+
+### File-lock rules that matter
+
+- **`stale_after` MUST be less than `timeout`.** An orphaned lock can only
+  be broken after `stale_after`; if that exceeds the wait, every waiter is
+  *guaranteed* to fail. A 30s timeout with a 60s staleness window is a
+  permanent "could not acquire lock" bug.
+- **Match ownership on a token, not a pid.** Threads in one process share a
+  pid, so a pid check lets thread A's late release delete thread B's lock.
+  Write a unique token (`f"{os.getpid()}-{threading.get_ident()}-{n}"`) at
+  acquisition and only remove the file when it still matches.
+- **Serialise in-process first.** A per-path `threading.RLock` with a depth
+  counter collapses every thread into a single contender for the file lock.
+  Removes same-pid races, cuts churn that starves waiters, and makes
+  nesting safe.
+- **Heartbeat any hold that can outlast `stale_after`.** Otherwise a waiter
+  declares a *live* holder stale. A dead holder stops refreshing and still
+  ages out normally.
+- **Treat a future timestamp as stale.** `now - held_at` is negative if the
+  stored time is ahead of the reader's clock (skew, VM resume), so the lock
+  never ages out and is unbreakable forever.
+- **Give an unreadable lock a grace period (~2s), not instant deletion.**
+  `O_CREAT|O_EXCL` creates the file before the payload is written, so an
+  empty lock is often one being born. Deleting immediately steals it;
+  never deleting means a genuinely corrupt lock blocks everyone forever.
+- **Use `time.monotonic()` for timeouts.** An NTP or DST correction
+  mid-wait otherwise cuts it short or stretches it enormously.
+- **Refresh only what you can prove is yours.** If reading the lock fails,
+  do nothing — writing anyway either recreates a lock you no longer hold or
+  stamps your name on someone else's.
+- **Wrap every `os.remove` in its own try/except.** An exception raised
+  inside an `except FileExistsError` handler escapes the whole retry loop,
+  and Windows raises when the holder still has the file open.
+
+### Per-instance filenames must include the world
+
+`session.servidor` is the community (`en`); `session.mundo` is the world
+number. **A player name is only unique within a world.** Server + username
+alone collides when the same name exists on two worlds — both instances
+then share one queue, one cache and one set of locks.
+
+```python
+def _account_suffix(session):
+    return f"{_safe(session.servidor)}{_safe(session.mundo)}_{_safe(session.username)}"
+```
+
+This applies to *everything* per-instance: data files, locks, flags, caches
+**and logs**. A single shared log across many instances is contention by
+design; give each account its own file (see RTM `_account_log_path`).
+
+Shared *preferences* have the same trap: one global "last used path" key
+offered whichever value was typed last in **any** account, so pressing
+Enter silently attached another account's file. Key remembered paths per
+account.
+
+---
+
+## 28. Background Workers and Schedulers
+
+Also from `resourceTransportManager`. If your module runs a long-lived
+worker that repeats work on a timer, these are the failure modes that
+actually happen.
+
+### Never mark work "done" because a cycle *finished*
+
+A cycle can run start to finish and accomplish nothing — no free ships, no
+action points, a blockade. If completion is judged on "the function
+returned", a one-shot task is closed as **"done, 0 sent"** and silently
+discarded. Judge on what was actually achieved, retry when it was nothing,
+and give up loudly after a bound rather than retrying forever.
+
+Equally: **distinguish "the cycle failed" from "the cycle did nothing".**
+Catching an exception and returning `0` makes a crash indistinguishable
+from a successful empty run. Return a distinct failure signal.
+
+### Recurring work needs its progress reset
+
+If you record per-item progress so an interrupted run can resume, something
+must clear it when a run *completes*, or the second cycle finds everything
+already done and the task silently becomes one-shot. Distinguish the cases:
+nothing pending = last pass finished, start fresh; some pending = last pass
+was cut short, resume.
+
+### Schedule the next run from completion, not from tick start
+
+Capturing `now` at the top of the tick and then setting
+`next_run = now + interval` means a cycle lasting longer than its own
+interval is due again the instant it ends, and runs back-to-back forever.
+
+### Identifiers must be monotonic
+
+`max(existing) + 1` reuses the id of a deleted item. A late write from the
+old holder of that id then corrupts the new one. Keep a high-water mark in
+a sidecar, and allocate the id **inside** the same lock as the append.
+
+### Guard against implausible timestamps
+
+An absolute `next_run` written while the clock was wrong (VM resume, bad
+NTP) and later corrected leaves work dated years out — permanently not due
+with no way back. Treat anything beyond a sane horizon (e.g. 30 days) as
+due.
+
+### A supervisor must own the lock it runs under
+
+If a restart re-acquires the worker lock, **check the result**. Ignoring it
+runs a second worker for the same account when another process won the
+race.
+
+### Reporting
+
+- The worker cannot report its own death. Detect it on the *next* start —
+  a lock on disk whose holder is gone and no stop was requested — and say
+  so then.
+- A process killed outright leaves no trace; supervise the loop in-process
+  for crashes, and use auto-start for reboots.
+- "RUNNING" is ambiguous once instances share a config volume: say *who*
+  holds the lock (pid, and which host), or a worker alive in another
+  container reads as a phantom.
+- Report rather than act when you cannot verify: silently clearing an
+  unverifiable lock risks killing a live worker elsewhere.
+- Strict priority means low-priority work can starve indefinitely. That may
+  be the intended rule — report it rather than silently overriding it.
+
+### Testing module internals without importing ikabot
+
+External modules import the whole ikabot stack, which makes them awkward to
+unit-test. Extract just the functions under test with `ast` and exec them
+into a namespace of stubs:
+
+```python
+tree = ast.parse(open("modules/myModule_v1.0.0.py").read())
+keep = [n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name in WANTED]
+ns = {"os": os, "json": json, "time": time, ...stubs...}
+exec(compile(ast.Module(body=keep, type_ignores=[]), "m", "exec"), ns)
+```
+
+Run the same tests against the **old** code to prove the diagnosis, not
+just the fix. Several times here a test "failure" was the harness missing a
+newly added global — always confirm which side is wrong before believing a
+red result.
+
+---
+
+
+---
+
+## 29. Building Costs, Game Data and Queue Semantics
+
+*Learned building `constructionManager` v2.1.7 → v2.2.8. For locks, worker
+supervision and multi-instance safety see §27–28 — this section is the
+game-data and queue-behaviour half.*
+
+### 29.1 Reading building costs from the ikipedia
+
+The in-game help ("ikipedia") holds the per-level cost table for every
+building. **Request the building's detail view directly:**
+
+```python
+cost_url = (
+    "view=buildingDetail&buildingId={bid}&helpId=1"
+    "&backgroundView=city&currentCityId={cid}"
+    "&templateView=buildingDetail&actionRequest={ar}&ajax=1"
+).format(bid=building_id, cid=city["id"], ar=actionRequest)
+html_costs = json.loads(session.post(cost_url), strict=False)[1][1][1]
+```
+
+`helpId=1` is a **constant** for every building — it is not derived from
+`buildingId`.
+
+**Do not scrape the listing page for the building links.** The old approach
+loaded `view=ikipedia&helpId=0` and regexed `class="button_building <slug>"`.
+Those icons are rendered client-side by JS, so the XHR body contains **zero**
+`button_building` matches and the scrape can never succeed, no matter how the
+regex is patched. Use the map below.
+
+**slug → buildingId** (verified against a live account; keys lowercased
+because city JSON uses camelCase like `townHall`):
+
+```
+townhall 0    port 3        academy 4      shipyard 5     barracks 6
+warehouse 7   wall 8        tavern 9       museum 10      palace 11
+embassy 12    branchoffice 13              workshop 15    safehouse 16
+palacecolony 17             forester 18    stonemason 19  glassblowing 20
+winegrower 21 alchemist 22  carpentering 23              architect 24
+optician 25   vineyard 26   fireworker 27  temple 28      dump 29
+piratefortress 30           blackmarket 31 marinechartarchive 32
+dockyard 33   shrineofolympus 34          chronosforge 35
+```
+
+IDs **1, 2 and 14 return HTTP 500 — they do not exist.** `forester` (18) is
+**absent from the ikipedia grid** but its detail page works when requested
+directly; it was found by probing the gaps. When probing by hand, note that a
+failed request leaves the previous panel in place, so a stale panel reads as a
+false positive — clear the network log per call.
+
+### 29.2 Cost table columns are identified by image hash, not filename
+
+Header cells carry no text identifier at all:
+
+```html
+<th class="costs"><img src="//gf2.geo.gfsrv.net/cdn19/c3527b2f694fb882563c04df6d8972.png"></th>
+```
+
+No `alt`, no `title`, and the filename is an opaque MD5. Data rows are equally
+generic — every cost cell is just `<td class="costs">`. Reconstruct the full
+hash from the CDN path (2-char `cdnXX` prefix + 30-char filename = 32-char MD5)
+and match it against `config.material_img_hash`:
+
+```python
+th_srcs = re.findall(r'<th class="costs"><img src="(.*?)"', html_costs)
+for src in th_srcs[:-1]:          # last <th class="costs"> is the time icon
+    m = re.search(r'/cdn([0-9a-f]{2})/([0-9a-f]+)\.png', src, re.IGNORECASE)
+    idx = material_img_hash.index(m.group(1) + m.group(2)) if m else -1
+```
+
+`material_img_hash` is ordered `materials_names_tec` = wood, wine, marble,
+glass(=crystal), sulfur. **Never assume column position** — a building only
+renders columns for resources it actually costs, so a barracks table is not a
+prefix of a town hall table.
+
+### 29.3 City slot data (`getCity`)
+
+`getCity()` post-processes each entry of `city["position"]`:
+
+- `position["position"]` — the slot index, added by ikabot (safe to read)
+- `position["isBusy"]` — True when the raw building string contained
+  `constructionSite`; the suffix is then stripped, so `building` stays the
+  plain slug
+- empty slots become `building == "empty"`, `name == "empty"`
+- `position["canUpgrade"]` — **the game's own gate.** False means the POST
+  will be refused (citizens, wine/happiness, or its resource check). Check it
+  before spending a request.
+- a busy slot carries `completed` (unix timestamp)
+
+**One build per city at a time.** If any slot is busy, a build POST for a
+different slot is refused — check for a busy slot first.
+
+### 29.4 Distinguish transient failure from permanent absence
+
+The worst bug in this module: a cost helper returned `{}` both when a building
+genuinely had no data **and** when the lookup failed (request error, unexpected
+response, parse error). The caller treated both as "no data" and cancelled the
+queued row. One network blip permanently killed queued work — and the next tick
+did the same to the next row, so a city's queue drained into `skipped` while
+other cities kept running. The symptom reported was "the scheduler is on but
+some cities never build".
+
+**Rule: a helper must let callers tell "nothing there" from "I could not
+look".** Return `None` for a failed lookup and `{}` for a genuine absence (or
+raise). Retry the first; only cancel on the second.
+
+The same discipline applies to actions:
+
+- a POST that fails to *send* — retry; do not cancel. Re-check state on the
+  next tick instead (it can adopt the action if it did land, so no double-fire).
+- an action that does not *appear* to have started — that is also what a slow
+  server looks like. Retry a bounded number of times before cancelling.
+- give the user a bulk **"retry cancelled items"** action. Anything
+  auto-cancelled is otherwise unrecoverable, and re-entering it by hand is the
+  thing they will ask for next.
+
+### 29.5 Long-running queues must reconcile with manual play
+
+The user still plays the game by hand. A queue that stores one row per level
+and executes each as "do one upgrade" will overshoot: build two levels
+manually, and the queue's remaining rows push the building **past** the
+requested target. Before acting, drop queued items the live city has already
+reached, so the next item is always current + 1 — that also keeps cost lookups
+and shipped amounts correct. Mark items whose slot now holds a *different*
+building as skipped-with-a-note rather than deleting them silently.
+
+### 29.6 Prompt and table gotchas
+
+- **`read()` re-asks silently on out-of-range input.** It erases the line and
+  recurses, printing nothing. A user typing a value your `min=`/`max=` rejects
+  sees the prompt blink and concludes the module is broken. State the accepted
+  range in the prompt text, and accept a sentinel for "no change" rather than
+  refusing it (e.g. allow the current level to mean *skip this one*).
+- `read()` returns an `int` for digit input and the raw `str` for anything in
+  `additionalValues`; `additionalValues` is matched **before** digit
+  validation, and matching is exact — include every case variant you accept.
+- **`getDateTime()` returns `YYYY-mm-dd_HH-MM-SS`**, so the common
+  `getDateTime(ts)[8:]` is **11 characters** (`dd_HH-MM-SS`). Size table
+  columns accordingly.
+- Collapse repetitive rows in list views. A build-to-level request stores one
+  row per level; showing `5 → 10` on one line instead of six rows cut a sample
+  queue from 52 lines to 28. Keep a detail toggle rather than deleting the
+  verbose view.
+- When a scheduler defers work, **write the reason where the user will see
+  it.** "Pending with no ETA" and no explanation is indistinguishable from a
+  broken scheduler. Prefix worker-written notes (e.g. `waiting: `) so they can
+  be replaced and cleared without ever overwriting a note the user typed, and
+  only rewrite when the text changes so a long wait does not churn the file.
+
+---
+
+*Last updated: 2026-09-06. Reflects ikabot 7.4.5 / mod v1.7.7.*

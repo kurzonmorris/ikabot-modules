@@ -13,7 +13,10 @@ from ikabot.config import city_url, island_url, materials_names_english, miracle
 from ikabot.helpers.botComm import sendToBot, telegramDataIsValid
 from ikabot.helpers.getJson import getIsland
 from ikabot.helpers.gui import banner, enter
-from ikabot.helpers.pedirInfo import chooseCity, read
+from ikabot.helpers.pedirInfo import chooseCity, getIdsOfCities, read
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, prompt_use_saved, offer_autostart,
+)
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import getDateTime, wait
@@ -39,30 +42,74 @@ def inactivePlayersRadiusMonitor(session, event, stdin_fd, predetermined_input):
     config.predetermined_input = predetermined_input
 
     try:
-        banner()
-        print("From which city should the inactive-player scan start?")
-        start_city = chooseCity(session)
+        _MODULE = "inactivePlayersRadiusMonitor"
+        start_city = None
 
-        banner()
-        print("Choose the radius to scan around the selected city (0-100).")
-        radius = int(read(min=0, max=100, digit=True, default=15))
+        saved = load_prefs(session, _MODULE)
+        use_saved = False
+        if saved:
+            try:
+                radius = int(saved["radius"]); assert 0 <= radius <= 100
+                interval_hours = int(saved["interval_hours"]); assert interval_hours >= 1
+                luxury_filter = int(saved["luxury_filter"]); assert 0 <= luxury_filter <= 4
+                send_to_telegram = bool(saved["send_to_telegram"])
+                # Resolve the saved city id against the account as it is now —
+                # a city that has been lost must not be replayed blindly.
+                _ids, _cities = getIdsOfCities(session)
+                saved_id = str(saved["city_id"])
+                assert saved_id in _cities, "saved city is gone"
+                start_city = _cities[saved_id]
+                use_saved = prompt_use_saved(session, _MODULE, [
+                    "Centre:   {}".format(start_city["cityName"]),
+                    "Radius:   {}".format(radius),
+                    "Interval: {} hour(s)".format(interval_hours),
+                    "Luxury:   {}".format(["any", "wine", "marble", "crystal", "sulfur"][luxury_filter]),
+                    "Telegram: " + ("yes" if send_to_telegram else "no"),
+                ])
+            except Exception:
+                use_saved = False
+                start_city = None
 
-        banner()
-        print("How often should the scan run in hours? (minimum is 1, default is 1)")
-        interval_hours = int(read(min=1, digit=True, default=1))
+        if config.autostart_active and not use_saved:
+            sendToBot(session, "{}: saved settings unusable, auto-start aborted.".format(_MODULE))
+            event.set()
+            return
 
-        banner()
-        print("Select luxury resource filter:")
-        print("(0) Any luxury resource")
-        print("(1) Wine")
-        print("(2) Marble")
-        print("(3) Crystal")
-        print("(4) Sulfur")
-        luxury_filter = int(read(min=0, max=4, digit=True, default=0))
+        if not use_saved:
+            banner()
+            print("From which city should the inactive-player scan start?")
+            start_city = chooseCity(session)
 
-        banner()
-        print("Do you want to send each scan result to Telegram? (Y|N)")
-        send_to_telegram = read(values=["y", "Y", "n", "N"], default="n") in ["y", "Y"]
+            banner()
+            print("Choose the radius to scan around the selected city (0-100).")
+            radius = int(read(min=0, max=100, digit=True, default=15))
+
+            banner()
+            print("How often should the scan run in hours? (minimum is 1, default is 1)")
+            interval_hours = int(read(min=1, digit=True, default=1))
+
+            banner()
+            print("Select luxury resource filter:")
+            print("(0) Any luxury resource")
+            print("(1) Wine")
+            print("(2) Marble")
+            print("(3) Crystal")
+            print("(4) Sulfur")
+            luxury_filter = int(read(min=0, max=4, digit=True, default=0))
+
+            banner()
+            print("Do you want to send each scan result to Telegram? (Y|N)")
+            send_to_telegram = read(values=["y", "Y", "n", "N"], default="n") in ["y", "Y"]
+
+            save_prefs(session, _MODULE, {
+                "city_id": str(start_city["id"]),
+                "radius": int(radius),
+                "interval_hours": int(interval_hours),
+                "luxury_filter": int(luxury_filter),
+                "send_to_telegram": bool(send_to_telegram),
+            })
+            offer_autostart(session, _MODULE)
+
         if send_to_telegram and not telegramDataIsValid(session):
             print("Telegram data is not configured. I will continue without Telegram notifications.")
             send_to_telegram = False

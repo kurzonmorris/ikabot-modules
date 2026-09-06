@@ -15,6 +15,7 @@ import json
 import os
 import re
 import time
+import uuid
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -198,8 +199,46 @@ def _decrypt(key: bytes, encrypted_b64: str) -> dict:
     return json.loads(plaintext.decode("utf-8"))
 
 
+def _host_id() -> str:
+    """Return an identifier for this machine *or container*.
+
+    PIDs are only comparable within one PID namespace, so a lock written by a
+    different container must never be judged by whether "that PID" is alive
+    here — under Docker the same PID number is routinely in use by an unrelated
+    process in every container.  Pairing the PID with a host id makes the
+    liveness check apply only where it is meaningful.
+
+    Docker sets the hostname to the container id by default, so this is
+    naturally distinct per container.
+    """
+    global _HOST_ID_CACHE
+    if _HOST_ID_CACHE is None:
+        parts = []
+        try:
+            parts.append(os.uname().nodename)
+        except AttributeError:  # Windows
+            parts.append(os.environ.get("COMPUTERNAME", ""))
+        # Distinguishes containers that were given the same hostname.
+        for path in ("/etc/machine-id", "/proc/sys/kernel/random/boot_id"):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    parts.append(f.read().strip())
+                break
+            except OSError:
+                continue
+        _HOST_ID_CACHE = hashlib.sha256(
+            "|".join(parts).encode("utf-8")).hexdigest()[:16]
+    return _HOST_ID_CACHE
+
+
+_HOST_ID_CACHE = None
+
+
 def _pid_alive(pid: int) -> bool:
-    """Return True if a process with the given PID is currently running."""
+    """Return True if a process with the given PID is currently running.
+
+    Only meaningful for a PID from this machine/container — see _host_id().
+    """
     if pid == os.getpid():
         return True
     try:
@@ -228,31 +267,83 @@ def _vault_lock_path() -> str:
     return _vault_path() + ".lock"
 
 
+# A vault write is a decrypt/re-encrypt plus one atomic replace — well under a
+# second. A lock older than this was left behind by a process that died, or by
+# a container that was killed, so it is safe to break.
+_LOCK_STALE_SECONDS = 60.0
+
+
+def _lock_is_stale(lock_path: str) -> bool:
+    """Return True if an existing lock file can safely be broken.
+
+    Two independent grounds:
+
+    * the owner is on *this* host and its PID is gone — immediate and certain;
+    * the lock file is older than _LOCK_STALE_SECONDS — the only thing we can
+      check for an owner in another container, whose PIDs we cannot inspect.
+
+    Age comes from the file's mtime rather than a timestamp written inside it,
+    so a lock left by an older ikabot (which wrote a bare PID) is handled too.
+    """
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+    except FileNotFoundError:
+        return False  # vanished — the retry loop will just try to create it
+    except OSError:
+        raw = ""
+
+    owner = None
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                owner = parsed
+        except ValueError:
+            # Older format: a bare PID, with no host recorded. Cannot be
+            # attributed to a host, so it is subject to the age rule only.
+            pass
+
+    if owner and owner.get("host") == _host_id():
+        try:
+            if not _pid_alive(int(owner["pid"])):
+                return True
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    try:
+        return (time.time() - os.path.getmtime(lock_path)) > _LOCK_STALE_SECONDS
+    except OSError:
+        return False
+
+
 def _acquire_vault_lock(timeout: float = 15.0) -> None:
     """Acquire an exclusive write-lock on the vault file.
 
-    Writes the current PID into the lock file so stale locks (left by
-    crashed processes) are detected and removed automatically.
+    Records the owning host *and* PID, so a lock held by a live process in
+    another container is never mistaken for a stale one left by a dead process
+    here — see _host_id().
     """
     lock_path = _vault_lock_path()
     deadline = time.monotonic() + timeout
+    token = json.dumps(
+        {"host": _host_id(), "pid": os.getpid(), "ts": int(time.time())}
+    ).encode("utf-8")
     while time.monotonic() < deadline:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
-                os.write(fd, str(os.getpid()).encode())
+                os.write(fd, token)
             finally:
                 os.close(fd)
             return
         except FileExistsError:
-            try:
-                with open(lock_path, "r") as f:
-                    pid_str = f.read().strip()
-                if pid_str and not _pid_alive(int(pid_str)):
+            if _lock_is_stale(lock_path):
+                try:
                     os.unlink(lock_path)
-                    continue
-            except (OSError, ValueError):
-                pass
+                except OSError:
+                    pass
+                continue
             time.sleep(0.05)
     raise TimeoutError(f"Could not acquire vault lock: {lock_path}")
 
@@ -262,6 +353,34 @@ def _release_vault_lock() -> None:
         os.unlink(_vault_lock_path())
     except FileNotFoundError:
         pass
+
+
+def _entry_id(entry: dict) -> str:
+    """Return a stable identifier for a vault entry.
+
+    Writes merge into whatever is on disk, so an entry has to be findable by
+    something better than its position — another process may have inserted or
+    removed accounts since this session was opened.
+
+    Accounts created since this change carry an explicit random ``id``.  Older
+    entries have none, so one is derived from the label.  The derivation is
+    deterministic, which is what matters: every process independently arrives
+    at the same id for the same legacy entry.  Mutating a legacy entry stamps
+    the derived value as an explicit ``id`` so it survives a later rename.
+    """
+    existing = entry.get("id")
+    if existing:
+        return existing
+    label = entry.get("label") or ""
+    return "L" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:15]
+
+
+def _find_entry(data: dict, entry_id: str):
+    """Return the index of *entry_id* in *data*, or None if it is gone."""
+    for i, entry in enumerate(data.get("accounts", [])):
+        if _entry_id(entry) == entry_id:
+            return i
+    return None
 
 
 def _atomic_write(path: str, data: dict) -> None:
@@ -357,9 +476,12 @@ class VaultSession:
             "locale": locale,
             "timezone_id": timezone_id,
         }
-        encrypted = _encrypt(self._key, payload)
-        self._data["accounts"].append({"label": label, "encrypted": encrypted})
-        self._save()
+        entry = {
+            "id": uuid.uuid4().hex,
+            "label": label,
+            "encrypted": _encrypt(self._key, payload),
+        }
+        self._mutate(lambda disk: disk["accounts"].append(entry))
 
     def update_tokens(
         self,
@@ -372,16 +494,24 @@ class VaultSession:
         Only fields that are not None are updated; existing values are kept for
         any field passed as None.
         """
-        entries = self._data["accounts"]
-        if index < 0 or index >= len(entries):
+        target = self._entry_id_at(index)
+        if target is None:
             return
-        creds = _decrypt(self._key, entries[index]["encrypted"])
-        if blackbox is not None:
-            creds["blackbox"] = blackbox
-        if lobby_token is not None:
-            creds["lobby_token"] = lobby_token
-        entries[index]["encrypted"] = _encrypt(self._key, creds)
-        self._save()
+
+        def _apply(disk):
+            i = _find_entry(disk, target)
+            if i is None:
+                return  # removed by another process; nothing to refresh
+            entry = disk["accounts"][i]
+            creds = _decrypt(self._key, entry["encrypted"])
+            if blackbox is not None:
+                creds["blackbox"] = blackbox
+            if lobby_token is not None:
+                creds["lobby_token"] = lobby_token
+            entry["encrypted"] = _encrypt(self._key, creds)
+            entry["id"] = target
+
+        self._mutate(_apply)
 
     def get_region(self, index: int) -> tuple:
         """Return (locale, timezone_id) for *index*; either may be None.
@@ -400,58 +530,129 @@ class VaultSession:
         region would contradict the new one — exactly the mismatch that gets
         logins rejected.  Clear it and let the next login mint a fresh token.
         """
-        entries = self._data["accounts"]
-        if index < 0 or index >= len(entries):
+        target = self._entry_id_at(index)
+        if target is None:
             return
-        creds = _decrypt(self._key, entries[index]["encrypted"])
-        changed = (creds.get("locale") != locale
-                   or creds.get("timezone_id") != timezone_id)
-        creds["locale"] = locale
-        creds["timezone_id"] = timezone_id
-        if changed:
-            creds["blackbox"] = None
-        entries[index]["encrypted"] = _encrypt(self._key, creds)
-        self._save()
+
+        def _apply(disk):
+            i = _find_entry(disk, target)
+            if i is None:
+                return
+            entry = disk["accounts"][i]
+            creds = _decrypt(self._key, entry["encrypted"])
+            changed = (creds.get("locale") != locale
+                       or creds.get("timezone_id") != timezone_id)
+            creds["locale"] = locale
+            creds["timezone_id"] = timezone_id
+            if changed:
+                creds["blackbox"] = None
+            entry["encrypted"] = _encrypt(self._key, creds)
+            entry["id"] = target
+
+        self._mutate(_apply)
 
     def rename_account(self, index: int, new_label: str) -> None:
         """Rename the label of account at *index* and save."""
-        entries = self._data["accounts"]
-        if index < 0 or index >= len(entries):
-            raise IndexError(f"No vault account at index {index}.")
-        entries[index]["label"] = new_label
-        self._save()
+        target = self._require_entry_id_at(index)
+
+        def _apply(disk):
+            i = _find_entry(disk, target)
+            if i is None:
+                raise IndexError(
+                    "That account is no longer in the vault "
+                    "(it was removed by another ikabot instance)."
+                )
+            # Stamp the id before the label changes: a legacy entry's id is
+            # derived from its label, so renaming without this would make the
+            # entry unfindable by any process holding the old id.
+            disk["accounts"][i]["id"] = target
+            disk["accounts"][i]["label"] = new_label
+
+        self._mutate(_apply)
 
     def remove_account(self, index: int) -> None:
         """Remove account by index and save."""
-        entries = self._data["accounts"]
-        if index < 0 or index >= len(entries):
-            raise IndexError(f"No vault account at index {index}.")
-        del entries[index]
-        self._save()
+        target = self._require_entry_id_at(index)
+
+        def _apply(disk):
+            i = _find_entry(disk, target)
+            if i is not None:
+                del disk["accounts"][i]
+
+        self._mutate(_apply)
 
     def change_master_password(self, new_master_pw: str) -> None:
         """Re-derive key from new password (same salt), re-encrypt all accounts, save."""
         salt_bytes = bytes.fromhex(self._data["salt"])
         new_key = _derive_key(new_master_pw, salt_bytes)
-        new_accounts = []
-        for entry in self._data["accounts"]:
-            creds = _decrypt(self._key, entry["encrypted"])
-            new_accounts.append({
-                "label": entry["label"],
-                "encrypted": _encrypt(new_key, creds),
-            })
-        self._data["accounts"] = new_accounts
+
+        def _apply(disk):
+            # Re-key whatever is on disk, not the snapshot this session opened:
+            # an account another instance added since must be re-encrypted too,
+            # or it would be unreadable under the new password.
+            for entry in disk["accounts"]:
+                creds = _decrypt(self._key, entry["encrypted"])
+                entry["encrypted"] = _encrypt(new_key, creds)
+
+        self._mutate(_apply)
         self._key = new_key
-        self._save()
 
     # ------------------------------------------------------------------ #
     # Private
     # ------------------------------------------------------------------ #
 
-    def _save(self) -> None:
+    def _entry_id_at(self, index: int):
+        """Return the stable id of the account at *index*, or None if invalid."""
+        entries = self._data["accounts"]
+        if index < 0 or index >= len(entries):
+            return None
+        return _entry_id(entries[index])
+
+    def _require_entry_id_at(self, index: int) -> str:
+        target = self._entry_id_at(index)
+        if target is None:
+            raise IndexError(f"No vault account at index {index}.")
+        return target
+
+    def _read_for_merge(self) -> dict:
+        """Re-read the vault from disk so a write merges instead of clobbering.
+
+        Must be called while holding the vault lock.  Falls back to the
+        in-memory snapshot when the file cannot be read, which is the same
+        behaviour as before this existed.
+        """
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                disk = json.load(f)
+        except (OSError, ValueError):
+            return self._data
+        if not isinstance(disk, dict) or disk.get("version") != _VAULT_VERSION:
+            return self._data
+        if disk.get("salt") != self._data.get("salt"):
+            # A different vault entirely — our key does not belong to it, and
+            # writing would replace someone else's accounts with ours.
+            raise VaultCorruptError(
+                "The vault file has been replaced by a different vault since "
+                "it was opened. Refusing to write over it."
+            )
+        disk.setdefault("accounts", [])
+        return disk
+
+    def _mutate(self, apply_change) -> None:
+        """Apply *apply_change* to the vault, atomically, under the lock.
+
+        The read, the change and the write all happen inside one lock hold, so
+        a concurrent writer cannot have its change silently discarded.  Writing
+        ``self._data`` — a snapshot taken at open_vault() time — would do
+        exactly that, and across containers sharing one data directory it is
+        how a whole account list gets rolled back to an older state.
+        """
         _acquire_vault_lock()
         try:
-            _atomic_write(self._path, self._data)
+            disk = self._read_for_merge()
+            apply_change(disk)
+            _atomic_write(self._path, disk)
+            self._data = disk
         finally:
             _release_vault_lock()
 
@@ -459,6 +660,37 @@ class VaultSession:
 # ---------------------------------------------------------------------------
 # Module-level API
 # ---------------------------------------------------------------------------
+
+def backup_vault(dest_dir: str) -> str:
+    """Copy the encrypted vault to *dest_dir*, timestamped. Returns the path.
+
+    A straight file copy: the backup stays AES-GCM encrypted and is only
+    readable with the same master password, so it is safe to keep anywhere the
+    original would be safe. Restore by copying it back over the vault file.
+    """
+    import shutil
+
+    src = _vault_path()
+    if not os.path.isfile(src):
+        raise FileNotFoundError("No vault to back up.")
+
+    dest_dir = os.path.expanduser(dest_dir.strip())
+    os.makedirs(dest_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = os.path.join(dest_dir, f"vault-backup-{stamp}")
+
+    _acquire_vault_lock()
+    try:
+        shutil.copy2(src, dest)
+    finally:
+        _release_vault_lock()
+
+    try:
+        os.chmod(dest, 0o600)
+    except OSError:
+        pass
+    return dest
+
 
 def vault_exists() -> bool:
     """Return True if an ikabot vault file is present."""

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 from decimal import *
 
 from ikabot import config
@@ -73,7 +74,23 @@ def read(
         
     try:
         if len(config.predetermined_input) != 0:
-            return config.predetermined_input.pop(0)
+            delay = getattr(config, 'sequence_input_delay', 0.0)
+            if delay > 0:
+                time.sleep(delay)
+            val = config.predetermined_input.pop(0)
+            # enter() calls auto-skip during sequence playback without consuming
+            # a token, so any "" tokens in the sequence must not be forwarded to
+            # read() calls that don't accept empty input — skip them transparently.
+            _accepts_empty = (
+                empty is True
+                or (values is not None and "" in values)
+                or (additionalValues is not None and "" in additionalValues)
+            )
+            while val == "" and not _accepts_empty and len(config.predetermined_input) != 0:
+                val = config.predetermined_input.pop(0)
+            if not (val == "" and not _accepts_empty):
+                return val
+            # fell through: only empty tokens left and we don't accept empty — read from stdin
     except Exception:
         _logger.debug("Failed to read predetermined_input", exc_info=True)
     
@@ -90,6 +107,11 @@ def read(
     # call redraw() (which invokes the module's hook if set, otherwise falls
     # back to the ikabot banner) then re-ask the same question.  Retry counter
     # not incremented so this can't time out.
+    # "/menu" at any prompt abandons the current module and returns to the main
+    # menu.  Checked before validation so it works even where the prompt only
+    # accepts digits — the whole point is that it is valid everywhere.
+    check_menu_token(read_input)
+
     if read_input.strip('\n').strip('\r') == _REFRESH_CHAR:
         from ikabot.helpers.gui import redraw
         redraw()
@@ -165,7 +187,7 @@ def chooseCity(session, foreign=False):
             resource_index = str(cities[city_id]["tradegood"])
             resource_abb = resources_abbreviations[resource_index]
             city_name = decodeUnicodeEscape(cities[city_id]["name"])
-            menu_cities += "{: >2}: {}{}{}\n".format(
+            menu_cities += "{: >2}: {}{}{}\ n".format(
                 i, city_name, pad(city_name), resource_abb
             )
         menu_cities = menu_cities[:-1]
@@ -205,7 +227,7 @@ def chooseForeignCity(session):
     )
     html = session.get(url)
     try:
-        islands_json = re.search(r"jsonData = \'(.*?)\';", html).group(1)
+        islands_json = re.search(r"jsonData = \'(.*?)\'", html).group(1)
         islands_json = json.loads(islands_json, strict=False)
         island_id = islands_json["data"][str(x)][str(y)][0]
     except Exception:
@@ -359,7 +381,7 @@ def getShipCapacity(session):
         an integer representing the ship capacity of the user's current city
     """
     html = session.get('view=merchantNavy')
-    data = re.search(r'ajax.Responder, (\[\[[\S\s]*?\]\])\)\;', html).group(1)
+    data = re.search(r'ajax.Responder, (\[\[\S\s]*?\]\])\)\;', html).group(1)
     data = json.loads(data, strict=False)
 
     ship_capacity = data[3][1]['singleTransporterCapacity']

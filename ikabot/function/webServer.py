@@ -332,6 +332,22 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                 )
                 raise e
 
+        # Refuse to start a second server for this account. Without this the
+        # port probe below just walks to the next free port and silently
+        # brings up another live server, so every retry leaves one more
+        # running with no indication that it happened.
+        _mine = os.getpid()
+        for _proc in updateProcessList(session):
+            if _proc.get("action") == "webServer" and _proc.get("pid") != _mine:
+                print(f"{bcolors.WARNING}[!]{bcolors.ENDC} The web server is already running for this account.")
+                print(f"    pid {_proc.get('pid')} — {_proc.get('status', 'running')}")
+                print("")
+                print("Starting another would leave two servers on different ports.")
+                print("Stop the existing one first via (21) Options -> (3) Kill tasks.")
+                enter()
+                event.set()
+                return
+
         # If the port is not provided, prompt the user for it if enabled from the config file
         if config.enable_CustomPort is True:
             while True:
@@ -395,7 +411,14 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
             "\nPress [ENTER] if you want to run the web server now, or CTRL+C to go back to the main menu"
         )
         enter()
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # The documented background-task contract: padre=False, SIGINT
+        # deactivated, per-account file logging, console detached. This file
+        # previously only did the SIGINT part by hand, so the server kept the
+        # shared console (its Flask output printed over the parent's menu,
+        # which is what made a working server look like a failed one) and
+        # session.padre stayed True, leaving session code on its interactive
+        # paths inside a background process.
+        set_child_mode(session)
         session.setStatus(
             f"""running on http://127.0.0.1:{port} {'and '+'http://' + str(local_network_ip) + ':' + port if local_network_ip else ''}"""
         )

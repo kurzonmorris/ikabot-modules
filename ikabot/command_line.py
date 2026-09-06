@@ -29,7 +29,7 @@ from ikabot.function.donationBot import donationBot
 from ikabot.function.dumpWorld import dumpWorld
 from ikabot.function.getStatus import getStatus
 from ikabot.function.importExportCookie import importExportCookie
-from ikabot.function.Research import research
+from ikabot.function.research import research
 from ikabot.function.consolidateResources import consolidateResources
 from ikabot.function.killTasks import killTasks
 from ikabot.function.loginDaily import loginDaily
@@ -48,6 +48,7 @@ from ikabot.function.externalModules import (
     _run_external_module_child,
 )
 from ikabot.function.trainArmy import trainArmy
+from ikabot.function.viewArmy import viewArmy
 from ikabot.function.update import update
 from ikabot.function.vacationMode import vacationMode
 from ikabot.function.webServer import webServer
@@ -60,6 +61,7 @@ from ikabot.helpers.botComm import telegramDataIsValid, notificationDataIsValid
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.process import updateProcessList
+from ikabot.helpers.taskWatchdog import check_for_dead_tasks, write_status
 from ikabot.web.session import *
 from ikabot.function.UpgradeUnits import UpgradeUnits
 from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWorkers
@@ -71,7 +73,7 @@ from ikabot.helpers.modulePrefs import (
 )
 from ikabot.helpers.credentialStore import (
     vault_exists, create_vault, open_vault,
-    get_vault_location, set_vault_location,
+    get_vault_location, set_vault_location, backup_vault,
     VaultWrongPasswordError, VaultCorruptError, VaultVersionError,
 )
 
@@ -101,6 +103,7 @@ def _menu_actions():
         1201: trainArmy,
         1202: stationArmy,
         1203: UpgradeUnits,
+        1204: viewArmy,
         13: shipMovements,
         14: constructBuilding,
         15: update,
@@ -147,6 +150,10 @@ def menu(session, checkUpdate=True):
 
         modules = get_external_modules(session)
         process_list = updateProcessList(session)
+        # A task whose process died used to vanish from this table silently.
+        # Notify once, and export state for external monitors (Docker panel).
+        check_for_dead_tasks(session, process_list)
+        write_status(session, process_list)
         if len(process_list) > 0:
             table = process_list.copy()
             table.insert(
@@ -225,6 +232,9 @@ def menu(session, checkUpdate=True):
                 print(f"({i + 40}) {name}")
         print("(99) Configure external modules")
         print("(100) Refresh")
+        print("")
+        print(f"{bcolors.STONE}Tip: type '{MENU_TOKEN}' at any prompt to come "
+              f"back here. '{MENU_TOKEN} 4' comes back and picks 4.{bcolors.ENDC}")
 
         top_max = 100
         selected = read(min=0, max=top_max, digit=True, empty=True)
@@ -269,7 +279,8 @@ def menu(session, checkUpdate=True):
             print("(1) Train Army")
             print("(2) Send Troops/Ships")
             print("(3) Upgrade Army")
-            selected = read(min=0, max=3, digit=True)
+            print("(4) View Army")
+            selected = read(min=0, max=4, digit=True)
             if selected == 0:
                 continue
             selected += 1200
@@ -361,8 +372,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{mod_name}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{mod_name}' is now running in the background.")
+                time.sleep(0.8)
             continue
 
         if selected == 24 and plugins:
@@ -393,8 +409,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{chosen_plugin.name}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{chosen_plugin.name}' is now running in the background.")
+                time.sleep(0.8)
             continue
 
         if selected == 0:
@@ -431,8 +452,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
+                time.sleep(0.8)
         except KeyboardInterrupt:
             pass
 
@@ -447,6 +473,71 @@ def init():
 # Credential vault helpers
 # ---------------------------------------------------------------------------
 
+def _unattended_vault_password():
+    """Master password for unattended start, or None to prompt.
+
+    Two sources, file first:
+
+      IKABOT_VAULT_PASSWORD_FILE  path to a file whose contents are the password
+      IKABOT_VAULT_PASSWORD       the password itself
+
+    The file form is strongly preferred and is what Docker/Podman secrets
+    provide (`/run/secrets/<name>`). An environment variable is readable by
+    anything that can run `docker inspect`, read /proc/<pid>/environ, or open a
+    crash dump — the file form keeps the secret off the process environment and
+    lets the filesystem restrict who can read it.
+
+    This does not weaken the vault itself: the file stays AES-GCM encrypted
+    with a PBKDF2 key and nothing is written in the clear. What it does change
+    is that anyone who can read the secret can unlock the vault without being
+    at a terminal, which is inherent to starting unattended.
+    """
+    path = os.getenv("IKABOT_VAULT_PASSWORD_FILE")
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                pw = f.read().strip("\r\n")
+            if pw:
+                try:
+                    mode = os.stat(path).st_mode
+                    if not isWindows and (mode & 0o077):
+                        print(f"{bcolors.WARNING}[!]{bcolors.ENDC} {path} is readable by other users; chmod 600 it.")
+                except OSError:
+                    pass
+                return pw
+            print(f"{bcolors.WARNING}[!]{bcolors.ENDC} IKABOT_VAULT_PASSWORD_FILE is empty: {path}")
+        except OSError as exc:
+            print(f"{bcolors.WARNING}[!]{bcolors.ENDC} Could not read IKABOT_VAULT_PASSWORD_FILE: {exc}")
+
+    pw = os.getenv("IKABOT_VAULT_PASSWORD")
+    if pw:
+        return pw.strip("\r\n")
+    return None
+
+
+def _unattended_account_choice(accounts):
+    """Resolve IKABOT_VAULT_ACCOUNT to a vault index, or None.
+
+    Matches the account label case-insensitively, or accepts a 1-based
+    position. With a single stored account and no variable set, that account is
+    chosen automatically — a one-account container needs no configuration.
+    """
+    wanted = (os.getenv("IKABOT_VAULT_ACCOUNT") or "").strip()
+    if not wanted:
+        return accounts[0][0] if len(accounts) == 1 else None
+
+    for idx, label in accounts:
+        if label.strip().lower() == wanted.lower():
+            return idx
+    if wanted.isdigit():
+        pos = int(wanted)
+        if 1 <= pos <= len(accounts):
+            return accounts[pos - 1][0]
+
+    print(f"{bcolors.WARNING}[!]{bcolors.ENDC} IKABOT_VAULT_ACCOUNT={wanted!r} matched no stored account.")
+    return None
+
+
 def _prompt_vault_login():
     """Prompt for master password, show account list, return (creds, vault_session, index).
 
@@ -455,6 +546,29 @@ def _prompt_vault_login():
     """
     MAX_ATTEMPTS = 3
     vault_session = None
+
+    # Unattended start (Docker): unlock from a secret without a terminal.
+    unattended_pw = _unattended_vault_password()
+    if unattended_pw:
+        try:
+            vs = open_vault(unattended_pw)
+            if vs.verify_password():
+                accounts = vs.list_accounts()
+                if accounts:
+                    idx = _unattended_account_choice(accounts)
+                    if idx is not None:
+                        label = dict(accounts).get(idx, idx)
+                        print(f"Unlocking vault unattended; using account '{label}'.")
+                        return vs.get_credentials(idx), vs, idx
+                    print("Set IKABOT_VAULT_ACCOUNT to pick one; falling back to prompting.")
+                else:
+                    print("Vault is empty; falling back to manual login.")
+            else:
+                print(f"{bcolors.WARNING}[!]{bcolors.ENDC} Unattended vault password was rejected.")
+        except (VaultWrongPasswordError, VaultCorruptError, VaultVersionError) as exc:
+            print(f"{bcolors.WARNING}[!]{bcolors.ENDC} Unattended vault unlock failed: {exc}")
+        except Exception as exc:
+            print(f"{bcolors.WARNING}[!]{bcolors.ENDC} Unattended vault unlock error: {exc}")
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         master_pw = getpass.getpass(
@@ -778,8 +892,9 @@ def _manage_vault_menu(session):
         print("(5) Rename an account")
         print("(6) Change vault location")
         print("(7) Change an account's region")
+        print("(8) Back up the vault")
 
-        choice = read(min=0, max=7, digit=True)
+        choice = read(min=0, max=8, digit=True)
         if choice == 0:
             return
         elif choice == 1:
@@ -796,6 +911,8 @@ def _manage_vault_menu(session):
             _vault_change_location()
         elif choice == 7:
             _vault_change_region()
+        elif choice == 8:
+            _vault_backup()
 
 
 def _vault_list_accounts():
@@ -947,6 +1064,30 @@ def _vault_change_region():
     enter()
 
 
+def _vault_backup():
+    """Copy the encrypted vault somewhere safe."""
+    if not vault_exists():
+        print("No vault found.")
+        enter()
+        return
+    print("\nThe backup is a copy of the encrypted vault file. It stays")
+    print("encrypted and still needs the master password, so it is safe")
+    print("wherever the original would be. Restore by copying it back over")
+    print("the vault file.\n")
+    print(f"Current vault location: {get_vault_location()}")
+    dest = read(msg="Backup directory (empty to cancel): ", empty=True).strip()
+    if not dest:
+        return
+    try:
+        path = backup_vault(dest)
+    except Exception as exc:
+        print(f"Backup failed: {exc}")
+        enter()
+        return
+    print(f"\nVault backed up to:\n  {path}")
+    enter()
+
+
 def _vault_change_master_password():
     if not vault_exists():
         print("No vault found.")
@@ -1010,7 +1151,16 @@ def start():
 
     creds, vault_session, acct_idx = None, None, None
     if vault_exists():
-        creds, vault_session, acct_idx = _prompt_vault_login()
+        # A front-end that prefixes every command with "/menu" will sooner or
+        # later send one while the vault is still asking for its password.
+        # There is no menu to return to yet, so treat it as "start over" —
+        # anything else would end the process before ikabot has even logged in.
+        while True:
+            try:
+                creds, vault_session, acct_idx = _prompt_vault_login()
+                break
+            except ReturnToMenu:
+                continue
 
     if creds is not None:
         session = Session(
@@ -1057,8 +1207,19 @@ def start():
         pass
 
     try:
-        menu(session)
-        clear()
+        # "/menu" typed at any prompt raises ReturnToMenu, which unwinds
+        # whatever sub-menu or module dialogue was in progress.  Re-entering
+        # menu() is the same thing as restarting its loop, and it works from
+        # arbitrary depth without every caller having to know about it.
+        checkUpdate = True
+        while True:
+            try:
+                menu(session, checkUpdate=checkUpdate)
+                clear()
+                break
+            except ReturnToMenu:
+                checkUpdate = False
+                continue
     except KeyboardInterrupt:
         clear()
         raise

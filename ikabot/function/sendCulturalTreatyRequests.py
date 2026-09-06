@@ -46,9 +46,14 @@ def _update_task_status(session, status):
                 }
             )
 
-        session_data = session.getSessionData()
-        session_data["processList"] = process_list
-        session.setSessionData(session_data)
+        # Atomic: this writes processList from a background task, so a plain
+        # read-edit-write races with the menu's updateProcessList() and can
+        # drop other tasks' entries.
+        def _set_process_list(session_data):
+            session_data["processList"] = process_list
+            return session_data
+
+        session.mutateSessionData(_set_process_list)
     except Exception:
         pass
 

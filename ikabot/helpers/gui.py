@@ -17,6 +17,77 @@ _child_mode = False
 _redraw_hook = None
 
 
+# ---------------------------------------------------------------------------
+# "Return to the main menu" escape token
+# ---------------------------------------------------------------------------
+#
+# Typing this at ANY ikabot prompt abandons whatever is in progress and lands
+# back on the main menu.  It exists so a script or a web front-end driving
+# ikabot over stdin has a reliable way to reach a known starting point without
+# knowing where the session currently is.
+#
+# Ctrl+C cannot serve that purpose: it is a terminal signal, not a character,
+# so it cannot be written into a pipe, and at the top level it exits ikabot
+# rather than returning to the menu.
+#
+# Anything after the token is queued as input for the menu, so one line can
+# both reset and drive:  "/menu 5 2 1".
+MENU_TOKEN = "/menu"
+
+
+class ReturnToMenu(KeyboardInterrupt):
+    """Raised at any prompt to abandon the current module and show the menu.
+
+    Deliberately a subclass of KeyboardInterrupt, for two reasons:
+
+    * KeyboardInterrupt derives from BaseException, so the broad
+      ``except Exception`` handlers scattered through the modules do not
+      swallow it;
+    * nearly every module already ends with ``except KeyboardInterrupt:
+      event.set(); return``, which is exactly the unwind we want — so this
+      works in modules that were written years before it existed.
+    """
+
+
+def queue_menu_input(tokens):
+    """Replace the pending scripted input with *tokens*.
+
+    Digit strings become ints, matching how command-line arguments are parsed
+    in start(), because the menu compares its selection numerically.
+    """
+    parsed = []
+    for token in tokens:
+        try:
+            parsed.append(int(token))
+        except ValueError:
+            parsed.append(token)
+    try:
+        # config.predetermined_input is a multiprocessing manager list shared
+        # with child processes, so mutate it in place rather than rebinding.
+        while len(config.predetermined_input):
+            config.predetermined_input.pop()
+        if parsed:
+            config.predetermined_input.extend(parsed)
+    except Exception:
+        pass
+    return parsed
+
+
+def check_menu_token(raw):
+    """Raise ReturnToMenu if *raw* is the escape token. Otherwise return False.
+
+    Matches only a line that *starts* with the token as a whole word, so a
+    proxy URL or a file path that merely contains "/menu" is left alone.
+    """
+    if raw is None:
+        return False
+    parts = str(raw).strip().split()
+    if not parts or parts[0] != MENU_TOKEN:
+        return False
+    queue_menu_input(parts[1:])
+    raise ReturnToMenu()
+
+
 def set_redraw_hook(fn):
     """Register a function that redraws the current module's UI.
 
@@ -65,9 +136,12 @@ def enter():
     except Exception:
         pass
     if isWindows:
-        input("\n[Enter]")  # TODO improve this
+        typed = input("\n[Enter]")  # TODO improve this
     else:
-        getpass.getpass("\n[Enter]")
+        typed = getpass.getpass("\n[Enter]")
+    # An [Enter] prompt is one of the easiest places for a script to get stuck,
+    # so the escape token has to work here too.
+    check_menu_token(typed)
 
 
 def clear():

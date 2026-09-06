@@ -1,6 +1,9 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import base64
+import json
+from contextlib import contextmanager
 import re
 import sys
 import time
@@ -16,12 +19,97 @@ from ikabot.helpers.pedirInfo import *
 from ikabot.helpers.process import run, set_child_mode
 from ikabot.helpers.varios import timeStringToSec, wait
 from ikabot.helpers.apiComm import getPiratesCaptchaSolution
+from ikabot.helpers.logging import getLogger
 
+logger = getLogger(__name__)
+
+_LOCAL_IMPORT_ERROR = None
 try:
     from ikabot.helpers.piratesDecaptcha import get_captcha_string
     LOCAL_DECAPTCHA = True
-except Exception:
-    LOCAL_DECAPTCHA = False
+except Exception as _exc:          # keep the reason: "not installed" and
+    LOCAL_DECAPTCHA = False        # "weights missing" need different fixes
+    _LOCAL_IMPORT_ERROR = _exc
+
+
+class PirateStageError(Exception):
+    """An error tagged with the pirate stage it came from.
+
+    Auto-Pirate used to report every failure as "Error in:" with an empty
+    subject and a bare traceback, so a notification told you something broke
+    but never what. Wrapping each step names the stage in the message.
+    """
+
+    def __init__(self, stage, cause):
+        self.stage = stage
+        self.cause = cause
+        super().__init__("{}: {}: {}".format(stage, type(cause).__name__, cause))
+
+
+@contextmanager
+def _stage(name):
+    """Tag anything raised inside with the stage name."""
+    try:
+        yield
+    except PirateStageError:
+        raise                      # keep the innermost stage, do not re-tag
+    except Exception as exc:
+        raise PirateStageError(name, exc) from exc
+
+
+def _report_failure(session, exc, fatal=True):
+    """Notify about a pirate failure, naming the stage that broke."""
+    if isinstance(exc, PirateStageError):
+        stage = exc.stage
+        cause = "{}: {}".format(type(exc.cause).__name__, exc.cause)
+    else:
+        stage = "an unrecorded step"
+        cause = "{}: {}".format(type(exc).__name__, exc)
+
+    headline = "Auto-Pirate stopped." if fatal else "Auto-Pirate hit a problem."
+    msg = "{}\n\nFailed while: {}\nCause: {}\n\n{}".format(
+        headline, stage, cause, traceback.format_exc()
+    )
+    logger.error("autoPirate failed during %s: %s", stage, cause)
+    sendToBot(session, msg)
+    return msg
+
+
+def extract_captcha_image(html):
+    """Extract the pirates captcha PNG bytes from the capture response.
+
+    The captcha image is now embedded by the game as a base64 data URI
+    (js_captchaImage.src) inside the JSON response of the capture request,
+    instead of being served on a separate createCaptcha endpoint.
+    """
+    if not isinstance(html, str):
+        return None
+
+    # Prefer parsing the JSON response, which unescapes everything for us.
+    try:
+        data = json.loads(html)
+    except Exception:
+        data = None
+    if isinstance(data, list):
+        for command, payload in data:
+            if command == "updateTemplateData" and isinstance(payload, dict):
+                image = payload.get("js_captchaImage")
+                if isinstance(image, dict) and isinstance(image.get("src"), str):
+                    match = re.search(
+                        r"data:image/png;base64,([A-Za-z0-9+/=]+)", image["src"]
+                    )
+                    if match:
+                        return base64.b64decode(match.group(1))
+
+    # Fallback: parse the base64 straight out of the raw (JSON-escaped) html.
+    match = re.search(r"base64,([A-Za-z0-9+/=\\\\]+)", html)
+    if match:
+        b64 = match.group(1).replace("\\/", "/").replace("\n", "").replace("\r", "")
+        try:
+            return base64.b64decode(b64)
+        except Exception:
+            return None
+    return None
 
 
 def autoPirate(session, event, stdin_fd, predetermined_input):
@@ -172,6 +260,14 @@ def autoPirate(session, event, stdin_fd, predetermined_input):
     set_child_mode(session)
     event.set()
 
+    # Take the ~2s solver load off the critical path of the first captcha.
+    if LOCAL_DECAPTCHA:
+        try:
+            from ikabot.helpers.piratesDecaptcha import warm_up
+            warm_up()
+        except Exception:
+            pass
+
     try:
         while pirateCount > 0:
             session.setStatus("Pirating for " + str(pirateCount) + " more runs")
@@ -184,24 +280,28 @@ def autoPirate(session, event, stdin_fd, predetermined_input):
                 else:
                     pirateMissionChoice = pirateMissionDayChoice
             pirateCount -= 1
-            piracyCities = getPiracyCities(
-                session, pirateMissionChoice
-            )  # this is done again inside the loop in case the user destroys / creates another pirate fortress while this module is running
+            with _stage("looking for a city with a pirate fortress"):
+                piracyCities = getPiracyCities(
+                    session, pirateMissionChoice
+                )  # this is done again inside the loop in case the user destroys / creates another pirate fortress while this module is running
             if piracyCities == []:
                 raise Exception(
                     "No city with pirate fortress capable of executing selected mission"
                 )
-            html = session.post(
-                city_url + str(piracyCities[0]["id"])
-            )  # this is needed because for some reason you need to look at the town where you are sending a request from in the line below, before you send that request
+            with _stage("opening the city that holds the pirate fortress"):
+                html = session.post(
+                    city_url + str(piracyCities[0]["id"])
+                )  # this is needed because for some reason you need to look at the town where you are sending a request from in the line below, before you send that request
             if (
                 '"showPirateFortressShip":0' in html
             ):  # this is in case the user has manually run a capture run, in that case, there is no need to wait 150secs instead we can check every 5
                 url = "view=pirateFortress&cityId={}&position=17&backgroundView=city&currentCityId={}&actionRequest={}&ajax=1".format(
                     piracyCities[0]["id"], piracyCities[0]["id"], actionRequest
                 )
-                html = session.post(url)
-                wait(getCurrentMissionWaitingTime(html), maxRandomWaitingTime)
+                with _stage("reading the timer of the mission already running"):
+                    html = session.post(url)
+                    wait_for = getCurrentMissionWaitingTime(html)
+                wait(wait_for, maxRandomWaitingTime)
                 pirateCount += 1  # don't count this as an iteration of the loop
                 continue
 
@@ -210,9 +310,12 @@ def autoPirate(session, event, stdin_fd, predetermined_input):
                 piracyCities[0]["id"],
                 actionRequest,
             )
-            html = session.post(url)
+            with _stage("starting the capture mission"):
+                html = session.post(url)
 
-            if "function=createCaptcha" in html:
+            if (
+                "function=createCaptcha" in html or "js_captchaImage" in html
+            ):
                 try:
                     for i in range(20):
                         session.setStatus("Resolving captcha " + str(i) + "/20")
@@ -220,16 +323,31 @@ def autoPirate(session, event, stdin_fd, predetermined_input):
                             msg = "Failed to resolve captcha too many times, autoPirate has been terminated."
                             sendToBot(session, msg)
                             raise Exception("Failed to resolve captcha too many times")
-                        picture = session.get(
-                            "action=Options&function=createCaptcha", fullResponse=True
-                        ).content
-                        captcha = resolveCaptcha(session, picture)
+                        with _stage("fetching the captcha image"):
+                            picture = extract_captcha_image(html)
+                            if picture is None:
+                                logger.warning(
+                                    "Captcha image not embedded in the capture "
+                                    "response; falling back to createCaptcha"
+                                )
+                                picture = session.get(
+                                    "action=Options&function=createCaptcha",
+                                    fullResponse=True,
+                                ).content
+                            if not picture:
+                                raise ValueError(
+                                    "the game returned no captcha image, neither "
+                                    "embedded in the capture response nor from "
+                                    "the createCaptcha endpoint"
+                                )
+                        with _stage("solving the captcha"):
+                            captcha = resolveCaptcha(session, picture)
                         session.setStatus("Got captcha: " + captcha)
                         if captcha == "Error":
                             time.sleep(5)
                             continue
                         session.post(city_url + str(piracyCities[0]["id"]))
-                        params = {
+                        _submit_params = {
                             "action": "PiracyScreen",
                             "function": "capture",
                             "cityId": piracyCities[0]["id"],
@@ -246,30 +364,51 @@ def autoPirate(session, event, stdin_fd, predetermined_input):
                             "actionRequest": actionRequest,
                             "ajax": "1",
                         }
-                        html = session.post(params=params, noIndex=True)
+                        with _stage("submitting the solved captcha"):
+                            html = session.post(params=_submit_params, noIndex=True)
                         if (
                             '"showPirateFortressShip":1' in html
                         ):  # if this is true, then the crew is still in the town, that means that the request didn't succeed
                             time.sleep(5)
                             continue
                         break
-                except Exception:
-                    info = ""
-                    msg = "Error in:\n{}\nCause:\n{}".format(
-                        info, traceback.format_exc()
-                    )
-                    sendToBot(session, msg)
+                except Exception as exc:
+                    _report_failure(session, exc)
                     break
             if autoConvert.lower() == "y":
-                convertCapturePoints(session, piracyCities, convertPerMission)
+                with _stage("converting capture points"):
+                    convertCapturePoints(session, piracyCities, convertPerMission)
             wait(piracyMissionWaitingTime[pirateMissionChoice], maxRandomWaitingTime)
 
-    except Exception:
-        info = ""
-        msg = "Error in:\n{}\nCause:\n{}".format(info, traceback.format_exc())
-        sendToBot(session, msg)
+    except Exception as exc:
+        _report_failure(session, exc)
         event.set()
         return
+
+
+_LOCAL_FALLBACK_WARNED = False
+
+
+def _warn_local_fallback(session, exc):
+    """Report once per run that captchas are going to the remote API.
+
+    Once, not per captcha: this fires inside the solve loop, and a message per
+    attempt would bury everything else. The reason still reaches the log every
+    time.
+    """
+    global _LOCAL_FALLBACK_WARNED
+    reason = "{}: {}".format(type(exc).__name__, exc) if exc else "unknown reason"
+    logger.warning("Local captcha solver unavailable (%s); using the remote API", reason)
+    if _LOCAL_FALLBACK_WARNED:
+        return
+    _LOCAL_FALLBACK_WARNED = True
+    sendToBot(
+        session,
+        "Auto-Pirate: the local captcha solver is unavailable, so captchas are "
+        "being sent to the remote API (slower, and it uses your quota).\n\n"
+        "Reason: {}\n\nThis is reported once per run; see the log for each "
+        "occurrence.".format(reason),
+    )
 
 
 def resolveCaptcha(session, picture):
@@ -279,8 +418,22 @@ def resolveCaptcha(session, picture):
         or session_data["decaptcha"]["name"] == "default"
     ):
         if LOCAL_DECAPTCHA:
-            return get_captcha_string(picture)
-        return getPiratesCaptchaSolution(session, picture)
+            try:
+                return get_captcha_string(picture)
+            except Exception as exc:
+                # Falling back is correct, but say why. A silent fallback hides
+                # a broken local solver behind slower, quota-consuming API
+                # calls, and that was invisible until you looked at timings.
+                _warn_local_fallback(session, exc)
+        else:
+            _warn_local_fallback(session, _LOCAL_IMPORT_ERROR)
+        try:
+            return getPiratesCaptchaSolution(session, picture)
+        except Exception as exc:
+            raise PirateStageError(
+                "solving the captcha with the remote API "
+                "(the local solver was unavailable too)", exc
+            ) from exc
     elif session_data["decaptcha"]["name"] == "custom":
         files = {"upload_file": picture}
         captcha = requests.post(
@@ -401,5 +554,11 @@ def getCurrentMissionWaitingTime(html):
             match
         ), "Couldn't find remaining ongoing mission time, did you run a pirate mission manually?"
         return int(match.group(1))
-    except: # In case we can not find current mission waiting time, just sleep for 10 mins (Not a perfect solution)
+    except Exception as exc:
+        # Falling back to a fixed wait is fine, but say so — silently sleeping
+        # 10 minutes looks identical to the module having hung.
+        logger.warning(
+            "Could not read the ongoing mission timer (%s: %s); waiting 10 minutes instead",
+            type(exc).__name__, exc,
+        )
         return 10 * 60

@@ -331,6 +331,38 @@ Worth knowing:
   when the alts should all behave alike but your main should not.
 - `'` at any prompt takes you back to the hub's menu.
 
+### Scheduler Monitor
+Watches the background workers of your other modules and restarts any that have
+stopped.  Ikabot workers survive most errors on their own, but a crash, a
+closed window or a reboot leaves the queue sitting there doing nothing until
+you notice — this module notices for you.
+
+It can watch:
+- **Construction Manager** — the build worker
+- **Resource Transport Manager** — the shipping scheduler
+- **Auto Recruitment Manager** — the units worker and the ships worker
+  (separately)
+
+Pick which of those to watch and how often to check (1 minute to 24 hours,
+15 minutes by default), then **(s)** to start.  Every time the timer runs out
+it looks at each watched scheduler and, if one is down while it still has work
+queued, starts it again using the settings that scheduler was last given — no
+questions asked.  Then it goes back to waiting.
+
+Worth knowing:
+- A scheduler with nothing to do is left alone.  It only restarts one that has
+  a queue, active schedules or active goals waiting.
+- If you stop a worker yourself, the monitor will start it again on the next
+  check.  Turn that scheduler **off** in the monitor's list if you want it to
+  stay stopped.
+- Notifications (**(m)**) tell you whenever something had to be restarted, so a
+  worker that keeps dying is visible rather than silent.
+- **(r)** runs one check immediately without leaving the menu.
+- Only one monitor runs per account; a second one exits rather than fighting
+  the first over the same workers.
+- Answer **y** to "run this automatically at login" and the monitor comes back
+  up with ikabot, which also covers workers lost to a reboot.
+
 ### Sequence Runner *(work in progress)*
 Record a list of menu inputs (e.g. `16, enter, 5, 1`) and replay them with one
 keypress.  Useful for repeating a fixed startup routine across multiple accounts

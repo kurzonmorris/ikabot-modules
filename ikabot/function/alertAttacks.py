@@ -8,6 +8,9 @@ import traceback
 from ikabot.function.vacationMode import activateVacationMode
 from ikabot.helpers.botComm import *
 from ikabot.helpers.gui import enter
+from ikabot.helpers.modulePrefs import (
+    load_prefs, save_prefs, prompt_use_saved, offer_autostart,
+)
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import daysHoursMinutes
@@ -30,16 +33,39 @@ def alertAttacks(session, event, stdin_fd, predetermined_input):
             return
 
         banner()
+        _MODULE = "alertAttacks"
         default = 20
-        minutes = read(
-            msg=
-                "How often should I search for attacks?(min:3, default: {:d}): ".format(default),
-            min=3,
-            default=default,
-        )
-        # min_units = read(msg=_('Attacks with less than how many units should be ignored? (default: 0): '), digit=True, default=0)
-        print("I will check for attacks every {:d} minutes".format(minutes))
-        enter()
+
+        saved = load_prefs(session, _MODULE)
+        use_saved = False
+        if saved:
+            try:
+                minutes = int(saved["minutes"])
+                assert minutes >= 3
+                use_saved = prompt_use_saved(
+                    session, _MODULE, ["Check every: {:d} minutes".format(minutes)]
+                )
+            except Exception:
+                use_saved = False
+
+        # Auto-start has no terminal, so a bad saved value must not fall
+        # through to the prompt below.
+        if config.autostart_active and not use_saved:
+            sendToBot(session, "{}: saved settings unusable, auto-start aborted.".format(_MODULE))
+            event.set()
+            return
+
+        if not use_saved:
+            minutes = read(
+                msg=
+                    "How often should I search for attacks?(min:3, default: {:d}): ".format(default),
+                min=3,
+                default=default,
+            )
+            save_prefs(session, _MODULE, {"minutes": int(minutes)})
+            print("I will check for attacks every {:d} minutes".format(minutes))
+            offer_autostart(session, _MODULE)
+            enter()
     except KeyboardInterrupt:
         event.set()
         return

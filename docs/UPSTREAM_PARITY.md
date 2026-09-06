@@ -7,9 +7,9 @@ deviation back into a bug.
 
 | | |
 |---|---|
-| **Parity point** | upstream **v7.4.5** |
-| **Fork version** | `IKABOT_MOD_VERSION` **1.7.5** |
-| **Last audited** | 2026-07-31 (commit `ea91dd2`) |
+| **Parity point** | upstream **v7.5.1** |
+| **Fork version at parity** | `IKABOT_MOD_VERSION` **1.8.0** (later bumps are fork-only work) |
+| **Last audited** | 2026-08-19 (upstream `c70a8d1`) |
 | **Scope** | `ikabot/` core only — `modules/` is fork-specific, no upstream counterpart |
 
 > Everything at or below upstream **7.4.0** is the fork's base and is assumed
@@ -36,6 +36,14 @@ our own way, deliberately · **Present** = already in the fork before the audit
 | #417 | Prompt manual blackbox payload before cookie fallback | Present | pre-audit |
 | #418 | Separate API user-agent from manual payload context | **Ported** | 1.7.5 |
 | #419 | Improve lobby fallback flow for blackbox failures | Present | pre-audit |
+| #424 | autoPirate: extract captcha image from capture response | **Ported** | 1.8.0 |
+| — | Local pure-Python pirates decaptcha (+ 6.6 MB weights) | **Ported, reordered** | 1.8.0 |
+| #421 | Improve value formatting in stationArmy | **Ported** | 1.8.0 |
+| #422 | Add view army function | **Ported** | 1.8.0 |
+| #420 | Research improvements (`Research.py` → `research.py`) | **Ported** | 1.8.0 |
+| #407 | Fix queue tracking and phantom tasks in constructionList | **Ported, bug fixed** | 1.8.0 |
+| #387 | Discord webhook notifications | **Equivalent** | pre-existing |
+| nfontan#4 | Size the local decaptcha to the machine | **Ported, adapted** | 1.8.3 |
 
 ---
 
@@ -163,6 +171,109 @@ Not part of any single PR, but latent bugs fixed while comparing:
 We **keep** an extra `"Unsupported user_agent"` retry that upstream lacks.
 Harmless and defensive; leave it.
 
+### Local pure-Python decaptcha  *(ported, ordering corrected)*
+
+`helpers/piratesDecaptchaPure.py` + `assets/local_purepython_decaptcha_weights.bin`
+(6.6 MB). Stdlib only — no onnxruntime, no numpy — so pirate captchas still
+solve on Docker/ARM and minimal images.
+
+⚠️ **Upstream tries the pure solver first and ONNX second. We reversed that.**
+The pure solver returns a string rather than raising, so upstream's ONNX branch
+below it was unreachable whenever the pure module imported — which is always,
+since it is stdlib-only and ships with its weights. Every captcha was silently
+routed through the pure path, which measured **~9.6 s per image** here versus
+milliseconds for ONNX. `get_captcha_string()` now tries ONNX first and falls
+back to pure, keeping upstream's benefit without the slowdown.
+
+The weights are added explicitly to `installer/ikabot.spec` rather than relying
+on `collect_all` heuristics: if the file goes missing the solver silently falls
+back with no error, which is very hard to diagnose.
+
+`config.USE_MULTIPROCESSING_DECAPTCHA` (default `True`) came with it.
+
+### #407 — constructionList queue tracking  *(ported, bug fixed)*
+
+The good parts are kept: `simulated_resources` deducts as you confirm each
+building so the queue is checked against what will actually remain;
+`confirmed_buildings` stops a cancelled building from creating a phantom
+background task; declining one building now skips just that one (`-2` sentinel)
+instead of cancelling the whole queue.
+
+⚠️ **Its display arithmetic was wrong and we fixed it.** The commit claims to
+"subtract the +1 internal resource buffer", but no such buffer exists — costs
+come from `math.ceil(real_cost)`, which adds between 0 and 1, never exactly 1.
+Subtracting 1 understated every requirement, and `if missing[i] <= 1: continue`
+hid a genuine one-unit shortfall while still printing an empty "Missing:"
+header. We display the real values.
+
+Note the `-1` branch in the caller is now dead (`getResourcesNeeded` only
+returns `-2`), left in place as harmless.
+
+### #422 viewArmy  *(ported)*
+
+View-only, like `getStatus`: no `set_child_mode()` and no `session.logout()`,
+which is correct — logging out from a child would invalidate the parent's
+session. Wired to Military actions → (4).
+
+### #420 research  *(ported, file renamed)*
+
+Upstream renamed `Research.py` → `research.py`. Done with `git rm` + add so a
+case-insensitive checkout (Windows) can never end up with both. Our old file
+was byte-identical to upstream's, so nothing fork-specific was lost.
+
+### #387 Discord webhooks  *(equivalent — do NOT port)*
+
+Upstream added `sendToDiscord`/`discordDataIsValid` to `botComm.py`. **Our fork
+already has a superset**: `helpers/discordComm.py` plus `helpers/ntfyComm.py`,
+a `sendToBot()` that fans out to Telegram + Discord + ntfy, and a unified
+setup menu (`function/notificationSetup.py`). Porting would duplicate those
+names and collide with `discordComm.py`.
+
+### #421 stationArmy  *(ported)*
+
+Widens the value regex so localised numbers (spaces, `&nbsp;`, periods) parse.
+Safe because `calculateTotals` guards with `.isdigit()` and treats non-numeric
+cells as 0. One latent fragility, pre-existing and not introduced here: the
+units/ships split is a hardcoded `i <= 14` index into a list that is now longer
+than before. Worth watching if totals ever look wrong.
+
+### nfontan#4 — machine-wide decaptcha sizing  *(ported, adapted for containers)*
+
+From `nfontan/ikabot` PR #4, not upstream. Replaces the fixed 8-worker pool
+per task (~1.4 GB per account) with a machine-wide worker budget: workers are
+claimed as `flock` "seats", weights ship as `array.array('d')` with zero-copy
+memoryviews (152 MB → 37.5 MB per worker), and the pool is built lazily and
+dropped after 120 s idle. Their measurements: one solve 13.2 s serial → 4.96 s
+on 8 workers; six concurrent accounts 10.93 s → 3.88 s each. Measured here, a
+single solve went 9.6 s → 4.0 s.
+
+Two changes were required for containers, both verified by test:
+
+⚠️ **It was not cgroup-aware.** Worker count came from `os.cpu_count()` and
+headroom from `/proc/meminfo`, both of which report the **host** inside a
+container. A container capped at 300 MB on a 15 GB host would plan a full pool
+and be OOM-killed. Added `_cgroup_available_mb()` and `_cgroup_cpu_limit()`
+(v2 `memory.max` / `cpu.max` and the v1 equivalents), plus `_usable_cores()`
+which also honours the CPU affinity mask. `_available_mb()` now takes the
+smaller of host and cgroup. A 300 MB container plans **zero** workers and
+solves serially.
+
+⚠️ **The seat directory was `/tmp`, which is per-container.** With one
+container per account each instance sees an empty seat dir and sizes itself to
+the whole machine — the coordination silently does nothing, which is the
+contention the PR exists to prevent. Demonstrated: 6 instances on 4 cores with
+per-container dirs → all 6 claim seats; with a shared dir → 4 seats, 2 serial.
+Default moved to `$IKABOT_DATA_DIR/decaptcha_seats` (already the shared volume
+in a multi-account Docker setup), overridable with `IKABOT_DECAPTCHA_SEAT_DIR`.
+
+Public API is unchanged, so our ONNX-first ordering and `warm_up()` are
+unaffected — the idle timer only starts after a solve, so warm-up is not
+undone. Their 13 tests pass as-is; `tests/ikabot/helpers/` also now holds our
+container-limit tests and their two real-captcha fixtures, which verify the
+solver still decodes `QKB24JC` and `DEVL5KA` correctly.
+
+Brought `config.DECAPTCHA_TIMING_LOG` with it.
+
 ---
 
 ## 3. Fork-only features that must survive future ports
@@ -208,6 +319,18 @@ If a port would remove or bypass any of these, stop and flag it:
 ---
 
 ## 5. Changelog
+
+### 2026-08-22 — nfontan#4 decaptcha sizing (mod 1.8.3)
+Ported the machine-wide worker budget, adapted for containers: cgroup-aware
+CPU/memory limits and a shared seat directory. Two container bugs in the
+original fixed; see section 2.
+
+### 2026-08-19 — parity with 7.5.1 (mod 1.8.0)
+Audited 7.4.5 → 7.5.1 (8 changes) by diffing a local clone. Ported #424, #421,
+#422, #420, #407 and the pure-Python decaptcha; skipped #387 (fork superset).
+Fixed two defects in upstream's own code: #407's phantom "+1 buffer" display
+arithmetic, and the decaptcha solver ordering that made ONNX unreachable.
+`IKABOT_VERSION` 7.4.5 -> 7.5.1.
 
 ### 2026-07-31 — parity with 7.4.5 (`ea91dd2`, mod 1.7.5)
 Audited all 12 PRs in 7.4.0 → 7.4.5. Ported #406, #408, #411, #418 plus two

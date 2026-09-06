@@ -31,8 +31,22 @@
 
 ### Devices
 - **Primary device:** Steam Deck (SteamOS, desktop mode) — and soon a Steam Machine running the same.
-- **Server:** Unraid, with a Windows VM. Most actual code usage (running ikabot, testing modules, etc.) happens inside this Windows VM.
-- **Development instructions** should default to **Windows** (paths like `%APPDATA%`, `.bat` scripts, PowerShell, Windows path separators) unless Linux/SteamOS is explicitly requested.
+- **Server:** Unraid. Historically a Windows VM; **now also a Linux Docker
+  container**, which is where much of the running happens.
+- **Both must keep working.** Code and instructions have to be correct on
+  Windows *and* in the Linux container — do not "fix" one by breaking the
+  other.
+- **Development instructions** should still default to **Windows** (paths like `%APPDATA%`, `.bat` scripts, PowerShell, Windows path separators) unless Linux/SteamOS/Docker is explicitly requested.
+
+### Docker specifics
+- The appdata volume is mounted at **`/config`**, and `HOME=/config`, so
+  anything a module writes to `~` lands there and persists. Confirm with
+  `echo $HOME` before assuming.
+- Modules live at `/config/modules/`, so data written beside a module also
+  persists — but see §27 of the ikabot reference: prefer `IKABOT_DATA_DIR`.
+- **Many instances run at once** (around 24 accounts). Assume concurrency:
+  per-account file names, no shared mutable files, and pid checks that are
+  namespace-aware. See §27 of the ikabot reference.
 
 ### OS context when giving instructions
 - If explaining how to run or install something: assume the user is on the **Windows VM** unless told otherwise.
@@ -48,7 +62,7 @@
 - Version numbers go **before the file extension**, separated by `_v`:
   ```
   resourceTransportManager_v10.3.1.py
-  constructionManager_v2.1.9.py
+  constructionManager_v2.2.8.py
   ```
   This exact form matters — the installer parses `_vX.Y.Z` out of the stem to
   show installed-vs-available versions, and strips it when copying the file
@@ -186,14 +200,15 @@ All modules — internal and external — must look and behave the same way.
 
 | Module | File | What it does |
 |--------|------|--------------|
-| Resource Transport Manager | `modules/resourceTransportManager_v10.3.1.py` | Automates resource movement between cities, ship routing, notifications |
+| Resource Transport Manager | `modules/resourceTransportManager_v10.8.0.py` | Resource movement, ship routing, notifications. Priority scheduling (1–5), cycle deadlines, supervised background worker, per-account logs |
 | Resource Reservation System | `modules/resourceReservationSystem_v1.0.0.py` | Reserves resources across cities to prevent over-spending. See `RRS_INTEGRATION_GUIDE.md` |
 | Resource Production Manager | `modules/resourceProductionManager_v1.0.3.py` | Manages production assignment across cities |
-| Construction Manager | `modules/constructionManager_v2.1.9.py` | CSV-backed multi-city building upgrade queue |
+| Construction Manager | `modules/constructionManager_v2.2.8.py` | CSV-backed multi-city building/upgrade queue |
 | Tavern Manager | `modules/tavernManager_v2.0.1.py` | Monitors wine and satisfaction, auto-adjusts tavern settings |
 | Auto Recruitment Manager | `modules/autoRecruitmentManager_v2.12.1.py` | Automates unit and ship training across barracks/shipyards |
 | Island Colonize Monitor | `modules/islandColonizeMonitor_v1.5.0.py` | Monitors islands for colonisation opportunities |
 | Sequence Runner | `modules/sequenceRunner_v1.1.2.py` | Stores named input sequences to automate daily routines |
+| Scheduler Monitor | `modules/schedulerMonitor_v1.0.0.py` | Watches other modules' background workers and restarts any that stopped |
 
 **Filenames drift.** Always `ls modules/` rather than trusting this table — the
 versions move faster than the docs.

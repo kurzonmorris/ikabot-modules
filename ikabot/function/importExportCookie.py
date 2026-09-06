@@ -124,9 +124,11 @@ def importCookie(session):
                 bcolors.GREEN, bcolors.ENDC
             )
         )
-        sessionData = session.getSessionData()
-        sessionData["cookies"]["ikariam"] = newcookie
-        session.setSessionData(sessionData)
+        def _set_cookie(sessionData):
+            sessionData.setdefault("cookies", {})["ikariam"] = newcookie
+            return sessionData
+
+        session.mutateSessionData(_set_cookie)
         enter()
     session.get()
 
