@@ -1180,9 +1180,14 @@ that needs something different gets its own button scoped just to it.
 
 Each number is sent followed by Enter, with the pause you set between them so
 the menu has time to redraw — which is why multi-step options like Donate work.
-The default of `0.4s` suits most menus; raise it if a step gets missed because
-the game was slow to respond, or drop it to `0` for a single-press button where
-it makes no difference. There is no pause after the last press.
+The default is `1.0s`, comfortable on a busy machine; raise it if a step gets
+missed because the game was slow to respond, or drop it to `0` for a
+single-press button where it makes no difference. There is no pause after the
+last press.
+
+Changing the default does not touch buttons you already saved — each keeps the
+pause it was created with, shown in the **Pause** column. Edit one and save it
+to bring it up to a second.
 
 A button holds up to 30 presses, which covers a whole daily routine in one
 press.
