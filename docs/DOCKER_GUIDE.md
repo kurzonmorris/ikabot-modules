@@ -893,6 +893,17 @@ nothing has changed.
 and password once more; if it stays blank, the link beside it opens the
 terminal in its own tab.
 
+Above it are **⤒ Top**, **▲ Page up**, **▼ Page down** and **⤓ Bottom**, with
+how far back you are beside them. On a desktop the mouse wheel does the same
+job, but on a phone nothing does: the scrollback belongs to tmux, and reaching
+it means entering copy mode, which a touch drag never does. So these drive tmux
+from the panel's side instead, which works whatever the browser makes of touch
+— the terminal only ever draws what tmux tells it to.
+
+They follow whichever screen is on show, and **⤓ Bottom** puts you back at the
+prompt. Scrolling back does not stop you typing: reaching the bottom leaves
+the scroll view by itself.
+
 **Web servers** is one page at a time, read properly, rather than a wall of
 thumbnails.
 

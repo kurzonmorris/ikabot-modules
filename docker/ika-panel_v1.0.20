@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.19"
+PANEL_VERSION = "1.0.20"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -785,6 +785,49 @@ def in_copy_mode(target):
     return out == "1"
 
 
+def term_scroll(what):
+    """Move the attached terminal's scrollback.
+
+    tmux owns the scrollback, and reaching it means entering copy mode --
+    which on a desktop happens by turning the mouse wheel. A phone has no
+    wheel, and a touch drag does not get there, so the screens could be typed
+    into but never read back. Driving tmux from this side works whatever the
+    browser does with touch, because the terminal only ever draws what tmux
+    tells it to.
+
+    Targets the session rather than a window, so it follows whichever screen
+    is on show.
+    """
+    target = SESSION
+
+    if what == "bottom":
+        if in_copy_mode(target):
+            _sh(["tmux", "send-keys", "-t", target, "-X", "cancel"], timeout=15)
+        return "at the bottom"
+
+    if not in_copy_mode(target):
+        # -e matches the tmux config: scrolling back to the bottom leaves copy
+        # mode by itself, so typing works again without pressing anything.
+        out = _sh(["tmux", "copy-mode", "-e", "-t", target], timeout=15)
+        if out.strip():
+            return out.strip()
+
+    move = {"up": "page-up", "down": "page-down", "top": "history-top"}.get(what)
+    if move is None:
+        return "unknown scroll"
+    _sh(["tmux", "send-keys", "-t", target, "-X", move], timeout=15)
+
+    try:
+        pos = subprocess.run(["tmux", "display", "-p", "-t", target,
+                              "#{scroll_position}"],
+                             capture_output=True, text=True).stdout.strip()
+    except OSError:
+        pos = ""
+    if pos in ("", "0"):
+        return "at the bottom"
+    return "%s line(s) back" % pos
+
+
 def press(window, keys, delay=DEFAULT_DELAY, menu=True):
     """Send each entry followed by Enter, pausing so the screen redraws.
 
@@ -1399,6 +1442,14 @@ class Handler(BaseHTTPRequestHandler):
         # Stopping tasks. The browser never supplies a bare pid to kill: every
         # target has to appear as a live task in the state built just above, so
         # the only reachable processes are ones ikabot itself reported.
+        # Scrolling is pressed repeatedly, so it answers on its own without
+        # the run lock or a state rebuild -- it changes nothing but the view.
+        if act == "term_scroll":
+            arg = str(payload.get("arg", ""))
+            if arg not in ("up", "down", "top", "bottom"):
+                return self._send(400, json.dumps({"error": "bad scroll"}))
+            return self._send(200, json.dumps({"where": term_scroll(arg)}))
+
         if act in ("kill_task", "kill_instance", "kill_all"):
             arg = str(payload.get("arg", ""))
             with _run_lock:
@@ -1605,6 +1656,10 @@ border:0;background:#fff;transform:scale(var(--wss,1));transform-origin:0 0}
 .zoom button{padding:2px 8px;font-size:13px;line-height:1.2;min-width:26px}
 .zoom b{font-family:ui-monospace,monospace;font-size:12px;color:var(--ink);
 min-width:34px;text-align:center}
+/* Big enough to hit with a thumb: on a phone these are the only way to read
+   back up the screen, since a touch drag never reaches tmux's copy mode. */
+.tscroll button{padding:8px 14px;font-size:13px}
+@media(pointer:coarse){.tscroll button{padding:11px 16px;font-size:14px}}
 .wrail{border:1px solid var(--rule);border-radius:6px;background:var(--card);
 padding:6px;display:flex;flex-direction:column;gap:6px;align-items:center}
 .wtoggle{border:1px solid var(--rule);background:var(--bg);color:var(--soft);
@@ -1906,6 +1961,13 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     the instances, Ctrl-B then D leaves them running.
     <a id="tnew" href="#" target="_blank" rel="noopener">Open in its own tab</a>
   </p>
+  <div class="row tscroll" style="margin-bottom:8px">
+    <button data-scroll="top" title="Jump to the start of the scrollback">⤒ Top</button>
+    <button data-scroll="up" title="Back one screen">▲ Page up</button>
+    <button data-scroll="down" title="Forward one screen">▼ Page down</button>
+    <button class="p" data-scroll="bottom" title="Back to the prompt">⤓ Bottom</button>
+    <span class="hint" id="tpos" style="margin:0"></span>
+  </div>
   <div id="tbox" class="embed"></div>
   <p class="hint" id="tnote"></p>
 </section>
@@ -2215,7 +2277,8 @@ function mountTerminal(){
   el('tbox').innerHTML='<iframe src="'+esc(url)+'" title="ikabot terminal"></iframe>';
   el('tnote').textContent='It asks for the same username and password as this '+
     'page — a frame has its own sign-in. If it stays blank, open it in its own '+
-    'tab instead.';
+    'tab instead. On a phone the buttons above are how you read back up the '+
+    'screen: a touch drag cannot reach the scrollback, so they drive it directly.';
   termUp=true;
 }
 
@@ -2619,6 +2682,19 @@ function openFile(){
 document.addEventListener('click',function(e){
   var b=e.target.closest('button[data-file]'); if(!b)return;
   openFileByPath(b.dataset.file);
+});
+
+// Its own handler rather than run(): scrolling is pressed over and over, and
+// it changes nothing, so it should not grey out every button on the page or
+// trigger a rebuild for each press.
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-scroll]'); if(!b)return;
+  var pos=el('tpos');
+  fetch('api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'term_scroll',arg:b.dataset.scroll})})
+  .then(function(r){return r.json()})
+  .then(function(d){ pos.textContent=d.error?('Error: '+d.error):(d.where||''); })
+  .catch(function(err){ pos.textContent='Request failed: '+err; });
 });
 
 el('fopen').addEventListener('click',openFile);
