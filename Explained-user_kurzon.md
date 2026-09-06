@@ -200,7 +200,7 @@ All modules — internal and external — must look and behave the same way.
 
 | Module | File | What it does |
 |--------|------|--------------|
-| Resource Transport Manager | `modules/resourceTransportManager_v10.8.0.py` | Resource movement, ship routing, notifications. Priority scheduling (1–5), cycle deadlines, supervised background worker, per-account logs |
+| Resource Transport Manager | `modules/resourceTransportManager_v10.9.0.py` | Resource movement, ship routing, notifications. Priority scheduling (1–5), trading-port hold list, cycle deadlines, supervised background worker, per-account logs |
 | Resource Reservation System | `modules/resourceReservationSystem_v1.0.0.py` | Reserves resources across cities to prevent over-spending. See `RRS_INTEGRATION_GUIDE.md` |
 | Resource Production Manager | `modules/resourceProductionManager_v1.0.3.py` | Manages production assignment across cities |
 | Construction Manager | `modules/constructionManager_v2.2.8.py` | CSV-backed multi-city building/upgrade queue |

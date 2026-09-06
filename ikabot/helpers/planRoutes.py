@@ -128,7 +128,11 @@ def executeRoutes(session, routes, useFreighters=False):
             origin_city = getCity(html)
             html = session.get(city_url + str(destination_city_id))
             destination_city = getCity(html)
-            foreign = str(destination_city["id"]) != str(destination_city_id)
+            # A page we cannot read the warehouse from is not a city of ours,
+            # whatever id it came back with — treating its unknown free space
+            # as zero would stall the route forever.
+            foreign = (str(destination_city["id"]) != str(destination_city_id)
+                       or not destination_city.get("storageCapacity"))
             if foreign is False:
                 storageCapacityInCity = destination_city["freeSpaceForResources"]
 

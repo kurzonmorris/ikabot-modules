@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.8.0"
+MODULE_VERSION = "10.9.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -2072,7 +2072,11 @@ def _execute_routes_bounded(session, route, useFreighters, deadline_ts,
         origin_city = getCity(html)
         html = session.get(city_url + str(destination_city_id))
         destination_city = getCity(html)
-        foreign = str(destination_city["id"]) != str(destination_city_id)
+        # A page whose warehouse we cannot read is not a city of ours,
+        # whatever id came back — its free space is unknown, not zero, and
+        # treating it as zero would stall the route in an hourly retry.
+        foreign = (str(destination_city["id"]) != str(destination_city_id)
+                   or not destination_city.get("storageCapacity"))
 
         send = []
         for i in range(len(toSend)):
@@ -2140,8 +2144,154 @@ def _check_city_status(session, city_id):
 
 
 # ============================================================================
+#  TRADING PORT QUEUE  (hold an order while the port is loading)
+# ============================================================================
+
+# A trading port loads one shipment at a time. Anything sent while it is busy
+# queues behind the shipment already loading, so the send either sits there or
+# comes back rejected. Rather than wait, the port's busy-until time is
+# recorded and the order goes on a hold list so the next order can start.
+PORT_HOLD_MAX_SECONDS = 3600
+# A queueTime further out than this is not a real port queue — it is a stale
+# or misread value, and acting on it would hold the order for hours.
+PORT_QUEUE_SANITY_SECONDS = 6 * 3600
+_PORT_PROBE_TTL = 45
+
+_port_holds = {}        # {city_id: unix time the port is free again}
+_port_probe_cache = {}  # {city_id: (checked_at, seconds_busy or None)}
+
+
+def _parse_port_queue_time(html, now=None):
+    """Seconds the trading port is still loading other shipments.
+
+    The transport view carries queueTime as an absolute epoch — the moment
+    the port finishes what it already has. 0 means free. None means the page
+    did not carry it, and unknown is never treated as busy.
+    """
+    if not html:
+        return None
+    m = re.search(r"['\"]queueTime['\"]\s*:\s*(\d+)", html)
+    if m is None:
+        return None
+    now = int(time.time() if now is None else now)
+    remaining = int(m.group(1)) - now
+    if remaining <= 0:
+        return 0
+    if remaining > PORT_QUEUE_SANITY_SECONDS:
+        return None
+    return min(remaining, PORT_HOLD_MAX_SECONDS)
+
+
+def _port_queue_seconds(session, city_id, dest_city_id=None, island_id=None):
+    """Ask the trading port how long it is still busy. None when unreadable."""
+    key = str(city_id)
+    now = time.time()
+    cached = _port_probe_cache.get(key)
+    if cached and now - cached[0] < _PORT_PROBE_TTL:
+        return cached[1]
+    busy = None
+    try:
+        params = {
+            "view": "transport",
+            "oldView": "city",
+            "oldBackgroundView": "city",
+            "backgroundView": "city",
+            "currentCityId": str(city_id),
+            "templateView": "transport",
+            "actionRequest": actionRequest,
+            "ajax": "1",
+        }
+        if dest_city_id is not None:
+            params["destinationCityId"] = str(dest_city_id)
+        if island_id is not None:
+            params["islandId"] = str(island_id)
+        busy = _parse_port_queue_time(session.post(params=params))
+    except Exception:
+        busy = None
+    _port_probe_cache[key] = (now, busy)
+    return busy
+
+
+def _port_hold_remaining(city_id, now=None):
+    """Seconds left on this city's recorded hold. 0 when it is free."""
+    key = str(city_id)
+    now = time.time() if now is None else now
+    until = _port_holds.get(key)
+    if until is None:
+        return 0
+    if until <= now:
+        del _port_holds[key]
+        return 0
+    return int(until - now)
+
+
+def _port_hold_set(city_id, seconds):
+    """Record how long this city's port stays busy. Returns what was set."""
+    key = str(city_id)
+    seconds = max(0, min(int(seconds), PORT_HOLD_MAX_SECONDS))
+    if seconds <= 0:
+        _port_holds.pop(key, None)
+        return 0
+    _port_holds[key] = time.time() + seconds
+    return seconds
+
+
+def _port_hold_clear(city_id):
+    """Forget what we knew about a port — used after we load it ourselves."""
+    key = str(city_id)
+    _port_holds.pop(key, None)
+    _port_probe_cache.pop(key, None)
+
+
+def _port_busy_seconds(session, origin_city_id, dest_city_id=None,
+                       island_id=None):
+    """Seconds this city's port is busy for, 0 when free or unknown.
+
+    An existing hold answers without a request, so a city found busy once is
+    not probed again for every remaining order out of it.
+    """
+    held = _port_hold_remaining(origin_city_id)
+    if held > 0:
+        return held
+    busy = _port_queue_seconds(session, origin_city_id, dest_city_id,
+                               island_id)
+    if not busy:
+        return 0
+    return _port_hold_set(origin_city_id, busy)
+
+
+# ============================================================================
 #  SHARED SEND SHIPMENT  (lock → verify → send → verify → unlock → log)
 # ============================================================================
+
+def _explain_exception(exc):
+    """Plain-English version of a technical error, or "" when there isn't one.
+
+    Python's own wording for a failed page parse ("'NoneType' object has no
+    attribute 'group'") tells the reader nothing about what actually went
+    wrong, which is that the game sent back a page we could not read.
+    """
+    text = str(exc)
+    lowered = text.lower()
+    if "nonetype" in lowered and "group" in lowered:
+        return ("The game sent back a page ikabot could not read. This "
+                "usually means the server was busy, in maintenance, or the "
+                "city was doing something else at that moment.")
+    if "could not parse" in lowered or "could not read" in lowered:
+        return ("The game sent back a page ikabot could not read — usually a "
+                "busy server or a maintenance page.")
+    if "could not find actionrequest" in lowered:
+        return ("The login session went stale mid-shipment. It refreshes "
+                "itself; the next cycle should go through normally.")
+    if isinstance(exc, (KeyError, IndexError)):
+        return ("The game's reply was missing something ikabot expected — "
+                "usually a half-loaded page from a busy server.")
+    if "timed out" in lowered or "timeout" in lowered:
+        return "The game server did not answer in time."
+    if "connection" in lowered:
+        return "The connection to the game server dropped."
+    return ""
+
 
 def send_shipment(session, route, useFreighters, notif_config, log_path,
                   mode_name, dest_island_coords="", dest_player="",
@@ -2157,7 +2307,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
     result = {"success": False, "error": None, "ships_used": 0,
               "no_ap": False, "below_threshold": False,
               "city_unavailable": False, "shortfalls": {},
-              "partial": False}
+              "partial": False, "port_busy": False, "hold_seconds": 0}
 
     # Full-ships-only mode: trim stock-derived cargo so every ship
     # sails full (freighters: at least the user-set minimum on the last
@@ -2269,6 +2419,39 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
+                     next_shipment_str)
+        return result
+
+    # 0c. Is the source port already loading something? Hold this order and
+    # hand control back so the caller can start the next one instead of
+    # sitting here for the whole loading time.
+    hold_secs = _port_busy_seconds(session, origin_city["id"],
+                                   dest_city["id"], route[2])
+    if hold_secs > 0:
+        hold_mins = max(1, hold_secs // 60)
+        result["port_busy"] = True
+        result["hold_seconds"] = hold_secs
+        result["error"] = (
+            f"{origin_city['name']} trading port is loading another "
+            f"shipment for about {hold_mins} more minute(s)"
+        )
+        session.setStatus(
+            f"{prefix}Port busy ~{hold_mins}min — held, next order first"
+        )
+        if should_notify(notif_config, "all"):
+            sendToBot(session,
+                      f"SHIPMENT HELD\n{prefix}\n"
+                      f"Reason: the trading port at {origin_city['name']} is "
+                      f"still loading an earlier shipment (about "
+                      f"{hold_mins} minute(s) left). A port can only load "
+                      f"one shipment at a time.\n"
+                      f"Nothing is lost — this order goes on the hold list "
+                      f"and the next one starts now. It is tried again as "
+                      f"soon as the port is free.")
+        log_shipment(log_path, session, mode_name,
+                     origin_city["name"], "", dest_city["name"],
+                     dest_island_coords, dest_player, resources,
+                     0, ship_type_name, "HELD", result["error"],
                      next_shipment_str)
         return result
 
@@ -2435,6 +2618,9 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
 
         result["success"] = True
         result["ships_used"] = ships_needed
+        # We have just put this port to work, so anything we knew about how
+        # busy it was is out of date — the next order re-asks it.
+        _port_hold_clear(origin_city["id"])
 
         res_desc = ", ".join(
             f"{addThousandSeparator(resources[i])} {materials_names[i]}"
@@ -2468,13 +2654,17 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
     except Exception as e:
         result["error"] = str(e)
         if should_notify(notif_config, "error"):
+            reason = _explain_exception(e)
+            reason_line = (f"Reason: {reason}\n" if reason else
+                           "Something unexpected went wrong while sending.\n")
             sendToBot(session,
                       f"SHIPMENT FAILED\nAccount: {session.username}\n"
                       f"From: {origin_city['name']}\n"
                       f"To: {dest_island_coords} {dest_city['name']}\n"
-                      f"Something unexpected went wrong while sending — "
-                      f"the shipment was not completed and will be tried "
-                      f"again next cycle.\n"
+                      f"{reason_line}"
+                      f"The shipment was not completed and will be tried "
+                      f"again next cycle. Nothing was lost — the resources "
+                      f"are still in the source city.\n"
                       f"Technical detail: {result['error']}")
         log_shipment(log_path, session, mode_name,
                      origin_city["name"], "", dest_city["name"],
@@ -6915,7 +7105,6 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     ap_blocked_cities = {}   # {src_city_id: last_check_timestamp}
     deferred_routes = []     # routes deferred due to no AP
     ap_wait_mins = int(sched.get("ap_max_wait_minutes", 120) or 120)
-    max_ap_retries = max(0, ap_wait_mins // 5)  # e.g. 120min / 5 = 24 retries
     min_threshold = int(sched.get("min_shipment_threshold", 0) or 0)
     deadline_ts = _cycle_deadline(sched)
     small_shipments = []     # (src_name, dest_name, resources) below threshold
@@ -6931,6 +7120,10 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         src_city_id = str(route[0]["id"])
 
         if src_city_id in ap_blocked_cities:
+            return False, True, False
+
+        # Known-busy port: hold without spending a request on it.
+        if _port_hold_remaining(src_city_id) > 0:
             return False, True, False
 
         src_exhausted = exhausted_by_src.get(src_city_id, set())
@@ -7007,6 +7200,13 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             ap_blocked_cities[src_city_id] = time.time()
             session.setStatus(
                 f"[AP BLOCKED] {src_name} — deferring, will retry in 5min"
+            )
+            return False, True, False
+
+        if result.get("port_busy"):
+            mins = max(1, int(result.get("hold_seconds", 0)) // 60)
+            session.setStatus(
+                f"[PORT BUSY] {src_name} — held ~{mins}min, next order first"
             )
             return False, True, False
 
@@ -7110,41 +7310,61 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
         else:
             skipped += 1
 
-    # --- Retry loop: re-check AP-blocked cities every 5 min ---
+    def _held_route_priority(route_info):
+        return _clamp_priority(
+            rows[route_info[0] - 1].get("Priority", PRIORITY_DEFAULT))
+
+    def _route_ready(route_info):
+        src_city_id = str(route_info[1][0]["id"])
+        return (src_city_id not in ap_blocked_cities
+                and _port_hold_remaining(src_city_id) == 0)
+
+    # --- Retry loop: re-check AP-blocked cities and held trading ports ---
+    # Bounded by wall time, not by round count: port holds can be seconds
+    # long, so counting rounds would exhaust the budget in a few minutes.
     retry_round = 0
-    while (deferred_routes and retry_round < max_ap_retries
+    retry_until = time.time() + ap_wait_mins * 60
+    while (deferred_routes and time.time() < retry_until
            and not _deadline_passed(deadline_ts)
            and not _should_yield(session)):
         retry_round += 1
+        # Wake when the first held port frees up, rather than sitting out a
+        # full action-point interval for a two-minute loading queue.
+        port_waits = [_port_hold_remaining(str(ri[1][0]["id"]))
+                      for ri in deferred_routes]
+        port_waits = [w for w in port_waits if w > 0]
+        nap = min(port_waits) + 5 if port_waits else AP_CHECK_INTERVAL
+        nap = max(15, min(nap, AP_CHECK_INTERVAL,
+                          int(retry_until - time.time()) + 1))
         session.setStatus(
-            f"[AP WAIT] {len(deferred_routes)} shipment(s) deferred, "
-            f"waiting 5min (retry {retry_round}/{max_ap_retries})..."
+            f"[HOLD] {len(deferred_routes)} shipment(s) waiting on ports or "
+            f"action points, re-checking in {nap}s "
+            f"(round {retry_round}, up to {ap_wait_mins}min)..."
         )
-        time.sleep(AP_CHECK_INTERVAL)
+        time.sleep(nap)
 
         # Re-check AP for blocked cities
-        unblocked = set()
         for cid in list(ap_blocked_cities.keys()):
             html = session.get(city_url + cid)
             ap = getActionPoints(html)
             if ap is not None and ap > 0:
-                unblocked.add(cid)
                 del ap_blocked_cities[cid]
 
-        if not unblocked:
+        # Highest priority first; within a priority the one that has been
+        # waiting longest, which the queue order already is.
+        ready = sorted((ri for ri in deferred_routes if _route_ready(ri)),
+                       key=_held_route_priority)
+        if not ready:
             continue
 
         session.setStatus(
-            f"[AP RESTORED] {len(unblocked)} city(ies) unblocked, "
-            f"retrying {len(deferred_routes)} shipment(s)..."
+            f"[RESUMING] {len(ready)} shipment(s) can go now, "
+            f"{len(deferred_routes) - len(ready)} still held..."
         )
 
-        still_deferred = []
-        for route_info in deferred_routes:
-            src_city_id = str(route_info[1][0]["id"])
-            if src_city_id in ap_blocked_cities:
-                still_deferred.append(route_info)
-                continue
+        still_deferred = [ri for ri in deferred_routes
+                          if not _route_ready(ri)]
+        for route_info in ready:
             src_name = route_info[7]
             dest_name = route_info[3]
             session.setStatus(
@@ -7165,20 +7385,29 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
     if deferred_routes:
         skipped += len(deferred_routes)
         if should_notify(notif_config, "error"):
-            blocked_names = set()
-            for ri in deferred_routes:
-                blocked_names.add(ri[7])
-            sendToBot(session,
-                      f"BULK DIST — {len(deferred_routes)} SHIPMENT(S) "
-                      f"SKIPPED THIS CYCLE\n"
-                      f"These source cities had no action points for "
-                      f"{ap_wait_mins} minutes: "
-                      f"{', '.join(sorted(blocked_names))}\n"
-                      f"(A city needs 1 free action point to send ships; "
-                      f"they are used by attacks/transports and free up "
-                      f"when those return.)\n"
-                      f"The rows stay pending and will be tried again "
-                      f"next cycle.")
+            ap_names = sorted({ri[7] for ri in deferred_routes
+                               if str(ri[1][0]["id"]) in ap_blocked_cities})
+            port_names = sorted({ri[7] for ri in deferred_routes
+                                 if _port_hold_remaining(
+                                     str(ri[1][0]["id"])) > 0})
+            lines = [f"BULK DIST — {len(deferred_routes)} SHIPMENT(S) "
+                     f"SKIPPED THIS CYCLE"]
+            if ap_names:
+                lines.append(
+                    f"No action points for {ap_wait_mins} minutes: "
+                    f"{', '.join(ap_names)}\n"
+                    f"(A city needs 1 free action point to send ships; they "
+                    f"are used by attacks/transports and free up when those "
+                    f"return.)")
+            if port_names:
+                lines.append(
+                    f"Trading port still loading earlier shipments: "
+                    f"{', '.join(port_names)}\n"
+                    f"(A port loads one shipment at a time, so these orders "
+                    f"waited their turn and ran out of cycle.)")
+            lines.append("The rows stay pending and will be tried again "
+                         "next cycle.")
+            sendToBot(session, "\n".join(lines))
 
     _notify_small_shipments(session, notif_config, "BULK DIST",
                             small_shipments, min_threshold)
