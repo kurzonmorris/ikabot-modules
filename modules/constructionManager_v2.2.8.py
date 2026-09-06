@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.7"
+__version__ = "2.2.8"
 
 import csv
 import glob
@@ -38,6 +38,10 @@ from ikabot.config import (
 from ikabot.helpers.botComm import checkTelegramData, sendToBot, sendToBotDebug
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import banner, bcolors, enter
+from ikabot.helpers.modulePrefs import (
+    load_prefs as module_load_prefs,
+    save_prefs as module_save_prefs,
+)
 from ikabot.helpers.pedirInfo import chooseCity, read
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
@@ -201,13 +205,6 @@ def stop_flag_path(session):
     )
 
 
-def prefs_path(session):
-    return os.path.join(
-        os.path.expanduser("~"),
-        f".ikabot_construction_prefs_{_account_suffix(session)}.json",
-    )
-
-
 # How a city picks what to work on when it can't afford the next item.
 #   wait_in_order — stay on the head of the queue, ship and re-check until the
 #                   resources arrive; nothing is cancelled.
@@ -217,40 +214,48 @@ QUEUE_STRATEGIES = ("wait_in_order", "skip_ahead")
 DEFAULT_QUEUE_STRATEGY = "wait_in_order"
 SKIP_AHEAD_MAX_CANDIDATES = 12   # bounds the per-tick scan
 
+PREFS_NAME = "constructionManager"
 
-def load_prefs(session):
-    """Read the per-account preferences sidecar; {} when absent or unreadable."""
+
+def _legacy_prefs_path(session):
+    """v2.2.6 wrote its own sidecar before this moved to modulePrefs."""
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_construction_prefs_{_account_suffix(session)}.json",
+    )
+
+
+def _migrate_legacy_prefs(session):
+    """Carry a v2.2.6 sidecar into modulePrefs, once, then remove it."""
+    path = _legacy_prefs_path(session)
+    if not os.path.isfile(path):
+        return
     try:
-        with open(prefs_path(session), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        with open(path, "r", encoding="utf-8") as f:
+            old = json.load(f)
     except (OSError, ValueError):
-        return {}
-
-
-def save_prefs(session, prefs):
-    path = prefs_path(session)
-    tmp = f"{path}.{os.getpid()}.tmp"
+        old = None
+    if isinstance(old, dict) and old.get("queue_strategy") in QUEUE_STRATEGIES:
+        prefs = module_load_prefs(session, PREFS_NAME) or {}
+        if "queue_strategy" not in prefs:
+            prefs["queue_strategy"] = old["queue_strategy"]
+            module_save_prefs(session, PREFS_NAME, prefs)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(prefs, f)
-        os.replace(tmp, path)
+        os.remove(path)
     except OSError:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+        pass
 
 
 def get_queue_strategy(session):
-    value = load_prefs(session).get("queue_strategy")
+    prefs = module_load_prefs(session, PREFS_NAME) or {}
+    value = prefs.get("queue_strategy")
     return value if value in QUEUE_STRATEGIES else DEFAULT_QUEUE_STRATEGY
 
 
 def set_queue_strategy(session, value):
-    prefs = load_prefs(session)
+    prefs = module_load_prefs(session, PREFS_NAME) or {}
     prefs["queue_strategy"] = value
-    save_prefs(session, prefs)
+    module_save_prefs(session, PREFS_NAME, prefs)
 
 
 def _strategy_label(value):
@@ -2639,6 +2644,8 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
     interactive = predetermined_input is None or len(predetermined_input) == 0
+
+    _migrate_legacy_prefs(session)
 
     if not migrate_legacy_account_files(session):
         enter()

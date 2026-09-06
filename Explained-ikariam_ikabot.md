@@ -130,7 +130,7 @@ Tracks changes made in this fork. Currently `1.7.6`. Banner displays
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
 resourceTransportManager_v10.3.1.py
-constructionManager_v2.1.9.py
+constructionManager_v2.2.8.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
 user's modules folder — *not* by the module loader. `MODULE_NAME` is the display
@@ -215,12 +215,24 @@ Every function receives a `session` object (instance of `ikabot.web.session.Sess
 
 ### Key attributes
 ```python
-session.username   # player username string
-session.servidor   # server string e.g. "s70-en"
-session.mundo      # world/server name
+session.username   # player name on this world, e.g. "StDa"
+session.servidor   # community / language code ONLY, e.g. "en"  (not "s70-en")
+session.mundo      # world NUMBER as a string, e.g. "70"
+session.word       # world NAME, e.g. "Nereus"
+session.host       # "s{mundo}-{servidor}.ikariam.gameforge.com"
 session.urlBase    # "https://s70-en.ikariam.gameforge.com/index.php?"
 session.padre      # True if this is the parent (menu) process
 ```
+
+> **`servidor` is not the full server string and `mundo` is not a name.**
+> The banner shows `Server:en, World:Nereus, Player:StDa` — that is
+> `servidor`, `word`, `username`. Verify against
+> `ikabot/web/session.py` (`self.host = "s{}-{}"`) before assuming.
+
+Getting these two wrong is exactly why per-account filenames used to omit the
+world and collide across worlds — see **§27, "Per-instance filenames must
+include the world"** for the naming rule. If you change an existing naming
+scheme, migrate the old filenames, or users silently lose their saved data.
 
 ### Key methods
 ```python
@@ -631,7 +643,7 @@ numbers below drift.**
 | Module | Does |
 |---|---|
 | `resourceTransportManager_v10.3.1.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
-| `constructionManager_v2.1.9.py` | CSV-backed multi-city construction queue. Polls, triggers upgrades, handles shortages by waiting or requesting transport. |
+| `constructionManager_v2.2.8.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §27. |
 | `autoRecruitmentManager_v2.12.1.py` | Trains units/ships across barracks and shipyards, synchronised completion, retry on shortage. **The working RRS integration example.** |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
 | `resourceProductionManager_v1.0.3.py` | Manages production/luxury assignment per city. Own persistence, predates `modulePrefs`. |
@@ -1395,4 +1407,157 @@ red result.
 
 ---
 
-*Last updated: 2026-08-29. Reflects ikabot 7.4.5 / mod v1.7.7.*
+
+---
+
+## 29. Building Costs, Game Data and Queue Semantics
+
+*Learned building `constructionManager` v2.1.7 → v2.2.8. For locks, worker
+supervision and multi-instance safety see §27–28 — this section is the
+game-data and queue-behaviour half.*
+
+### 29.1 Reading building costs from the ikipedia
+
+The in-game help ("ikipedia") holds the per-level cost table for every
+building. **Request the building's detail view directly:**
+
+```python
+cost_url = (
+    "view=buildingDetail&buildingId={bid}&helpId=1"
+    "&backgroundView=city&currentCityId={cid}"
+    "&templateView=buildingDetail&actionRequest={ar}&ajax=1"
+).format(bid=building_id, cid=city["id"], ar=actionRequest)
+html_costs = json.loads(session.post(cost_url), strict=False)[1][1][1]
+```
+
+`helpId=1` is a **constant** for every building — it is not derived from
+`buildingId`.
+
+**Do not scrape the listing page for the building links.** The old approach
+loaded `view=ikipedia&helpId=0` and regexed `class="button_building <slug>"`.
+Those icons are rendered client-side by JS, so the XHR body contains **zero**
+`button_building` matches and the scrape can never succeed, no matter how the
+regex is patched. Use the map below.
+
+**slug → buildingId** (verified against a live account; keys lowercased
+because city JSON uses camelCase like `townHall`):
+
+```
+townhall 0    port 3        academy 4      shipyard 5     barracks 6
+warehouse 7   wall 8        tavern 9       museum 10      palace 11
+embassy 12    branchoffice 13              workshop 15    safehouse 16
+palacecolony 17             forester 18    stonemason 19  glassblowing 20
+winegrower 21 alchemist 22  carpentering 23              architect 24
+optician 25   vineyard 26   fireworker 27  temple 28      dump 29
+piratefortress 30           blackmarket 31 marinechartarchive 32
+dockyard 33   shrineofolympus 34          chronosforge 35
+```
+
+IDs **1, 2 and 14 return HTTP 500 — they do not exist.** `forester` (18) is
+**absent from the ikipedia grid** but its detail page works when requested
+directly; it was found by probing the gaps. When probing by hand, note that a
+failed request leaves the previous panel in place, so a stale panel reads as a
+false positive — clear the network log per call.
+
+### 29.2 Cost table columns are identified by image hash, not filename
+
+Header cells carry no text identifier at all:
+
+```html
+<th class="costs"><img src="//gf2.geo.gfsrv.net/cdn19/c3527b2f694fb882563c04df6d8972.png"></th>
+```
+
+No `alt`, no `title`, and the filename is an opaque MD5. Data rows are equally
+generic — every cost cell is just `<td class="costs">`. Reconstruct the full
+hash from the CDN path (2-char `cdnXX` prefix + 30-char filename = 32-char MD5)
+and match it against `config.material_img_hash`:
+
+```python
+th_srcs = re.findall(r'<th class="costs"><img src="(.*?)"', html_costs)
+for src in th_srcs[:-1]:          # last <th class="costs"> is the time icon
+    m = re.search(r'/cdn([0-9a-f]{2})/([0-9a-f]+)\.png', src, re.IGNORECASE)
+    idx = material_img_hash.index(m.group(1) + m.group(2)) if m else -1
+```
+
+`material_img_hash` is ordered `materials_names_tec` = wood, wine, marble,
+glass(=crystal), sulfur. **Never assume column position** — a building only
+renders columns for resources it actually costs, so a barracks table is not a
+prefix of a town hall table.
+
+### 29.3 City slot data (`getCity`)
+
+`getCity()` post-processes each entry of `city["position"]`:
+
+- `position["position"]` — the slot index, added by ikabot (safe to read)
+- `position["isBusy"]` — True when the raw building string contained
+  `constructionSite`; the suffix is then stripped, so `building` stays the
+  plain slug
+- empty slots become `building == "empty"`, `name == "empty"`
+- `position["canUpgrade"]` — **the game's own gate.** False means the POST
+  will be refused (citizens, wine/happiness, or its resource check). Check it
+  before spending a request.
+- a busy slot carries `completed` (unix timestamp)
+
+**One build per city at a time.** If any slot is busy, a build POST for a
+different slot is refused — check for a busy slot first.
+
+### 29.4 Distinguish transient failure from permanent absence
+
+The worst bug in this module: a cost helper returned `{}` both when a building
+genuinely had no data **and** when the lookup failed (request error, unexpected
+response, parse error). The caller treated both as "no data" and cancelled the
+queued row. One network blip permanently killed queued work — and the next tick
+did the same to the next row, so a city's queue drained into `skipped` while
+other cities kept running. The symptom reported was "the scheduler is on but
+some cities never build".
+
+**Rule: a helper must let callers tell "nothing there" from "I could not
+look".** Return `None` for a failed lookup and `{}` for a genuine absence (or
+raise). Retry the first; only cancel on the second.
+
+The same discipline applies to actions:
+
+- a POST that fails to *send* — retry; do not cancel. Re-check state on the
+  next tick instead (it can adopt the action if it did land, so no double-fire).
+- an action that does not *appear* to have started — that is also what a slow
+  server looks like. Retry a bounded number of times before cancelling.
+- give the user a bulk **"retry cancelled items"** action. Anything
+  auto-cancelled is otherwise unrecoverable, and re-entering it by hand is the
+  thing they will ask for next.
+
+### 29.5 Long-running queues must reconcile with manual play
+
+The user still plays the game by hand. A queue that stores one row per level
+and executes each as "do one upgrade" will overshoot: build two levels
+manually, and the queue's remaining rows push the building **past** the
+requested target. Before acting, drop queued items the live city has already
+reached, so the next item is always current + 1 — that also keeps cost lookups
+and shipped amounts correct. Mark items whose slot now holds a *different*
+building as skipped-with-a-note rather than deleting them silently.
+
+### 29.6 Prompt and table gotchas
+
+- **`read()` re-asks silently on out-of-range input.** It erases the line and
+  recurses, printing nothing. A user typing a value your `min=`/`max=` rejects
+  sees the prompt blink and concludes the module is broken. State the accepted
+  range in the prompt text, and accept a sentinel for "no change" rather than
+  refusing it (e.g. allow the current level to mean *skip this one*).
+- `read()` returns an `int` for digit input and the raw `str` for anything in
+  `additionalValues`; `additionalValues` is matched **before** digit
+  validation, and matching is exact — include every case variant you accept.
+- **`getDateTime()` returns `YYYY-mm-dd_HH-MM-SS`**, so the common
+  `getDateTime(ts)[8:]` is **11 characters** (`dd_HH-MM-SS`). Size table
+  columns accordingly.
+- Collapse repetitive rows in list views. A build-to-level request stores one
+  row per level; showing `5 → 10` on one line instead of six rows cut a sample
+  queue from 52 lines to 28. Keep a detail toggle rather than deleting the
+  verbose view.
+- When a scheduler defers work, **write the reason where the user will see
+  it.** "Pending with no ETA" and no explanation is indistinguishable from a
+  broken scheduler. Prefix worker-written notes (e.g. `waiting: `) so they can
+  be replaced and cleared without ever overwriting a note the user typed, and
+  only rewrite when the text changes so a long wait does not churn the file.
+
+---
+
+*Last updated: 2026-09-06. Reflects ikabot 7.4.5 / mod v1.7.7.*
