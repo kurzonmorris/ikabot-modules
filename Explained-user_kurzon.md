@@ -62,7 +62,7 @@
 - Version numbers go **before the file extension**, separated by `_v`:
   ```
   resourceTransportManager_v10.3.1.py
-  constructionManager_v2.1.9.py
+  constructionManager_v2.2.8.py
   ```
   This exact form matters — the installer parses `_vX.Y.Z` out of the stem to
   show installed-vs-available versions, and strips it when copying the file
@@ -203,7 +203,7 @@ All modules — internal and external — must look and behave the same way.
 | Resource Transport Manager | `modules/resourceTransportManager_v10.8.0.py` | Resource movement, ship routing, notifications. Priority scheduling (1–5), cycle deadlines, supervised background worker, per-account logs |
 | Resource Reservation System | `modules/resourceReservationSystem_v1.0.0.py` | Reserves resources across cities to prevent over-spending. See `RRS_INTEGRATION_GUIDE.md` |
 | Resource Production Manager | `modules/resourceProductionManager_v1.0.3.py` | Manages production assignment across cities |
-| Construction Manager | `modules/constructionManager_v2.1.9.py` | CSV-backed multi-city building upgrade queue |
+| Construction Manager | `modules/constructionManager_v2.2.8.py` | CSV-backed multi-city building/upgrade queue |
 | Tavern Manager | `modules/tavernManager_v2.0.1.py` | Monitors wine and satisfaction, auto-adjusts tavern settings |
 | Auto Recruitment Manager | `modules/autoRecruitmentManager_v2.12.1.py` | Automates unit and ship training across barracks/shipyards |
 | Island Colonize Monitor | `modules/islandColonizeMonitor_v1.5.0.py` | Monitors islands for colonisation opportunities |
