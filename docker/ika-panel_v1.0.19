@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.18"
+PANEL_VERSION = "1.0.19"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -1916,12 +1916,15 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     <a class="btn" id="wopen" href="#" target="_blank" rel="noopener">Open this one in a tab</a>
     <button id="wreload">Reload this one</button>
     <button class="d" id="wclear">Unload all</button>
-    <span class="zoom">Page width
-      <button id="wnarrow" title="Give the page less width">−</button>
-      <b id="wwidth">1100</b>
-      <button id="wwider" title="Give the page more width">+</button>
-    </span>
     <span class="hint" id="wcount"></span>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <span class="zoom">Page width
+      <button id="wnarrow" title="Show more of the page">−</button>
+      <b id="wwidth">1400</b>
+      <button id="wwider" title="Show more of the page">+</button>
+      <span class="hint" style="margin:0">press + until nothing is cut off the right</span>
+    </span>
   </div>
   <div class="wsplit" id="wsplit">
     <div class="wview" id="wview">
@@ -2239,7 +2242,10 @@ function wHost(){ return location.hostname || last.host || 'localhost'; }
 // page needs, nothing falls off the right and there is no sideways scrolling.
 // The scale lives in a CSS variable, so one write re-fits every frame already
 // loaded rather than touching each of them.
-var PAGE_W = 1100, PAGE_MIN = 700, PAGE_MAX = 2400, PAGE_STEP = 100;
+// Ikariam's own layout, with its right-hand column, needs more than 1100 --
+// at that width about a fifth of it was still off the right. 1400 covers it;
+// the control below moves it either way.
+var PAGE_W = 1400, PAGE_MIN = 700, PAGE_MAX = 2400, PAGE_STEP = 100;
 var FIT_H = 1500;              // what a phone renders, so nothing scrolls inside
 try{
   var stored = parseInt(localStorage.getItem('ikaPageWidth'), 10);

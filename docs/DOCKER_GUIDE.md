@@ -916,9 +916,10 @@ whole of that width is then scaled to land exactly on the panel. Nothing falls
 off the right and there is never a sideways scrollbar. Up and down still scroll
 normally.
 
-`1100` suits Ikariam. If anything is still cut off, press **+** until it is
-not; if the page looks smaller than it needs to, press **−**. It steps by 100
-between 700 and 2400 and is remembered, so it is a once-only adjustment.
+`1400` covers Ikariam's layout including its right-hand column. If anything
+is still cut off, press **+** until it is not; if the page looks smaller than
+it needs to, press **−**. It steps by 100 between 700 and 2400 and is
+remembered, so it is a once-only adjustment.
 
 The **›** at the top of the strip retracts it, giving the page the full width;
 the **‹** brings it back. The choice is remembered.
