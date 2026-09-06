@@ -1445,10 +1445,15 @@ release page shows people exactly what they are downloading.
 
 ### What they do
 
-| They have | They do |
-|---|---|
-| Windows or Mac | Unzip, double-click `INSTALL.bat` |
-| Unraid, TrueNAS, Linux | Unzip, `./install.sh` |
+| They have | They do | Hand them |
+|---|---|---|
+| Windows or Mac | Unzip, double-click `INSTALL.bat` | `docs/WINDOWS_GUIDE.md` |
+| Unraid, TrueNAS, Linux | Unzip, `./install.sh` | `README.txt` in the zip |
+| A Steam Deck | Unzip, `./install.sh` | `docs/STEAMDECK_GUIDE.md` |
+
+`docs/WINDOWS_GUIDE.md` assumes no knowledge of Docker, containers or ikabot
+and starts at "download this". It is the one to send someone who has never
+done any of this before.
 
 Either way it asks three questions — where to keep data, how many accounts, and
 a password for the web pages — then builds and starts the container and prints

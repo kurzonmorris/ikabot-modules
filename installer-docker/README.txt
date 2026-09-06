@@ -24,6 +24,11 @@ INSTALLING — WINDOWS OR MAC
   3. Answer three questions: where to keep data, how many
      accounts, and a password for the web pages.
 
+  Never done this before? There is a step-by-step guide
+  written for exactly that, with screenshots of what to
+  click:
+    https://github.com/kurzonmorris/ikabot-modules/blob/main/docs/WINDOWS_GUIDE.md
+
   It builds and starts everything, then opens the control
   panel in your browser.
 
