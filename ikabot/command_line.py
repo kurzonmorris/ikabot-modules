@@ -232,6 +232,9 @@ def menu(session, checkUpdate=True):
                 print(f"({i + 40}) {name}")
         print("(99) Configure external modules")
         print("(100) Refresh")
+        print("")
+        print(f"{bcolors.STONE}Tip: type '{MENU_TOKEN}' at any prompt to come "
+              f"back here. '{MENU_TOKEN} 4' comes back and picks 4.{bcolors.ENDC}")
 
         top_max = 100
         selected = read(min=0, max=top_max, digit=True, empty=True)
@@ -369,8 +372,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{mod_name}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{mod_name}' is now running in the background.")
+                time.sleep(0.8)
             continue
 
         if selected == 24 and plugins:
@@ -401,8 +409,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{chosen_plugin.name}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{chosen_plugin.name}' is now running in the background.")
+                time.sleep(0.8)
             continue
 
         if selected == 0:
@@ -439,8 +452,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
+                time.sleep(0.8)
         except KeyboardInterrupt:
             pass
 
@@ -1133,7 +1151,16 @@ def start():
 
     creds, vault_session, acct_idx = None, None, None
     if vault_exists():
-        creds, vault_session, acct_idx = _prompt_vault_login()
+        # A front-end that prefixes every command with "/menu" will sooner or
+        # later send one while the vault is still asking for its password.
+        # There is no menu to return to yet, so treat it as "start over" —
+        # anything else would end the process before ikabot has even logged in.
+        while True:
+            try:
+                creds, vault_session, acct_idx = _prompt_vault_login()
+                break
+            except ReturnToMenu:
+                continue
 
     if creds is not None:
         session = Session(
@@ -1180,8 +1207,19 @@ def start():
         pass
 
     try:
-        menu(session)
-        clear()
+        # "/menu" typed at any prompt raises ReturnToMenu, which unwinds
+        # whatever sub-menu or module dialogue was in progress.  Re-entering
+        # menu() is the same thing as restarting its loop, and it works from
+        # arbitrary depth without every caller having to know about it.
+        checkUpdate = True
+        while True:
+            try:
+                menu(session, checkUpdate=checkUpdate)
+                clear()
+                break
+            except ReturnToMenu:
+                checkUpdate = False
+                continue
     except KeyboardInterrupt:
         clear()
         raise
