@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.11"
+PANEL_VERSION = "1.0.12"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -86,8 +86,10 @@ MENU_COMMAND = "/menu"
 ID_OK = re.compile(r"^[A-Za-z0-9]{1,32}$")
 _buttons_lock = threading.RLock()
 
-# Seconds between keypresses, so the menu has time to redraw before the next one.
-DEFAULT_DELAY = 0.4
+# Seconds between keypresses, so the menu has time to redraw before the next
+# one. A second is comfortable on a busy machine; 0.4 was fast enough to miss a
+# step when an instance was slow to draw the next screen.
+DEFAULT_DELAY = 1.0
 MIN_DELAY, MAX_DELAY = 0.0, 30.0
 # Only a guard against an absurd payload; a long sequence is fine, it just
 # takes proportionally longer when run across every instance.
@@ -737,7 +739,7 @@ def clean_button(raw):
     try:
         delay = round(float(delay), 2)
     except (TypeError, ValueError):
-        return None, "Delay must be a number of seconds, e.g. 0.4."
+        return None, "Delay must be a number of seconds, e.g. 1 or 0.5."
     if not MIN_DELAY <= delay <= MAX_DELAY:
         return None, "Delay must be between %g and %g seconds." % (MIN_DELAY, MAX_DELAY)
 
@@ -1627,6 +1629,8 @@ border-radius:4px;border:1px solid var(--rule);background:var(--bg);color:var(--
 .cb{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;
 color:var(--soft);margin-top:10px}
 .cb input{margin:0}
+/* So the section heading is still visible when the editor is scrolled to. */
+#bform{scroll-margin-top:14px}
 .vlist{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
 .vitem{font-family:ui-monospace,monospace;font-size:11.5px;padding:2px 8px;
 border-radius:99px;border:1px solid var(--rule);color:var(--ink)}
@@ -1688,7 +1692,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
 <section>
   <h2>Buttons</h2>
   <p class="err" id="berr"></p>
-  <div class="form">
+  <div class="form" id="bform">
     <div class="f"><label for="blabel">Name</label>
       <input id="blabel" placeholder="Daily login" maxlength="24"></div>
     <div class="f"><label for="bkeys">Menu numbers</label>
@@ -1700,8 +1704,8 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
       </select></div>
     <div class="f" id="binstwrap" style="display:none"><label for="binst">Instance numbers</label>
       <input id="binst" placeholder="3,7,12" size="10"></div>
-    <div class="f"><label for="bdelay">Pause between presses <span class="dval" id="bdval">0.4s</span></label>
-      <input id="bdelay" type="range" min="0" max="10" step="0.1" value="0.4"></div>
+    <div class="f"><label for="bdelay">Pause between presses <span class="dval" id="bdval">1.0s</span></label>
+      <input id="bdelay" type="range" min="0" max="10" step="0.1" value="1"></div>
     <button class="p" id="bsave">Add button</button>
     <button id="bcancel" style="display:none">Cancel</button>
   </div>
@@ -1837,7 +1841,7 @@ el('bmenu').addEventListener('change',menuWarn);
 function renderButtons(list){
   el('blist').innerHTML=list.map(function(b){
     var scope=b.instances.length?('instances '+b.instances.join(', ')):'all instances';
-    var d=(b.delay===undefined?0.4:b.delay);
+    var d=(b.delay===undefined?1:b.delay);
     return '<tr><td>'+esc(b.label)+'</td>'+
       '<td class="mono">'+esc(b.keys.map(function(k){
           return k==='enter'?'↵':k;}).join(' → '))+'</td>'+
@@ -1854,7 +1858,7 @@ function resetForm(){
   editing=null;
   el('blabel').value=''; el('bkeys').value=''; el('binst').value='';
   el('bscope').value='global'; el('binstwrap').style.display='none';
-  el('bdelay').value='0.4'; showDelay();
+  el('bdelay').value='1'; showDelay();
   el('bmenu').checked=true; menuWarn();
   el('bsave').textContent='Add button'; el('bcancel').style.display='none';
   el('berr').textContent='';
@@ -1900,11 +1904,14 @@ document.addEventListener('click',function(e){
     el('bscope').value=b.instances.length?'some':'global';
     el('binstwrap').style.display=b.instances.length?'':'none';
     el('binst').value=b.instances.join(',');
-    el('bdelay').value=(b.delay===undefined?0.4:b.delay); showDelay();
+    el('bdelay').value=(b.delay===undefined?1:b.delay); showDelay();
     el('bmenu').checked=(b.menu!==false); menuWarn();
     el('bsave').textContent='Save changes'; el('bcancel').style.display='';
     el('berr').textContent='';
-    window.scrollTo({top:0,behavior:'smooth'});
+    // Bring the editor to the top of the screen rather than jumping the whole
+    // page to the top: with 24 instances above it, that meant scrolling all
+    // the way back down after every edit.
+    el('bform').scrollIntoView({behavior:'smooth',block:'start'});
     return;
   }
   var dl=e.target.closest('button[data-del]');
