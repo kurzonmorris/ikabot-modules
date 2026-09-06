@@ -907,6 +907,19 @@ going back to one you have already opened is instant instead of a fresh load.
 just the page you are looking at, and **Open this one in a tab** does what it
 says.
 
+#### Page width
+
+The account page is Ikariam's own layout, and a page on another port is
+another origin — so the panel cannot measure how wide it wants to be. Instead
+you tell it: **Page width** is how many pixels the page is laid out in, and the
+whole of that width is then scaled to land exactly on the panel. Nothing falls
+off the right and there is never a sideways scrollbar. Up and down still scroll
+normally.
+
+`1100` suits Ikariam. If anything is still cut off, press **+** until it is
+not; if the page looks smaller than it needs to, press **−**. It steps by 100
+between 700 and 2400 and is remembered, so it is a once-only adjustment.
+
 The **›** at the top of the strip retracts it, giving the page the full width;
 the **‹** brings it back. The choice is remembered.
 
@@ -920,10 +933,9 @@ fit, so the whole thing is on screen at once with **nothing to scroll inside
 it** — the awkward part of a framed page on a small screen. Pinch to zoom in on
 whatever you want to read, the way you would with any other page.
 
-> The frame is given 1500px of height to work with. A status page fits inside
-> that comfortably; the cost is a little blank space below a short one. If a
-> real page ever comes out cut off at the bottom, that number is the one to
-> raise.
+> On a phone the frame is given 1500px of height to work with, so the whole
+> page renders and the outer page does the scrolling. A status page fits inside
+> that comfortably; the cost is a little blank space below a short one.
 
 This replaces keeping twenty-four browser tabs open. It needs the ports to be
 reachable from your browser, which they are on Unraid, TrueNAS, Linux and a
