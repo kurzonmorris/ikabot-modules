@@ -504,6 +504,56 @@ def getPiracyCities(session, pirateMissionChoice):
     return piracyCities
 
 
+def getPirateFortressHtml(session, cityId):
+    """Gets the crew tab of the pirate fortress, which always sits on position 17
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    cityId : int
+        id of a city which has a pirate fortress in it
+
+    Returns
+    -------
+    html : str
+    """
+    params = {
+        "view": "pirateFortress",
+        "activeTab": "tabCrew",
+        "cityId": cityId,
+        "position": 17,
+        "backgroundView": "city",
+        "currentCityId": cityId,
+        "templateView": "pirateFortress",
+        "actionRequest": actionRequest,
+        "ajax": 1,
+    }
+    return session.post(params=params)
+
+
+def getPirateFortressPoints(session, cityId):
+    """Gets the account's capture points and crew strength. Both are shared by every
+    city, so any city with a pirate fortress can be used to read them
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    cityId : int
+        id of a city which has a pirate fortress in it
+
+    Returns
+    -------
+    (capturePoints, crewStrength) : tuple
+        None if the fortress did not report them
+    """
+    html = getPirateFortressHtml(session, cityId)
+    capturePoints = re.search(r'\\"capturePoints\\":\\"(\d+)\\"', html)
+    # crewPoints only counts the crew converted from capture points, the strength the
+    # game shows also includes the basic and the bonus crew
+    crewStrength = re.search(r'\\"completeCrewPoints\\":(\d+)', html)
+    if capturePoints is None or crewStrength is None:
+        return None
+    return int(capturePoints.group(1)), int(crewStrength.group(1))
+
+
 def convertCapturePoints(session, piracyCities, convertPerMission):
     """Converts all the users capture points into crew strength
     Parameters

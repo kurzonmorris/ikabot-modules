@@ -182,7 +182,7 @@ your account from the list — no typing the game password every time.
 | **1** | Shows all queued building upgrades across your cities with estimated completion times. |
 | **2** | Manually sends a one-off resource shipment from one city to another. |
 | **3** | Automatically balances a chosen resource across all your cities — useful for keeping wine topped up everywhere. |
-| **4** | Displays a summary of all your cities: population, resources, buildings. |
+| **4** | Account status — account totals (ships, resources, production, gold, wine) plus a menu: building levels for every city as a table or a list, and a per-city detail screen. The account is read once and kept for 10 minutes, so moving around the menu costs no requests; **(3) Refresh data** re-reads it on demand. |
 | **5** | **Shrine** — donates to the shrine on a schedule (every 12 hours) to maintain divine favour. Set and forget. |
 | **6** | **Login Daily** — collects your daily bonus automatically. Also handles wine deliveries and other recurring tasks. |
 | **7** | Configure alerts: get notified when you are attacked or when wine is running low. |
