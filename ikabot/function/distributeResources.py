@@ -124,11 +124,21 @@ def distribute_evenly(session, resource_type, cities_ids, cities):
             city_url + cityID
         )  # load html from the get request for that particular city
         city = getCity(html)  # convert the html to a city object
+        # A blockaded harbour can neither send nor receive, so counting its
+        # stock skews the average every other city is levelled to, and any
+        # route planned to or from it silently does nothing.
+        if city.get("harbourOccupied"):
+            continue
 
         resourceTotal += city["availableResources"][
             resource_type
         ]  # the cities resources are added to the total
         allCities[cityID] = city  # adds the city to all cities
+
+    # Nothing to even out between fewer than two usable cities — and the
+    # average below would divide by zero if every harbour were blockaded.
+    if len(allCities) < 2:
+        return []
 
     # if a city doesn't have enough storage to fit resourceAverage
     # ikabot will send enough resources to fill the store to the max

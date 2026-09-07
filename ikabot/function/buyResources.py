@@ -140,6 +140,52 @@ def calculateCost(offers, total_amount_to_buy):
     return total_cost
 
 
+BUY_FROM_ANYONE = 1
+BUY_FROM_PLAYER = 2
+BUY_FROM_CITY = 3
+
+
+def filterOffers(offers):
+    """Narrow the offers to one seller, or leave them all.
+
+    Offers are sorted cheapest-first, and buying blindly down that list is not
+    always what is wanted — a diplomatic or alliance trade needs a particular
+    counterparty.
+
+    Parameters
+    ----------
+    offers : list[dict]
+
+    Returns
+    -------
+    (offers, seller) : tuple
+        the offers belonging to the chosen seller, and its name (None when the
+        user did not narrow the list)
+    """
+    print("Buy from:")
+    print("({:d}) Anyone in range".format(BUY_FROM_ANYONE))
+    print("({:d}) A specific player".format(BUY_FROM_PLAYER))
+    print("({:d}) A specific city".format(BUY_FROM_CITY))
+    choice = read(min=BUY_FROM_ANYONE, max=BUY_FROM_CITY, default=BUY_FROM_ANYONE)
+    if choice == BUY_FROM_ANYONE:
+        return offers, None
+
+    if choice == BUY_FROM_PLAYER:
+        key = "jugadorAComprar"
+        print("\nWhich player do you want to buy from?\n")
+    else:
+        key = "ciudadDestino"
+        print("\nWhich city do you want to buy from?\n")
+
+    # dict.fromkeys de-duplicates while keeping the cheapest-first ordering
+    sellers = list(dict.fromkeys([offer[key] for offer in offers]))
+    for i, seller in enumerate(sellers):
+        print("({:d}) {}".format(i + 1, seller))
+    seller = sellers[read(min=1, max=len(sellers)) - 1]
+
+    return [offer for offer in offers if offer[key] == seller], seller
+
+
 def chooseCommertialCity(commercial_cities):
     """
     Parameters
@@ -198,6 +244,10 @@ def buyResources(session, event, stdin_fd, predetermined_input):
             event.set()
             return
 
+        # let the user buy from one seller only
+        (offers, seller) = filterOffers(offers)
+        banner()
+
         # display offers to the user
         total_price = 0
         total_amount = 0
@@ -205,6 +255,11 @@ def buyResources(session, event, stdin_fd, predetermined_input):
             amount = offer["amountAvailable"]
             price = offer["precio"]
             cost = amount * price
+            print(
+                "seller:{} ({})".format(
+                    offer["jugadorAComprar"], offer["ciudadDestino"]
+                )
+            )
             print("amount:{}".format(addThousandSeparator(amount)))
             print("price :{:d}".format(price))
             print("cost  :{}".format(addThousandSeparator(cost)))
@@ -263,6 +318,8 @@ def buyResources(session, event, stdin_fd, predetermined_input):
     info = "\nI will buy {} from {} to {}\n".format(
         addThousandSeparator(amount_to_buy), materials_names[resource], city["cityName"]
     )
+    if seller is not None:
+        info += "Buying from {} only\n".format(seller)
     setInfoSignal(session, info)
     try:
         do_it(session, city, offers, amount_to_buy)

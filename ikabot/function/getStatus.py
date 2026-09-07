@@ -6,6 +6,7 @@ import re
 from decimal import *
 
 from ikabot.config import *
+from ikabot.function.autoPirate import getPirateFortressPoints
 from ikabot.helpers.getJson import getCity
 from ikabot.helpers.gui import *
 from ikabot.helpers.market import getGold
@@ -49,13 +50,21 @@ def getStatus(session, event, stdin_fd, predetermined_input):
         total_citizens = 0
         available_ships = 0
         total_ships = 0
+        pirate_city_id = None
         for id in ids:
-            session.get("view=city&cityId={}".format(id), noIndex=True)
+            html = session.get("view=city&cityId={}".format(id), noIndex=True)
             data = session.get("view=updateGlobalData&ajax=1", noIndex=True)
             json_data = json.loads(data, strict=False)
             json_data = json_data[0][1]["headerData"]
             if json_data["relatedCity"]["owncity"] != 1:
                 continue
+            # Capture points and crew are account-wide, so the first fortress
+            # found answers for all of them.
+            if pirate_city_id is None:
+                for building in getCity(html)["position"]:
+                    if building["building"] == "pirateFortress":
+                        pirate_city_id = id
+                        break
             wood = Decimal(json_data["resourceProduction"])
             good = Decimal(json_data["tradegoodProduction"])
             typeGood = int(json_data["producedTradegood"])
@@ -77,14 +86,29 @@ def getStatus(session, event, stdin_fd, predetermined_input):
             available_ships = json_data["freeTransporters"]
             total_ships = json_data["maxTransporters"]
             total_gold = int(Decimal(json_data["gold"]))
+            # Every term the game itself sums. Leaving out the Hermes bonus
+            # and the corrupt tax collector made the figure disagree with the
+            # one on screen for any account that had either.
             total_gold_production = int(
                 Decimal(
-                    json_data["scientistsUpkeep"]
-                    + json_data["income"]
+                    json_data["income"]
+                    + json_data["godGoldResult"]
+                    + json_data["badTaxAccountant"]
                     + json_data["upkeep"]
+                    + json_data["scientistsUpkeep"]
                 )
             )
         print("Ships {:d}/{:d}".format(int(available_ships), int(total_ships)))
+        if pirate_city_id is not None:
+            points = getPirateFortressPoints(session, pirate_city_id)
+            if points is not None:
+                (capture_points, crew_points) = points
+                print(
+                    "Pirate fortress: {} capture points, {} crew strength".format(
+                        addThousandSeparator(capture_points),
+                        addThousandSeparator(crew_points),
+                    )
+                )
         print("\nTotal:")
         print("{:>10}".format(" "), end="|")
         for i in range(len(materials_names)):

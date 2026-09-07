@@ -194,7 +194,26 @@ def getCostsReducers(city):
     return reducers_per_material
 
 
-def getResourcesNeeded(session, city, building, current_level, final_level):
+# Which reducer index each special building feeds, and the per-level step.
+_REDUCER_BUILDINGS = {
+    "carpentering": 0,
+    "vineyard": 1,
+    "architect": 2,
+    "optician": 3,
+    "fireworker": 4,
+}
+_REDUCER_CAP = 50
+
+
+def _bump_reducer(reducers, building_name):
+    """Account for one completed level of a cost-reducing building."""
+    index = _REDUCER_BUILDINGS.get(building_name)
+    if index is not None:
+        reducers[index] = min(_REDUCER_CAP, reducers[index] + 1)
+
+
+def getResourcesNeeded(session, city, building, current_level, final_level,
+                       simulated_reducers=None):
     """
     Parameters
     ----------
@@ -271,7 +290,12 @@ def getResourcesNeeded(session, city, building, current_level, final_level):
     costs_reduction = 1 - costs_reduction
 
     # get buildings that reduce the cost of upgrades
-    costs_reductions = getCostsReducers(city)
+    # When a queue is being planned, the caller tracks how the reducers grow as
+    # earlier upgrades in that queue complete, and passes the running values in.
+    if simulated_reducers is None:
+        costs_reductions = getCostsReducers(city)
+    else:
+        costs_reductions = simulated_reducers
 
     # get the type of resources that this upgrade will cost (wood, marble, etc)
     resources_types = re.findall(
@@ -318,16 +342,26 @@ def getResourcesNeeded(session, city, building, current_level, final_level):
             cost = cost.replace(",", "").replace(".", "")
             cost = 0 if cost == "" else int(cost)
 
-            # calculate all the reductions
-            real_cost = Decimal(cost)
-            # investigation reduction
-            original_cost = Decimal(real_cost) / Decimal(costs_reduction)
-            # special building reduction
-            real_cost -= Decimal(original_cost) * (
-                Decimal(costs_reductions[resource_index]) / Decimal(100)
-            )
+            # The page already shows the cost with the research reduction
+            # applied. The old code divided that back out to recover a "base"
+            # cost and subtracted the building reduction from it, which only
+            # works if the two reductions compose that way -- they do not, and
+            # the recovered base was wrong whenever the division did not land
+            # exactly. Scale the displayed cost by the ratio of the two
+            # multipliers instead, which needs no guess about the base.
+            investigation_multiplier = Decimal(str(costs_reduction))
+            building_reduction = Decimal(costs_reductions[resource_index]) / Decimal(100)
+            final_multiplier = investigation_multiplier - building_reduction
 
+            real_cost = Decimal(cost) * (final_multiplier / investigation_multiplier)
+
+            # Round up: falling one unit short means a wasted transport or a
+            # refused upgrade.
             final_costs[resource_index] += math.ceil(real_cost)
+
+        # Each level of a reducer building adds one percent, capped at 50, and
+        # that applies to every later level in this same upgrade run.
+        _bump_reducer(costs_reductions, building["building"])
 
     if levels_to_upgrade < final_level - current_level:
         print(
@@ -652,7 +686,15 @@ def constructionList(session, event, stdin_fd, predetermined_input):
 
         #simulated resources
         simulated_resources = list(city["availableResources"])
-        
+        # Reducers grow as the queue completes, so the cost of a later building
+        # depends on the ones queued before it. Track them alongside resources.
+        simulated_reducers = getCostsReducers(city)
+        for b in city["position"]:
+            # Already under construction: it will have finished before anything
+            # queued now is paid for, so its extra percent counts.
+            if b["name"] != "empty" and b.get("isBusy", False):
+                _bump_reducer(simulated_reducers, b["building"])
+
         # NewList - Only Accepted
         confirmed_buildings = []
 
@@ -663,9 +705,14 @@ def constructionList(session, event, stdin_fd, predetermined_input):
                 current_level += 1
             final_level = building["upgradeTo"]
 
+            # A copy: only committed once the user accepts this building,
+            # so a skipped one does not leave its reduction behind.
+            current_reducers = list(simulated_reducers)
+
             # calculate the resources that are needed
             resourcesNeeded = getResourcesNeeded(
-                session, city, building, current_level, final_level
+                session, city, building, current_level, final_level,
+                current_reducers
             )
                         
             if -2 in resourcesNeeded:
@@ -683,7 +730,8 @@ def constructionList(session, event, stdin_fd, predetermined_input):
 
             # show missing resources to the user
             if sum(missing) > 0:
-                print("\nMaterials needed for {}:".format(building["name"]))
+                print("\nMaterials needed for {} (lv {:d} -> {:d}):".format(
+                    building["name"], current_level, final_level))
                 for i, name in enumerate(materials_names):
                     amount = resourcesNeeded[i]
                     if amount == 0:
@@ -726,7 +774,8 @@ def constructionList(session, event, stdin_fd, predetermined_input):
                     wait_resources = True
                     sendResourcesMenu(session, cityId, missing, useFreighters, useRounding)
             else:
-                print("\nMaterials needed for {}:".format(building["name"]))
+                print("\nMaterials needed for {} (lv {:d} -> {:d}):".format(
+                    building["name"], current_level, final_level))
                 for i, name in enumerate(materials_names):
                     amount = resourcesNeeded[i]
                     if amount == 0:
@@ -743,7 +792,8 @@ def constructionList(session, event, stdin_fd, predetermined_input):
 
             # Save the approved building and deduct it from the simulator
             confirmed_buildings.append(building)
-            
+            simulated_reducers = current_reducers
+
             for i in range(len(materials_names)):
                 if simulated_resources[i] < resourcesNeeded[i]:
                     simulated_resources[i] = 0
