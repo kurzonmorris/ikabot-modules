@@ -42,7 +42,7 @@ from ikabot.helpers.modulePrefs import (
     load_prefs as module_load_prefs,
     save_prefs as module_save_prefs,
 )
-from ikabot.helpers.pedirInfo import chooseCity, read
+from ikabot.helpers.pedirInfo import chooseCity,getIdsOfCities, read
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.varios import addThousandSeparator, getDateTime, wait
@@ -2458,8 +2458,8 @@ def _stop_worker(session):
 
 def _all_city_ids(session):
     """Return every city id owned by this account, in menu order."""
-    html = session.get()
-    return re.findall(r'<option value="(\d+)" class="cityowntown"', html)
+    ids, _ = getIdsOfCities(session)
+    return [str(cid) for cid in ids]
 
 
 def _resource_requirements(session):
@@ -2819,8 +2819,8 @@ def _get_supplier_ids(session, dest_city_id):
         if cached and now - cached[0] < SUPPLIER_LIST_TTL_SECONDS:
             return cached[1]
     html = session.get()
-    ids = re.findall(r'<option value="(\d+)" class="cityowntown"', html)
-    ids = [cid for cid in ids if str(cid) != str(dest_city_id)]
+    raw_ids, _ = getIdsOfCities(session)
+    ids = [str(cid) for cid in raw_ids if str(cid) != str(dest_city_id)]
     with _supplier_cache_lock:
         _supplier_id_cache[dest_city_id] = (now, ids)
     return ids
