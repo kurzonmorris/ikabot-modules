@@ -487,7 +487,12 @@ def updateTelegramData(session, event=None, stdin_fd=None, predetermined_input=[
                             update["message"]["text"].strip()
                             == "/ikabot {}".format(rand)
                         ):
-                            user_id = update.get("message", {}).get("from", {}).get("id")
+                            # The chat id, not the sender's user id. They are
+                            # the same number in a private chat, which is why
+                            # this went unnoticed, but in a group they differ
+                            # and every later sendMessage goes to the wrong
+                            # place.
+                            user_id = update.get("message", {}).get("chat", {}).get("id")
                             break
             time.sleep(2)
             print(" " * 100, end="\r")

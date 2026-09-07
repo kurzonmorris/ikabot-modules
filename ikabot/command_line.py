@@ -64,7 +64,9 @@ from ikabot.helpers.process import updateProcessList
 from ikabot.helpers.taskWatchdog import check_for_dead_tasks, write_status
 from ikabot.web.session import *
 from ikabot.function.UpgradeUnits import UpgradeUnits
-from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWorkers
+from ikabot.function.modifyProduction import (
+    modifyProduction, modifyAcademyWorkers, modifyTempleWorkers,
+)
 from ikabot.function.reorganizeCityBuildings import reorganizeCityBuildings
 from ikabot.function.developer import developer
 from ikabot.helpers.pluginLoader import discover_plugins
@@ -127,6 +129,7 @@ def _menu_actions():
         2301: modifyProduction,
         2302: modifyAcademyWorkers,
         2303: reorganizeCityBuildings,
+        2304: modifyTempleWorkers,
         25: sendCulturalTreatyRequests,
     }
 
@@ -339,7 +342,8 @@ def menu(session, checkUpdate=True):
             print("(1) Set Production of Saw mill / Luxury good")
             print("(2) Set Academy workers")
             print("(3) Reorganize city buildings")
-            selected = read(min=0, max=3, digit=True)
+            print("(4) Set Temple priests")
+            selected = read(min=0, max=4, digit=True)
             if selected == 0:
                 continue
             selected += 2300
