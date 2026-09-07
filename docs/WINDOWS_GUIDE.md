@@ -5,6 +5,9 @@ twenty minutes, most of which is waiting.
 
 You need Windows 10 or 11, 64-bit, and about 4 GB of free disk space.
 
+Steps 1 to 6 get it running. Step 10 is optional and adds access from your
+phone, from anywhere.
+
 ---
 
 ## Step 1 — Install Docker Desktop
@@ -183,6 +186,77 @@ You do not need to download the installer again for those.
 
 ---
 
+## Step 10 — Reaching it from your phone, anywhere (optional)
+
+So far the control panel only works on the PC it is installed on. This step
+lets you open it from your phone, at home or away, without opening anything up
+to the internet.
+
+It uses **Tailscale**, which builds a small private network between your own
+devices. Nothing becomes public; only devices signed in to your own account can
+see each other. It is free for personal use.
+
+> **Do not port-forward instead.** Forwarding port 7682 on your router puts the
+> control panel — which can restart your bots and read your files — on the open
+> internet for anyone to find. Tailscale is the safe way to do this, and it is
+> easier.
+
+### On the PC
+
+1. Go to **https://tailscale.com/download** and install it
+2. It appears in the system tray, bottom-right, near the clock
+3. Click it → **Log in**, and sign in with Google, Microsoft or GitHub. That
+   creates your private network. No payment, no configuration.
+4. Click the tray icon again. It shows this PC and an address beginning
+   **100.** — something like `100.122.72.17`
+
+**Write that number down.** That is your PC's address on your private network,
+and it does not change.
+
+### On Android
+
+1. Install **Tailscale** from the Play Store
+2. Sign in with **the same account** you used on the PC
+3. Turn the switch on. A key icon appears in the status bar
+
+> **If the panel will not load but Tailscale says it is connected**, this is
+> almost certainly Android's Private DNS setting. Go to **Settings → Network &
+> internet → Private DNS** and set it to **Off** or **Automatic** — not a named
+> provider. This catches a lot of people and looks exactly like Tailscale being
+> broken.
+
+### On iPhone or iPad
+
+1. Install **Tailscale** from the App Store
+2. Sign in with **the same account** you used on the PC
+3. It asks to add a VPN configuration — allow it
+4. Turn the switch on
+
+### Using it
+
+On the phone, open a browser and go to:
+
+```
+http://100.122.72.17:7682
+```
+
+using **your** number from the PC step. Sign in with `ikabot` and the password
+from Step 4. Bookmark it.
+
+That address works on mobile data, on someone else's wifi, anywhere — as long
+as Tailscale is switched on at both ends and the PC is awake.
+
+> **A shorter address.** Tailscale can also give the PC a name, so
+> `http://my-pc:7682` works instead of the number. It is on by default for new
+> accounts; if the name does not work, use the number.
+
+### Turning it off
+
+Switching Tailscale off on the phone stops the access. Nothing is left exposed
+either way — there is no open port to close.
+
+---
+
 ## One thing that does not work on Windows
 
 ikabot can start a small web page for each account showing that account's town
@@ -208,6 +282,10 @@ Unraid or TrueNAS, or a Steam Deck.
 | The browser says it cannot connect | The container is not running | Open Docker Desktop → **Containers** → start **ikabot** |
 | It asks for a password you never set | It wants the web page password from Step 4 | Username is `ikabot` |
 | An account box says **crashed** | That account stopped | Press **Restart** on that box |
+| Phone: Tailscale is on but the panel will not load | Android Private DNS is intercepting it | **Settings → Network & internet → Private DNS** → **Off** or **Automatic** |
+| Phone: the PC shows as offline in Tailscale | The PC is asleep, off, or Tailscale is not running on it | Wake the PC and check the Tailscale tray icon says *Connected* |
+| Phone: it asks for a password that is not accepted | Wrong account — the phone is on a different private network | Sign out on the phone and sign in with the same account as the PC |
+| It works on the PC but not from the phone | Windows Firewall is blocking the ports on the Tailscale adapter | Allow **Docker Desktop** through Windows Firewall for **private** networks |
 
 Nothing here can be broken by trying again. Running `INSTALL.bat` a second
 time is safe: it keeps your accounts and settings and leaves an ikabot you have
