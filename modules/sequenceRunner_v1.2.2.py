@@ -3,7 +3,7 @@
 
 MODULE_NAME  = "Sequence Runner"
 MODULE_ENTRY = "sequenceRunner"
-MODULE_VERSION = "1.2.1"
+MODULE_VERSION = "1.2.2"
 
 __version__ = MODULE_VERSION
 
@@ -158,6 +158,10 @@ def _create_sequence(sequences):
     print("  Do NOT use 'enter' for [Enter] pause prompts — those are")
     print("  skipped automatically. Only use 'enter' for text fields")
     print("  that genuinely accept an empty input (e.g. optional fields).")
+    print()
+    print("  NOTE: Account status (4) is now a browsing menu.")
+    print("  Old sequences using (4) need re-recording with the new sub-options:")
+    print("    (1) Building levels  (2) City details  (3) Refresh  (0) Exit")
     print()
     print("  Example: 16, 5, 1, 0, 2, 6, 1, y")
     print()
