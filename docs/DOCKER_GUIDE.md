@@ -1438,6 +1438,12 @@ script refuses to build if that number disagrees with the copies printed inside
 `install.sh`, `INSTALL.bat` and `README.txt`, so what they download and what
 they see on screen can never drift apart.
 
+> **The installer and the panel are versioned separately** and the numbers do
+> not match — installer 1.0.23 ships panel 1.0.21. That looks like a failed
+> update if only one of them is on screen, so both are: the installer prints
+> both when it finishes, writes its own into `config/.installer-version`, and
+> the panel shows it beside its own in the line under the heading.
+
 ### Publishing it
 
 Attach the zip to a GitHub Release. Because the version is in the filename, the

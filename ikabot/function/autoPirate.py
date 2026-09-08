@@ -317,34 +317,57 @@ def autoPirate(session, event, stdin_fd, predetermined_input):
                 "function=createCaptcha" in html or "js_captchaImage" in html
             ):
                 try:
+                    last_captcha_error = None
                     for i in range(20):
                         session.setStatus("Resolving captcha " + str(i) + "/20")
                         if i == 19:
-                            msg = "Failed to resolve captcha too many times, autoPirate has been terminated."
+                            msg = (
+                                "Failed to resolve captcha too many times, "
+                                "autoPirate has been terminated."
+                            )
+                            if last_captcha_error is not None:
+                                msg += "\n\nLast failure was while {}:\n{}: {}".format(
+                                    getattr(last_captcha_error, "stage", "solving the captcha"),
+                                    type(getattr(last_captcha_error, "cause", last_captcha_error)).__name__,
+                                    getattr(last_captcha_error, "cause", last_captcha_error),
+                                )
                             sendToBot(session, msg)
                             raise Exception("Failed to resolve captcha too many times")
-                        with _stage("fetching the captcha image"):
-                            picture = extract_captcha_image(html)
-                            if picture is None:
-                                logger.warning(
-                                    "Captcha image not embedded in the capture "
-                                    "response; falling back to createCaptcha"
-                                )
-                                picture = session.get(
-                                    "action=Options&function=createCaptcha",
-                                    fullResponse=True,
-                                ).content
-                            if not picture:
-                                raise ValueError(
-                                    "the game returned no captcha image, neither "
-                                    "embedded in the capture response nor from "
-                                    "the createCaptcha endpoint"
-                                )
-                        with _stage("solving the captcha"):
-                            captcha = resolveCaptcha(session, picture)
+                        try:
+                            captcha = _fetch_and_solve_captcha(session, html)
+                        except PirateStageError as exc:
+                            # Recoverable within this loop: remember why, and
+                            # try again on a fresh captcha. Only if all 20
+                            # attempts fail does the reason get reported, so a
+                            # transient blip stays quiet but a real breakage
+                            # still says which step broke.
+                            last_captcha_error = exc
+                            logger.warning(
+                                "Captcha attempt %d/20 failed while %s: %s",
+                                i + 1, exc.stage, exc.cause,
+                            )
+                            session.setStatus(
+                                "Captcha failed ({}/20): {}".format(i + 1, exc.stage)
+                            )
+                            time.sleep(5)
+                            html = _request_fresh_captcha(
+                                session,
+                                piracyMissionToBuildingLevel[pirateMissionChoice],
+                                piracyCities[0]["id"],
+                            )
+                            if html is None:
+                                break
+                            continue
                         session.setStatus("Got captcha: " + captcha)
                         if captcha == "Error":
                             time.sleep(5)
+                            html = _request_fresh_captcha(
+                                session,
+                                piracyMissionToBuildingLevel[pirateMissionChoice],
+                                piracyCities[0]["id"],
+                            )
+                            if html is None:
+                                break
                             continue
                         session.post(city_url + str(piracyCities[0]["id"]))
                         _submit_params = {
@@ -409,6 +432,77 @@ def _warn_local_fallback(session, exc):
         "Reason: {}\n\nThis is reported once per run; see the log for each "
         "occurrence.".format(reason),
     )
+
+
+def _request_fresh_captcha(session, building_level, city_id):
+    """Ask the fortress for a new capture, and return its HTML.
+
+    A captcha that could not be solved leaves the page holding the *same*
+    stale challenge, so retrying against it just fails the same way. Issuing a
+    fresh capture request both mints a new captcha and re-establishes the
+    fortress context if that is what went wrong.
+
+    Returns None when the fortress is no longer asking for a captcha, which
+    means the caller should stop retrying and let the outer loop decide.
+    """
+    url = (
+        "action=PiracyScreen&function=capture&buildingLevel={0}"
+        "&view=pirateFortress&cityId={1}&position=17&activeTab=tabBootyQuest"
+        "&backgroundView=city&currentCityId={1}&templateView=pirateFortress"
+        "&actionRequest={2}&ajax=1"
+    ).format(building_level, city_id, actionRequest)
+    html = session.post(url)
+    if "function=createCaptcha" in html or "js_captchaImage" in html:
+        return html
+    return None
+
+
+def _fetch_and_solve_captcha(session, html):
+    """Return the solved captcha string, or raise PirateStageError saying why."""
+    with _stage("fetching the captcha image"):
+        picture = extract_captcha_image(html)
+        if picture is None:
+            logger.warning(
+                "Captcha image not embedded in the capture "
+                "response; falling back to createCaptcha"
+            )
+            picture = session.get(
+                "action=Options&function=createCaptcha",
+                fullResponse=True,
+            ).content
+        if not picture:
+            raise ValueError(
+                "the game returned no captcha image, neither "
+                "embedded in the capture response nor from "
+                "the createCaptcha endpoint"
+            )
+        if not _is_png_bytes(picture):
+            raise ValueError(
+                "the captcha image was not a PNG (got {} bytes starting "
+                "{!r}) - the game most likely returned a page instead".format(
+                    len(picture), bytes(picture[:16])
+                )
+            )
+    with _stage("solving the captcha"):
+        return resolveCaptcha(session, picture)
+
+
+def _is_png_bytes(image):
+    """True only if *image* is a non-empty PNG byte string.
+
+    The solvers expect the actual image. When the game hands back HTML — a
+    login page, an error, a redirect — sending it to the API wastes a call and
+    comes back as a silent failure, and the local solver chews through the
+    weights to produce nonsense. Cheap to check, so check.
+    """
+    try:
+        return (
+            isinstance(image, (bytes, bytearray))
+            and len(image) > 8
+            and bytes(image[:8]) == b"\x89PNG\r\n\x1a\n"
+        )
+    except Exception:
+        return False
 
 
 def resolveCaptcha(session, picture):
@@ -505,12 +599,13 @@ def getPiracyCities(session, pirateMissionChoice):
 
 
 def getPirateFortressHtml(session, cityId):
-    """Gets the crew tab of the pirate fortress, which always sits on position 17
+    """Return the crew tab of the pirate fortress, which always sits on position 17.
+
     Parameters
     ----------
     session : ikabot.web.session.Session
     cityId : int
-        id of a city which has a pirate fortress in it
+        id of a city that has a pirate fortress in it
 
     Returns
     -------
@@ -531,23 +626,21 @@ def getPirateFortressHtml(session, cityId):
 
 
 def getPirateFortressPoints(session, cityId):
-    """Gets the account's capture points and crew strength. Both are shared by every
-    city, so any city with a pirate fortress can be used to read them
+    """Return (capturePoints, crewStrength) for the account, or None.
+
+    Both are account-wide rather than per city, so any city with a fortress
+    gives the same answer.
+
     Parameters
     ----------
     session : ikabot.web.session.Session
     cityId : int
-        id of a city which has a pirate fortress in it
-
-    Returns
-    -------
-    (capturePoints, crewStrength) : tuple
-        None if the fortress did not report them
+        id of a city that has a pirate fortress in it
     """
     html = getPirateFortressHtml(session, cityId)
     capturePoints = re.search(r'\\"capturePoints\\":\\"(\d+)\\"', html)
-    # crewPoints only counts the crew converted from capture points, the strength the
-    # game shows also includes the basic and the bonus crew
+    # crewPoints counts only the crew converted from capture points; the figure
+    # the game displays also includes the basic and bonus crew.
     crewStrength = re.search(r'\\"completeCrewPoints\\":(\d+)', html)
     if capturePoints is None or crewStrength is None:
         return None
@@ -561,18 +654,7 @@ def convertCapturePoints(session, piracyCities, convertPerMission):
     session : ikabot.web.session.Session
     piracyCities: a list containing all cities which have a pirate fortress
     """
-    params = {
-        "view": "pirateFortress",
-        "activeTab": "tabCrew",
-        "cityId": piracyCities[0]["id"],
-        "position": 17,
-        "backgroundView": "city",
-        "currentCityId": piracyCities[0]["id"],
-        "templateView": "pirateFortress",
-        "actionRequest": actionRequest,
-        "ajax": 1,
-    }
-    html = session.post(params=params)
+    html = getPirateFortressHtml(session, piracyCities[0]["id"])
     rta = re.search(r'\\"capturePoints\\":\\"(\d+)\\"', html)
     capturePoints = int(rta.group(1))
     if convertPerMission == "all":

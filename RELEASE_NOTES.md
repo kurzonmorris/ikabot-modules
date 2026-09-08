@@ -107,10 +107,10 @@
 - Respects server rate limit of 5 outgoing messages per 5 minutes, reserving one slot for manual use.
 - Accessible via `(25) Send cultural treaty requests`.
 
-**Account status rewritten (`getStatus.py`, `autoPirate.py`)**
+**Account status rewritten (`getStatus.py`)**
 - The account is now read in a single pass (two requests per city) and cached per account for 10 minutes, so browsing the status screens costs no further requests. Stale caches are re-read automatically; `(3) Refresh data` forces a re-read.
 - New menu: `(1) Building levels` shows every city's buildings as a width-aware table or as a per-city list with slot positions, `(2) City details` opens any city without re-scanning the account.
-- Shows pirate fortress capture points and crew strength when a fortress is present (`getPirateFortressPoints()` added to `autoPirate.py`).
+- Shows pirate fortress capture points and crew strength when a fortress is present, reading it once after the scan instead of per city.
 - Per-city production is now parsed from the city page that was already downloaded, removing one request per city view.
 - Gold production tolerates servers that omit `godGoldResult` / `badTaxAccountant`.
 - Note: the sub-menu changes the keystrokes for option `(4)`, so Sequence Runner sequences that include Account status need re-recording.
