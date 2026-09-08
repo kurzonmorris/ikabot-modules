@@ -20,10 +20,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.12.1
+Version: 2.13.0
 """
 
-MODULE_VERSION = "2.12.1"
+MODULE_VERSION = "2.13.0"
 
 import csv
 import glob
@@ -159,49 +159,85 @@ def _to_num(value):
 
 
 def _account_suffix(session):
+    """
+    Per-account file suffix. Includes the WORLD number: the same username can
+    exist on several worlds of the same server, and without it those accounts
+    would share (and corrupt) each other's goals, config, locks and cache.
+    """
+    world = _safe(getattr(session, "mundo", "") or "x")
+    return f"{_safe(session.servidor)}_{world}_{_safe(session.username)}"
+
+
+def _legacy_account_suffix(session):
+    """Pre-2.13 suffix (no world number) — used only to migrate old files."""
     return f"{_safe(session.servidor)}_{_safe(session.username)}"
+
+
+def _home(name):
+    return os.path.join(os.path.expanduser("~"), name)
 
 
 def _csv_path(session, is_units):
     kind = "units" if is_units else "ships"
-    return os.path.join(
-        os.path.expanduser("~"),
-        f".ikabot_recruitment_{kind}_{_account_suffix(session)}.csv",
-    )
+    return _home(f".ikabot_recruitment_{kind}_{_account_suffix(session)}.csv")
 
 
 def _config_path(session):
-    return os.path.join(
-        os.path.expanduser("~"),
-        f".ikabot_recruitment_cfg_{_account_suffix(session)}.json",
-    )
+    return _home(f".ikabot_recruitment_cfg_{_account_suffix(session)}.json")
 
 
-def _stop_flag_path(session):
-    return os.path.join(
-        os.path.expanduser("~"),
-        f".ikabot_recruitment_stop_{_account_suffix(session)}",
-    )
+def _stop_flag_path(session, is_units):
+    """Per-TYPE stop flag. A shared flag let stopping troops also stop ships."""
+    kind = "units" if is_units else "ships"
+    return _home(f".ikabot_recruitment_stop_{kind}_{_account_suffix(session)}")
+
+
+_MIGRATED_ACCOUNTS = set()
+
+
+def _migrate_account_files(session):
+    """
+    One-time rename of pre-2.13 files (which lacked the world number) to the
+    new per-world names. Only moves a file when the new name does not exist,
+    so it can never clobber newer data. Idempotent and safe to call often.
+    """
+    key = _account_suffix(session)
+    if key in _MIGRATED_ACCOUNTS:
+        return
+    _MIGRATED_ACCOUNTS.add(key)
+    old, new = _legacy_account_suffix(session), key
+    if old == new:
+        return
+    for tmpl in (".ikabot_recruitment_units_{}.csv",
+                 ".ikabot_recruitment_ships_{}.csv",
+                 ".ikabot_recruitment_cfg_{}.json",
+                 ".ikabot_recruit_bldcache_units_{}.json",
+                 ".ikabot_recruit_bldcache_ships_{}.json"):
+        src, dst = _home(tmpl.format(old)), _home(tmpl.format(new))
+        try:
+            if os.path.exists(src) and not os.path.exists(dst):
+                os.replace(src, dst)
+        except OSError:
+            pass
 
 
 WORKER_LOCK_STALE_SECONDS = 120  # worker renews every ~30 s; stale after 4 missed cycles
 WAKE_POLL_SECONDS = 2            # granularity for interruptible sleep
 
+# Batching guards (see the order-sizing block in execute_recruitment_loop)
+_TAIL_UNITS = 25           # below this, finish the goal in one order
+_RELAX_AFTER_CYCLES = 4    # idle cycles before the minimum starts relaxing
+_RELAX_MAX_DIVISOR = 64    # ceiling on how far the minimum may relax
+
 
 def _worker_lock_path(session, is_units):
     kind = "units" if is_units else "ships"
-    return os.path.join(
-        os.path.expanduser("~"),
-        f".ikabot_recruitment_worker_{kind}_{_account_suffix(session)}.lock",
-    )
+    return _home(f".ikabot_recruitment_worker_{kind}_{_account_suffix(session)}.lock")
 
 
 def _wake_flag_path(session, is_units):
     kind = "units" if is_units else "ships"
-    return os.path.join(
-        os.path.expanduser("~"),
-        f".ikabot_recruitment_wake_{kind}_{_account_suffix(session)}",
-    )
+    return _home(f".ikabot_recruitment_wake_{kind}_{_account_suffix(session)}")
 
 
 # =============================================================================
@@ -213,10 +249,7 @@ _BUILDINGS_CACHE_VERSION = 1
 
 def _buildings_cache_path(session, is_units):
     kind = "units" if is_units else "ships"
-    return os.path.join(
-        os.path.expanduser("~"),
-        f".ikabot_recruit_bldcache_{kind}_{_account_suffix(session)}.json",
-    )
+    return _home(f".ikabot_recruit_bldcache_{kind}_{_account_suffix(session)}.json")
 
 
 def _load_buildings_cache(session, is_units):
@@ -375,6 +408,70 @@ def _coerce_recruit_row_out(row):
     return out
 
 
+_CSV_LOCK_STALE_SECONDS = 30
+
+
+def _csv_lock_path(session, is_units):
+    kind = "units" if is_units else "ships"
+    return _home(f".ikabot_recruitment_{kind}_{_account_suffix(session)}.csv.lock")
+
+
+class _csv_lock(object):
+    """
+    Cross-process guard for read-modify-write on the goals CSV.
+
+    The menu and the background worker both do load -> mutate -> save. Without
+    this, adding/reducing/reprioritising a goal while the worker deducts an
+    order silently discards one of the two changes.
+
+    Uses O_CREAT|O_EXCL (atomic on every platform). A lock older than
+    _CSV_LOCK_STALE_SECONDS is treated as abandoned and broken, so a crashed
+    process cannot wedge the CSV permanently. Acquisition never fails hard:
+    after the timeout it proceeds anyway, matching the previous behaviour
+    rather than losing the user's edit.
+    """
+
+    def __init__(self, session, is_units, timeout=10.0):
+        self.path = _csv_lock_path(session, is_units)
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(self.fd, str(os.getpid()).encode())
+                except OSError:
+                    pass
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > _CSV_LOCK_STALE_SECONDS:
+                        os.remove(self.path)      # abandoned by a dead process
+                        continue
+                except OSError:
+                    pass
+                if time.time() >= deadline:
+                    return self                   # proceed rather than lose data
+                time.sleep(0.05)
+            except OSError:
+                return self                       # lock unusable: don't block work
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+        return False
+
+
 def recruit_csv_load(session, is_units):
     """Load and return all rows from the goals CSV for this account/type."""
     path = _csv_path(session, is_units)
@@ -387,6 +484,14 @@ def recruit_csv_load(session, is_units):
             return _migrate_old_csv(session, is_units, rows)
         return [_coerce_recruit_row(r) for r in rows]
     except FileNotFoundError:
+        return []
+    except Exception:
+        # A truncated or corrupt CSV must not kill the worker mid-run.
+        try:
+            sendToBot(session, "Auto Recruitment: goals file unreadable this "
+                               "cycle; leaving it untouched and retrying.")
+        except Exception:
+            pass
         return []
 
 
@@ -414,56 +519,64 @@ def recruit_csv_next_id(rows):
 
 def recruit_csv_add(session, is_units, unit_type_id, unit_name, qty, priority, notes=""):
     """Append a new goal row; merge with existing active row for same unit type."""
-    rows = recruit_csv_load(session, is_units)
     now = int(time.time())
-    for r in rows:
-        if r["unit_type_id"] == unit_type_id and r["status"] == "active":
-            r["qty_total"] += qty
-            r["qty_remaining"] += qty
-            r["priority"] = min(r["priority"], priority)
-            r["last_updated"] = now
-            recruit_csv_save(session, is_units, rows)
-            return r["request_id"]
-    new_id = recruit_csv_next_id(rows)
-    rows.append({
-        "request_id":   new_id,
-        "unit_type_id": unit_type_id,
-        "unit_name":    unit_name,
-        "is_units":     is_units,
-        "qty_total":    qty,
-        "qty_remaining": qty,
-        "priority":     priority,
-        "status":       "active",
-        "created_at":   now,
-        "last_updated": now,
-        "notes":        notes,
-    })
-    recruit_csv_save(session, is_units, rows)
-    return new_id
+    with _csv_lock(session, is_units):
+        rows = recruit_csv_load(session, is_units)
+        for r in rows:
+            if r["unit_type_id"] == unit_type_id and r["status"] == "active":
+                r["qty_total"] += qty
+                r["qty_remaining"] += qty
+                r["priority"] = min(r["priority"], priority)
+                r["last_updated"] = now
+                recruit_csv_save(session, is_units, rows)
+                return r["request_id"]
+        new_id = recruit_csv_next_id(rows)
+        rows.append({
+            "request_id":   new_id,
+            "unit_type_id": unit_type_id,
+            "unit_name":    unit_name,
+            "is_units":     is_units,
+            "qty_total":    qty,
+            "qty_remaining": qty,
+            "priority":     priority,
+            "status":       "active",
+            "created_at":   now,
+            "last_updated": now,
+            "notes":        notes,
+        })
+        recruit_csv_save(session, is_units, rows)
+        return new_id
 
 
 def recruit_csv_deduct(session, is_units, request_id, qty_placed):
-    """Subtract qty_placed from qty_remaining; mark completed when zero."""
-    rows = recruit_csv_load(session, is_units)
+    """
+    Subtract qty_placed from qty_remaining; mark completed when zero.
+
+    Held under the CSV lock so a concurrent menu edit cannot be lost, and the
+    row is re-read inside the lock so we deduct from current data.
+    """
     now = int(time.time())
-    for r in rows:
-        if r["request_id"] == request_id:
-            r["qty_remaining"] = max(0, r["qty_remaining"] - qty_placed)
-            r["last_updated"]  = now
-            if r["qty_remaining"] == 0:
-                r["status"] = "completed"
-            break
-    recruit_csv_save(session, is_units, rows)
+    with _csv_lock(session, is_units):
+        rows = recruit_csv_load(session, is_units)
+        for r in rows:
+            if r["request_id"] == request_id:
+                r["qty_remaining"] = max(0, r["qty_remaining"] - qty_placed)
+                r["last_updated"]  = now
+                if r["qty_remaining"] == 0:
+                    r["status"] = "completed"
+                break
+        recruit_csv_save(session, is_units, rows)
 
 
 def recruit_csv_update(session, is_units, request_id, **kwargs):
-    rows = recruit_csv_load(session, is_units)
-    for r in rows:
-        if r["request_id"] == request_id:
-            r.update(kwargs)
-            r["last_updated"] = int(time.time())
-            break
-    recruit_csv_save(session, is_units, rows)
+    with _csv_lock(session, is_units):
+        rows = recruit_csv_load(session, is_units)
+        for r in rows:
+            if r["request_id"] == request_id:
+                r.update(kwargs)
+                r["last_updated"] = int(time.time())
+                break
+        recruit_csv_save(session, is_units, rows)
 
 
 def recruit_csv_clear(session, is_units):
@@ -1378,6 +1491,56 @@ def fetch_building_data(session, building_info, is_units=True):
     return result
 
 
+_BUILD_ERROR_MARKERS = (
+    "wrong_request_id", "errormessage", "error_message",
+    "txt_error", "notenough", "not_enough", "insufficient",
+    "buildingisbusy", "maxunits", "toomany",
+)
+
+
+def _build_order_accepted(session, building, is_units, response):
+    """
+    Decide whether a BuildUnits/BuildShips POST was actually accepted.
+
+    Never trust a bare 200: Ikariam answers a rejected order (expired token,
+    insufficient resources, queue full, unsupported unit) with a normal
+    response body. Deducting on that basis silently completes goals that were
+    never built — the single biggest risk in unattended runs.
+
+    Two checks, cheapest first:
+      1. Scan the response for an explicit error marker.
+      2. Confirm the building is now BUSY. We only ever order into an idle
+         building, so it must be busy afterwards; still idle means the order
+         did not take. This is the authoritative check.
+
+    Returns (accepted: bool, reason: str).
+    """
+    # 1. Explicit error in the reply
+    try:
+        text = response if isinstance(response, str) else str(response)
+        low = text.lower()
+        for marker in _BUILD_ERROR_MARKERS:
+            if marker in low:
+                return False, f"server reported '{marker}'"
+    except Exception:
+        pass
+
+    # 2. Authoritative: the building must have become busy
+    try:
+        html = session.get(city_url + str(building['city_id']))
+        city_data = getCity(html)
+        for slot in city_data.get('position', []):
+            if slot.get('position') == building['building_position']:
+                if bool(slot.get('isBusy', False)):
+                    return True, ""
+                return False, "building still idle after the order"
+        return False, "building slot not found after the order"
+    except Exception as e:
+        # Could not verify. Treat as NOT accepted: re-ordering a batch later is
+        # recoverable, wrongly completing a goal is not.
+        return False, f"could not verify ({e})"
+
+
 def _fetch_fresh_action_code(session, building, is_units):
     """Always fetch a live action code before POSTing — codes expire."""
     city_id = building['city_id']
@@ -2223,6 +2386,7 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     """
     building_type = "barracks" if is_units else "shipyard"
     building_noun = "units" if is_units else "ships"
+    _migrate_account_files(session)
 
     # Fetch city list once — cities rarely change mid-session
     cities_ids, cities = getIdsOfCities(session)
@@ -2247,12 +2411,15 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
     IMPORT_COOLDOWN_SECS = 2 * 3600
 
     consecutive_errors = 0
+    last_fetch_error = None
     MAX_ERRORS = 10
 
     last_order_time = time.time()
     stall_warned = False
     STALL_WARN_SECS = 24 * 3600
     idle_notified = False  # avoid spamming "all goals placed" each idle cycle
+    starved_cycles = 0     # consecutive cycles where nothing met the minimum
+    impossible_warned = False  # warn once about unbuildable goals
     first_report_sent = False  # hold the very first report until troops are
                                # ordered — a maxed-out city reads 0 growth until
                                # production starts consuming its population, so
@@ -2260,9 +2427,9 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
 
     while True:
         # --- Check stop flag ---
-        if os.path.exists(_stop_flag_path(session)):
+        if os.path.exists(_stop_flag_path(session, is_units)):
             try:
-                os.remove(_stop_flag_path(session))
+                os.remove(_stop_flag_path(session, is_units))
             except OSError:
                 pass
             session.setStatus("Auto Recruitment Manager: stopped by user")
@@ -2277,11 +2444,23 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             batch_pct = 0.20
         batch_pct = max(0.0, min(1.0, batch_pct))
 
+        # The longer nothing has been affordable, the smaller a batch we accept,
+        # so a slowly-accumulating city eventually builds instead of stalling.
+        relax_divisor = 2 ** (starved_cycles // _RELAX_AFTER_CYCLES)
+        relax_divisor = max(1, min(_RELAX_MAX_DIVISOR, relax_divisor))
+
         # Which cities may be recruited in (re-read each cycle so changes take
         # effect live). Skipping a city in the resource fetch below also removes
         # its buildings from this cycle's work list.
         inc_cities = get_included_city_ids(session, is_units, cfg)
         exc_cities = get_excluded_city_ids(session, is_units, cfg)
+
+        # Pick up a building-list refresh (menu option 6) without a restart.
+        _fresh_cache = _load_buildings_cache(session, is_units)
+        if _fresh_cache:
+            cached_buildings = _fresh_cache
+
+        rejected_orders = 0
 
         # --- Reload goals CSV each cycle ---
         all_rows = recruit_csv_load(session, is_units)
@@ -2294,7 +2473,9 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             if not idle_notified:
                 session.setStatus("Auto Recruitment: all goals placed — idle")
                 sendToBot(session,
-                    "Auto Recruitment: all goals placed into build queue.\n"
+                    f"Auto Recruitment: every {building_noun} goal has been SUBMITTED to the\n"
+                    "in-game build queue. They are still being produced there;\n"
+                    "this only means there is nothing left to order.\n"
                     "Worker staying alive — add new goals or stop with (o).")
                 idle_notified = True
             _wait_or_wake(session, is_units, stop_event, 300)
@@ -2349,23 +2530,30 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                     if slot.get('position') is not None
                 }
 
-                consecutive_errors = 0
             except Exception as e:
-                consecutive_errors += 1
-                if consecutive_errors >= MAX_ERRORS:
-                    msg = (f"Auto Recruitment: {consecutive_errors} consecutive "
-                           f"network errors, aborting.\n{e}")
-                    sendToBot(session, msg)
-                    raise RuntimeError(msg)
-                session.setStatus(
-                    f"Network error ({consecutive_errors}/{MAX_ERRORS}), retrying...")
+                # Count FAILED CYCLES, not failed requests. Resetting the
+                # counter after each successful city meant one permanently
+                # broken city could never reach the abort limit: a good city
+                # cleared the count, the bad one ended the cycle, and the worker
+                # retried every 60 s forever.
+                last_fetch_error = e
                 fetch_error = True
                 break
 
         if fetch_error:
+            consecutive_errors += 1
+            if consecutive_errors >= MAX_ERRORS:
+                msg = (f"Auto Recruitment: {consecutive_errors} consecutive failed "
+                       f"cycles, aborting.\n{last_fetch_error}")
+                sendToBot(session, msg)
+                raise RuntimeError(msg)
+            session.setStatus(
+                f"Network error ({consecutive_errors}/{MAX_ERRORS}), retrying...")
             _wait_or_wake(session, is_units, stop_event, 60)
             _renew_worker_lock(session, is_units)
             continue
+
+        consecutive_errors = 0   # a cycle that fetched every city cleanly
 
         # Assemble all_buildings from the static cache + live busy/queue state
         all_buildings = []
@@ -2404,6 +2592,7 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             goals_by_unit.setdefault(g['unit_type_id'], []).append(g)
 
         buildings_recruited = 0
+        idle_capable = 0   # idle buildings that CAN train one of the goals
         total_placed = 0
 
         for b in all_buildings:
@@ -2424,6 +2613,11 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             unit_data = bld_unit_data_cache[key]
             res = city_resources[cid]
 
+            # Can this idle building train ANY outstanding goal? Used to tell
+            # "saving up for a batch" apart from "nothing here can build these".
+            if any(g['unit_type_id'] in unit_data for g in active_goals):
+                idle_capable += 1
+
             # Walk goals in priority order and build the FIRST one this building
             # can both train AND currently afford (>= 1 unit). Falling through to
             # a lower-priority affordable goal keeps the building working when the
@@ -2438,31 +2632,45 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                 if uid not in unit_data:
                     continue
                 cand = unit_data[uid]
+                remaining = g['qty_remaining']
 
-                # Order size = batch_pct of the goal's CURRENT remaining (so the
-                # goal steps down: 1500 -> 300 -> 240 ...), then capped by the
-                # building's slider max, the goal, and what the city can afford.
-                cap = g['qty_remaining']
-                if batch_pct > 0:
-                    batch = max(1, math.ceil(g['qty_remaining'] * batch_pct))
-                    cap = min(cap, batch)
-                # NOTE: deliberately NOT capped by unit_data['max_buildable'].
-                # That is the slider's max at the moment the building was
-                # fetched, i.e. a snapshot of THEN-available resources. Because
-                # unit_data is cached across cycles, a stale low value (taken
-                # when the city was poor) kept throttling every later order.
-                # ikabot's own trainArmy never uses it either — the live
-                # resource maths below is the correct and sufficient limit.
-                for res_key in ('citizens', 'wood', 'wine', 'marble', 'crystal', 'sulfur'):
+                # Target order size: batch_pct of the goal's CURRENT remaining,
+                # so a goal steps down 1500 -> 300 -> 240 ...
+                target = max(1, math.ceil(remaining * batch_pct)) if batch_pct > 0 \
+                    else remaining
+
+                # Tail collapse. Percentage batching degenerates into a stream of
+                # 3/2/1-unit orders near the end, each tying up a building for a
+                # few seconds. Once the batch would be trivial, finish the goal
+                # off in one order instead.
+                final_run = remaining <= _TAIL_UNITS or target < _TAIL_UNITS
+                if final_run:
+                    target = remaining
+
+                # What this city can actually pay for right now.
+                # NOTE: deliberately NOT capped by unit_data['max_buildable'] —
+                # that is a stale snapshot of past resources (see v2.10.1).
+                affordable = remaining
+                for res_key in ('citizens', 'wood', 'wine', 'marble',
+                                'crystal', 'sulfur'):
                     cost = cand.get(res_key, 0)
                     if cost > 0:
-                        cap = min(cap, res[res_key] // cost)
+                        affordable = min(affordable, res[res_key] // cost)
 
-                if cap >= 1:
+                # The MINIMUM we are willing to order. Below this we WAIT rather
+                # than dribble out a handful of units — that is the whole point
+                # of a batch size. Two escape hatches stop this deadlocking:
+                #   * the final remainder may always go out, however small;
+                #   * relax_divisor grows the longer nothing can be built, so a
+                #     slowly-accumulating city eventually proceeds instead of
+                #     stalling forever (the old 20%-threshold failure).
+                minimum = 1 if final_run else max(1, target // relax_divisor)
+
+                if affordable >= minimum:
                     chosen_goal = g
                     chosen_uid = uid
                     ud = cand
-                    max_p = cap
+                    max_p = max(1, min(target, affordable))
                     break
 
             if chosen_goal is None:
@@ -2511,13 +2719,28 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
             }
 
             try:
-                session.post(params=params)
+                resp = session.post(params=params)
                 unit_name = ud.get('name', str(chosen_uid))
+
+                # Never deduct on an unverified POST. A rejected order returns a
+                # normal response, so trusting it would mark goals complete that
+                # were never built.
+                accepted, why = _build_order_accepted(session, b, is_units, resp)
+                if not accepted:
+                    print(f"  {bcolors.RED}{b['city_name']} L{b['building_level']}: "
+                          f"order of {max_p:,} {unit_name} REJECTED — {why}."
+                          f" Goal left unchanged.{bcolors.ENDC}")
+                    if RRS_AVAILABLE:
+                        for rid in reservation_ids:
+                            rrs_release(session, rid, MODULE_NAME)
+                    rejected_orders += 1
+                    continue
+
                 print(f"  {b['city_name']} L{b['building_level']}: "
                       f"Placed {max_p:,} {unit_name} "
                       f"(goal #{chosen_goal['request_id']})")
 
-                # Decrement the goals CSV
+                # Decrement the goals CSV — only now that the game confirmed it
                 recruit_csv_deduct(session, is_units, chosen_goal['request_id'], max_p)
 
                 # Deduct from city resource pool to prevent double-spend this cycle
@@ -2557,10 +2780,13 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
         # --- Resource import if nothing was placed this cycle ---
         if buildings_recruited == 0 and cfg.get("resource_import_enabled"):
             now_ts = int(time.time())
+            imported_this_cycle = set()   # one request per city, not per building
             for b in all_buildings:
                 if b['is_busy']:
                     continue
                 cid = b['city_id']
+                if cid in imported_this_cycle:
+                    continue
                 if now_ts - import_requested_at.get(cid, 0) < IMPORT_COOLDOWN_SECS:
                     continue
                 key = (cid, b['building_position'])
@@ -2570,12 +2796,18 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                     if uid not in goals_by_unit:
                         continue
                     goal = goals_by_unit[uid][0]
+                    # Only ask for what the NEXT batch needs. Costing the entire
+                    # remaining goal could demand millions of resources and
+                    # monopolise the transport scheduler.
                     qty = goal['qty_remaining']
+                    if batch_pct > 0:
+                        qty = min(qty, max(1, math.ceil(qty * batch_pct)))
                     for i, res_key in enumerate(('wood','wine','marble','crystal','sulfur')):
                         cost = ud.get(res_key, 0) * qty
                         have = city_resources.get(cid, {}).get(res_key, 0)
                         deficit[i] = max(deficit[i], max(0, cost - have))
                 if any(d > 0 for d in deficit):
+                    imported_this_cycle.add(cid)
                     requests = _request_resource_import(
                         session, cid, deficit, all_city_ids, cities
                     )
@@ -2589,15 +2821,32 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
         any_busy = any(b['is_busy'] for b in all_buildings)
         total_remaining = sum(r['qty_remaining'] for r in active_goals)
 
+        # Track how long nothing could be ordered, so the batch minimum relaxes
+        # instead of stalling a slowly-accumulating city forever.
+        if buildings_recruited > 0:
+            starved_cycles = 0
+        elif idle_capable > 0:
+            starved_cycles = min(starved_cycles + 1, 999)
+
         if buildings_recruited > 0:
             label = f"Placed {total_placed:,} {building_noun} this cycle"
-        elif any_busy:
-            label = "Waiting for building queues..."
+        elif rejected_orders:
+            label = (f"{rejected_orders} order(s) REJECTED by the game — "
+                     f"goals unchanged")
+        elif any_busy and idle_capable == 0:
+            label = "All buildings busy — waiting for queues"
+        elif idle_capable == 0:
+            label = ("No idle building can take these goals "
+                     "(unit not trainable there, or no city selected)")
+        elif starved_cycles:
+            label = (f"Saving up for a full batch "
+                     f"(waited {starved_cycles} cycle(s))")
         else:
-            label = "Waiting for resources..."
+            label = "Waiting for resources"
 
         session.setStatus(
-            f"Auto Recruitment: {label}  |  {total_remaining:,} remaining")
+            f"Auto Recruitment: {label}  |  {total_remaining:,} {building_noun} "
+            f"still to order")
 
         # First report: wait until troops have actually been ordered across the
         # cities. Ordering frees population in maxed-out cities, so the growth
@@ -2623,14 +2872,36 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
         else:
             cfg = _maybe_send_report(session, is_units, cfg)
 
+        # Impossible-goal guard: a goal no selected building can train would
+        # otherwise sit at 0% forever with no explanation.
+        if all_buildings and not impossible_warned:
+            trainable = set()
+            for bb in all_buildings:
+                trainable |= set(bld_unit_data_cache.get(
+                    (bb['city_id'], bb['building_position']), {}).keys())
+            if trainable:
+                stuck = [g for g in active_goals
+                         if g['unit_type_id'] not in trainable]
+                if stuck:
+                    impossible_warned = True
+                    names = ", ".join(f"{g['unit_name']} ({g['qty_remaining']:,})"
+                                      for g in stuck)
+                    sendToBot(
+                        session,
+                        "Auto Recruitment: these goals cannot be built by any "
+                        "selected building and will never progress:\n"
+                        f"  {names}\n"
+                        "The unit may need a higher building level, or the only "
+                        "cities that can build it are not selected (option 9).")
+
         # Stall guard: warn after 24 h with no successful order
         if not stall_warned and (time.time() - last_order_time) >= STALL_WARN_SECS:
             stall_warned = True
             sendToBot(
                 session,
-                "Auto Recruitment Manager: no units ordered in the last 24 h.\n"
+                f"Auto Recruitment Manager: no {building_noun} ordered in the last 24 h.\n"
                 "Check that buildings are reachable and resources are available.\n"
-                "Use the queue manager to cancel orders if needed.",
+                "Use option (9) to check selected cities, or edit goals in option (4).",
             )
 
         # --- Sleep duration ---
@@ -2694,7 +2965,7 @@ def _activate_worker(session, event, is_units):
 
     # Clear any leftover stop / wake flags
     try:
-        os.remove(_stop_flag_path(session))
+        os.remove(_stop_flag_path(session, is_units))
     except OSError:
         pass
     _consume_wake_flag(session, is_units)
@@ -2724,7 +2995,7 @@ def _activate_worker(session, event, is_units):
         _release_worker_lock(session, is_units)
         _consume_wake_flag(session, is_units)
         try:
-            os.remove(_stop_flag_path(session))
+            os.remove(_stop_flag_path(session, is_units))
         except OSError:
             pass
         if RRS_AVAILABLE:
@@ -2746,7 +3017,7 @@ def _stop_worker_cmd(session, is_units):
         print(f"\n  {bcolors.WARNING}No {kind} worker appears to be running.{bcolors.ENDC}")
         enter()
         return
-    pathlib.Path(_stop_flag_path(session)).touch()
+    pathlib.Path(_stop_flag_path(session, is_units)).touch()
     # Wake the worker so it doesn't wait out a long sleep (up to 30 min)
     # before noticing the stop flag at the top of its next cycle.
     _touch_wake_flag(session, is_units)
@@ -2774,7 +3045,7 @@ def _setup_worker_config(session, is_units):
     print("=" * 60)
     print()
 
-    report_raw = read(msg="Send periodic progress reports to Telegram? [Y/n]: ",
+    report_raw = read(msg="Send periodic progress reports to your notification service? [Y/n]: ",
                       values=["y", "Y", "n", "N", ""])
     report_enabled = report_raw.lower() != "n"
     report_interval = 4
@@ -2893,6 +3164,7 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
     """Auto Recruitment Manager — Main entry point"""
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
+    _migrate_account_files(session)   # pre-2.13 files lacked the world number
 
     try:
         # Outer loop: unit-type selection
@@ -3089,3 +3361,20 @@ def autoRecruitmentManager(session, event, stdin_fd, predetermined_input):
         pass
     finally:
         event.set()
+
+
+# =============================================================================
+# MODULE ENTRY POINT ALIASES
+# =============================================================================
+# loadCustomModule resolves the entry function by filename:
+#     name = os.path.basename(path).replace('.py', '')
+#     getattr(module, name)(session, event, stdin_fd, predetermined_input)
+# So a versioned filename looks for an attribute like
+# "autoRecruitmentManager_v2.13.0", which is not a valid Python identifier and
+# cannot be defined with a normal def. Registering the aliases directly in the
+# module namespace makes the file work whether it is installed under its plain
+# name or its versioned one.
+MODULE_ENTRY = "autoRecruitmentManager"
+
+globals()[f"autoRecruitmentManager_v{MODULE_VERSION}"] = autoRecruitmentManager
+globals()[f"autoRecruitmentManager_v{MODULE_VERSION.replace('.', '_')}"] = autoRecruitmentManager
