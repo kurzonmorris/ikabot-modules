@@ -109,6 +109,12 @@ The browser asks for a username and password:
 You should now see the ikabot control panel, with a menu down the left and a
 box for every account you asked for.
 
+> **Two version numbers, and that is normal.** The heading shows the control
+> panel's own version; the line under it ends with the installer's. They are
+> numbered separately and are usually a little apart — installer `v1.0.23`
+> carries control panel `v1.0.21`, for instance. A lower number on the page
+> than on the file you downloaded does **not** mean the install went wrong.
+
 ---
 
 ## Step 6 — Put your accounts in

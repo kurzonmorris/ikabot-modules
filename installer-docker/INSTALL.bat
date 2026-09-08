@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-set "INSTALLER_VERSION=1.0.22"
+set "INSTALLER_VERSION=1.0.23"
 title ikabot Docker installer v%INSTALLER_VERSION%
 color 0F
 
@@ -65,6 +65,10 @@ echo.
 
 if not exist "!INSTALL_DIR!\config" mkdir "!INSTALL_DIR!\config"
 if not exist "!INSTALL_DIR!\app" mkdir "!INSTALL_DIR!\app"
+
+rem The panel shows this beside its own version. The two are numbered
+rem separately, and one number alone reads like an update that did not take.
+>"!INSTALL_DIR!\config\.installer-version" echo %INSTALLER_VERSION%
 
 rem ikabot itself lives on the host and is mounted at /app, so that a later
 rem "ika update" survives the container being rebuilt. Only copied in when the
@@ -132,6 +136,8 @@ echo    Done.
 echo.
 echo    Control panel : http://localhost:7682
 echo    Terminal      : http://localhost:7681
+echo.
+echo    Versions      : installer v%INSTALLER_VERSION%
 echo.
 echo    Username      : ikabot
 echo    Password      : the one you just chose
