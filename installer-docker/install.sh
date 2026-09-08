@@ -3,7 +3,7 @@
 # Run from the folder this file was extracted into.
 set -uo pipefail
 
-INSTALLER_VERSION="1.0.22"
+INSTALLER_VERSION="1.0.23"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say()  { printf '%s\n' "$*"; }
@@ -92,6 +92,10 @@ say ""
 mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/app" \
     || { say "Cannot create $INSTALL_DIR"; exit 1; }
 
+# The panel shows this next to its own version. The two are numbered
+# separately, and one number alone reads like an update that did not take.
+printf '%s\n' "$INSTALLER_VERSION" > "$INSTALL_DIR/config/.installer-version" 2>/dev/null || true
+
 # ikabot itself lives in a folder on the host, mounted at /app, so that
 # `ika update` can replace it and the new version survives the container being
 # rebuilt. Only ever populated when empty: re-running this installer must not
@@ -143,6 +147,9 @@ say "  Done."
 say ""
 say "  Control panel : http://${IP}:7682"
 say "  Terminal      : http://${IP}:7681"
+say ""
+PANEL_V="$(basename "$(ls "$HERE"/docker/ika-panel_v* 2>/dev/null | sort -V | tail -1)" 2>/dev/null | sed 's/^ika-panel_v//')"
+say "  Versions      : installer v${INSTALLER_VERSION}, control panel v${PANEL_V:-?}"
 say ""
 say "  Username      : ikabot"
 say "  Password      : the one you just chose"
