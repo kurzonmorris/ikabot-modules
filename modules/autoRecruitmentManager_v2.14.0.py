@@ -20,10 +20,10 @@ Features:
 - Periodic Telegram progress reports (global bar + per-city breakdown)
 - Optional resource import via ResourceTransportManager CSV scheduler
 
-Version: 2.13.0
+Version: 2.14.0
 """
 
-MODULE_VERSION = "2.13.0"
+MODULE_VERSION = "2.14.0"
 
 import csv
 import glob
@@ -282,6 +282,92 @@ def _clear_buildings_cache(session, is_units):
         os.remove(_buildings_cache_path(session, is_units))
     except OSError:
         pass
+
+
+# =============================================================================
+# POPULATION CAPACITY CACHE
+# =============================================================================
+# max_inhabitants (the housing ceiling) only exists in the Town Hall view and
+# changes rarely — it moves when the player upgrades the Town Hall or adds
+# housing. Current population comes free from the city view we already fetch
+# each cycle, so caching only the ceiling keeps capacity awareness at ~zero
+# per-cycle cost. Keyed by city (not by building type).
+
+_POP_CAP_TTL_SECONDS = 12 * 3600
+
+
+def _pop_cap_path(session):
+    return _home(f".ikabot_recruit_popcap_{_account_suffix(session)}.json")
+
+
+def _load_pop_caps(session):
+    """Return {city_id:int -> max_inhabitants:int} plus the stamp, or ({}, 0)."""
+    try:
+        with open(_pop_cap_path(session)) as f:
+            data = json.load(f)
+        caps = {}
+        for k, v in (data.get("caps") or {}).items():
+            cid, mx = _cid(k), _to_num(v)
+            if cid is not None and mx:
+                caps[cid] = int(mx)
+        return caps, float(data.get("scanned_at", 0) or 0)
+    except (OSError, json.JSONDecodeError, AttributeError, ValueError):
+        return {}, 0.0
+
+
+def _save_pop_caps(session, caps):
+    path = _pop_cap_path(session)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"scanned_at": int(time.time()),
+                       "caps": {str(k): int(v) for k, v in caps.items()}}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _refresh_pop_caps(session, city_ids, existing=None):
+    """Read max_inhabitants for the given cities from their Town Halls."""
+    caps = dict(existing or {})
+    for cid in city_ids:
+        n = _cid(cid)
+        if n is None:
+            continue
+        stats = _fetch_townhall(session, cid)
+        if stats.get("max_inhabitants"):
+            caps[n] = int(stats["max_inhabitants"])
+    return caps
+
+
+def _get_pop_caps(session, city_ids, force=False):
+    """
+    Cached housing ceilings. Refreshes when stale, when forced, or when a city
+    is missing (e.g. a newly founded one).
+    """
+    caps, stamp = _load_pop_caps(session)
+    wanted = {c for c in (_cid(x) for x in city_ids) if c is not None}
+    stale = force or (time.time() - stamp > _POP_CAP_TTL_SECONDS)
+    if stale or not wanted.issubset(set(caps)):
+        caps = _refresh_pop_caps(session, city_ids, caps)
+        _save_pop_caps(session, caps)
+    return caps
+
+
+def potential_free_citizens(free_now, total_pop, max_inhabitants):
+    """
+    How many idle citizens this city can eventually hold.
+
+        potential = free_now + (max_inhabitants - total_pop)
+
+    Workers assigned to mines/temples/academy do not grow on their own, so all
+    remaining growth arrives as FREE citizens. This is what separates a city
+    permanently capped at 50 idle from one sitting at 50 with 1,450 still to
+    grow. Returns free_now unchanged when the ceiling is unknown.
+    """
+    if not max_inhabitants or total_pop is None:
+        return max(0, free_now or 0)
+    return max(0, (free_now or 0) + max(0, int(max_inhabitants) - int(total_pop)))
 
 
 def _scan_buildings(session, is_units, all_city_ids, cities):
@@ -811,95 +897,107 @@ def _pct(current, total):
     return f"{100 * current / total:.1f}"
 
 
-def _parse_growth_from_townhall(text):
-    """
-    Extract hourly citizen growth from a Town Hall response.
-
-    The growth value ONLY appears in the Town Hall popup HTML:
-      <li id="js_TownHallPopulationGrowth" class="growth_positive">
-        Growth: <span id="js_TownHallPopulationGrowthValue">59.49 </span> per Hour
-      </li>
-    The <li> class carries the sign (growth_negative when below zero); the
-    <span> holds the magnitude. Returns a float (0.0 is valid) or None.
-    """
-    # The town hall arrives as an ajax JSON envelope; json.loads decodes the
-    # escaped quotes back to real ones so the HTML regex below matches. Fall
-    # back to the raw text if it isn't JSON.
-    haystacks = []
+def _num(text):
+    """Parse a game-rendered number, stripping locale thousand separators."""
     try:
-        data = json.loads(text)
-        stack = [data]
-        while stack:
-            o = stack.pop()
-            if isinstance(o, str):
-                haystacks.append(o)
-            elif isinstance(o, dict):
-                stack.extend(o.values())
-            elif isinstance(o, list):
-                stack.extend(o)
-    except (ValueError, TypeError):
-        haystacks = [text]
+        cleaned = re.sub(r"[^\d-]", "", str(text))
+        return int(cleaned) if cleaned not in ("", "-") else None
+    except (TypeError, ValueError):
+        return None
 
-    for s in haystacks:
-        val_m = re.search(
-            r'id="js_TownHallPopulationGrowthValue"[^>]*>\s*([-\d.,]+)', s)
-        if not val_m:
-            continue
+
+def _parse_townhall_stats(text):
+    """
+    Parse the Town Hall ajax response into population figures.
+
+    The response carries the same data twice: an HTML template (JSON-escaped,
+    with newlines *inside* tags, so id="..."[^>]*> regexes break on it) and a
+    clean updateTemplateData JSON block. We read the JSON block:
+
+        "js_TownHallOccupiedSpace":{"text":"5,928"}      current total population
+        "js_TownHallMaxInhabitants":{"text":"5,928"}     housing ceiling
+        "CitizenCount":835                               free/idle citizens (raw int)
+        "js_TownHallPopulationGrowthValue":{"text":"0.00 "}
+        "js_TownHallPopulationGrowth":{"class":"growth_positive"}
+
+    Returns a dict with keys occupied / max_inhabitants / free / growth; any
+    value that could not be read is None.
+
+    NOTE: growth == 0.00 does NOT mean the city is full — a city can be
+    satisfaction- or wine-limited well below its ceiling. Fullness is
+    occupied == max_inhabitants and nothing else.
+    """
+    out = {"occupied": None, "max_inhabitants": None, "free": None, "growth": None}
+
+    m = re.search(r'"js_TownHallOccupiedSpace"\s*:\s*\{"text"\s*:\s*"([^"]*)"', text)
+    if m:
+        out["occupied"] = _num(m.group(1))
+
+    m = re.search(r'"js_TownHallMaxInhabitants"\s*:\s*\{"text"\s*:\s*"([^"]*)"', text)
+    if m:
+        out["max_inhabitants"] = _num(m.group(1))
+
+    # Prefer the raw int; fall back to the separator-formatted span.
+    m = re.search(r'"CitizenCount"\s*:\s*(-?\d+)', text)
+    if m:
+        out["free"] = _num(m.group(1))
+    else:
+        m = re.search(
+            r'"js_TownHallPopulationGraphCitizenCount"\s*:\s*\{"text"\s*:\s*"([^"]*)"',
+            text)
+        if m:
+            out["free"] = _num(m.group(1))
+
+    m = re.search(
+        r'"js_TownHallPopulationGrowthValue"\s*:\s*\{"text"\s*:\s*"([^"]*)"', text)
+    if m:
         try:
-            magnitude = float(val_m.group(1).replace(',', ''))
+            magnitude = float(re.sub(r"[^\d.\-]", "", m.group(1)) or 0)
         except ValueError:
-            continue
-        sign_m = re.search(
-            r'id="js_TownHallPopulationGrowth"[^>]*class="([^"]*)"', s)
-        negative = bool(sign_m) and "growth_negative" in sign_m.group(1)
-        return -magnitude if negative else magnitude
-    return None
+            magnitude = None
+        if magnitude is not None:
+            cls = re.search(
+                r'"js_TownHallPopulationGrowth"\s*:\s*\{[^}]*"class"\s*:\s*"([^"]*)"',
+                text)
+            negative = bool(cls) and "growth_negative" in cls.group(1)
+            out["growth"] = -magnitude if negative else magnitude
+    return out
+
+
+def _fetch_townhall(session, city_id):
+    """Fetch a city's Town Hall (ajax) and return parsed population stats."""
+    try:
+        params = (
+            f"view=townHall&cityId={city_id}&position=0"
+            f"&backgroundView=city&currentCityId={city_id}"
+            f"&templateView=townHall&ajax=1"
+        )
+        return _parse_townhall_stats(session.post(params))
+    except Exception:
+        return {"occupied": None, "max_inhabitants": None,
+                "free": None, "growth": None}
+
+
+def _parse_growth_from_townhall(text):
+    """Back-compat shim: growth only."""
+    return _parse_townhall_stats(text).get("growth")
 
 
 def _fetch_citizen_growth(session, city_id):
     """
     Return (free_citizens, growth_per_hour) for a city.
 
-    Free citizens come from the plain city view. The hourly growth rate is
-    NOT present there — it is rendered only inside the Town Hall popup — so we
-    open the Town Hall (always position 0, but resolved from city data to be
-    safe) and parse its HTML. growth_per_hour is None only if that fetch fails.
+    Both come from the Town Hall response, which also carries the free-citizen
+    count, so no separate city-view fetch is needed. growth_per_hour is None
+    only when the Town Hall could not be read.
     """
-    try:
-        html = session.get(city_url + str(city_id))
+    stats = _fetch_townhall(session, city_id)
+    return (stats.get("free") or 0), stats.get("growth")
 
-        # Free citizens — use getCity's parser rather than a local regex (a
-        # loose fallback used to match a unit COST instead of the real count).
-        free = 0
 
-        # Resolve the Town Hall position (it is position 0 in every city, but
-        # read it from the city data in case that ever changes).
-        th_pos = 0
-        try:
-            city_data = getCity(html)
-            free = int(city_data.get('freeCitizens', 0) or 0)
-            for slot in city_data.get('position', []):
-                if slot.get('building') == 'townHall':
-                    th_pos = slot.get('position', 0)
-                    break
-        except Exception:
-            pass
-
-        # Open the Town Hall popup (ajax) and parse the growth value from it.
-        growth = None
-        try:
-            params = (
-                f"view=townHall&cityId={city_id}&position={th_pos}"
-                f"&backgroundView=city&currentCityId={city_id}&ajax=1"
-            )
-            resp = session.post(params)
-            growth = _parse_growth_from_townhall(resp)
-        except Exception:
-            growth = None
-
-        return free, growth
-    except Exception:
-        return 0, None
+def _fetch_city_population(session, city_id):
+    """Full population picture for one city (costs one Town Hall request)."""
+    return _fetch_townhall(session, city_id)
 
 
 def _calculate_recruitment_eta(session, all_rows):
@@ -1958,16 +2056,36 @@ def _view_building_status(session, is_units):
             print()
             continue
 
-        # Citizen growth diagnostic (read from the Town Hall). Shows whether
-        # growth is readable per city so a failing city is easy to spot.
-        free_cit, growth = _fetch_citizen_growth(session, cid)
+        # Citizen diagnostic straight from the Town Hall: current idle count,
+        # growth, and the ceiling of idle citizens this city can ever reach.
+        # A city at 50 idle with 1,450 of headroom is a very different
+        # proposition from one permanently capped at 50.
+        st = _fetch_townhall(session, cid)
+        free_cit = st.get('free') or 0
+        growth = st.get('growth')
+        occ, mx = st.get('occupied'), st.get('max_inhabitants')
+
         if growth is None:
             growth_str = f"{bcolors.RED}growth: unreadable{bcolors.ENDC}"
         else:
-            growth_str = f"growth: {growth:+.2f}/hr"
+            growth_str = f"growth {growth:+.2f}/hr"
+
+        if mx and occ is not None:
+            pot = potential_free_citizens(free_cit, occ, mx)
+            head = max(0, int(mx) - int(occ))
+            if head == 0:
+                cap_str = (f"{bcolors.WARNING}FULL {occ:,}/{mx:,} — idle "
+                           f"capped at {pot:,}{bcolors.ENDC}")
+            else:
+                cap_str = (f"pop {occ:,}/{mx:,} (+{head:,} to grow) — "
+                           f"idle can reach {pot:,}")
+        else:
+            cap_str = f"{bcolors.RED}capacity unreadable{bcolors.ENDC}"
+
         print(f"  {bcolors.BOLD}{city_name}{bcolors.ENDC} "
               f"({len(city_buildings)} {building_type})  |  "
-              f"{free_cit:,} free citizens, {growth_str}")
+              f"{free_cit:,} idle, {growth_str}")
+        print(f"       {cap_str}")
 
         for b in sorted(city_buildings, key=lambda x: -x['building_level']):
             total_buildings += 1
@@ -2462,6 +2580,15 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
 
         rejected_orders = 0
 
+        # Housing ceilings (cached ~12 h; only refreshed when stale or a city
+        # is new, so this is normally a file read, not network traffic).
+        try:
+            pop_caps = _get_pop_caps(
+                session, [c for c in all_city_ids
+                          if city_in_use(c, inc_cities, exc_cities)])
+        except Exception:
+            pop_caps = {}
+
         # --- Reload goals CSV each cycle ---
         all_rows = recruit_csv_load(session, is_units)
         active_goals = [r for r in all_rows
@@ -2509,6 +2636,17 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                 # and only 1-2 troops were ever ordered.
                 citizens = int(city_data.get('freeCitizens', 0) or 0)
 
+                # Total population is rendered in the city view we already have:
+                #   <span id="js_GlobalMenu_citizens">835</span>
+                #   (<span id="js_GlobalMenu_population">5,928</span>)
+                # so citizen HEADROOM costs no extra request — only the ceiling
+                # (max_inhabitants) needs the Town Hall, and that is cached.
+                total_pop = None
+                m_pop = re.search(
+                    r'id="js_GlobalMenu_population"[^>]*>\s*([\d.,\s]+?)\s*<', html)
+                if m_pop:
+                    total_pop = _num(m_pop.group(1))
+
                 if RRS_AVAILABLE:
                     res_avail = []
                     for i in range(5):
@@ -2522,6 +2660,11 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                     'wood':    res_avail[0], 'wine':    res_avail[1],
                     'marble':  res_avail[2], 'crystal': res_avail[3],
                     'sulfur':  res_avail[4],
+                    # How many idle citizens this city can EVER hold. Lets the
+                    # loop tell "temporarily short, will recover" apart from
+                    # "structurally capped" instead of seeing only today's count.
+                    'potential_citizens': potential_free_citizens(
+                        citizens, total_pop, pop_caps.get(_cid(cid))),
                 }
 
                 city_pos_map[cid] = {
@@ -2657,13 +2800,31 @@ def execute_recruitment_loop(session, is_units, cfg, stop_event=None):
                     if cost > 0:
                         affordable = min(affordable, res[res_key] // cost)
 
+                # Capacity awareness. A city's citizen ceiling decides how big a
+                # batch it can EVER sustain, which is not the same as what it can
+                # afford today:
+                #   * 3000 cap, 2950 occupied, 50 idle -> ceiling 50. Waiting for
+                #     a 200-unit batch here would wait forever, so ask it only for
+                #     what it can actually sustain and let it contribute that.
+                #   * 3000 cap, 1500 occupied, 50 idle -> ceiling 1500. Only
+                #     temporarily short; keep the full batch target and let other
+                #     cities cover this cycle while it grows into its share.
+                cit_cost = cand.get('citizens', 0)
+                if cit_cost > 0:
+                    sustainable = res.get('potential_citizens', 0) // cit_cost
+                    if sustainable >= 1:
+                        target = max(1, min(target, sustainable))
+
                 # The MINIMUM we are willing to order. Below this we WAIT rather
                 # than dribble out a handful of units — that is the whole point
-                # of a batch size. Two escape hatches stop this deadlocking:
+                # of a batch size. Three escape hatches stop this deadlocking:
                 #   * the final remainder may always go out, however small;
                 #   * relax_divisor grows the longer nothing can be built, so a
                 #     slowly-accumulating city eventually proceeds instead of
-                #     stalling forever (the old 20%-threshold failure).
+                #     stalling forever (the old 20%-threshold failure);
+                #   * target is already clamped to what this city can sustain, so
+                #     a structurally capped city is never held to a batch its
+                #     population could not reach.
                 minimum = 1 if final_run else max(1, target // relax_divisor)
 
                 if affordable >= minimum:
