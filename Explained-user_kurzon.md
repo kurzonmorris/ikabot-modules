@@ -205,7 +205,7 @@ All modules — internal and external — must look and behave the same way.
 | Resource Production Manager | `modules/resourceProductionManager_v1.0.3.py` | Manages production assignment across cities |
 | Construction Manager | `modules/constructionManager_v2.2.8.py` | CSV-backed multi-city building/upgrade queue |
 | Tavern Manager | `modules/tavernManager_v2.0.1.py` | Monitors wine and satisfaction, auto-adjusts tavern settings |
-| Auto Recruitment Manager | `modules/autoRecruitmentManager_v2.12.1.py` | Automates unit and ship training across barracks/shipyards |
+| Auto Recruitment Manager | `modules/autoRecruitmentManager_v2.14.0.py` | Automates unit and ship training across barracks/shipyards. Goals CSV, per-type city selection, batch sizing, citizen-capacity-aware allocation, order verification |
 | Island Colonize Monitor | `modules/islandColonizeMonitor_v1.5.0.py` | Monitors islands for colonisation opportunities |
 | Sequence Runner | `modules/sequenceRunner_v1.1.2.py` | Stores named input sequences to automate daily routines |
 | Scheduler Monitor | `modules/schedulerMonitor_v1.0.0.py` | Watches other modules' background workers and restarts any that stopped |

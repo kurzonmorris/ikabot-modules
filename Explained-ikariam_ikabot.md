@@ -41,6 +41,41 @@ A player can own many cities, each on a different island (or the same island up 
 - Coordinates (`x`, `y`) — world map is 0–100 × 0–100
 - A unique `id` (cityId) used in all API calls
 
+### Population and citizens
+A city's people split into **occupied** citizens (assigned to wood/luxury
+production, scientists, priests) and **free/idle** citizens. Only idle citizens
+can be spent — training a unit consumes them.
+
+Four numbers matter, and mixing them up is a common source of bugs:
+
+| Quantity | Meaning |
+|---|---|
+| **Total population** | Everyone in the city: occupied + idle |
+| **Max inhabitants** | The housing ceiling. Set by Town Hall level and housing |
+| **Free / idle citizens** | Unassigned people, the only ones spendable |
+| **Occupied** | Workers, scientists, priests — do **not** grow on their own |
+
+Population grows toward the ceiling. Because occupied counts stay put, **every
+new citizen arrives idle**, which gives the useful identity:
+
+```
+potential_idle = free_now + (max_inhabitants − total_population)
+```
+
+This separates two cities that look identical if you only read "free citizens":
+
+- 3,000 cap, 2,950 occupied, 50 idle → potential **50**. Permanently capped.
+- 3,000 cap, 1,500 occupied, 50 idle → potential **1,500**. Merely short today.
+
+**Trap: growth `0.00` does NOT mean the city is full.** A city can be
+satisfaction- or wine-limited hundreds below its ceiling and still report
+`0.00`/hr. Fullness is `occupied == max_inhabitants` and nothing else. Verified
+in the wild: cities sitting 227 and 146 below cap, both reporting 0.00.
+
+**Where each number lives** (see §"Reading population" under the HTTP API):
+`max_inhabitants` exists **only** in the Town Hall view — it is absent from
+`view=city` entirely. Total population and idle count are in every view.
+
 ### Islands
 Each island has:
 - A fixed luxury `tradegood` (1=Wine, 2=Marble, 3=Crystal, 4=Sulfur)
@@ -99,6 +134,68 @@ Responses are often a JSON array of commands like:
 ```json
 [["changeView", ["templateName", "<html...>"]], ["updateGlobalData", {...}]]
 ```
+
+### Reading population (verified field names)
+
+**From any view, including `view=city`** — free, no extra request:
+```html
+<li id="resources_population" class="population" title="Population">
+    <span id="js_GlobalMenu_citizens">835</span>
+    (<span id="js_GlobalMenu_population">5,928</span>)
+</li>
+```
+- `js_GlobalMenu_citizens` → **free/idle** citizens (this is what `getCity()`
+  returns as `freeCitizens`)
+- `js_GlobalMenu_population` → **total population**, with thousand separators
+
+**The housing ceiling requires the Town Hall.** `MaxInhabitants` /
+`OccupiedSpace` appear **zero times** in a `view=city` response:
+```
+?view=townHall&cityId={id}&position=0&backgroundView=city
+ &currentCityId={id}&templateView=townHall&ajax=1
+```
+
+That response carries the data **twice**. Parse the clean
+`updateTemplateData` JSON block, *not* the HTML template:
+
+```json
+"js_TownHallOccupiedSpace":{"text":"5,928"},     // total population
+"js_TownHallMaxInhabitants":{"text":"5,928"},    // housing ceiling
+"js_TownHallPopulationGrowthValue":{"text":"0.00 "},
+"js_TownHallPopulationGrowth":{"class":"growth_positive"},
+"CitizenCount":835,          // free citizens, raw int, no separators
+"ResourceWorkerCount":1948,  // occupied — wood
+"SpecialWorkerCount":1897,   // occupied — luxury
+"ScientistCount":0,
+"PriestCount":1248
+```
+
+**Parsing traps, all encountered for real:**
+
+1. **Do not regex the HTML template copy.** It is JSON-escaped (`\"`,
+   `<\/span>`) *and* has newlines inside tags — `<span\n id="js_TownHallMax…">`.
+   A pattern like `id="js_TownHallMaxInhabitants"[^>]*>` fails on both counts.
+   The `updateTemplateData` keys above are plain JSON. Use them.
+2. **Thousand separators are locale-dependent** on every HTML-rendered number.
+   Strip non-digits before `int()`. The `*Count` integers have none.
+3. **Growth text has a trailing space**: `"0.00 "`.
+4. **Housing space is two spans with the `/` between them**, outside both:
+   `<span id="…OccupiedSpace">5,928</span>/<span id="…MaxInhabitants">5,928</span>`.
+5. **Worker counts render as a sum string**: `"1,299 + 649"`. Ignore it and use
+   the raw `ResourceWorkerCount` int.
+6. **Do not derive total by summing the components.** They can round to one less
+   than `OccupiedSpace` (observed: 6,575 vs 6,576). Read `OccupiedSpace`.
+7. `growth_positive` / `green` are present even at `0.00` — class names tell you
+   nothing about fullness.
+
+**Side effect:** requesting `view=townHall` with `currentCityId` **switches the
+server-side active city**. Sequential scans are fine, but restore the original
+city, or interleave carefully with anything acting on "current city".
+
+`window.ikariam.model` is **not** a shortcut here — it has
+`currentResources.population` (total, *not* capacity) and
+`currentResources.citizens` (free). There is no max-population field anywhere in
+the model.
 
 ### Sessions and Authentication
 Players log in through Gameforge's lobby (`lobby.ikariam.gameforge.com`), which issues a cookie. The cookie is stored encrypted in ikabot's session file. Sessions expire and must be refreshed. ikabot handles re-login automatically.
@@ -644,7 +741,7 @@ numbers below drift.**
 |---|---|
 | `resourceTransportManager_v10.3.1.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
 | `constructionManager_v2.2.8.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §27. |
-| `autoRecruitmentManager_v2.12.1.py` | Trains units/ships across barracks and shipyards, synchronised completion, retry on shortage. **The working RRS integration example.** |
+| `autoRecruitmentManager_v2.14.0.py` | Trains units/ships across barracks and shipyards from a goals CSV, with per-type city include lists, configurable batch sizing and capacity-aware allocation (§ Population and citizens). **The working RRS integration example.** Also the reference for *verifying* an order was accepted before mutating state — see §Order verification. |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
 | `resourceProductionManager_v1.0.3.py` | Manages production/luxury assignment per city. Own persistence, predates `modulePrefs`. |
 | `islandColonizeMonitor_v1.5.0.py` | Watches islands for free colonisation slots. |
@@ -765,6 +862,42 @@ All modules — internal and external — must look and behave the same way.
 ---
 
 ## 19. Common Patterns and Pitfalls
+
+### Order verification — never trust a bare POST
+**The single most dangerous pattern in this repo.** Ikariam answers a *rejected*
+action with a perfectly normal response. There is no exception, no non-200. So:
+
+```python
+session.post(params=params)
+csv_deduct(goal_id, qty)      # WRONG — deducts even when nothing happened
+```
+
+An expired `actionRequest`, insufficient resources, a full queue or an
+unsupported unit all land here. The module marks work complete that the game
+never performed, and because the goal is now zero it never retries. In
+`autoRecruitmentManager` this silently "finished" entire ship orders.
+
+Verify before mutating any persistent state. Cheapest check first:
+
+1. **Scan the reply for an error marker** (`wrong_request_id`, `errorMessage`,
+   `notEnough`, `TXT_ERROR`, …).
+2. **Confirm the observable side effect.** This is the authoritative one. For
+   training: we only ever order into an *idle* building, so it must be **busy**
+   afterwards — still idle means the order did not take.
+
+```python
+accepted, why = _build_order_accepted(session, building, is_units, resp)
+if not accepted:
+    log(f"order REJECTED — {why}; goal left unchanged")
+    continue          # do NOT deduct
+deduct(...)           # only now
+```
+
+**Treat "could not verify" as failure.** Re-issuing a batch later is
+recoverable; a falsely completed goal is not.
+
+The same reasoning applies to any module that spends resources or advances a
+queue: construction upgrades, transports, purchases.
 
 ### Getting cities
 ```python
@@ -1231,6 +1364,30 @@ in your module.
 Learned the hard way while hardening `resourceTransportManager` (v10.4.1 →
 v10.9.0) across Windows and Docker. Every rule below caused a real,
 observed failure.
+
+### ⚠ Per-account filenames must include the WORLD number
+
+State files keyed only by server + username collide when the same player name
+exists on two worlds of the same server — and it usually does, because players
+reuse their name. Both accounts then share one goals CSV, one config, one lock
+and one cache, silently corrupting each other.
+
+```python
+# WRONG — 'en' + 'Stave' is not unique
+f"{session.servidor}_{session.username}"
+
+# RIGHT — session.mundo is the world number
+f"{session.servidor}_{session.mundo}_{session.username}"
+```
+
+`session.mundo` is always available (`session.py` sets it from
+`account["server"]["number"]`). When adding it to an existing module, migrate
+the old files on first run — rename old → new only when the new name does not
+exist, so it can never clobber newer data.
+
+Also make **every** per-account file per-*type* where the module has types. A
+shared `..._stop_{account}` flag meant stopping the troops worker also stopped
+the ships worker, and starting one erased the other's stop request.
 
 ### ⚠ NEVER use `os.kill(pid, 0)` to test if a process is alive
 
