@@ -1,0 +1,79 @@
+services:
+  # The upstream API itself. It is never published to the host and never
+  # reachable from the LAN — only the gate on the internal network can reach
+  # it, so there is no way in that skips the API key.
+  #
+  # It does need outbound internet: the token page pulls Gameforge's
+  # https://gameforge.com/tra/game1.js and runs it in a real Chromium. That
+  # is why this network is a normal bridge and not `internal: true`.
+  ikabot-api:
+    build:
+      context: https://github.com/Ikabot-Collective/IkabotAPI.git#${API_GIT_REF:-main}
+    image: ikabot-api:${API_GIT_REF:-main}
+    container_name: ikabot-api
+    restart: unless-stopped
+    environment:
+      - LOGS_WEBHOOK_URL=${LOGS_WEBHOOK_URL:-}
+    volumes:
+      # None of this fork's user agents are in the upstream server's supported
+      # list, so the public API rejects every one of them and ikabot falls back
+      # to a token minted with a random agent and the default region — the
+      # exact mismatch upstream #414/#416 set out to remove. Our own server
+      # accepts them, so the token matches the login that presents it.
+      - ./SupportedUserAgents.json:/ikabotapi/apps/token/SupportedUserAgents.json:ro
+    networks:
+      - ikabot-api-internal
+    # Playwright spawns a Chromium per token. Without a cap, one burst of
+    # logins from two dozen accounts pages out the rest of the server.
+    mem_limit: ${API_MEM_LIMIT:-2g}
+    cpus: ${API_CPUS:-2.0}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Authentication and rate limiting. Anything that reaches ikabot-api has
+  # already presented the API key here.
+  ikabot-api-gate:
+    image: caddy:2-alpine
+    container_name: ikabot-api-gate
+    restart: unless-stopped
+    environment:
+      - IKABOT_API_KEY=${IKABOT_API_KEY:?set IKABOT_API_KEY in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    # Published on the LAN so ikabot instances on the Unraid box and on the
+    # tailnet reach it without going out to Cloudflare and back. Drop this
+    # block if you want the tunnel to be the only way in.
+    ports:
+      - "${GATE_LAN_PORT:-5080}:8080"
+    networks:
+      - ikabot-api-internal
+      - ikabot-api-edge
+    depends_on:
+      - ikabot-api
+
+  # The only path in from the Internet, and it is outbound-only: no router
+  # port forward, no inbound firewall rule, no public IP on the Unraid box.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ikabot-api-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    networks:
+      - ikabot-api-edge
+    depends_on:
+      - ikabot-api-gate
+
+networks:
+  ikabot-api-internal:
+  ikabot-api-edge:
+
+volumes:
+  caddy-data:
+  caddy-config:

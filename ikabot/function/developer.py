@@ -1,3 +1,4 @@
+from ikabot.helpers.apiComm import API_TIMEOUT, getFallbackEndpoints
 from ikabot.helpers.dns import getAddress
 import ikabot
 import os
@@ -22,6 +23,9 @@ def developer(session, event, stdin_fd, *args):
     print(f"Ikabot Install Directory: {ikabot_dir}")
     print("Ikabot API address:", api_address)
     print("CUSTOM_API_ADDRESS:", os.getenv("CUSTOM_API_ADDRESS"))
+    print("Fallback API addresses:", ", ".join(getFallbackEndpoints()) or "None")
+    print("Fallback API key:", "set" if os.getenv("IKABOT_API_KEY") else "not set")
+    print("API timeout:", API_TIMEOUT, "seconds")
 
     print("\nGame host:", getattr(session, "host", "Not available"))
     print("Game URL base:", getattr(session, "urlBase", "Not available"))

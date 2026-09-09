@@ -12,6 +12,7 @@ Read this file first. Open the others only when the task touches them.
 | `docs/UPSTREAM_PARITY.md` | **Before any upstream sync.** Which upstream PRs are in, which were deliberately adapted, and what a port must never remove |
 | `docs/AUTOSTART_BRIEF.md` | Making a module start automatically at login (§24) |
 | `RRS_INTEGRATION_GUIDE.md` | Any module that reserves or spends resources (§26) |
+| `docs/SELF_HOSTED_API.md` | The blackbox/captcha API, running your own, and the failover (§25) |
 | `MIGRATION_GUIDE.md` | Applying the fork's changes onto a fresh upstream tree |
 | `GUIDE.md` | End-user setup — not needed for coding |
 
@@ -1331,6 +1332,25 @@ region in the vault.
 
 **Never hardcode `Accept-Language` or a locale in a module.** If you build
 headers by hand, use `session.accept_language`.
+
+### The API failover
+
+Blackbox tokens and pirate captchas come from a public API server resolved
+from a DNS TXT record. `apiComm.callApi()` runs a request against each
+endpoint in turn — the public server first, then anything in
+`IKABOT_API_FALLBACK` — and any exception moves on to the next. `IKABOT_API_KEY`
+is attached as `X-API-Key` to the fallbacks only.
+
+Two things to keep in mind if you touch it:
+
+- **`IKABOT_API_TIMEOUT` (120s) is what makes failover possible.** An
+  unbounded wait means there is nothing to fail over *from* — the login just
+  hangs. Do not raise it back to the old 900s.
+- **Whatever an attempt sends must be re-sendable.** The pirate captcha
+  passes `bytes`; hand it a file object and the second endpoint receives an
+  empty upload, because the first attempt drained the stream.
+
+Self-hosting it: `docker/ikabot-api/` and `docs/SELF_HOSTED_API.md`.
 
 ### The vault
 
