@@ -499,3 +499,34 @@ your account directories automatically — no manual copying needed.
 This entire process takes about a minute regardless of how many accounts you
 run.
 
+
+---
+
+## 12. Backup API Server — Logins That Survive an Outage
+
+ikabot cannot log in without a "blackbox" token, and it fetches that token from
+a public server run by the Ikabot Collective. When that server is down, every
+account stops logging in at once. There is nothing you can do from ikabot's
+side — except point it at a second server.
+
+You can run your own on the Unraid box. Full setup, including a Cloudflare
+Tunnel so nothing on your router has to be opened, is in
+`docs/SELF_HOSTED_API.md`.
+
+Once it is running, add two lines to the `.env` next to each ikabot install:
+
+```ini
+IKABOT_API_FALLBACK=https://ikabot-api.example.com
+IKABOT_API_KEY=<the key from your server>
+```
+
+That is all. ikabot keeps using the public server as normal; when a request to
+it fails — refused, timed out, or an error — it repeats the request against
+yours and carries on. Nothing to switch on or off, and nothing changes while
+the public server is healthy.
+
+The key is sent to your own addresses only, never to the public server.
+
+Check it is loaded at **(21) Options → (2108) Developer**: it prints the
+fallback addresses, whether the key is set, and how long each server gets
+before ikabot moves on (`IKABOT_API_TIMEOUT`, 120 seconds by default).

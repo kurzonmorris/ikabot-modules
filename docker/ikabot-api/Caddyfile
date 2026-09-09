@@ -1,0 +1,56 @@
+{
+	admin off
+	auto_https off
+}
+
+# Plain HTTP, reachable only on the docker bridge and the LAN. TLS is
+# Cloudflare's job on the tunnel side.
+:8080 {
+	log {
+		output stdout
+		format console
+	}
+
+	header -Server
+
+	# Liveness probe, deliberately unauthenticated: ikabot's failover and
+	# Cloudflare both need to ask "are you up?" without a key, and the answer
+	# is a version string and an uptime.
+	@health path /health
+
+	@unauthorized {
+		not header X-API-Key "{$IKABOT_API_KEY}"
+	}
+
+	@token {
+		method GET
+		path /v1/token
+	}
+
+	@captcha {
+		method POST
+		path /v1/decaptcha/pirate /v1/decaptcha/lobby
+	}
+
+	# `route` keeps these in the order written. Without it Caddy re-sorts
+	# directives by its own precedence, which is exactly the wrong thing for a
+	# gate: the auth check has to run before anything it protects.
+	route {
+		reverse_proxy @health ikabot-api:5005
+
+		respond @unauthorized "Unauthorized" 401 {
+			close
+		}
+
+		request_body {
+			max_size 2MB
+		}
+
+		reverse_proxy @token ikabot-api:5005
+		reverse_proxy @captcha ikabot-api:5005
+
+		# Everything else — /docs, /redoc, /, /static — stays unreachable.
+		# An interactive API explorer is a gift to anyone who does get a key.
+		respond "Not Found" 404
+	}
+}

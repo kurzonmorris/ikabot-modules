@@ -50,6 +50,27 @@
 
 ## Fork-Specific Changes vs. Original Ikabot
 
+**Self-hosted API failover (`apiComm.py`)**
+- ikabot depends on one public server for blackbox login tokens; when it is
+  down, no account can log in. `IKABOT_API_FALLBACK` takes a comma-separated
+  list of your own API servers, tried in order after the public one whenever a
+  request to it fails — refused, timed out, or an error response.
+- `IKABOT_API_KEY` is sent as `X-API-Key` to those servers only, never to the
+  public server.
+- `IKABOT_API_TIMEOUT` (default 120s) bounds each server's attempt. It was
+  previously 900s, which meant a hung server blocked a login for fifteen
+  minutes with nothing to fail over to.
+- `(2108) Developer` now reports the fallback addresses, whether a key is set,
+  and the timeout.
+- `docker/ikabot-api/` deploys the upstream API on Unraid behind an API-key
+  gate and a Cloudflare Tunnel, so no inbound port is opened. Setup in
+  `docs/SELF_HOSTED_API.md`.
+- The bundled `SupportedUserAgents.json` adds this fork's user agents, none of
+  which appear in the upstream server's list — against the public server every
+  token is therefore minted with a random agent and the default region while
+  the login presents ikabot's own, the mismatch upstream #414/#416 set out to
+  remove.
+
 **Encrypted Credential Vault**
 - Stores game account credentials (email, password, blackbox token, lobby cookie) encrypted on disk using AES-256-GCM with a PBKDF2 master password.
 - Wrong master password is detected before showing the account list.
