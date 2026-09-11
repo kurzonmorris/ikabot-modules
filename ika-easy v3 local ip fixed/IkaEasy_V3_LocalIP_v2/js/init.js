@@ -47,6 +47,10 @@ function isIkariamPage() {
 // content script does nothing beyond this cheap check — the heavy libraries
 // (jQuery, lodash, moment) are not loaded there at all.
 if (isIkariamPage()) {
+    // Mark the document so the ikabot-served "IkaEasy-lite" in-page loader
+    // knows the full extension is present and stays dormant (no double UI).
+    try { document.documentElement.setAttribute('data-ikaeasy-ext', '1'); } catch (e) {}
+
     // Ask the background worker to inject the libraries into this frame's
     // isolated world, then start the app once they are available. Everything
     // downstream relies on $, _ and moment being present as globals.
