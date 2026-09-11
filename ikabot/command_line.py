@@ -64,7 +64,9 @@ from ikabot.helpers.process import updateProcessList
 from ikabot.helpers.taskWatchdog import check_for_dead_tasks, write_status
 from ikabot.web.session import *
 from ikabot.function.UpgradeUnits import UpgradeUnits
-from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWorkers
+from ikabot.function.modifyProduction import (
+    modifyProduction, modifyAcademyWorkers, modifyTempleWorkers,
+)
 from ikabot.function.reorganizeCityBuildings import reorganizeCityBuildings
 from ikabot.function.developer import developer
 from ikabot.helpers.pluginLoader import discover_plugins
@@ -127,6 +129,7 @@ def _menu_actions():
         2301: modifyProduction,
         2302: modifyAcademyWorkers,
         2303: reorganizeCityBuildings,
+        2304: modifyTempleWorkers,
         25: sendCulturalTreatyRequests,
     }
 
@@ -232,6 +235,9 @@ def menu(session, checkUpdate=True):
                 print(f"({i + 40}) {name}")
         print("(99) Configure external modules")
         print("(100) Refresh")
+        print("")
+        print(f"{bcolors.STONE}Tip: type '{MENU_TOKEN}' at any prompt to come "
+              f"back here. '{MENU_TOKEN} 4' comes back and picks 4.{bcolors.ENDC}")
 
         top_max = 100
         selected = read(min=0, max=top_max, digit=True, empty=True)
@@ -336,7 +342,8 @@ def menu(session, checkUpdate=True):
             print("(1) Set Production of Saw mill / Luxury good")
             print("(2) Set Academy workers")
             print("(3) Reorganize city buildings")
-            selected = read(min=0, max=3, digit=True)
+            print("(4) Set Temple priests")
+            selected = read(min=0, max=4, digit=True)
             if selected == 0:
                 continue
             selected += 2300
@@ -369,8 +376,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{mod_name}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{mod_name}' is now running in the background.")
+                time.sleep(0.8)
             continue
 
         if selected == 24 and plugins:
@@ -401,8 +413,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{chosen_plugin.name}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{chosen_plugin.name}' is now running in the background.")
+                time.sleep(0.8)
             continue
 
         if selected == 0:
@@ -439,8 +456,13 @@ def menu(session, checkUpdate=True):
                 if not process.is_alive():
                     break
             set_redraw_hook(None)
-            print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
-            time.sleep(0.8)
+            # Only claim it backgrounded if it actually did. A module
+            # that was abandoned (Ctrl+C, or "/menu") sets the event on
+            # its way out too, and saying it is running would be a lie.
+            process.join(0.8)
+            if process.is_alive():
+                print(f"\n'{menu_actions[selected].__name__}' is now running in the background.")
+                time.sleep(0.8)
         except KeyboardInterrupt:
             pass
 
@@ -1133,7 +1155,16 @@ def start():
 
     creds, vault_session, acct_idx = None, None, None
     if vault_exists():
-        creds, vault_session, acct_idx = _prompt_vault_login()
+        # A front-end that prefixes every command with "/menu" will sooner or
+        # later send one while the vault is still asking for its password.
+        # There is no menu to return to yet, so treat it as "start over" —
+        # anything else would end the process before ikabot has even logged in.
+        while True:
+            try:
+                creds, vault_session, acct_idx = _prompt_vault_login()
+                break
+            except ReturnToMenu:
+                continue
 
     if creds is not None:
         session = Session(
@@ -1180,8 +1211,19 @@ def start():
         pass
 
     try:
-        menu(session)
-        clear()
+        # "/menu" typed at any prompt raises ReturnToMenu, which unwinds
+        # whatever sub-menu or module dialogue was in progress.  Re-entering
+        # menu() is the same thing as restarting its loop, and it works from
+        # arbitrary depth without every caller having to know about it.
+        checkUpdate = True
+        while True:
+            try:
+                menu(session, checkUpdate=checkUpdate)
+                clear()
+                break
+            except ReturnToMenu:
+                checkUpdate = False
+                continue
     except KeyboardInterrupt:
         clear()
         raise

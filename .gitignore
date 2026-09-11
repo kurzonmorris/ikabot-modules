@@ -4,6 +4,8 @@ build/
 dist/
 ikabot-7.2.5/
 IkabotAPI-main/
+.env
+docker/ikabot-api/.env
 
 # Build artifacts
 *.zip

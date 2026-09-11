@@ -39,6 +39,7 @@ def read(
     empty=False,
     additionalValues=None,
     default=None,
+    ignore_predetermined=False,
     _retries=0,
     _max_retries=20
 ):
@@ -59,6 +60,10 @@ def read(
         a boolean indicating whether or not an empty string is acceptable as input
     additionalValues : list
         list of strings which are additional valid inputs. Can be used with digit = True to validate a string as an input among all digits
+    ignore_predetermined : bool
+        if True, skip config.predetermined_input entirely and force an
+        interactive prompt. For the rare question a recorded sequence must not
+        answer on the user's behalf.
     Returns
     -------
     result : int | str
@@ -72,36 +77,47 @@ def read(
         print('Error: minimum input value is greater than maximum input value!')
         return None
         
-    try:
-        if len(config.predetermined_input) != 0:
-            delay = getattr(config, 'sequence_input_delay', 0.0)
-            if delay > 0:
-                time.sleep(delay)
-            val = config.predetermined_input.pop(0)
-            # enter() calls auto-skip during sequence playback without consuming
-            # a token, so any "" tokens in the sequence must not be forwarded to
-            # read() calls that don't accept empty input — skip them transparently.
-            _accepts_empty = (
-                empty is True
-                or (values is not None and "" in values)
-                or (additionalValues is not None and "" in additionalValues)
-            )
-            while val == "" and not _accepts_empty and len(config.predetermined_input) != 0:
+    if not ignore_predetermined:
+        try:
+            if len(config.predetermined_input) != 0:
+                delay = getattr(config, 'sequence_input_delay', 0.0)
+                if delay > 0:
+                    time.sleep(delay)
                 val = config.predetermined_input.pop(0)
-            if not (val == "" and not _accepts_empty):
-                return val
-            # fell through: only empty tokens left and we don't accept empty — read from stdin
-    except Exception:
-        _logger.debug("Failed to read predetermined_input", exc_info=True)
+                # enter() calls auto-skip during sequence playback without
+                # consuming a token, so any "" tokens in the sequence must not
+                # be forwarded to read() calls that don't accept empty input —
+                # skip them transparently.
+                _accepts_empty = (
+                    empty is True
+                    or (values is not None and "" in values)
+                    or (additionalValues is not None and "" in additionalValues)
+                )
+                while val == "" and not _accepts_empty and len(config.predetermined_input) != 0:
+                    val = config.predetermined_input.pop(0)
+                if not (val == "" and not _accepts_empty):
+                    return val
+                # fell through: only empty tokens left and we don't accept
+                # empty — read from stdin
+        except Exception:
+            _logger.debug("Failed to read predetermined_input", exc_info=True)
     
     def _invalid():
         print("\033[1A\033[K", end="")  # remove line
-        return read(min=min, max=max, digit=digit, msg=msg, values=values, empty=empty, additionalValues=additionalValues, default=default, _retries=_retries+1, _max_retries=_max_retries)
+        return read(min=min, max=max, digit=digit, msg=msg, values=values,
+                    empty=empty, additionalValues=additionalValues,
+                    default=default, ignore_predetermined=ignore_predetermined,
+                    _retries=_retries+1, _max_retries=_max_retries)
     
     try:
         read_input = input(msg)
     except EOFError:
         return _invalid()
+
+    # "/menu" at any prompt abandons the current module and returns to the main
+    # menu.  Checked before validation so it works even where the prompt only
+    # accepts digits — the whole point is that it is valid everywhere.
+    check_menu_token(read_input)
 
     # Ctrl+' (0x1C) is a universal "refresh screen" shortcut.  When detected,
     # call redraw() (which invokes the module's hook if set, otherwise falls
@@ -112,7 +128,8 @@ def read(
         redraw()
         return read(min=min, max=max, digit=digit, msg=msg, values=values,
                     empty=empty, additionalValues=additionalValues,
-                    default=default, _retries=_retries, _max_retries=_max_retries)
+                    default=default, ignore_predetermined=ignore_predetermined,
+                    _retries=_retries, _max_retries=_max_retries)
 
     if additionalValues is not None and read_input in additionalValues:
         return read_input
@@ -376,8 +393,10 @@ def getShipCapacity(session):
         an integer representing the ship capacity of the user's current city
     """
     html = session.get('view=merchantNavy')
-    data = re.search(r'ajax.Responder, (\[\[\S\s]*?\]\])\)\;', html).group(1)
-    data = json.loads(data, strict=False)
+    _m = re.search(r'ajax.Responder, (\[\[\S\s]*?\]\])\)\;', html)
+    if _m is None:
+        raise RuntimeError("Could not read ship capacity from the trading port page (unexpected server response)")
+    data = json.loads(_m.group(1), strict=False)
 
     ship_capacity = data[3][1]['singleTransporterCapacity']
     freighter_capacity = data[3][1]['singleFreighterCapacity']

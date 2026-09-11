@@ -12,27 +12,49 @@ Available from **mod v1.8.1**.
 Each running ikabot writes a JSON file for its account:
 
 ```
-$IKABOT_DATA_DIR/status/<username>_<server><world>.json
+$IKABOT_STATUS_DIR/<username>_<server><world>.json
 ```
 
-`IKABOT_DATA_DIR` is `~/.ikabot` on Linux (`%APPDATA%\.ikabot` on Windows), so
-in a container it is normally:
+which defaults to `$IKABOT_DATA_DIR/status/` — `~/.ikabot/status/` on Linux,
+`%APPDATA%\.ikabot\status\` on Windows.
 
-```
-/root/.ikabot/status/kurzon_s55en.json
-```
-
-**No HTTP, no auth, no port discovery.** Mount that directory (or its parent)
-into the panel container read-only and read the files directly:
+**No HTTP, no auth, no port discovery.** Point every ikabot container at one
+shared status directory and mount it into the panel read-only:
 
 ```yaml
-volumes:
-  - ikabot-data:/root/.ikabot          # in each ikabot container
-  - ikabot-data:/data/ikabot:ro        # in the panel container
+services:
+  ikabot-1:
+    environment:
+      - IKABOT_STATUS_DIR=/shared/status
+    volumes:
+      - ikabot-1-data:/root/.ikabot     # PER CONTAINER — see the warning below
+      - ikabot-status:/shared/status
+  panel:
+    volumes:
+      - ikabot-status:/data/status:ro
 ```
 
-One file per account. `ls /data/ikabot/status/*.json` enumerates every instance
+One file per account. `ls /data/status/*.json` enumerates every instance
 without needing to be told how many there are.
+
+### Two topologies, and which one you have
+
+The shipped `docker/` image runs **one container with `INSTANCES` ikabot
+processes** in tmux, all sharing `/config/.ikabot`. `IKABOT_STATUS_DIR` is not
+needed there — one data directory is already one status directory, and the
+decaptcha seats coordinate naturally too. Nothing to configure.
+
+`IKABOT_STATUS_DIR` exists for the other shape: **one container per account**.
+There, do *not* mount a single data volume into every container, as an earlier
+revision of this document suggested. That directory also holds **the credential
+vault**, and several ikabots on one vault file is a needless single point of
+failure. Give each container its own data volume and share only the status
+directory and the decaptcha seats (§7).
+
+Either way, several ikabot processes do share one vault, so the vault has been
+hardened for it: writes merge under the lock instead of overwriting a snapshot,
+accounts are addressed by a stable id rather than by list position, and the
+stale-lock check no longer compares PIDs across PID namespaces.
 
 ---
 
@@ -108,7 +130,7 @@ Example read:
 ```python
 import json, glob, time
 
-for path in sorted(glob.glob("/data/ikabot/status/*.json")):
+for path in sorted(glob.glob("/data/status/*.json")):
     with open(path) as f:
         s = json.load(f)
     if s.get("schema") != 1:
@@ -140,3 +162,90 @@ them — say which and they can go in a follow-up:
 - `events` array of recent task starts/stops/failures
 - Last login time and session-expiry state
 - Per-task progress where the module knows it (e.g. "3 of 10 buildings")
+
+---
+
+## 7. Also relevant to the compose file: decaptcha worker seats
+
+From **mod v1.8.3** the local captcha solver sizes its worker pool to the
+machine rather than running a fixed pool per account, coordinating through
+`flock` "seat" files so several instances do not all grab every core.
+
+**The seats must be on a path shared by every ikabot container**, or each one
+sees an empty seat directory, believes it has the machine to itself, and the
+coordination does nothing. Measured here with 6 instances on 4 cores: shared
+directory → 4 get seats and 2 correctly fall back to serial; per-container
+directories → all 6 claim seats.
+
+They default to `$IKABOT_DATA_DIR/decaptcha_seats`. In the shipped
+single-container image every instance shares that directory already, so there is
+nothing to do. With **one container per account** the default is not shared, and
+setting this is required:
+
+```yaml
+environment:
+  - IKABOT_DECAPTCHA_SEAT_DIR=/shared/decaptcha_seats
+volumes:
+  - decaptcha-seats:/shared/decaptcha_seats
+```
+
+The directory must be on a filesystem where `flock` works — a Docker volume or
+bind mount is fine, NFS generally is not. Seat locks are released by the
+kernel when a process exits, so a crashed instance cannot leave a seat stuck.
+
+**Container limits are respected.** Worker count and memory headroom come from
+the cgroup (`memory.max` / `cpu.max`, and the v1 equivalents) rather than
+`/proc/meminfo` and `os.cpu_count()`, which report the host from inside a
+container. A container with `--memory=300m` plans zero workers and solves
+serially instead of being OOM-killed. No action needed — just be aware that
+tightening `--cpus` or `--memory` will make captcha solving slower rather than
+failing.
+
+### Scaling numbers (measured, 4 cores, worst case)
+
+Every instance solving a captcha *at the same moment* — the pathological case,
+not the norm, since captchas are sporadic.
+
+| Instances | Wall | Median per solve | Throughput | Correct |
+|---|---|---|---|---|
+| 1 | 7.0 s | 7.0 s | 0.14 /s | 1/1 |
+| 2 | 11.4 s | 11.4 s | 0.18 /s | 2/2 |
+| 4 | 13.3 s | 13.2 s | **0.30 /s** | 4/4 |
+| 8 | 25.5 s | 25.0 s | 0.31 /s | 8/8 |
+| 12 | 37.5 s | 36.9 s | 0.32 /s | 12/12 |
+| 20 | 67.3 s | 66.4 s | 0.30 /s | 20/20 |
+
+**Throughput saturates at the core count** (~0.31 solves/s here) and stays
+flat. Past that, extra instances buy nothing and simply queue: latency grows
+linearly.
+
+Rules of thumb, per core count `C`:
+
+- **Aggregate ceiling** ≈ `0.08 × C` solves per second.
+- **Median latency** ≈ `(N / C) × 13 s` when all N solve at once.
+- **RAM** ≈ `N × 316 MB` peak while solving, `N × 70 MB` once idle for 120 s.
+
+So on 4 cores, 12 instances is comfortable (~37 s worst case) and 20 is
+usable (~67 s). Double the cores and both halve. Since a pirate mission runs
+for minutes to hours, even a minute of captcha delay rarely matters — but if
+it does, add cores, not instances.
+
+Accuracy never degraded: every solve decoded correctly at all N.
+
+To measure your own box, set `DECAPTCHA_TIMING_LOG = True` in `config.py`.
+Each solve then logs one `[decaptcha-timing]` line with worker count, free RAM
+and CPU topology.
+
+Memory per instance: **~316 MB while solving**, dropping to **~70 MB** after
+the 120 s idle release (verified: the weights really are returned to the OS,
+not just freed inside Python). So 20 instances cost ~1.4 GB idle and up to
+~6.3 GB if they all happen to solve at once.
+
+From **v1.8.4** a solve is refused outright when there is not enough free
+memory to hold the weights, and the caller falls back to the remote decaptcha
+API. That turns the worst case from "OOM-killed container" into "solved
+remotely, a bit slower".
+
+If you run many instances on a small box, either give the host enough RAM for
+the peak, or set `USE_MULTIPROCESSING_DECAPTCHA = False` and accept serial
+solving.

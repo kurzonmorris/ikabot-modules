@@ -161,7 +161,6 @@ imports:
  &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
  &#8226;   <a href="#ikabot.config">ikabot.config</a>
  &#8226;   <a href="#ikabot.function">ikabot.function</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -194,6 +193,7 @@ imports:
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
  &#8226;   <a href="#ikabot.function.proxyConf">ikabot.function.proxyConf</a>
  &#8226;   <a href="#ikabot.function.reorganizeCityBuildings">ikabot.function.reorganizeCityBuildings</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -205,6 +205,7 @@ imports:
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
  &#8226;   <a href="#ikabot.function.update">ikabot.function.update</a>
  &#8226;   <a href="#ikabot.function.vacationMode">ikabot.function.vacationMode</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers">ikabot.helpers</a>
  &#8226;   <a href="#ikabot.helpers.aesCipher">ikabot.helpers.aesCipher</a>
@@ -224,11 +225,13 @@ imports:
  &#8226;   <a href="#ikabot.helpers.ntfyComm">ikabot.helpers.ntfyComm</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.planRoutes">ikabot.helpers.planRoutes</a>
  &#8226;   <a href="#ikabot.helpers.pluginLoader">ikabot.helpers.pluginLoader</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.resources">ikabot.helpers.resources</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
  &#8226;   <a href="#ikabot.web">ikabot.web</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
@@ -2600,7 +2603,8 @@ imported by:
   <a name="array"></a>
   <tt>array</tt> <span class="moduletype"><i>(builtin module)</i></span>  <div class="import">
 imported by:
-    <a href="#multiprocessing.dummy">multiprocessing.dummy</a>
+    <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
+ &#8226;   <a href="#multiprocessing.dummy">multiprocessing.dummy</a>
  &#8226;   <a href="#multiprocessing.managers">multiprocessing.managers</a>
  &#8226;   <a href="#multiprocessing.reduction">multiprocessing.reduction</a>
  &#8226;   <a href="#socket">socket</a>
@@ -3607,6 +3611,7 @@ imported by:
 imported by:
     <a href="#certifi.core">certifi.core</a>
  &#8226;   <a href="#colorama.initialise">colorama.initialise</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#logging">logging</a>
  &#8226;   <a href="#multiprocessing.forkserver">multiprocessing.forkserver</a>
  &#8226;   <a href="#multiprocessing.popen_fork">multiprocessing.popen_fork</a>
@@ -3678,6 +3683,7 @@ imported by:
  &#8226;   <a href="#encodings.base64_codec">encodings.base64_codec</a>
  &#8226;   <a href="#flask.json.tag">flask.json.tag</a>
  &#8226;   <a href="#http.server">http.server</a>
+ &#8226;   <a href="#ikabot.function.autoPirate">ikabot.function.autoPirate</a>
  &#8226;   <a href="#ikabot.function.decaptchaConf">ikabot.function.decaptchaConf</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.aesCipher">ikabot.helpers.aesCipher</a>
@@ -5523,6 +5529,7 @@ imported by:
  &#8226;   <a href="#getpass">getpass</a>
  &#8226;   <a href="#glob">glob</a>
  &#8226;   <a href="#http.server">http.server</a>
+ &#8226;   <a href="#ikabot.function.autoPirate">ikabot.function.autoPirate</a>
  &#8226;   <a href="#importlib.metadata">importlib.metadata</a>
  &#8226;   <a href="#importlib.resources._adapters">importlib.resources._adapters</a>
  &#8226;   <a href="#importlib.resources._common">importlib.resources._common</a>
@@ -7085,6 +7092,7 @@ imported by:
  &#8226;   <a href="#ctypes.wintypes">ctypes.wintypes</a>
  &#8226;   <a href="#ikabot.helpers.aesCipher">ikabot.helpers.aesCipher</a>
  &#8226;   <a href="#ikabot.helpers.credentialStore">ikabot.helpers.credentialStore</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#multiprocessing.sharedctypes">multiprocessing.sharedctypes</a>
  &#8226;   <a href="#packaging._manylinux">packaging._manylinux</a>
@@ -10748,6 +10756,7 @@ imported by:
 <span class="moduletype">MissingModule</span>  <div class="import">
 imported by:
     <a href="#_pyrepl.unix_console">_pyrepl.unix_console</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#subprocess">subprocess</a>
 
   </div>
@@ -11846,6 +11855,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#click.utils">click.utils</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#pathlib._abc">pathlib._abc</a>
  &#8226;   <a href="#pathlib._local">pathlib._local</a>
  &#8226;   <a href="#setuptools._distutils.command.sdist">setuptools._distutils.command.sdist</a>
@@ -12363,7 +12373,6 @@ imports:
  &#8226;   <a href="#getpass">getpass</a>
  &#8226;   <a href="#ikabot">ikabot</a>
  &#8226;   <a href="#ikabot.config">ikabot.config</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -12396,6 +12405,7 @@ imports:
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
  &#8226;   <a href="#ikabot.function.proxyConf">ikabot.function.proxyConf</a>
  &#8226;   <a href="#ikabot.function.reorganizeCityBuildings">ikabot.function.reorganizeCityBuildings</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
  &#8226;   <a href="#ikabot.function.sendCulturalTreatyRequests">ikabot.function.sendCulturalTreatyRequests</a>
@@ -12405,6 +12415,7 @@ imports:
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
  &#8226;   <a href="#ikabot.function.update">ikabot.function.update</a>
  &#8226;   <a href="#ikabot.function.vacationMode">ikabot.function.vacationMode</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.credentialStore">ikabot.helpers.credentialStore</a>
@@ -12413,6 +12424,7 @@ imports:
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.pluginLoader">ikabot.helpers.pluginLoader</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
  &#8226;   <a href="#multiprocessing">multiprocessing</a>
  &#8226;   <a href="#os">os</a>
@@ -12443,7 +12455,6 @@ imports:
 imported by:
     <a href="#__main__.py">__main__.py</a>
  &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -12473,6 +12484,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
  &#8226;   <a href="#ikabot.function.proxyConf">ikabot.function.proxyConf</a>
  &#8226;   <a href="#ikabot.function.reorganizeCityBuildings">ikabot.function.reorganizeCityBuildings</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -12483,6 +12495,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
  &#8226;   <a href="#ikabot.function.update">ikabot.function.update</a>
  &#8226;   <a href="#ikabot.function.vacationMode">ikabot.function.vacationMode</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.aesCipher">ikabot.helpers.aesCipher</a>
  &#8226;   <a href="#ikabot.helpers.apiComm">ikabot.helpers.apiComm</a>
@@ -12498,10 +12511,12 @@ imported by:
  &#8226;   <a href="#ikabot.helpers.modulePrefs">ikabot.helpers.modulePrefs</a>
  &#8226;   <a href="#ikabot.helpers.ntfyComm">ikabot.helpers.ntfyComm</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.planRoutes">ikabot.helpers.planRoutes</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.resources">ikabot.helpers.resources</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
 
   </div>
@@ -12519,7 +12534,6 @@ imports:
   <div class="import">
 imported by:
     <a href="#__main__.py">__main__.py</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -12552,6 +12566,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
  &#8226;   <a href="#ikabot.function.proxyConf">ikabot.function.proxyConf</a>
  &#8226;   <a href="#ikabot.function.reorganizeCityBuildings">ikabot.function.reorganizeCityBuildings</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -12563,34 +12578,8 @@ imported by:
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
  &#8226;   <a href="#ikabot.function.update">ikabot.function.update</a>
  &#8226;   <a href="#ikabot.function.vacationMode">ikabot.function.vacationMode</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
-
-  </div>
-
-</div>
-
-<div class="node">
-  <a name="ikabot.function.Research"></a>
-  <a target="code" href="///C:/Users/SERVER/Desktop/github/ikabot-modules/ikabot/function/Research.py" type="text/plain"><tt>ikabot.function.Research</tt></a>
-<span class="moduletype">SourceModule</span>  <div class="import">
-imports:
-    <a href="#ikabot.config">ikabot.config</a>
- &#8226;   <a href="#ikabot.function">ikabot.function</a>
- &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
- &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
- &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
- &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
- &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
- &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
- &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
- &#8226;   <a href="#json">json</a>
- &#8226;   <a href="#traceback">traceback</a>
-
-  </div>
-  <div class="import">
-imported by:
-    <a href="#__main__.py">__main__.py</a>
- &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
 
   </div>
 
@@ -12696,6 +12685,7 @@ imports:
  &#8226;   <a href="#ikabot.function.vacationMode">ikabot.function.vacationMode</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
+ &#8226;   <a href="#ikabot.helpers.modulePrefs">ikabot.helpers.modulePrefs</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
  &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
@@ -12725,6 +12715,7 @@ imports:
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
  &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
+ &#8226;   <a href="#ikabot.helpers.modulePrefs">ikabot.helpers.modulePrefs</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.planRoutes">ikabot.helpers.planRoutes</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
@@ -12757,6 +12748,7 @@ imports:
  &#8226;   <a href="#ikabot.function">ikabot.function</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
+ &#8226;   <a href="#ikabot.helpers.modulePrefs">ikabot.helpers.modulePrefs</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
@@ -12851,16 +12843,20 @@ imported by:
   <a target="code" href="///C:/Users/SERVER/Desktop/github/ikabot-modules/ikabot/function/autoPirate.py" type="text/plain"><tt>ikabot.function.autoPirate</tt></a>
 <span class="moduletype">SourceModule</span>  <div class="import">
 imports:
-    <a href="#ikabot.config">ikabot.config</a>
+    <a href="#base64">base64</a>
+ &#8226;   <a href="#contextlib">contextlib</a>
+ &#8226;   <a href="#ikabot.config">ikabot.config</a>
  &#8226;   <a href="#ikabot.function">ikabot.function</a>
  &#8226;   <a href="#ikabot.helpers.apiComm">ikabot.helpers.apiComm</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
  &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
+ &#8226;   <a href="#ikabot.helpers.logging">ikabot.helpers.logging</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
+ &#8226;   <a href="#json">json</a>
  &#8226;   <a href="#re">re</a>
  &#8226;   <a href="#requests">requests</a>
  &#8226;   <a href="#sys">sys</a>
@@ -13279,6 +13275,7 @@ imports:
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
  &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
+ &#8226;   <a href="#ikabot.helpers.modulePrefs">ikabot.helpers.modulePrefs</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
@@ -13493,6 +13490,33 @@ imported by:
 </div>
 
 <div class="node">
+  <a name="ikabot.function.research"></a>
+  <a target="code" href="///C:/Users/SERVER/Desktop/github/ikabot-modules/ikabot/function/research.py" type="text/plain"><tt>ikabot.function.research</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#ikabot.config">ikabot.config</a>
+ &#8226;   <a href="#ikabot.function">ikabot.function</a>
+ &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
+ &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
+ &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
+ &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
+ &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
+ &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
+ &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#traceback">traceback</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#__main__.py">__main__.py</a>
+ &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
+
+  </div>
+
+</div>
+
+<div class="node">
   <a name="ikabot.function.resourceTransportManager"></a>
   <a target="code" href="///C:/Users/SERVER/Desktop/github/ikabot-modules/ikabot/function/resourceTransportManager.py" type="text/plain"><tt>ikabot.function.resourceTransportManager</tt></a>
 <span class="moduletype">SourceModule</span>  <div class="import">
@@ -13534,6 +13558,7 @@ imports:
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
  &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
+ &#8226;   <a href="#ikabot.helpers.modulePrefs">ikabot.helpers.modulePrefs</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
@@ -13790,6 +13815,31 @@ imported by:
 </div>
 
 <div class="node">
+  <a name="ikabot.function.viewArmy"></a>
+  <a target="code" href="///C:/Users/SERVER/Desktop/github/ikabot-modules/ikabot/function/viewArmy.py" type="text/plain"><tt>ikabot.function.viewArmy</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#ikabot.config">ikabot.config</a>
+ &#8226;   <a href="#ikabot.function">ikabot.function</a>
+ &#8226;   <a href="#ikabot.helpers.gui">ikabot.helpers.gui</a>
+ &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
+ &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#os">os</a>
+ &#8226;   <a href="#re">re</a>
+ &#8226;   <a href="#sys">sys</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#__main__.py">__main__.py</a>
+ &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
+
+  </div>
+
+</div>
+
+<div class="node">
   <a name="ikabot.function.webServer"></a>
   <a target="code" href="///C:/Users/SERVER/Desktop/github/ikabot-modules/ikabot/function/webServer.py" type="text/plain"><tt>ikabot.function.webServer</tt></a>
 <span class="moduletype">SourceModule</span>  <div class="import">
@@ -13860,11 +13910,13 @@ imported by:
  &#8226;   <a href="#ikabot.helpers.ntfyComm">ikabot.helpers.ntfyComm</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.planRoutes">ikabot.helpers.planRoutes</a>
  &#8226;   <a href="#ikabot.helpers.pluginLoader">ikabot.helpers.pluginLoader</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.resources">ikabot.helpers.resources</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
 
   </div>
@@ -13945,7 +13997,6 @@ imports:
 imported by:
     <a href="#__main__.py">__main__.py</a>
  &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -13966,6 +14017,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.inactivePlayersRadiusMonitor">ikabot.function.inactivePlayersRadiusMonitor</a>
  &#8226;   <a href="#ikabot.function.loginDaily">ikabot.function.loginDaily</a>
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -13975,6 +14027,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.aesCipher">ikabot.helpers.aesCipher</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
 
   </div>
@@ -14075,7 +14128,6 @@ imports:
   <div class="import">
 imported by:
     <a href="#__main__.py">__main__.py</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -14094,6 +14146,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.inactivePlayersRadiusMonitor">ikabot.function.inactivePlayersRadiusMonitor</a>
  &#8226;   <a href="#ikabot.function.loginDaily">ikabot.function.loginDaily</a>
  &#8226;   <a href="#ikabot.function.reorganizeCityBuildings">ikabot.function.reorganizeCityBuildings</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sendCulturalTreatyRequests">ikabot.function.sendCulturalTreatyRequests</a>
@@ -14126,7 +14179,6 @@ imports:
 imported by:
     <a href="#__main__.py">__main__.py</a>
  &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -14156,6 +14208,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
  &#8226;   <a href="#ikabot.function.proxyConf">ikabot.function.proxyConf</a>
  &#8226;   <a href="#ikabot.function.reorganizeCityBuildings">ikabot.function.reorganizeCityBuildings</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -14166,6 +14219,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
  &#8226;   <a href="#ikabot.function.update">ikabot.function.update</a>
  &#8226;   <a href="#ikabot.function.vacationMode">ikabot.function.vacationMode</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.discordComm">ikabot.helpers.discordComm</a>
@@ -14242,6 +14296,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#__main__.py">__main__.py</a>
+ &#8226;   <a href="#ikabot.function.autoPirate">ikabot.function.autoPirate</a>
  &#8226;   <a href="#ikabot.function.externalModules">ikabot.function.externalModules</a>
  &#8226;   <a href="#ikabot.function.logs">ikabot.function.logs</a>
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
@@ -14253,7 +14308,10 @@ imported by:
  &#8226;   <a href="#ikabot.helpers.modulePrefs">ikabot.helpers.modulePrefs</a>
  &#8226;   <a href="#ikabot.helpers.ntfyComm">ikabot.helpers.ntfyComm</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
 
   </div>
@@ -14305,8 +14363,13 @@ imported by:
  &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
+ &#8226;   <a href="#ikabot.function.alertAttacks">ikabot.function.alertAttacks</a>
+ &#8226;   <a href="#ikabot.function.alertLowWine">ikabot.function.alertLowWine</a>
+ &#8226;   <a href="#ikabot.function.alertMessages">ikabot.function.alertMessages</a>
  &#8226;   <a href="#ikabot.function.donationBot">ikabot.function.donationBot</a>
+ &#8226;   <a href="#ikabot.function.inactivePlayersRadiusMonitor">ikabot.function.inactivePlayersRadiusMonitor</a>
  &#8226;   <a href="#ikabot.function.loginDaily">ikabot.function.loginDaily</a>
+ &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
 
   </div>
 
@@ -14380,13 +14443,13 @@ imports:
  &#8226;   <a href="#re">re</a>
  &#8226;   <a href="#readline">readline</a>
  &#8226;   <a href="#sys">sys</a>
+ &#8226;   <a href="#time">time</a>
 
   </div>
   <div class="import">
 imported by:
     <a href="#__main__.py">__main__.py</a>
  &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -14416,6 +14479,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
  &#8226;   <a href="#ikabot.function.proxyConf">ikabot.function.proxyConf</a>
  &#8226;   <a href="#ikabot.function.reorganizeCityBuildings">ikabot.function.reorganizeCityBuildings</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -14427,6 +14491,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
  &#8226;   <a href="#ikabot.function.update">ikabot.function.update</a>
  &#8226;   <a href="#ikabot.function.vacationMode">ikabot.function.vacationMode</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.aesCipher">ikabot.helpers.aesCipher</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
@@ -14448,6 +14513,8 @@ imported by:
 <span class="moduletype">SourceModule</span>  <div class="import">
 imports:
     <a href="#ikabot.helpers">ikabot.helpers</a>
+ &#8226;   <a href="#ikabot.helpers.logging">ikabot.helpers.logging</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#io">io</a>
  &#8226;   <a href="#onnxruntime">onnxruntime</a>
  &#8226;   <a href="#onnxruntime_inference_collection">onnxruntime_inference_collection</a>
@@ -14455,6 +14522,7 @@ imports:
  &#8226;   <a href="#requests">requests</a>
  &#8226;   <a href="#struct">struct</a>
  &#8226;   <a href="#sys">sys</a>
+ &#8226;   <a href="#threading">threading</a>
  &#8226;   <a href="#zlib">zlib</a>
 
   </div>
@@ -14462,6 +14530,45 @@ imports:
 imported by:
     <a href="#__main__.py">__main__.py</a>
  &#8226;   <a href="#ikabot.function.autoPirate">ikabot.function.autoPirate</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="ikabot.helpers.piratesDecaptchaPure"></a>
+  <a target="code" href="///C:/Users/SERVER/Desktop/github/ikabot-modules/ikabot/helpers/piratesDecaptchaPure.py" type="text/plain"><tt>ikabot.helpers.piratesDecaptchaPure</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#array">array</a>
+ &#8226;   <a href="#atexit">atexit</a>
+ &#8226;   <a href="#ctypes">ctypes</a>
+ &#8226;   <a href="#fcntl">fcntl</a>
+ &#8226;   <a href="#glob">glob</a>
+ &#8226;   <a href="#ikabot.config">ikabot.config</a>
+ &#8226;   <a href="#ikabot.helpers">ikabot.helpers</a>
+ &#8226;   <a href="#ikabot.helpers.logging">ikabot.helpers.logging</a>
+ &#8226;   <a href="#io">io</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#math">math</a>
+ &#8226;   <a href="#msvcrt">msvcrt</a>
+ &#8226;   <a href="#multiprocessing">multiprocessing</a>
+ &#8226;   <a href="#operator">operator</a>
+ &#8226;   <a href="#os">os</a>
+ &#8226;   <a href="#pathlib">pathlib</a>
+ &#8226;   <a href="#platform">platform</a>
+ &#8226;   <a href="#struct">struct</a>
+ &#8226;   <a href="#sys">sys</a>
+ &#8226;   <a href="#tempfile">tempfile</a>
+ &#8226;   <a href="#threading">threading</a>
+ &#8226;   <a href="#time">time</a>
+ &#8226;   <a href="#zlib">zlib</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#__main__.py">__main__.py</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
 
   </div>
 
@@ -14549,7 +14656,6 @@ imports:
 imported by:
     <a href="#__main__.py">__main__.py</a>
  &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -14570,6 +14676,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.inactivePlayersRadiusMonitor">ikabot.function.inactivePlayersRadiusMonitor</a>
  &#8226;   <a href="#ikabot.function.killTasks">ikabot.function.killTasks</a>
  &#8226;   <a href="#ikabot.function.loginDaily">ikabot.function.loginDaily</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -14632,7 +14739,6 @@ imports:
   <div class="import">
 imported by:
     <a href="#__main__.py">__main__.py</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.alertAttacks">ikabot.function.alertAttacks</a>
@@ -14648,6 +14754,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.dumpWorld">ikabot.function.dumpWorld</a>
  &#8226;   <a href="#ikabot.function.inactivePlayersRadiusMonitor">ikabot.function.inactivePlayersRadiusMonitor</a>
  &#8226;   <a href="#ikabot.function.loginDaily">ikabot.function.loginDaily</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -14655,6 +14762,29 @@ imported by:
  &#8226;   <a href="#ikabot.function.sendResources">ikabot.function.sendResources</a>
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="ikabot.helpers.taskWatchdog"></a>
+  <a target="code" href="///C:/Users/SERVER/Desktop/github/ikabot-modules/ikabot/helpers/taskWatchdog.py" type="text/plain"><tt>ikabot.helpers.taskWatchdog</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#ikabot.config">ikabot.config</a>
+ &#8226;   <a href="#ikabot.helpers">ikabot.helpers</a>
+ &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
+ &#8226;   <a href="#ikabot.helpers.logging">ikabot.helpers.logging</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#os">os</a>
+ &#8226;   <a href="#time">time</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#__main__.py">__main__.py</a>
+ &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
 
   </div>
 
@@ -14677,7 +14807,6 @@ imports:
   <div class="import">
 imported by:
     <a href="#__main__.py">__main__.py</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
@@ -14699,6 +14828,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.inactivePlayersRadiusMonitor">ikabot.function.inactivePlayersRadiusMonitor</a>
  &#8226;   <a href="#ikabot.function.loginDaily">ikabot.function.loginDaily</a>
  &#8226;   <a href="#ikabot.function.modifyProduction">ikabot.function.modifyProduction</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -14707,6 +14837,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.shipMovements">ikabot.function.shipMovements</a>
  &#8226;   <a href="#ikabot.function.stationArmy">ikabot.function.stationArmy</a>
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
@@ -15488,6 +15619,7 @@ imported by:
  &#8226;   <a href="#http.server">http.server</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#importlib.resources._adapters">importlib.resources._adapters</a>
  &#8226;   <a href="#importlib.resources.abc">importlib.resources.abc</a>
  &#8226;   <a href="#jinja2.bccache">jinja2.bccache</a>
@@ -16595,13 +16727,13 @@ imported by:
  &#8226;   <a href="#flask.config">flask.config</a>
  &#8226;   <a href="#flask.json">flask.json</a>
  &#8226;   <a href="#flask.json.provider">flask.json.provider</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.UpgradeUnits">ikabot.function.UpgradeUnits</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.activateShrine">ikabot.function.activateShrine</a>
  &#8226;   <a href="#ikabot.function.alertLowWine">ikabot.function.alertLowWine</a>
  &#8226;   <a href="#ikabot.function.alertMessages">ikabot.function.alertMessages</a>
  &#8226;   <a href="#ikabot.function.attackBarbarians">ikabot.function.attackBarbarians</a>
+ &#8226;   <a href="#ikabot.function.autoPirate">ikabot.function.autoPirate</a>
  &#8226;   <a href="#ikabot.function.buyResources">ikabot.function.buyResources</a>
  &#8226;   <a href="#ikabot.function.constructBuilding">ikabot.function.constructBuilding</a>
  &#8226;   <a href="#ikabot.function.constructionList">ikabot.function.constructionList</a>
@@ -16610,11 +16742,13 @@ imported by:
  &#8226;   <a href="#ikabot.function.externalModules">ikabot.function.externalModules</a>
  &#8226;   <a href="#ikabot.function.importExportCookie">ikabot.function.importExportCookie</a>
  &#8226;   <a href="#ikabot.function.inactivePlayersRadiusMonitor">ikabot.function.inactivePlayersRadiusMonitor</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
  &#8226;   <a href="#ikabot.function.sendCulturalTreatyRequests">ikabot.function.sendCulturalTreatyRequests</a>
  &#8226;   <a href="#ikabot.function.shipMovements">ikabot.function.shipMovements</a>
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.aesCipher">ikabot.helpers.aesCipher</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
@@ -16624,9 +16758,11 @@ imported by:
  &#8226;   <a href="#ikabot.helpers.market">ikabot.helpers.market</a>
  &#8226;   <a href="#ikabot.helpers.modulePrefs">ikabot.helpers.modulePrefs</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.planRoutes">ikabot.helpers.planRoutes</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.resources">ikabot.helpers.resources</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
  &#8226;   <a href="#importlib.metadata">importlib.metadata</a>
  &#8226;   <a href="#itsdangerous._json">itsdangerous._json</a>
@@ -17020,6 +17156,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
  &#8226;   <a href="#ikabot.function.shipMovements">ikabot.function.shipMovements</a>
  &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.planRoutes">ikabot.helpers.planRoutes</a>
  &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
  &#8226;   <a href="#jinja2.filters">jinja2.filters</a>
@@ -17110,6 +17247,7 @@ imported by:
  &#8226;   <a href="#colorama.winterm">colorama.winterm</a>
  &#8226;   <a href="#getpass">getpass</a>
  &#8226;   <a href="#ikabot.function.importExportCookie">ikabot.function.importExportCookie</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#multiprocessing.popen_spawn_win32">multiprocessing.popen_spawn_win32</a>
  &#8226;   <a href="#multiprocessing.spawn">multiprocessing.spawn</a>
  &#8226;   <a href="#subprocess">subprocess</a>
@@ -17151,6 +17289,7 @@ imported by:
  &#8226;   <a href="#concurrent.futures.process">concurrent.futures.process</a>
  &#8226;   <a href="#ikabot.__main__">ikabot.__main__</a>
  &#8226;   <a href="#ikabot.command_line">ikabot.command_line</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#multiprocessing">multiprocessing</a>
  &#8226;   <a href="#multiprocessing.connection">multiprocessing.connection</a>
  &#8226;   <a href="#multiprocessing.context">multiprocessing.context</a>
@@ -18092,6 +18231,7 @@ imported by:
  &#8226;   <a href="#fractions">fractions</a>
  &#8226;   <a href="#gettext">gettext</a>
  &#8226;   <a href="#glob">glob</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#importlib.metadata">importlib.metadata</a>
  &#8226;   <a href="#importlib.resources.readers">importlib.resources.readers</a>
  &#8226;   <a href="#inspect">inspect</a>
@@ -18218,6 +18358,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.notificationSetup">ikabot.function.notificationSetup</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.sendCulturalTreatyRequests">ikabot.function.sendCulturalTreatyRequests</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.helpers.aesCipher">ikabot.helpers.aesCipher</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.credentialStore">ikabot.helpers.credentialStore</a>
@@ -18230,9 +18371,11 @@ imported by:
  &#8226;   <a href="#ikabot.helpers.ntfyComm">ikabot.helpers.ntfyComm</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.pluginLoader">ikabot.helpers.pluginLoader</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.helpers.signals">ikabot.helpers.signals</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
  &#8226;   <a href="#importlib.metadata">importlib.metadata</a>
  &#8226;   <a href="#importlib.metadata._meta">importlib.metadata._meta</a>
@@ -18813,6 +18956,7 @@ imported by:
  &#8226;   <a href="#dotenv.main">dotenv.main</a>
  &#8226;   <a href="#flask.sansio.scaffold">flask.sansio.scaffold</a>
  &#8226;   <a href="#ikabot.function.dumpWorld">ikabot.function.dumpWorld</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#importlib.metadata">importlib.metadata</a>
  &#8226;   <a href="#importlib.resources._common">importlib.resources._common</a>
  &#8226;   <a href="#importlib.resources.abc">importlib.resources.abc</a>
@@ -18981,6 +19125,7 @@ imports:
 imported by:
     <a href="#_pyrepl.unix_console">_pyrepl.unix_console</a>
  &#8226;   <a href="#flask.cli">flask.cli</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#packaging.markers">packaging.markers</a>
  &#8226;   <a href="#packaging.tags">packaging.tags</a>
  &#8226;   <a href="#pydoc">pydoc</a>
@@ -19552,6 +19697,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.shipMovements">ikabot.function.shipMovements</a>
  &#8226;   <a href="#ikabot.function.stationArmy">ikabot.function.stationArmy</a>
  &#8226;   <a href="#ikabot.function.trainArmy">ikabot.function.trainArmy</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.credentialStore">ikabot.helpers.credentialStore</a>
@@ -24728,6 +24874,7 @@ imported by:
  &#8226;   <a href="#ikabot.helpers.dns">ikabot.helpers.dns</a>
  &#8226;   <a href="#ikabot.helpers.lobbyDecaptcha">ikabot.helpers.lobbyDecaptcha</a>
  &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#itsdangerous.encoding">itsdangerous.encoding</a>
  &#8226;   <a href="#logging.handlers">logging.handlers</a>
  &#8226;   <a href="#multiprocessing.connection">multiprocessing.connection</a>
@@ -24934,12 +25081,14 @@ imported by:
  &#8226;   <a href="#ikabot.function.testTelegramBot">ikabot.function.testTelegramBot</a>
  &#8226;   <a href="#ikabot.function.update">ikabot.function.update</a>
  &#8226;   <a href="#ikabot.function.vacationMode">ikabot.function.vacationMode</a>
+ &#8226;   <a href="#ikabot.function.viewArmy">ikabot.function.viewArmy</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
  &#8226;   <a href="#ikabot.helpers.botComm">ikabot.helpers.botComm</a>
  &#8226;   <a href="#ikabot.helpers.discordComm">ikabot.helpers.discordComm</a>
  &#8226;   <a href="#ikabot.helpers.ntfyComm">ikabot.helpers.ntfyComm</a>
  &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
  &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.pluginLoader">ikabot.helpers.pluginLoader</a>
  &#8226;   <a href="#ikabot.helpers.process">ikabot.helpers.process</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
@@ -25208,6 +25357,7 @@ imported by:
  &#8226;   <a href="#click.testing">click.testing</a>
  &#8226;   <a href="#ctypes.util">ctypes.util</a>
  &#8226;   <a href="#dotenv.main">dotenv.main</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#importlib.resources._common">importlib.resources._common</a>
  &#8226;   <a href="#jinja2.bccache">jinja2.bccache</a>
  &#8226;   <a href="#multiprocessing.connection">multiprocessing.connection</a>
@@ -25318,6 +25468,8 @@ imported by:
  &#8226;   <a href="#ikabot.function.constructionList">ikabot.function.constructionList</a>
  &#8226;   <a href="#ikabot.function.dumpWorld">ikabot.function.dumpWorld</a>
  &#8226;   <a href="#ikabot.function.webServer">ikabot.function.webServer</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#importlib.util">importlib.util</a>
  &#8226;   <a href="#jinja2.utils">jinja2.utils</a>
  &#8226;   <a href="#logging">logging</a>
@@ -25413,7 +25565,10 @@ imported by:
  &#8226;   <a href="#ikabot.helpers.getJson">ikabot.helpers.getJson</a>
  &#8226;   <a href="#ikabot.helpers.ikaEasyBridge">ikabot.helpers.ikaEasyBridge</a>
  &#8226;   <a href="#ikabot.helpers.lobbyDecaptcha">ikabot.helpers.lobbyDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.pedirInfo">ikabot.helpers.pedirInfo</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#ikabot.helpers.planRoutes">ikabot.helpers.planRoutes</a>
+ &#8226;   <a href="#ikabot.helpers.taskWatchdog">ikabot.helpers.taskWatchdog</a>
  &#8226;   <a href="#ikabot.helpers.varios">ikabot.helpers.varios</a>
  &#8226;   <a href="#ikabot.web.session">ikabot.web.session</a>
  &#8226;   <a href="#itsdangerous.timed">itsdangerous.timed</a>
@@ -25635,7 +25790,6 @@ imported by:
  &#8226;   <a href="#concurrent.futures.process">concurrent.futures.process</a>
  &#8226;   <a href="#flask.cli">flask.cli</a>
  &#8226;   <a href="#http.cookiejar">http.cookiejar</a>
- &#8226;   <a href="#ikabot.function.Research">ikabot.function.Research</a>
  &#8226;   <a href="#ikabot.function.activateMiracle">ikabot.function.activateMiracle</a>
  &#8226;   <a href="#ikabot.function.alertAttacks">ikabot.function.alertAttacks</a>
  &#8226;   <a href="#ikabot.function.alertLowWine">ikabot.function.alertLowWine</a>
@@ -25652,6 +25806,7 @@ imported by:
  &#8226;   <a href="#ikabot.function.inactivePlayersRadiusMonitor">ikabot.function.inactivePlayersRadiusMonitor</a>
  &#8226;   <a href="#ikabot.function.loadCustomModule">ikabot.function.loadCustomModule</a>
  &#8226;   <a href="#ikabot.function.loginDaily">ikabot.function.loginDaily</a>
+ &#8226;   <a href="#ikabot.function.research">ikabot.function.research</a>
  &#8226;   <a href="#ikabot.function.resourceTransportManager">ikabot.function.resourceTransportManager</a>
  &#8226;   <a href="#ikabot.function.searchForIslandSpaces">ikabot.function.searchForIslandSpaces</a>
  &#8226;   <a href="#ikabot.function.sellResources">ikabot.function.sellResources</a>
@@ -29995,6 +30150,7 @@ imported by:
  &#8226;   <a href="#gzip">gzip</a>
  &#8226;   <a href="#ikabot.helpers.lobbyDecaptcha">ikabot.helpers.lobbyDecaptcha</a>
  &#8226;   <a href="#ikabot.helpers.piratesDecaptcha">ikabot.helpers.piratesDecaptcha</a>
+ &#8226;   <a href="#ikabot.helpers.piratesDecaptchaPure">ikabot.helpers.piratesDecaptchaPure</a>
  &#8226;   <a href="#itsdangerous.url_safe">itsdangerous.url_safe</a>
  &#8226;   <a href="#setuptools._vendor.backports.tarfile">setuptools._vendor.backports.tarfile</a>
  &#8226;   <a href="#shutil">shutil</a>

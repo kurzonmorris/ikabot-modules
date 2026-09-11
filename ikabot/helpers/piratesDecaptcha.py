@@ -1,6 +1,10 @@
 import os
 import sys
 
+from ikabot.helpers.logging import getLogger
+
+_logger = getLogger(__name__)
+
 class SuppressStderr:
     def __enter__(self):
         self._devnull = None
@@ -277,6 +281,11 @@ def _ctc_greedy_decode(logits_tbc):
     return "".join(chars)
 
 
+class LocalDecaptchaError(RuntimeError):
+    """Every local solver failed. Carries which one failed and why, so the
+    caller can say more than "local decaptcha failed"."""
+
+
 def _solve_with_onnx(image_bytes):
     """Solve using the ONNX CRNN model. Raises if onnxruntime is unavailable."""
     width, height, rgb_pixels = read_png(image_bytes)
@@ -306,13 +315,28 @@ def get_captcha_string(image_bytes):
     the pure fallback still covers environments where it is not (Docker on
     ARM, minimal images), which is what it was added for.
     """
+    onnx_error = None
     try:
         return _solve_with_onnx(image_bytes)
-    except Exception:
-        pass
+    # Python unbinds the "as" name at the end of the block, so keep a copy for
+    # the combined message below.
+    except Exception as exc:
+        onnx_error = exc
+        # Say which engine bowed out and why. Silently sliding to the pure
+        # solver hides a broken ONNX install behind a 100x slower solve.
+        _logger.info("ONNX solver unavailable (%s: %s); using the pure-Python solver",
+                     type(exc).__name__, exc)
 
     from ikabot.helpers.piratesDecaptchaPure import get_captcha_string as pure_solve
-    return pure_solve(image_bytes)
+    try:
+        return pure_solve(image_bytes)
+    except Exception as pure_error:
+        raise LocalDecaptchaError(
+            "both local solvers failed - ONNX: {}: {} | pure: {}: {}".format(
+                type(onnx_error).__name__, onnx_error,
+                type(pure_error).__name__, pure_error,
+            )
+        ) from pure_error
 
 def warm_up(background=True):
     """Pre-load whichever solver will actually be used.

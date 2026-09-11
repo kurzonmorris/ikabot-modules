@@ -53,8 +53,11 @@ def getWarehouseCapacity(html):
     """
     capacity = re.search(
         r'maxResources:\s*JSON\.parse\(\'{\\"resource\\":(\d+),', html
-    ).group(1)
-    return int(capacity)
+    )
+    # Absent on any page that is not one of our own city views (a foreign
+    # city, an ajax fragment, a maintenance page). 0 means "unknown", which
+    # callers must not read as "the warehouse is full".
+    return int(capacity.group(1)) if capacity else 0
 
 
 def getWineConsumptionPerHour(html):

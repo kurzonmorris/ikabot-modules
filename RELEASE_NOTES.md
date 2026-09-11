@@ -50,6 +50,27 @@
 
 ## Fork-Specific Changes vs. Original Ikabot
 
+**Self-hosted API failover (`apiComm.py`)**
+- ikabot depends on one public server for blackbox login tokens; when it is
+  down, no account can log in. `IKABOT_API_FALLBACK` takes a comma-separated
+  list of your own API servers, tried in order after the public one whenever a
+  request to it fails — refused, timed out, or an error response.
+- `IKABOT_API_KEY` is sent as `X-API-Key` to those servers only, never to the
+  public server.
+- `IKABOT_API_TIMEOUT` (default 120s) bounds each server's attempt. It was
+  previously 900s, which meant a hung server blocked a login for fifteen
+  minutes with nothing to fail over to.
+- `(2108) Developer` now reports the fallback addresses, whether a key is set,
+  and the timeout.
+- `docker/ikabot-api/` deploys the upstream API on Unraid behind an API-key
+  gate and a Cloudflare Tunnel, so no inbound port is opened. Setup in
+  `docs/SELF_HOSTED_API.md`.
+- The bundled `SupportedUserAgents.json` adds this fork's user agents, none of
+  which appear in the upstream server's list — against the public server every
+  token is therefore minted with a random agent and the default region while
+  the login presents ikabot's own, the mismatch upstream #414/#416 set out to
+  remove.
+
 **Encrypted Credential Vault**
 - Stores game account credentials (email, password, blackbox token, lobby cookie) encrypted on disk using AES-256-GCM with a PBKDF2 master password.
 - Wrong master password is detected before showing the account list.
@@ -106,6 +127,14 @@
 - Skips players with existing confirmed treaties or pending museum requests.
 - Respects server rate limit of 5 outgoing messages per 5 minutes, reserving one slot for manual use.
 - Accessible via `(25) Send cultural treaty requests`.
+
+**Account status rewritten (`getStatus.py`)**
+- The account is now read in a single pass (two requests per city) and cached per account for 10 minutes, so browsing the status screens costs no further requests. Stale caches are re-read automatically; `(3) Refresh data` forces a re-read.
+- New menu: `(1) Building levels` shows every city's buildings as a width-aware table or as a per-city list with slot positions, `(2) City details` opens any city without re-scanning the account.
+- Shows pirate fortress capture points and crew strength when a fortress is present, reading it once after the scan instead of per city.
+- Per-city production is now parsed from the city page that was already downloaded, removing one request per city view.
+- Gold production tolerates servers that omit `godGoldResult` / `badTaxAccountant`.
+- Note: the sub-menu changes the keystrokes for option `(4)`, so Sequence Runner sequences that include Account status need re-recording.
 
 ### Distribution / Build
 

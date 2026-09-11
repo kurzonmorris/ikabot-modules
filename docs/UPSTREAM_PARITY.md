@@ -7,9 +7,9 @@ deviation back into a bug.
 
 | | |
 |---|---|
-| **Parity point** | upstream **v7.5.1** |
-| **Fork version at parity** | `IKABOT_MOD_VERSION` **1.8.0** (later bumps are fork-only work) |
-| **Last audited** | 2026-08-19 (upstream `c70a8d1`) |
+| **Parity point** | upstream **v7.6.0** |
+| **Fork version at parity** | `IKABOT_MOD_VERSION` **1.9.1** |
+| **Last audited** | 2026-09-07 (upstream `0c60ebc`) |
 | **Scope** | `ikabot/` core only — `modules/` is fork-specific, no upstream counterpart |
 
 > Everything at or below upstream **7.4.0** is the fork's base and is assumed
@@ -43,6 +43,45 @@ our own way, deliberately · **Present** = already in the fork before the audit
 | #420 | Research improvements (`Research.py` → `research.py`) | **Ported** | 1.8.0 |
 | #407 | Fix queue tracking and phantom tasks in constructionList | **Ported, bug fixed** | 1.8.0 |
 | #387 | Discord webhook notifications | **Equivalent** | pre-existing |
+| nfontan#4 | Size the local decaptcha to the machine | **Ported, adapted** | 1.8.3 |
+
+### 7.5.1 → 7.6.0 audit (2026-09-07)
+
+> "unreleased" below means the code is on `main` but no `IKABOT_MOD_VERSION`
+> bump has been made for it yet. `IKABOT_VERSION` still reads 7.5.1 although
+> the fork is now level with upstream 7.6.0.
+
+| PR | Title | Status | Landed |
+|---|---|---|---|
+| #423 | consolidateResources: choose trade ships, freighters or both | **Ported** | unreleased |
+| #426 | Add the player name to every log record | **Equivalent** | pre-audit |
+| #428 | Size the local decaptcha to the machine | Present | 1.8.3 (as nfontan#4) |
+| #429 | Show pirate fortress points in the account status | **Ported** | unreleased |
+| #430 | Buy from a specific player or city in the market | **Ported** | unreleased |
+| #434 | Assign temple priests from the Set Workers menu | **Ported, rewired** | unreleased |
+| #435 | Fix reducer calculation, propagate reducers across upgrades | **Ported, partly present** | unreleased |
+| #438 | Capture the Telegram chat id, not the user id | **Ported** | unreleased |
+| #439 | Fix cumulative timing drift in attack alerts | **Ported** | unreleased |
+| #440 | Retry pirate captcha with a fresh fortress context | **Ported, adapted** | unreleased |
+| #445 | Fix resource distribution with blockaded harbours | **Ported** | unreleased |
+
+Open upstream PRs, taken early:
+
+| PR | Title | Status | Landed |
+|---|---|---|---|
+| #431 | Allow clearing of the predetermined input queue | **Ported** | unreleased |
+| #444 | Fix gold production in getStatus to include god bonus | **Ported (first commit only)** | unreleased |
+| #446 | Fix SyntaxWarning: invalid escape sequence in loginDaily | **Ported** | unreleased |
+
+Open upstream PRs, deliberately **not** taken — revisit when they merge:
+
+| PR | Title | Why not |
+|---|---|---|
+| #441 / #447 | Rework session storage (dir instead of file, hotswapping) | Large, still open, and overlaps the fork's own session/vault work — see below |
+| #444 (2nd commit) | getStatus single-pass refactor + per-account cache | 600-line refactor of a file the fork has changed; wait for it to land |
+| #448 | Detect expired session and close ikabot cleanly | Open; interacts with the fork's auto-start and watchdog, needs its own design pass |
+| #425 | constructionList total time + skip button | Open, and touches the area #407/#435 just changed |
+| #389 | In-game message and combat report alerts | The fork already has `alertMessages` |
 
 ---
 
@@ -236,6 +275,43 @@ cells as 0. One latent fragility, pre-existing and not introduced here: the
 units/ships split is a hardcoded `i <= 14` index into a list that is now longer
 than before. Worth watching if totals ever look wrong.
 
+### nfontan#4 — machine-wide decaptcha sizing  *(ported, adapted for containers)*
+
+From `nfontan/ikabot` PR #4, not upstream. Replaces the fixed 8-worker pool
+per task (~1.4 GB per account) with a machine-wide worker budget: workers are
+claimed as `flock` "seats", weights ship as `array.array('d')` with zero-copy
+memoryviews (152 MB → 37.5 MB per worker), and the pool is built lazily and
+dropped after 120 s idle. Their measurements: one solve 13.2 s serial → 4.96 s
+on 8 workers; six concurrent accounts 10.93 s → 3.88 s each. Measured here, a
+single solve went 9.6 s → 4.0 s.
+
+Two changes were required for containers, both verified by test:
+
+⚠️ **It was not cgroup-aware.** Worker count came from `os.cpu_count()` and
+headroom from `/proc/meminfo`, both of which report the **host** inside a
+container. A container capped at 300 MB on a 15 GB host would plan a full pool
+and be OOM-killed. Added `_cgroup_available_mb()` and `_cgroup_cpu_limit()`
+(v2 `memory.max` / `cpu.max` and the v1 equivalents), plus `_usable_cores()`
+which also honours the CPU affinity mask. `_available_mb()` now takes the
+smaller of host and cgroup. A 300 MB container plans **zero** workers and
+solves serially.
+
+⚠️ **The seat directory was `/tmp`, which is per-container.** With one
+container per account each instance sees an empty seat dir and sizes itself to
+the whole machine — the coordination silently does nothing, which is the
+contention the PR exists to prevent. Demonstrated: 6 instances on 4 cores with
+per-container dirs → all 6 claim seats; with a shared dir → 4 seats, 2 serial.
+Default moved to `$IKABOT_DATA_DIR/decaptcha_seats` (already the shared volume
+in a multi-account Docker setup), overridable with `IKABOT_DECAPTCHA_SEAT_DIR`.
+
+Public API is unchanged, so our ONNX-first ordering and `warm_up()` are
+unaffected — the idle timer only starts after a solve, so warm-up is not
+undone. Their 13 tests pass as-is; `tests/ikabot/helpers/` also now holds our
+container-limit tests and their two real-captcha fixtures, which verify the
+solver still decodes `QKB24JC` and `DEVL5KA` correctly.
+
+Brought `config.DECAPTCHA_TIMING_LOG` with it.
+
 ---
 
 ## 3. Fork-only features that must survive future ports
@@ -282,6 +358,11 @@ If a port would remove or bypass any of these, stop and flag it:
 
 ## 5. Changelog
 
+### 2026-08-22 — nfontan#4 decaptcha sizing (mod 1.8.3)
+Ported the machine-wide worker budget, adapted for containers: cgroup-aware
+CPU/memory limits and a shared seat directory. Two container bugs in the
+original fixed; see section 2.
+
 ### 2026-08-19 — parity with 7.5.1 (mod 1.8.0)
 Audited 7.4.5 → 7.5.1 (8 changes) by diffing a local clone. Ported #424, #421,
 #422, #420, #407 and the pure-Python decaptcha; skipped #387 (fork superset).
@@ -294,3 +375,58 @@ Audited all 12 PRs in 7.4.0 → 7.4.5. Ported #406, #408, #411, #418 plus two
 `apiComm` fixes. Confirmed #380, #413, #417, #419 present; #409, #410, #414,
 #416 satisfied by equivalent fork implementations. `IKABOT_VERSION` corrected
 7.4.0 → 7.4.5.
+
+
+### #435 — constructionList reducers  *(ported, part was already present)*
+
+Two independent things in one upstream PR.
+
+The **display half** — dropping the `- 1` from every printed amount and the
+`<= 1` guard on missing resources — the fork already had, from the #407 port
+in 1.8.0. Upstream arrived at the same fix later.
+
+The **maths half** is new here. The old code took the cost the page shows
+(which already has the research reduction applied), divided the reduction back
+out to recover a "base" cost, then subtracted the building reduction from that.
+The two reductions do not compose that way, and the recovered base was wrong
+whenever the division did not land exactly. It now scales the displayed cost by
+the ratio of the two multipliers, which needs no guess about the base.
+
+The **propagation half** is also new: each level of a reducer building adds one
+percent (capped at 50), so a queue of upgrades gets cheaper as it goes, and a
+reducer already under construction will have finished before anything queued
+now is paid for. `getResourcesNeeded` takes a `simulated_reducers` list and the
+caller advances it, committing only for buildings the user accepts — a skipped
+building must not leave its reduction behind.
+
+### #440 — pirate captcha retry  *(ported, adapted)*
+
+Upstream re-issues the capture request when a captcha cannot be solved, so the
+retry gets a *fresh* challenge instead of failing the same way against the same
+stale HTML. That part is taken as-is, plus its PNG check on the image bytes.
+
+What is **not** taken is upstream's error handling. Upstream catches the remote
+API failure, logs it and returns `"Error"`, which is how the fork behaved
+before 1.8.5 and exactly what the "say which part broke" work replaced. Here
+`resolveCaptcha` still raises `PirateStageError`; the loop catches it, records
+it, retries against a fresh captcha, and reports the remembered stage and cause
+only if all 20 attempts fail. Transient blips stay quiet, real breakage still
+names the step.
+
+### #434 — temple priests  *(ported, menu rewired)*
+
+The function is upstream's. The menu wiring is not: upstream has `2303:
+tavernManager` and `24: reorganizeCityBuildings`, while the fork has `2303:
+reorganizeCityBuildings` (tavern management is an external module here). Ported
+as `2304` under the existing City Management submenu.
+
+### #426 — player name in log records  *(equivalent, not ported)*
+
+Upstream writes one shared log file and adds a `%(player)s` column so
+concurrent accounts can be told apart, carrying the name in an environment
+variable so spawned children inherit it.
+
+The fork already writes **one log file per account**
+(`ikabot_<user>_<server><world>.log`, via `setup_file_logging()`), which
+separates the accounts more strongly than a column does. Adding the column
+would only repeat the filename on every line.

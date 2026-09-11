@@ -29,7 +29,12 @@ from ikabot.helpers.logging import getLogger
 
 logger = getLogger(__name__)
 
-STATUS_DIR = os.path.join(IKABOT_DATA_DIR, "status")
+# Where the per-account status files go. The monitor page wants one directory
+# it can read for every instance, but the vault lives in IKABOT_DATA_DIR too —
+# and sharing that whole directory across containers puts several ikabots on
+# one vault file. Point IKABOT_STATUS_DIR at the shared volume instead and keep
+# each container's data directory (and therefore its vault) private.
+STATUS_DIR = os.getenv("IKABOT_STATUS_DIR") or os.path.join(IKABOT_DATA_DIR, "status")
 
 # Tasks that end on their own are not failures. A task missing from the process
 # list having never reported completion is what we care about.

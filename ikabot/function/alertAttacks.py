@@ -93,7 +93,10 @@ def respondToAttack(session):
 
     # this allows the user to respond to an attack via telegram
     while True:
-        time.sleep(60 * 3)
+        # Time the work, not just the wait: the poll itself takes however long
+        # the network takes, and sleeping a full interval on top of that made
+        # each cycle drift later than the last.
+        start_time = time.time()
         responses = getUserResponse(session)
         for response in responses:
             # the response should be in the form of:
@@ -116,6 +119,9 @@ def respondToAttack(session):
             else:
                 sendToBot(session, "Invalid command: {:d}".format(action))
 
+        elapsed = time.time() - start_time
+        time.sleep(max(0, 60 * 3 - elapsed))
+
 
 def do_it(session, minutes):
     """
@@ -131,6 +137,7 @@ def do_it(session, minutes):
 
     knownAttacks = []
     while True:
+        start_time = time.time()
         ##Catch errors inside the function to not exit for any reason.
         currentAttacks = []
         try:
@@ -188,4 +195,5 @@ def do_it(session, minutes):
             if event_id not in currentAttacks:
                 knownAttacks.remove(event_id)
 
-        time.sleep(minutes * 60)
+        elapsed = time.time() - start_time
+        time.sleep(max(0, minutes * 60 - elapsed))
