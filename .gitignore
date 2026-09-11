@@ -4,3 +4,6 @@ build/
 dist/
 ikabot-7.2.5/
 IkabotAPI-main/
+
+# Build artifacts
+*.zip
