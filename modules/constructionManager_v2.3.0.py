@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.8"
+__version__ = "2.3.0"
 
 import csv
 import glob
@@ -20,6 +20,7 @@ import queue
 import random
 import re
 import sys
+import textwrap
 import threading
 import time
 import traceback
@@ -1183,20 +1184,29 @@ def _fmt_res(vals):
 def _print_cost_table(header, rows):
     """Print a labelled table of resource amounts.
 
-    *rows* is a list of (label, [w,wi,mb,cr,su]) tuples.
+    *rows* is a list of (label, [w,wi,mb,cr,su]) tuples, optionally with a
+    third element carrying a bcolors code to colour that whole row.
     """
+    # Label column is 20, not 30: at 30 the table was 82 chars wide and wrapped
+    # on an 80-column terminal, turning every row into two. The longest label
+    # in use is "Warehouse capacity" (18).
     col_w = 10
+    label_w = 20
     res_names = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
-    header_line = f"  {'':30}" + "".join(f"{r:>{col_w}}" for r in res_names)
+    header_line = f"  {'':{label_w}}" + "".join(f"{r:>{col_w}}" for r in res_names)
     print(f"\n  {header}")
     print(header_line)
-    print("  " + "-" * (30 + col_w * 5))
-    for label, vals in rows:
+    print("  " + "-" * (label_w + col_w * 5))
+    for row in rows:
+        label, vals = row[0], row[1]
+        colour = row[2] if len(row) > 2 else ""
         vals = list(vals) + [0] * (5 - len(vals))
-        row_line = f"  {label:<30}" + "".join(
+        row_line = f"  {label:<{label_w}}" + "".join(
             f"{addThousandSeparator(v):>{col_w}}" for v in vals
         )
-        print(row_line)
+        # Colour is applied to the built line so the padding above is computed
+        # on plain text — ANSI codes would otherwise count toward the widths.
+        print(f"{colour}{row_line}{bcolors.ENDC}" if colour else row_line)
 
 
 # ---------------------------------------------------------------------------
@@ -2462,6 +2472,20 @@ def _all_city_ids(session):
     return re.findall(r'<option value="(\d+)" class="cityowntown"', html)
 
 
+def _print_note(flag, text, colour="", indent="  "):
+    """Print a note wrapped to fit an 80-column terminal.
+
+    Notes here run long (the empire shortage line is ~140 chars), and a
+    terminal wrapping them itself breaks mid-word at the margin and loses the
+    indent.  Wrapping the plain text and adding colour per line keeps ANSI
+    codes out of the width calculation.
+    """
+    width = 78 - len(indent) - 2
+    for i, line in enumerate(textwrap.wrap(text, width=width) or [text]):
+        mark = f"{flag} " if i == 0 else "  "
+        print(f"{indent}{colour}{mark}{line}{bcolors.ENDC if colour else ''}")
+
+
 def _resource_requirements(session):
     """Show, per city, the resources still needed to finish its queue.
 
@@ -2548,6 +2572,11 @@ def _resource_requirements(session):
         free  = [int(v or 0) for v in city.get("freeSpaceForResources", [0] * 5)]
         cap   = [a + f for a, f in zip(avail, free)]
         shortfall = [max(0, n - a) for n, a in zip(needed, avail)]
+        # What's actually worth sending right now: what's missing, capped by
+        # what the warehouse can still take. Sending more than the shortfall
+        # is wasted; sending more than the free space overflows.
+        send_now = [min(s, f) for s, f in zip(shortfall, free)]
+        capped = [i for i in range(5) if shortfall[i] > free[i]]
 
         _print_cost_table(
             f"{city_name} (id {cid}) — {len(city_rows)} row(s) queued",
@@ -2556,6 +2585,8 @@ def _resource_requirements(session):
                 ("In city now",      avail),
                 ("Still to ship in", shortfall),
                 ("Warehouse capacity", cap),
+                # The at-a-glance "send this" line, so it's green.
+                ("SEND NOW", send_now, bcolors.GREEN),
             ],
         )
 
@@ -2582,13 +2613,21 @@ def _resource_requirements(session):
                 f"{materials_names[i].lower()}"
                 for i in range(5) if shortfall[i]
             ) + " shipped in.")
+        if capped:
+            # SEND NOW is below the shortfall for these — worth saying so, or
+            # the smaller number reads as the whole job.
+            notes.append(
+                "SEND NOW is limited by warehouse space for "
+                + ", ".join(materials_names[i].lower() for i in capped)
+                + " — send that much now, the rest once it's been spent."
+            )
 
         for n in notes:
             flag = "!" if "never" in n or "understated" in n else "-"
             colour = bcolors.RED if flag == "!" else ""
             if flag == "!":
                 problems_seen = True
-            print(f"  {colour}{flag} {n}{bcolors.ENDC if colour else ''}")
+            _print_note(flag, n, colour)
 
     # ---- empire-wide view ----
     net = [max(0, n - p) for n, p in zip(empire_needed, empire_pool)]
@@ -2606,21 +2645,21 @@ def _resource_requirements(session):
             f"{addThousandSeparator(net[i])} {materials_names[i].lower()}"
             for i in range(5) if net[i]
         )
-        print(f"  {bcolors.RED}! Not enough in the whole account — short "
-              f"{short}. Production or trade is needed; shipping alone "
-              f"cannot finish the queue.{bcolors.ENDC}")
+        _print_note("!", f"Not enough in the whole account — short {short}. "
+                         f"Production or trade is needed; shipping alone "
+                         f"cannot finish the queue.", bcolors.RED)
     else:
-        print("  - The account holds enough overall; any shortfall above is "
-              "a shipping problem, not a production one.")
+        _print_note("-", "The account holds enough overall; any shortfall "
+                         "above is a shipping problem, not a production one.")
 
     if failed:
         problems_seen = True
-        print(f"  {bcolors.RED}! {len(failed)} city/cities could not be "
-              f"fetched ({', '.join(failed)}); figures exclude them."
-              f"{bcolors.ENDC}")
+        _print_note("!", f"{len(failed)} city/cities could not be fetched "
+                         f"({', '.join(failed)}); figures exclude them.",
+                    bcolors.RED)
     if skipped_count:
-        print(f"  - {skipped_count} skipped row(s) are not counted; re-queue "
-              f"them from Edit queue if they should be.")
+        _print_note("-", f"{skipped_count} skipped row(s) are not counted; "
+                         f"use (r) in the menu to retry them.")
     if not problems_seen:
         print("  - No problems found.")
 
