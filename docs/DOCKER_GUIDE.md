@@ -907,13 +907,24 @@ the scroll view by itself.
 **Web servers** is one page at a time, read properly, rather than a wall of
 thumbnails.
 
-Down the right is a strip of small numbered squares, five to a row, one per
-instance and in instance order. A **green** square has a web server running; a
-dim one does not and cannot be pressed. Press a square and that account's page
-opens in the large panel to its left, filling most of the window.
+Under the section menu on the left is a strip of small numbered squares, five
+to a row, one per instance and in instance order. A **green** square has a web
+server running; a dim one does not and cannot be pressed. Press a square and
+that account's page opens in the large panel beside it, filling the rest of the
+window. Narrow the section menu and the strip narrows with it, to two to a row.
+
+On a phone there is no left column for it to sit under, so it moves back to the
+right of the page — see *On a phone* below. It is one strip that moves, not two
+copies, so the instance you are looking at stays selected across a rotation.
 
 An instance is loaded the first time you press it and then kept, hidden, so
 going back to one you have already opened is instant instead of a fresh load.
+**Load all** does that for every instance with a server running, so the first
+press of every square is instant too. It loads them one at a time rather than
+all at once — each one fetches a page from the game — and the output box
+counts them off; press **Unload all** during a run to stop it. Whatever you
+were looking at stays on screen while the rest load behind it.
+
 **Unload all** frees the lot when you are done. **Reload this one** refetches
 just the page you are looking at, and **Open this one in a tab** does what it
 says.
@@ -1439,7 +1450,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.23 ships panel 1.0.21. That looks like a failed
+> not match — installer 1.0.24 ships panel 1.0.22. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.

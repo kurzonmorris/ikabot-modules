@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.21"
+PANEL_VERSION = "1.0.22"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -1613,9 +1613,15 @@ margin:0 0 4px;letter-spacing:-.01em}
 /* --- section switcher ---------------------------------------------------
    Every section stays in the DOM and keeps being refreshed; only one is
    shown. Switching is a class change, so it is instant and nothing reloads. */
-.shell{display:grid;grid-template-columns:172px minmax(0,1fr);gap:16px;
-align-items:start}
-.panes{min-width:0}
+.shell{display:grid;grid-template-columns:172px minmax(0,1fr);
+grid-template-rows:auto 1fr;gap:16px;align-items:start}
+/* Placed explicitly. Grid children otherwise flow in source order, which put
+   the strip in the right-hand column and pushed the panes underneath the
+   menu. The rows are pinned as well: .panes spans both, so without an fr row
+   to absorb its height the first row grew and left a gap under the menu. */
+nav{grid-column:1;grid-row:1}
+#railslot{grid-column:1;grid-row:2}
+.panes{grid-column:2;grid-row:1 / span 2;min-width:0}
 .sec{display:none}
 .sec.on{display:block}
 nav{position:sticky;top:16px;display:flex;flex-direction:column;gap:4px;
@@ -1643,9 +1649,20 @@ opacity:.75;font-weight:400}
 .embed{border:1px solid var(--rule);border-radius:6px;overflow:hidden;
 background:var(--code);min-height:420px}
 .embed iframe{display:block;width:100%;height:min(70vh,620px);border:0}
-/* --- web servers: one page at a time, picked from a strip on the right --- */
-.wsplit{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;
+/* --- web servers: one page at a time, picked from a strip of numbers ---- */
+/* On a wide screen the strip sits under the section menu, in the left column,
+   and the page gets the whole width beside it. On a narrow one there is no
+   left column to sit under, so it goes back to the right of the page. The
+   strip is one element that moves between the two, not two copies. */
+.wsplit{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;
 align-items:start}
+#railslot:empty{display:none}
+#railslot{margin-top:8px}
+#railslot .wrail{position:sticky;top:16px}
+/* Five to a row under a full-width menu; two when it is narrowed, which is
+   all that fits. */
+#railslot .wpad{grid-template-columns:repeat(5,var(--sq));justify-content:center}
+.shell.navoff #railslot .wpad{grid-template-columns:repeat(2,var(--sq))}
 /* The frame is laid out at a chosen page width and scaled so that width
    lands exactly on the viewer. Nothing is ever cut off the right, and there
    is never a sideways scrollbar; up and down still scroll normally. */
@@ -1664,7 +1681,9 @@ border:0;background:#fff;transform:scale(var(--wss,1));transform-origin:0 0}
   /* On a phone the whole page is rendered and the outer page scrolls, so
      there is nothing to scroll inside the frame at all. */
   .wview{overflow:visible}
-  .wsplit{gap:6px}
+  /* Strip back on the right, beside the page. */
+  .wsplit{grid-template-columns:minmax(0,1fr) auto;gap:6px}
+  #railslot{display:none}
 }
 .wempty{margin:0;padding:24px;color:var(--soft);font-size:13px;background:var(--card)}
 .zoom{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--soft)}
@@ -1694,7 +1713,10 @@ display:grid;place-items:center;line-height:1}
   .wpad button{font-size:12px}
 }
 /* Retracted: just the arrow, so the page gets the whole width. */
-.wsplit.railoff .wpad{display:none}
+/* The retract class lives on .wsplit, and the strip is not always inside it
+   any more, so match it from the shell instead. */
+.shell.railoff .wpad{display:none}
+.shell.railoff .wrail{padding:6px 4px}
 /* After the rules above on purpose: same specificity, so the later one wins
    and a media query does not change that. */
 @media(max-width:820px){
@@ -1703,11 +1725,13 @@ display:grid;place-items:center;line-height:1}
   overscroll-behavior:contain;justify-content:center}
   .wrail{padding:5px 4px}
 }
-.wsplit.railoff .wrail{padding:6px 4px}
+
 
 @media(max-width:820px){
   body{padding:10px}
-  .shell{grid-template-columns:minmax(0,1fr);gap:10px}
+  /* One column on a phone, so the explicit placement above is dropped. */
+  .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:auto;gap:10px}
+  nav,#railslot,.panes{grid-column:auto;grid-row:auto}
   /* The rail becomes a row of chips that scrolls sideways on its own. */
   nav{position:static;flex-direction:row;overflow-x:auto;gap:6px;padding:6px;
   scrollbar-width:thin}
@@ -1839,6 +1863,7 @@ border-radius:99px;border:1px solid var(--rule);color:var(--ink)}
 
 <div class="shell" id="shell">
 <nav id="nav" aria-label="Sections"></nav>
+<div id="railslot"></div>
 <div class="panes">
 
 <section class="sec" id="sec-instances">
@@ -1992,6 +2017,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <div class="row" style="margin-bottom:10px">
     <a class="btn" id="wopen" href="#" target="_blank" rel="noopener">Open this one in a tab</a>
     <button id="wreload">Reload this one</button>
+    <button id="wloadall">Load all</button>
     <button class="d" id="wclear">Unload all</button>
     <span class="hint" id="wcount"></span>
   </div>
@@ -2005,7 +2031,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   </div>
   <div class="wsplit" id="wsplit">
     <div class="wview" id="wview">
-      <p class="wempty" id="wempty">Pick an instance from the strip on the right.</p>
+      <p class="wempty" id="wempty">Pick an instance from the numbered strip.</p>
     </div>
     <div class="wrail" id="wrail">
       <button class="wtoggle" id="wtoggle" title="Hide the instance strip">›</button>
@@ -2250,6 +2276,7 @@ function showSection(id){
   // but the two embedded ones only start loading once they are asked for.
   if(id==='terminal')mountTerminal();
   if(id==='webservers'){ renderServers(); fitServers(); }
+  placeRail();
   window.scrollTo({top:0});
 }
 
@@ -2278,9 +2305,12 @@ document.addEventListener('click',function(e){
   showSection(b.dataset.sec);
 });
 
+// Restored at the very bottom of the script, not here. Showing a section
+// runs that section's render, and Web servers' render reads state that is
+// declared further down — so restoring it here left the whole panel dead on
+// "loading…" for anyone whose last section was Web servers.
 var saved='instances';
 try{ saved=localStorage.getItem('ikaSection')||'instances'; }catch(e){}
-showSection(saved);
 
 // --- the terminal, embedded ----------------------------------------------
 var termUp=false;
@@ -2312,6 +2342,25 @@ function serverPorts(){
 }
 
 function wHost(){ return location.hostname || last.host || 'localhost'; }
+
+// The strip lives under the section menu on a wide screen and beside the page
+// on a narrow one. Rather than keep two copies in step, the one element is
+// moved between the two places whenever the layout crosses the breakpoint.
+function placeRail(){
+  var rail = el('wrail'), slot = el('railslot'), split = el('wsplit');
+  if(!rail || !slot || !split) return;
+  var narrow = window.matchMedia('(max-width:820px)').matches;
+  var wanted = narrow ? split : slot;
+  if(rail.parentNode !== wanted){
+    wanted.appendChild(rail);
+    // Moving it changes how much width the page has, so re-fit the frames.
+    fitServers();
+  }
+  // Only worth showing while that section is the one on screen.
+  slot.style.display = (!narrow && current === 'webservers') ? '' : 'none';
+}
+window.addEventListener('resize', placeRail);
+window.addEventListener('orientationchange', placeRail);
 
 // The account page is Ikariam's own layout, and its width cannot be measured
 // from here — a frame on another port is another origin. So the width it is
@@ -2363,16 +2412,24 @@ el('wwider').addEventListener('click', function(){ setPageWidth(PAGE_W + PAGE_ST
 window.addEventListener('resize', fitServers);
 window.addEventListener('orientationchange', fitServers);
 
+// Making a frame and choosing which one is on show are separate things, so
+// one can be loaded in the background without taking over the viewer.
+function loadServer(num){
+  var port = serverPorts()[num];
+  if(!port || wOpen[num]) return false;
+  var f = document.createElement('iframe');
+  f.src = 'http://' + wHost() + ':' + port + '/';
+  f.title = 'instance ' + num;
+  f.style.display = 'none';        // pickServer decides what is on show
+  el('wview').appendChild(f);
+  wOpen[num] = f;
+  return true;
+}
+
 function pickServer(num){
   var ports = serverPorts(), port = ports[num];
   if(!port) return;
-  if(!wOpen[num]){
-    var f = document.createElement('iframe');
-    f.src = 'http://' + wHost() + ':' + port + '/';
-    f.title = 'instance ' + num;
-    el('wview').appendChild(f);
-    wOpen[num] = f;
-  }
+  loadServer(num);
   wPicked = num;
   Object.keys(wOpen).forEach(function(k){
     wOpen[k].style.display = (String(k) === String(num)) ? 'block' : 'none';
@@ -2421,7 +2478,7 @@ document.addEventListener('click', function(e){
 });
 
 el('wtoggle').addEventListener('click', function(){
-  var off = el('wsplit').classList.toggle('railoff');
+  var off = el('shell').classList.toggle('railoff');
   fitServers();          // the page just got wider or narrower
   this.textContent = off ? '‹' : '›';
   this.title = off ? 'Show the instance strip' : 'Hide the instance strip';
@@ -2429,7 +2486,7 @@ el('wtoggle').addEventListener('click', function(){
 });
 try{
   if(localStorage.getItem('ikaRailOff') === '1'){
-    el('wsplit').classList.add('railoff');
+    el('shell').classList.add('railoff');
     el('wtoggle').textContent = '‹';
   }
 }catch(e){}
@@ -2440,11 +2497,61 @@ el('wreload').addEventListener('click', function(){
   f.src = f.src;                       // same page, fetched again
 });
 
+// Loading them all costs one page fetch per instance, and every one of those
+// goes out to the game through that instance's proxy. So they start one at a
+// time, a beat apart, rather than as a single burst of twenty-four.
+var LOAD_GAP = 400;   // ms between starting one frame and starting the next
+var loadRun = 0;      // bumped to call off a run in progress
+
+el('wloadall').addEventListener('click', function(){
+  var ports = serverPorts();
+  var live = Object.keys(ports).length;
+  if(!live){
+    out.textContent = 'No web servers are running. Start them with menu '
+                    + 'option (16) in each instance.';
+    return;
+  }
+  var todo = Object.keys(ports).map(Number).sort(function(a, b){ return a - b; })
+                   .filter(function(n){ return !wOpen[n]; });
+  if(!todo.length){
+    out.textContent = 'All ' + live + ' running web server(s) are already '
+                    + 'loaded. Switching between them is instant.';
+    return;
+  }
+  var btn = this, run = ++loadRun, total = todo.length, done = 0;
+  var first = todo[0];
+  btn.disabled = true;
+  (function next(){
+    if(run !== loadRun) return;            // unloaded, or started again
+    if(!todo.length){
+      btn.disabled = false;
+      if(!wPicked) pickServer(first); else renderServers();
+      out.textContent = 'Loaded ' + done + ' instance(s). Switching between '
+                      + 'them is now instant.';
+      return;
+    }
+    if(loadServer(todo.shift())) done++;
+    // Progress goes in the output box, not the note under the viewer: the
+    // note is rewritten by every refresh, which would wipe it mid-run.
+    out.textContent = 'Loading ' + done + ' of ' + total + '…';
+    setTimeout(next, LOAD_GAP);
+  })();
+});
+
 el('wclear').addEventListener('click', function(){
+  var n = Object.keys(wOpen).length;
+  var wasLoading = el('wloadall').disabled;
+  loadRun++;                               // stop a run that is still going
+  el('wloadall').disabled = false;
   Object.keys(wOpen).forEach(function(k){ wOpen[k].remove(); });
   wOpen = {}; wPicked = null;
   el('wempty').style.display = '';
   el('wopen').href = '#';
+  // Otherwise the box is left showing the progress of a run that no longer
+  // exists, which reads as if it were still going.
+  out.textContent = wasLoading
+    ? 'Stopped loading and unloaded ' + n + ' instance(s).'
+    : (n ? 'Unloaded ' + n + ' instance(s).' : 'Nothing was loaded.');
   renderServers();
 });
 
@@ -2923,6 +3030,7 @@ function refresh(){
     if(busy)setBusy(true);
   }).catch(function(){head.textContent='Lost contact with the container.';});
 }
+showSection(saved);
 refresh(); setInterval(function(){if(!busy)refresh();},5000);
 </script></body></html>
 """

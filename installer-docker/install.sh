@@ -3,7 +3,7 @@
 # Run from the folder this file was extracted into.
 set -uo pipefail
 
-INSTALLER_VERSION="1.0.23"
+INSTALLER_VERSION="1.0.24"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say()  { printf '%s\n' "$*"; }

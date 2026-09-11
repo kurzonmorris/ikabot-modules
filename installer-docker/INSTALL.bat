@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-set "INSTALLER_VERSION=1.0.23"
+set "INSTALLER_VERSION=1.0.24"
 title ikabot Docker installer v%INSTALLER_VERSION%
 color 0F
 
@@ -37,6 +37,16 @@ if not exist "%~dp0docker\Dockerfile" (
     echo.
     pause
     exit /b 1
+)
+
+rem The control panel carries its own version, lower than the
+rem installer's. Reported here so the number on the web page is
+rem expected rather than alarming. The zip holds exactly one of
+rem these files, so taking the last one listed is enough.
+set "PANEL_V=?"
+for /f "delims=" %%F in ('dir /b /o:n "%~dp0docker\ika-panel_v*" 2^>nul') do (
+    set "PANEL_V=%%F"
+    set "PANEL_V=!PANEL_V:ika-panel_v=!"
 )
 
 set "DEFAULT_DIR=%USERPROFILE%\ikabot"
@@ -137,7 +147,7 @@ echo.
 echo    Control panel : http://localhost:7682
 echo    Terminal      : http://localhost:7681
 echo.
-echo    Versions      : installer v%INSTALLER_VERSION%
+echo    Versions      : installer v%INSTALLER_VERSION%, control panel v!PANEL_V!
 echo.
 echo    Username      : ikabot
 echo    Password      : the one you just chose
