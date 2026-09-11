@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.2.9"
+__version__ = "2.3.0"
 
 import csv
 import glob
@@ -1184,7 +1184,8 @@ def _fmt_res(vals):
 def _print_cost_table(header, rows):
     """Print a labelled table of resource amounts.
 
-    *rows* is a list of (label, [w,wi,mb,cr,su]) tuples.
+    *rows* is a list of (label, [w,wi,mb,cr,su]) tuples, optionally with a
+    third element carrying a bcolors code to colour that whole row.
     """
     # Label column is 20, not 30: at 30 the table was 82 chars wide and wrapped
     # on an 80-column terminal, turning every row into two. The longest label
@@ -1196,12 +1197,16 @@ def _print_cost_table(header, rows):
     print(f"\n  {header}")
     print(header_line)
     print("  " + "-" * (label_w + col_w * 5))
-    for label, vals in rows:
+    for row in rows:
+        label, vals = row[0], row[1]
+        colour = row[2] if len(row) > 2 else ""
         vals = list(vals) + [0] * (5 - len(vals))
         row_line = f"  {label:<{label_w}}" + "".join(
             f"{addThousandSeparator(v):>{col_w}}" for v in vals
         )
-        print(row_line)
+        # Colour is applied to the built line so the padding above is computed
+        # on plain text — ANSI codes would otherwise count toward the widths.
+        print(f"{colour}{row_line}{bcolors.ENDC}" if colour else row_line)
 
 
 # ---------------------------------------------------------------------------
@@ -2567,6 +2572,11 @@ def _resource_requirements(session):
         free  = [int(v or 0) for v in city.get("freeSpaceForResources", [0] * 5)]
         cap   = [a + f for a, f in zip(avail, free)]
         shortfall = [max(0, n - a) for n, a in zip(needed, avail)]
+        # What's actually worth sending right now: what's missing, capped by
+        # what the warehouse can still take. Sending more than the shortfall
+        # is wasted; sending more than the free space overflows.
+        send_now = [min(s, f) for s, f in zip(shortfall, free)]
+        capped = [i for i in range(5) if shortfall[i] > free[i]]
 
         _print_cost_table(
             f"{city_name} (id {cid}) — {len(city_rows)} row(s) queued",
@@ -2575,10 +2585,8 @@ def _resource_requirements(session):
                 ("In city now",      avail),
                 ("Still to ship in", shortfall),
                 ("Warehouse capacity", cap),
-                # Room left in the warehouse — the most that can be shipped in
-                # before it overflows. This is the game's own freeSpace figure
-                # rather than capacity-minus-stock recomputed by hand.
-                ("Room to receive",  free),
+                # The at-a-glance "send this" line, so it's green.
+                ("SEND NOW", send_now, bcolors.GREEN),
             ],
         )
 
@@ -2605,6 +2613,14 @@ def _resource_requirements(session):
                 f"{materials_names[i].lower()}"
                 for i in range(5) if shortfall[i]
             ) + " shipped in.")
+        if capped:
+            # SEND NOW is below the shortfall for these — worth saying so, or
+            # the smaller number reads as the whole job.
+            notes.append(
+                "SEND NOW is limited by warehouse space for "
+                + ", ".join(materials_names[i].lower() for i in capped)
+                + " — send that much now, the rest once it's been spent."
+            )
 
         for n in notes:
             flag = "!" if "never" in n or "understated" in n else "-"
