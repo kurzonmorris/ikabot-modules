@@ -170,6 +170,24 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
             if "ikabot=1" in request.url:
                 return handleIkabotAPIRequest(session, request)
 
+            # Serve the IkaEasy-lite in-page bundle (loader.js, css, features)
+            # so the IkaEasy feature panels work in any browser with no
+            # extension. Wrapped defensively — a failure here must never affect
+            # the proxied game.
+            if path.startswith("ikaeasy-lite/"):
+                try:
+                    from ikabot.helpers.ikaEasyInject import serve_lite_asset
+                    asset = serve_lite_asset(path)
+                    if asset is not None:
+                        content, ctype = asset
+                        return Response(content, 200, {
+                            "Content-Type": ctype,
+                            "Cache-Control": "no-cache",
+                        })
+                except Exception:
+                    pass
+                return Response("Not found", 404)
+
             # replace mayor
             if "/cdn/all/both/layout/advisors/mayor" in request.url:
                 image_data = (
@@ -304,6 +322,17 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                 or "view=ikabotSandbox" in request.url
             ):
                 return addSandbox(session, resp, request)
+
+            # Inject the IkaEasy-lite loader into full HTML game pages only.
+            # is_full_html_page() rejects AJAX/JSON responses and images, and
+            # the whole thing is wrapped so a failure degrades to the
+            # unmodified page rather than breaking it.
+            try:
+                from ikabot.helpers.ikaEasyInject import is_full_html_page, inject
+                if is_full_html_page(modified_content):
+                    modified_content = inject(modified_content)
+            except Exception:
+                pass
 
             # Create a new response with the modified content
             proxied_response = Response(modified_content, status=resp.status_code) if modified_content[1:4] != "PNG" else Response(resp.content, status=resp.status_code, content_type="image/png")
