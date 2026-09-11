@@ -919,6 +919,12 @@ copies, so the instance you are looking at stays selected across a rotation.
 
 An instance is loaded the first time you press it and then kept, hidden, so
 going back to one you have already opened is instant instead of a fresh load.
+**Load all** does that for every instance with a server running, so the first
+press of every square is instant too. It loads them one at a time rather than
+all at once — each one fetches a page from the game — and the output box
+counts them off; press **Unload all** during a run to stop it. Whatever you
+were looking at stays on screen while the rest load behind it.
+
 **Unload all** frees the lot when you are done. **Reload this one** refetches
 just the page you are looking at, and **Open this one in a tab** does what it
 says.

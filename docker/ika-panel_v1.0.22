@@ -2017,6 +2017,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <div class="row" style="margin-bottom:10px">
     <a class="btn" id="wopen" href="#" target="_blank" rel="noopener">Open this one in a tab</a>
     <button id="wreload">Reload this one</button>
+    <button id="wloadall">Load all</button>
     <button class="d" id="wclear">Unload all</button>
     <span class="hint" id="wcount"></span>
   </div>
@@ -2411,16 +2412,24 @@ el('wwider').addEventListener('click', function(){ setPageWidth(PAGE_W + PAGE_ST
 window.addEventListener('resize', fitServers);
 window.addEventListener('orientationchange', fitServers);
 
+// Making a frame and choosing which one is on show are separate things, so
+// one can be loaded in the background without taking over the viewer.
+function loadServer(num){
+  var port = serverPorts()[num];
+  if(!port || wOpen[num]) return false;
+  var f = document.createElement('iframe');
+  f.src = 'http://' + wHost() + ':' + port + '/';
+  f.title = 'instance ' + num;
+  f.style.display = 'none';        // pickServer decides what is on show
+  el('wview').appendChild(f);
+  wOpen[num] = f;
+  return true;
+}
+
 function pickServer(num){
   var ports = serverPorts(), port = ports[num];
   if(!port) return;
-  if(!wOpen[num]){
-    var f = document.createElement('iframe');
-    f.src = 'http://' + wHost() + ':' + port + '/';
-    f.title = 'instance ' + num;
-    el('wview').appendChild(f);
-    wOpen[num] = f;
-  }
+  loadServer(num);
   wPicked = num;
   Object.keys(wOpen).forEach(function(k){
     wOpen[k].style.display = (String(k) === String(num)) ? 'block' : 'none';
@@ -2488,11 +2497,61 @@ el('wreload').addEventListener('click', function(){
   f.src = f.src;                       // same page, fetched again
 });
 
+// Loading them all costs one page fetch per instance, and every one of those
+// goes out to the game through that instance's proxy. So they start one at a
+// time, a beat apart, rather than as a single burst of twenty-four.
+var LOAD_GAP = 400;   // ms between starting one frame and starting the next
+var loadRun = 0;      // bumped to call off a run in progress
+
+el('wloadall').addEventListener('click', function(){
+  var ports = serverPorts();
+  var live = Object.keys(ports).length;
+  if(!live){
+    out.textContent = 'No web servers are running. Start them with menu '
+                    + 'option (16) in each instance.';
+    return;
+  }
+  var todo = Object.keys(ports).map(Number).sort(function(a, b){ return a - b; })
+                   .filter(function(n){ return !wOpen[n]; });
+  if(!todo.length){
+    out.textContent = 'All ' + live + ' running web server(s) are already '
+                    + 'loaded. Switching between them is instant.';
+    return;
+  }
+  var btn = this, run = ++loadRun, total = todo.length, done = 0;
+  var first = todo[0];
+  btn.disabled = true;
+  (function next(){
+    if(run !== loadRun) return;            // unloaded, or started again
+    if(!todo.length){
+      btn.disabled = false;
+      if(!wPicked) pickServer(first); else renderServers();
+      out.textContent = 'Loaded ' + done + ' instance(s). Switching between '
+                      + 'them is now instant.';
+      return;
+    }
+    if(loadServer(todo.shift())) done++;
+    // Progress goes in the output box, not the note under the viewer: the
+    // note is rewritten by every refresh, which would wipe it mid-run.
+    out.textContent = 'Loading ' + done + ' of ' + total + '…';
+    setTimeout(next, LOAD_GAP);
+  })();
+});
+
 el('wclear').addEventListener('click', function(){
+  var n = Object.keys(wOpen).length;
+  var wasLoading = el('wloadall').disabled;
+  loadRun++;                               // stop a run that is still going
+  el('wloadall').disabled = false;
   Object.keys(wOpen).forEach(function(k){ wOpen[k].remove(); });
   wOpen = {}; wPicked = null;
   el('wempty').style.display = '';
   el('wopen').href = '#';
+  // Otherwise the box is left showing the progress of a run that no longer
+  // exists, which reads as if it were still going.
+  out.textContent = wasLoading
+    ? 'Stopped loading and unloaded ' + n + ' instance(s).'
+    : (n ? 'Unloaded ' + n + ' instance(s).' : 'Nothing was loaded.');
   renderServers();
 });
 
