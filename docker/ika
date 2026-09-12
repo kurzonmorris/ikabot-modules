@@ -30,6 +30,8 @@ ika — ikabot container maintenance
   ika panel             Show the control panel address
   ika panel restart     Reload the panel after swapping in a new one
   ika panel upgrade     Fetch the newest panel from GitHub and reload
+  ika self-upgrade      Refresh ika's own scripts from GitHub, this one
+                        included — for when ika update itself is broken
   ika shell             Plain shell inside the container
 
 Leaving the screens: press Ctrl-B, let go, then press D.
@@ -460,6 +462,61 @@ cmd_logs() {
     tail -f "$LOGS_DIR/$name"
 }
 
+# The helper scripts live in the image, not in the mounted app folder, so
+# `ika update` cannot replace them — and when the one that is broken is
+# ika-update itself, there is no way out from inside the container short of
+# rebuilding the image. This refreshes them from the repo the same way
+# `ika panel upgrade` refreshes the panel.
+cmd_self_upgrade() {
+    local raw tmp n=0 failed=0
+    raw="https://raw.githubusercontent.com/${IKABOT_REPO:-kurzonmorris/ikabot-modules}"
+    raw="$raw/${IKABOT_BRANCH:-main}/docker"
+    tmp="$(mktemp)"
+
+    for name in ika ika-update ika-modules ika-web-attach ika-panel-host; do
+        if ! curl -fsSL -o "$tmp" "$raw/$name"; then
+            echo "  $name: download failed" >&2
+            failed=$((failed + 1))
+            continue
+        fi
+        # A truncated download or a 404 page would otherwise be installed over
+        # a working script, which is the failure this command exists to undo.
+        if [ ! -s "$tmp" ] || ! head -1 "$tmp" | grep -q '^#!'; then
+            echo "  $name: that download does not look like a script — skipped" >&2
+            failed=$((failed + 1))
+            continue
+        fi
+        case "$name" in
+            *-update|*-modules|*-panel-host)
+                if ! python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$tmp" \
+                     2>/dev/null; then
+                    echo "  $name: downloaded file is not valid Python — skipped" >&2
+                    failed=$((failed + 1))
+                    continue
+                fi ;;
+            *)
+                if ! bash -n "$tmp" 2>/dev/null; then
+                    echo "  $name: downloaded file is not valid shell — skipped" >&2
+                    failed=$((failed + 1))
+                    continue
+                fi ;;
+        esac
+        install -m 755 "$tmp" "/usr/local/bin/$name"
+        echo "  $name: updated"
+        n=$((n + 1))
+    done
+    rm -f "$tmp"
+
+    echo
+    if [ "$failed" -gt 0 ]; then
+        echo "$n script(s) refreshed from GitHub, $failed left alone."
+    else
+        echo "$n script(s) refreshed from GitHub."
+    fi
+    echo "The panel is separate:  ika panel upgrade"
+    [ "$failed" -eq 0 ]
+}
+
 case "${1:-}" in
     attach|"")   exec tmux attach -t "$SESSION" ;;
     status)      cmd_status ;;
@@ -471,6 +528,7 @@ case "${1:-}" in
     crash)       shift; cmd_crash "$@" ;;
     logs)        shift; cmd_logs "$@" ;;
     panel)       shift; cmd_panel "${1:-}" ;;
+    self-upgrade) cmd_self_upgrade ;;
     shell)       exec /bin/bash ;;
     -h|--help|help) usage ;;
     *)           echo "Unknown command: $1" >&2; echo; usage; exit 1 ;;

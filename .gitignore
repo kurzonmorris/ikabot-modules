@@ -9,3 +9,7 @@ docker/ikabot-api/.env
 
 # Build artifacts
 *.zip
+# ...but not the published installers. The guides link straight at
+# releases/ikabot-docker_vX.Y.Z.zip on GitHub, so those have to be in the repo
+# — 41 of them already are, and a new one would silently not be committed.
+!releases/*.zip
