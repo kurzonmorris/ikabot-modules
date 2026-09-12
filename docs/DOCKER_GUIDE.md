@@ -389,6 +389,25 @@ example version back.
 
 ### Updating ikabot itself
 
+#### Knowing there is one
+
+The panel asks GitHub what is published when it starts and **once an hour**
+after that, so a panel left open for days does not go on reporting whatever
+was current the morning it started.
+
+When something newer is out, the **ikabot** section says so in a line across
+the top — *Ready to install: ikabot 7.5.2 (you have 7.5.1)* — and the
+**ikabot** item in the section menu is marked **new**, so you can see it from
+whichever section you happen to be in.
+
+Under the buttons is when it last asked and when it will ask again. If you
+would rather not wait for the hour, **Check GitHub now** asks immediately.
+That line is about ikabot only: if the *module* check fails, that is reported
+separately in the **Modules** section, because they are two different
+requests and one can fail while the other works.
+
+#### Installing it
+
 One command. No rebuild — ikabot's code lives in the `app` folder, not inside
 the image:
 
@@ -856,7 +875,7 @@ Sign in with the same username and password as the terminal.
 |---|---|
 | **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback. **Open all web servers** opens a tab per running web server, in instance order |
 | **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
-| **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Download and install an update, or roll the last one back |
+| **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Says so plainly at the top when there is one to install, and marks the menu item **new**. Download and install an update, or roll the last one back |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
 | **Accounts** | Paste every account in at once and save them to ikabot's vault in one press — for a fresh install, or a machine that has no vault yet |
 | **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
@@ -1392,6 +1411,37 @@ docker exec -it ikabot ika panel
 reports the running version and the newest available, so a stale panel is
 obvious rather than something you discover from a confusing error.
 
+### When one of ika's own commands is broken
+
+`ika`, `ika-update` and the rest live **inside the image**, not in the mounted
+`app` folder. `ika update` replaces ikabot's code, not those — so if one of
+them is itself broken, updating cannot fix it. The usual sign is an update
+that ends in a Python traceback instead of asking you a question.
+
+```bash
+docker exec -it ikabot ika self-upgrade
+```
+
+fetches `ika`, `ika-update`, `ika-modules`, `ika-web-attach` and
+`ika-panel-host` fresh from the repo. Each one is checked before it is
+installed — that it arrived, that it starts with `#!`, and that it parses as
+the language it claims to be — so a failed download or a GitHub error page
+can never land on top of a script that was working. Anything that fails those
+checks is left alone and named in the output.
+
+The same thing is a button in the control panel: **ikabot** →
+**Refresh ika's own scripts**. The panel itself is not in that list; it has
+its own `ika panel upgrade`.
+
+If even that is not available — an older container without the command — the
+one-liner it replaces is:
+
+```bash
+docker exec ikabot sh -c 'curl -fsSL -o /usr/local/bin/ika-update \
+  https://raw.githubusercontent.com/kurzonmorris/ikabot-modules/main/docker/ika-update \
+  && chmod +x /usr/local/bin/ika-update'
+```
+
 > GitHub names its own download `main.zip` and that cannot be changed, so the
 > version lives in the file inside it rather than in the zip name.
 
@@ -1450,7 +1500,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.24 ships panel 1.0.22. That looks like a failed
+> not match — installer 1.0.25 ships panel 1.0.23. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.

@@ -245,6 +245,7 @@ Identical to the server. All of them work from Konsole:
 | Update ikabot | `docker exec -it ikabot ika update` |
 | Update the modules | `docker exec -it ikabot ika modules` |
 | Update the control panel | `docker exec -it ikabot ika panel upgrade` |
+| Repair ika's own commands | `docker exec -it ikabot ika self-upgrade` |
 | Stop everything | `docker stop ikabot` |
 | Start it again | `docker start ikabot` |
 
@@ -349,6 +350,7 @@ all of this, which is what Part 10 is for.
 | Everything vanished after a system update | SteamOS re-imaged the system partition | Part 10 — your data is fine |
 | `docker: command not found` after an update | Same cause | Appendix A, then Part 10 |
 | Container keeps stopping | Something failed at startup | `docker logs ikabot` and read the last few lines |
+| `ika update` ends in a Python traceback | One of ika's own scripts is broken, and updating cannot replace those | `docker exec -it ikabot ika self-upgrade`, then try again |
 | Build fails on the base 64 GB model | Out of disk | `docker system prune -a`, or move the data to the SD card |
 
 ---

@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.22"
+PANEL_VERSION = "1.0.23"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -120,8 +120,15 @@ _run_lock = threading.Lock()
 
 # GitHub's unauthenticated API allows 60 calls an hour, so remote versions are
 # cached rather than fetched on every poll.
-_avail = {"data": {}, "ikabot": {}, "checked": 0.0, "error": ""}
+_avail = {"data": {}, "ikabot": {}, "checked": 0.0, "error": "",
+          "core_error": ""}
 _avail_lock = threading.Lock()
+
+# ...but once at startup is not enough either. A panel left open for days would
+# go on reporting whatever was published the morning it started, with nothing
+# on screen to say the answer had aged. Two calls an hour against a limit of
+# sixty is not worth being clever about.
+CHECK_EVERY = 3600
 
 
 def _ver_tuple(v):
@@ -143,7 +150,14 @@ def is_newer(remote, local):
 
 
 def remote_ikabot_versions():
-    """IKABOT_VERSION / IKABOT_MOD_VERSION as published in the repo."""
+    """IKABOT_VERSION / IKABOT_MOD_VERSION as published in the repo.
+
+    Returns (versions, error). The error is reported separately from the
+    module check's: they are two different requests, and saying "could not
+    reach GitHub" on the ikabot page because the module check failed sends
+    people looking for a network problem they do not have.
+    """
+    import http.client
     import urllib.error
     import urllib.request
     try:
@@ -151,18 +165,23 @@ def remote_ikabot_versions():
                                      headers={"User-Agent": "ika-panel/%s" % PANEL_VERSION})
         with urllib.request.urlopen(req, timeout=60) as resp:
             text = resp.read().decode("utf-8", "replace")
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
-        return {}
+    # HTTPException covers a connection cut mid-read, which is not an OSError
+    # and would otherwise come out of here as a traceback in the log.
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            http.client.HTTPException) as exc:
+        return {}, str(exc)[:200] or exc.__class__.__name__
     out = {}
     for key, label in (("IKABOT_VERSION", "ikabot"), ("IKABOT_MOD_VERSION", "mod")):
         m = re.search(r'^%s\s*=\s*"([^"]+)"' % key, text, re.M)
         if m:
             out[label] = m.group(1)
-    return out
+    if not out:
+        return {}, "no version lines in %s" % CONFIG_URL.rsplit("/", 1)[-1]
+    return out, ""
 
 
 def refresh_available():
-    core = remote_ikabot_versions()
+    core, core_err = remote_ikabot_versions()
     raw = _sh(["ika-modules", "available"], timeout=90).strip()
     data, err = {}, ""
     try:
@@ -180,11 +199,28 @@ def refresh_available():
         if core:
             _avail["ikabot"] = core
         _avail["error"] = err
+        _avail["core_error"] = core_err
         _avail["checked"] = time.time()
 
+    notes = []
+    if core_err:
+        notes.append("could not read the published ikabot version: %s" % core_err)
     if err:
-        return "Could not check GitHub: %s" % err
-    return "Checked %d module version(s) on GitHub." % len(data)
+        notes.append("could not check module versions: %s" % err)
+    if notes:
+        return "Checked GitHub — " + "; ".join(notes)
+    return ("Checked GitHub: ikabot %s, and %d module version(s)."
+            % (core.get("ikabot", "?"), len(data)))
+
+
+def check_loop():
+    """Check at startup and every hour after, until the panel stops."""
+    while True:
+        # Shares the lock with updates and restarts: a version check while one
+        # of those is running would be reading a tree that is being replaced.
+        with _run_lock:
+            refresh_available()
+        time.sleep(CHECK_EVERY)
 
 
 # --------------------------------------------------------------------------
@@ -1031,6 +1067,7 @@ def state():
 
     with _avail_lock:
         avail, checked, avail_err = dict(_avail["data"]), _avail["checked"], _avail["error"]
+        core_err = _avail["core_error"]
         core_avail = dict(_avail["ikabot"])
 
     for m in modules:
@@ -1065,7 +1102,9 @@ def state():
     instances.sort(key=lambda i: i["num"])
     return {
         "checked": checked,
+        "check_every": CHECK_EVERY,
         "avail_error": avail_err,
+        "core_error": core_err,
         "panel_version": PANEL_VERSION,
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
@@ -1115,6 +1154,10 @@ def command_for(action, arg):
         "modules_local":   ["ika-modules", "sync", "--local"],
         "update":          ["ika-update", "--yes"],
         "update_rollback": ["ika-update", "--rollback"],
+        # The helper scripts live in the image, so `ika update` cannot replace
+        # them. Reachable from here because the one that breaks is usually
+        # ika-update itself, and then the buttons above are no use.
+        "self_upgrade":    ["ika", "self-upgrade"],
         "status":          ["ika", "status"],
     }.get(action)
 
@@ -1783,6 +1826,11 @@ overflow-x:auto;font-size:12.5px;margin:0;white-space:pre-wrap;max-height:340px;
 .badge{font-family:ui-monospace,monospace;font-size:11px;padding:2px 7px;border-radius:99px;
 border:1px solid var(--rule);color:var(--soft)}
 .busy{color:var(--warn)}
+/* A new version is worth noticing from across the room. One red cell in a
+   table is easy to miss, so the same news also gets a line of its own. */
+.upnote{margin:0 0 12px;padding:10px 12px;border-radius:6px;font-size:13.5px;
+border:1px solid var(--warn);color:var(--warn);background:var(--card)}
+.upnote b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .v-current{color:var(--ok);font-weight:600}
 .v-outdated{color:var(--bad);font-weight:600}
 .v-unknown{color:var(--soft)}
@@ -1966,16 +2014,26 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
 
 <section class="sec" id="sec-ikabot">
   <h2>ikabot</h2>
+  <p class="upnote" id="coreup" style="display:none"></p>
   <table style="margin-bottom:12px"><thead><tr>
     <th>Component</th><th>Installed</th><th>Available</th><th></th></tr></thead>
   <tbody id="corever"></tbody></table>
   <div class="row">
     <button class="p" data-a="update">Download &amp; update ikabot</button>
     <button class="d" data-a="update_rollback">Roll back last update</button>
+    <button data-a="check_updates">Check GitHub now</button>
+    <button data-a="self_upgrade"
+            title="Refresh ika, ika-update and the other helper scripts from GitHub">Refresh ika's own scripts</button>
   </div>
-  <p class="sub" style="margin:12px 0 0">
+  <p class="hint" id="corechecked" style="margin:10px 0 0"></p>
+  <p class="sub" style="margin:8px 0 0">
     Red means a newer version is published. Instances keep running the old code
     until you restart them.
+    <br>
+    <b>Download &amp; update ikabot</b> replaces the code your instances run.
+    <b>Refresh ika's own scripts</b> replaces the container's own commands —
+    only needed when one of them is broken, such as an update that ends in a
+    traceback rather than a question.
   </p>
 </section>
 
@@ -2857,6 +2915,20 @@ function ago(ts){
   return ' · '+Math.floor(h/24)+'d '+(h%24)+'h';
 }
 
+// ago() is written for a table cell — " · 2h 10m". The same thing in a
+// sentence needs words.
+function agoWords(ts){
+  if(!ts)return'';
+  var m=Math.floor((Date.now()/1000-ts)/60);
+  if(m<1)return', a moment ago';
+  if(m===1)return', a minute ago';
+  if(m<60)return', '+m+' minutes ago';
+  var h=Math.floor(m/60);
+  if(h<24)return', '+h+(h===1?' hour':' hours')+' ago';
+  var d=Math.floor(h/24);
+  return ', '+d+(d===1?' day':' days')+' ago';
+}
+
 function refresh(){
   fetch('api/state').then(function(r){return r.json()}).then(function(s){
     last=s;
@@ -3002,18 +3074,56 @@ function refresh(){
         esc(m.name)+'"'+hi+'>'+act+'</button></td></tr>';
     }).join('') || '<tr><td colspan="5" class="sub">No modules installed.</td></tr>';
 
-    var ca=s.versions_available||{}, cv=s.versions||{};
+    var ca=s.versions_available||{}, cv=s.versions||{}, coreDue=[];
     document.getElementById('corever').innerHTML=[
       ['ikabot','ikabot'],['mod','modded by kurzon']
     ].map(function(pair){
       var k=pair[0], have=cv[k]||'', want=ca[k]||'';
-      var state=!want?'v-unknown':(newer(want,have)?'v-outdated':'v-current');
+      var due=!!want&&newer(want,have);
+      if(due)coreDue.push(pair[1]+' '+want+(have?' (you have '+have+')':''));
+      var state=!want?'v-unknown':(due?'v-outdated':'v-current');
       return '<tr><td>'+pair[1]+'</td>'+
         '<td class="mono '+state+'">'+(have||'—')+'</td>'+
         '<td class="mono '+state+'">'+(want||'not checked')+'</td>'+
-        '<td class="scope">'+(!want?'':(newer(want,have)?'update available':'up to date'))+
+        '<td class="scope">'+(!want?'':(due?'update available':'up to date'))+
         '</td></tr>';
     }).join('');
+
+    // Said plainly, above the table, and again on the section menu — so a new
+    // version is noticed from whichever section happens to be on screen.
+    var up=el('coreup');
+    up.style.display = coreDue.length ? '' : 'none';
+    up.innerHTML = coreDue.length
+      // Each name escaped and then joined, not the other way round: escaping
+      // the joined string would escape the markup doing the joining.
+      ? 'Ready to install: <b>' + coreDue.map(esc).join('</b>, <b>') + '</b>. '
+        + 'Press Download &amp; update ikabot, then restart the instances.'
+      : '';
+    tag('ikabot', coreDue.length ? 'new' : '');
+
+    // When it was last asked, and when it will ask again on its own — without
+    // this the Available column is a number of unknown age.
+    var cc=el('corechecked'), secs=s.check_every||3600;
+    // Said in whichever unit reads properly, so no setting can produce
+    // "every 0 minutes".
+    var every = secs>=3600
+      ? (secs<7200 ? 'hour' : Math.round(secs/3600)+' hours')
+      : (function(mins){ return mins===1 ? 'minute' : mins+' minutes'; })(
+          Math.max(1, Math.round(secs/60)));
+    cc.className = 'hint';
+    // s.core_error, not s.avail_error: the second is the module check, which
+    // fails on its own and has its own line in the Modules section.
+    if(s.core_error){
+      cc.className = 'hint warn2';
+      cc.textContent = 'Could not read the published ikabot version: '
+                     + s.core_error + ' — press Check GitHub now to try again.';
+    } else if(s.checked){
+      cc.textContent = 'Checked ' + new Date(s.checked*1000).toLocaleTimeString()
+                     + agoWords(s.checked) + '. Checks again by itself every '
+                     + every + '.';
+    } else {
+      cc.textContent = 'Checking GitHub…';
+    }
 
     if(!s.status_available){
       var h=document.getElementById('statushint');
@@ -3041,7 +3151,7 @@ def main():
         print("ika-panel: no password set (PANEL_PASS or TTYD_PASS) — refusing "
               "to serve a control panel unauthenticated.", file=sys.stderr)
         return 1
-    threading.Thread(target=refresh_available, daemon=True).start()
+    threading.Thread(target=check_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("ika-panel v%s listening on port %d (user: %s)"
           % (PANEL_VERSION, PORT, USER))

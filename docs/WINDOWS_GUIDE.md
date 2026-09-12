@@ -32,7 +32,7 @@ Leave Docker Desktop open. Nothing else works until it says *Engine running*.
 
 Click this link and the file will download:
 
-**[ikabot-docker_v1.0.24.zip](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-docker_v1.0.24.zip)**
+**[ikabot-docker_v1.0.25.zip](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-docker_v1.0.25.zip)**
 
 It is about 7 MB and lands in your **Downloads** folder.
 
@@ -48,11 +48,11 @@ It is about 7 MB and lands in your **Downloads** folder.
 ## Step 3 — Unzip it
 
 1. Open your **Downloads** folder
-2. **Right-click** `ikabot-docker_v1.0.24.zip` → **Properties**
+2. **Right-click** `ikabot-docker_v1.0.25.zip` → **Properties**
 3. If you see an **Unblock** tickbox at the bottom, tick it and press **OK**
 4. **Right-click** the file again → **Extract All…** → **Extract**
 
-A folder called `ikabot-docker_v1.0.24` opens. Inside it you should see:
+A folder called `ikabot-docker_v1.0.25` opens. Inside it you should see:
 
 ```
 INSTALL.bat        README.txt        app        docker        install.sh
@@ -111,8 +111,8 @@ box for every account you asked for.
 
 > **Two version numbers, and that is normal.** The heading shows the control
 > panel's own version; the line under it ends with the installer's. They are
-> numbered separately and are usually a little apart — installer `v1.0.24`
-> carries control panel `v1.0.22`, for instance. A lower number on the page
+> numbered separately and are usually a little apart — installer `v1.0.25`
+> carries control panel `v1.0.23`, for instance. A lower number on the page
 > than on the file you downloaded does **not** mean the install went wrong.
 > The installer prints both numbers when it finishes, so you can check the
 > page against that line rather than against the file name.
@@ -290,6 +290,7 @@ Unraid or TrueNAS, or a Steam Deck.
 | The browser says it cannot connect | The container is not running | Open Docker Desktop → **Containers** → start **ikabot** |
 | It asks for a password you never set | It wants the web page password from Step 4 | Username is `ikabot` |
 | An account box says **crashed** | That account stopped | Press **Restart** on that box |
+| Updating ikabot ends in a wall of red Python text | One of ikabot's own commands is broken, and the update button cannot replace those | **ikabot** in the menu → **Refresh ika's own scripts**, then update again |
 | Phone: Tailscale is on but the panel will not load | Android Private DNS is intercepting it | **Settings → Network & internet → Private DNS** → **Off** or **Automatic** |
 | Phone: the PC shows as offline in Tailscale | The PC is asleep, off, or Tailscale is not running on it | Wake the PC and check the Tailscale tray icon says *Connected* |
 | Phone: it asks for a password that is not accepted | Wrong account — the phone is on a different private network | Sign out on the phone and sign in with the same account as the PC |
