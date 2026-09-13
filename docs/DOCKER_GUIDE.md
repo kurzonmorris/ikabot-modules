@@ -427,19 +427,32 @@ Running instances keep going until you restart them.
 Continue? [y/N]:
 ```
 
-Only `ikabot`, `modules` and `config-examples` come down — about nine
-megabytes — not the repository archive, which carries the releases and build
-folders and is a quarter of a gigabyte. The files are fetched a few at a time
-over connections that are kept open, so a normal update is seconds rather than
-minutes.
+**It only downloads what changed.** The file listing from GitHub carries the
+id git gave each file, so the ones already installed are recognised without
+being fetched — a typical update is a handful of files and takes about a
+second. A first install is 136 files and about 8.6 MB, over connections that
+are kept open and used a few at a time.
+
+What it never does is pull the repository archive as a matter of course: that
+is 364 MB, of which the `releases` folder alone is 288, for the 8.6 MB an
+update actually needs.
+
+If the listing is not available — the GitHub API allows sixty calls an hour —
+it falls back to the **packaged release zip** instead: one request, about
+7 MB, fetched from `raw.githubusercontent.com`, which has no such limit. That
+zip is built when a release is cut, so it can sit slightly behind the branch;
+the versions it carries are printed before anything is installed. The full
+archive is the last resort and rarely reached.
 
 If the link is slow or GitHub is throttling, it **stops after five minutes and
-says so** rather than hanging until something else gives up on it. Pressing it
-again usually works; if the link is genuinely too poor, download the release
-zip by whatever means work and install from that:
+says so** rather than hanging until something else gives up on it — and then
+tries the packaged release once, since one connection sometimes gets through
+where a hundred and thirty-six small ones do not. Pressing it again usually
+works; if the link is genuinely too poor, download the release zip by whatever
+means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.26.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.27.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -1518,7 +1531,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.26 ships panel 1.0.24. That looks like a failed
+> not match — installer 1.0.27 ships panel 1.0.24. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.

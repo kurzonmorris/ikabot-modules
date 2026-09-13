@@ -102,11 +102,18 @@ def main():
         if "app/ikabot/__main__.py" not in z.namelist():
             fail("app/ikabot/__main__.py is not in the zip")
 
+    # A plain pointer to the newest zip, fetched over raw.githubusercontent
+    # rather than the API. ika-update falls back to this when the API is rate
+    # limited — which is exactly when an API call to find the newest release
+    # would fail too.
+    (OUT / "LATEST").write_text(target.name + "\n")
+
     size = target.stat().st_size / 1024.0
     print("built %s  (%.0f KB)" % (target.name, size))
     print("  installer version : %s" % version)
     print("  control panel     : v%s" % panel_version)
     print("  ikabot files      : %d under app/" % app_files)
+    print("  releases/LATEST   : %s" % target.name)
     with zipfile.ZipFile(target) as z:
         print("  contents:")
         shown = [n for n in z.namelist() if not n.startswith("app/")]
