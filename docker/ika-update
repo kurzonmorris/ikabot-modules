@@ -6,6 +6,7 @@ kept so a bad update can be rolled back without another download.
 """
 
 import argparse
+import hashlib
 import http.client
 import json
 import os
@@ -29,6 +30,13 @@ APP = Path(os.environ.get("APP_DIR", "/app"))
 BACKUP = APP / ".previous"
 
 ZIP_URL = "https://codeload.github.com/%s/zip/refs/heads/%s" % (REPO, BRANCH)
+# The packaged installer: one file of about seven megabytes carrying the same
+# ikabot, modules and config-examples. LATEST names the newest one and is read
+# over raw.githubusercontent rather than the API — this is the path taken when
+# the API is the thing that is unavailable, so it cannot depend on it.
+LATEST_URL = "https://raw.githubusercontent.com/%s/%s/releases/LATEST" % (REPO, BRANCH)
+RELEASE_URL = ("https://raw.githubusercontent.com/%s/%s/releases/"
+               % (REPO, BRANCH))
 TREE_URL = ("https://api.github.com/repos/%s/git/trees/%s?recursive=1"
             % (REPO, BRANCH))
 RAW_URL = "https://raw.githubusercontent.com/%s/%s/" % (REPO, BRANCH)
@@ -186,6 +194,41 @@ class RawPool:
         raise RuntimeError("%s: %s" % (path, last))
 
 
+def say(text=""):
+    """print() that cannot bring the update down.
+
+    Once the old copy has been moved aside and folders are being replaced,
+    losing stdout — a closed pipe from `ika update | head`, for instance —
+    must not raise, or ikabot is left half installed by a failure that was
+    only ever about the output.
+    """
+    try:
+        print(text)
+    except OSError:
+        pass
+
+
+def blob_sha(data):
+    """The id git would give this content.
+
+    The tree listing carries one of these per file, so comparing it against
+    what is already installed says exactly which files changed — without
+    downloading any of them to find out.
+    """
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def unchanged(path, sha):
+    """True if the installed copy of *path* is already that blob."""
+    current = APP / path
+    try:
+        if current.stat().st_size > 8 * 1024 * 1024:
+            return False            # not worth reading; nothing tracked is
+        return blob_sha(current.read_bytes()) == sha
+    except OSError:
+        return False
+
+
 def safe_under(root, rel):
     """Resolve rel under root, or None if it would escape.
 
@@ -210,42 +253,66 @@ def fetch_tracked(dest):
     the whole archive if anything about that is not available.
     """
     print("Listing %s (%s)..." % (REPO, BRANCH))
-    tree = json.loads(get(TREE_URL, timeout=60).decode("utf-8"))
+    # Two tries, not four: there are two other ways in behind this one, and
+    # fourteen seconds of backoff before reaching them is fourteen seconds of
+    # nothing happening.
+    tree = json.loads(get(TREE_URL, tries=2, timeout=30).decode("utf-8"))
     if tree.get("truncated"):
         raise RuntimeError("tree listing truncated")
 
-    wanted = []
+    wanted = {}
     for entry in tree.get("tree", []):
         if entry.get("type") != "blob":
             continue
         path = entry.get("path", "")
         if any(path == name or path.startswith(name + "/") for name in TRACKED):
-            wanted.append(path)
+            wanted[path] = entry.get("sha", "")
     if not wanted:
         raise RuntimeError("no %s files in the listing" % ", ".join(TRACKED))
 
     root = Path(dest) / "tree"
-    wanted.sort()
+    paths = sorted(wanted)
 
     # Checked before a single byte is fetched: one entry of "../../usr/local
     # /bin" should stop the update, not be discovered halfway through it.
     targets = {}
-    for path in wanted:
+    for path in paths:
         target = safe_under(root, path)
         if target is None:
             raise RuntimeError("refusing path from the listing: %r" % path)
         targets[path] = target
 
-    pool = RawPool(RAW_URL)
+    # The listing carries the id git gave each file, so the ones already
+    # installed can be recognised without downloading them. Those are copied
+    # across from /app instead — the tree that gets installed has to be
+    # complete, because installing replaces whole folders.
     started = time.time()
+    todo, reused = [], 0
+    for path in paths:
+        if wanted[path] and unchanged(path, wanted[path]):
+            target = targets[path]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(APP / path, target)
+            reused += 1
+        else:
+            todo.append(path)
+
+    if reused:
+        print("  %d of %d file(s) already current; fetching %d"
+              % (reused, len(paths), len(todo)))
+    else:
+        print("  %d file(s) to fetch" % len(todo))
+    if not todo:
+        return root
+
+    pool = RawPool(RAW_URL)
     deadline = started + BUDGET
-    print("  %d file(s) to fetch" % len(wanted))
     done = 0
 
     # Not a "with": its exit waits for every running worker, which is the one
     # thing that must not happen when the budget has just run out.
     ex = futures.ThreadPoolExecutor(max_workers=WORKERS)
-    jobs = {ex.submit(pool.get, path): path for path in wanted}
+    jobs = {ex.submit(pool.get, path): path for path in todo}
     pending = set(jobs)
     try:
         for fut in futures.as_completed(jobs, timeout=BUDGET):
@@ -255,14 +322,14 @@ def fetch_tracked(dest):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(fut.result())
             done += 1
-            if done % 25 == 0 or done == len(wanted):
-                print("  %d/%d (%.0fs)" % (done, len(wanted),
+            if done % 25 == 0 or done == len(todo):
+                print("  %d/%d (%.0fs)" % (done, len(todo),
                                            time.time() - started))
     except futures.TimeoutError:
         raise SlowLink(
             "gave up after %.0fs with %d of %d file(s) — the connection to "
             "%s is too slow or is being throttled"
-            % (time.time() - started, done, len(wanted), pool.host))
+            % (time.time() - started, done, len(todo), pool.host))
     finally:
         pool.abort.set()
         for fut in pending:
@@ -271,6 +338,68 @@ def fetch_tracked(dest):
 
     if time.time() > deadline:
         print("  (took longer than the %.0fs budget, but finished)" % BUDGET)
+    return root
+
+
+def fetch_release(dest):
+    """Install from the packaged release zip: one request, about 7 MB.
+
+    The repository archive is 364 MB — the releases folder alone is 288 of
+    them — for the 8.6 MB an update actually needs. The release zip carries
+    exactly that, already assembled, so it is the right thing to reach for
+    when the per-file route is not available.
+
+    It is built when a release is cut, so it can sit a little behind the
+    branch. That is why it is the fallback and not the first choice, and why
+    the versions it carries are printed before anything is installed.
+    """
+    name = get(LATEST_URL, tries=2, timeout=30).decode("utf-8", "replace").strip()
+    if not re.match(r"^ikabot-docker_v[\d.]+\.zip$", name):
+        raise RuntimeError("releases/LATEST does not name a release: %r" % name[:80])
+
+    print("Downloading the packaged release %s..." % name)
+    blob = Path(dest) / name
+    out = Path(dest) / "release"
+    delay = 2
+
+    # Retried here rather than left to the caller: the next thing down is the
+    # 364 MB archive, which is a poor answer to one dropped connection.
+    for attempt in range(1, 4):
+        got = 0
+        try:
+            req = urllib.request.Request(RELEASE_URL + name, headers=UA)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                declared = resp.headers.get("Content-Length")
+                declared = int(declared) if declared and declared.isdigit() else 0
+                with open(blob, "wb") as fh:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        got += len(chunk)
+            # A cut-off transfer does not always raise: with a Content-Length
+            # the read loop can simply end early and hand back a short file.
+            if declared and got != declared:
+                raise http.client.IncompleteRead(b"", declared - got)
+
+            print("  %.1f MB, unpacking" % (got / 1048576.0))
+            if out.is_dir():
+                shutil.rmtree(out)
+            with zipfile.ZipFile(blob) as z:
+                z.extractall(out)
+            blob.unlink()
+            break
+        except (NET_ERRORS + (zipfile.BadZipFile,)) as exc:
+            if attempt == 3:
+                raise
+            print("  %s after %.1f MB — retrying" % (exc, got / 1048576.0))
+            time.sleep(delay)
+            delay *= 2
+
+    root = find_root(out)
+    if root is None:
+        raise RuntimeError("%s has no ikabot/config.py in it" % name)
     return root
 
 
@@ -379,23 +508,47 @@ def from_local(source, dest):
 
 
 def download(dest):
+    """Three ways in, cheapest and most exact first.
+
+    1. the changed files only, straight from the branch
+    2. the packaged release: one request, about 7 MB, possibly a shade behind
+    3. the whole repository archive: 364 MB, and the last resort it sounds
+       like
+    """
     try:
         return fetch_tracked(dest)
+
     except SlowLink as exc:
-        # The fallback is a quarter-gigabyte archive. Offering that to a link
-        # that has just failed to carry nine megabytes is not a fallback, it
-        # is a longer wait before the same failure.
-        raise RuntimeError(
-            "%s.\n\nThe files are there and the versions were read, so this is "
-            "the connection rather than the update.\n"
-            "  - press it again: a throttled link usually clears in a few "
-            "minutes\n"
-            "  - or download the release zip by hand and install from it:\n"
-            "      ika update --from /config/ikabot-docker_vX.Y.Z.zip" % exc)
+        # Many small requests are not getting through. One larger one might:
+        # it is a single connection rather than a hundred and thirty-six.
+        # What is not worth trying is the 364 MB archive.
+        print("  %s" % exc)
+        print("  trying the packaged release instead — one file, about 7 MB")
+        try:
+            return fetch_release(dest)
+        except FAIL_ERRORS as exc2:
+            raise RuntimeError(
+                "%s.\n\nThe packaged release did not come down either (%s).\n"
+                "The listing worked and the versions were read, so this is the "
+                "connection rather than the update.\n"
+                "  - press it again: a throttled link usually clears in a few "
+                "minutes\n"
+                "  - or fetch the zip by whatever means work, drop it in "
+                "/config, and install from it:\n"
+                "      ika update --from /config/ikabot-docker_vX.Y.Z.zip"
+                % (exc, exc2))
+
     except Exception as exc:
+        # The listing itself failed — usually the API's sixty calls an hour.
+        # The release zip comes from raw.githubusercontent, which has no such
+        # limit, so it is the right next thing rather than the last.
         print("  could not fetch the file list (%s)" % exc)
-        print("  falling back to the whole archive")
-        return fetch_zip(dest)
+        try:
+            return fetch_release(dest)
+        except FAIL_ERRORS as exc2:
+            print("  the packaged release did not work either (%s)" % exc2)
+            print("  falling back to the whole archive")
+            return fetch_zip(dest)
 
 
 def main():
@@ -464,7 +617,9 @@ def main():
                 print("Cancelled — nothing changed.")
                 return 0
 
-        # Keep exactly one previous copy so --rollback always has a target.
+        # From here to the end nothing may raise on account of the output:
+        # every message goes through say(). Keep exactly one previous copy so
+        # --rollback always has a target.
         if BACKUP.is_dir():
             shutil.rmtree(BACKUP)
         BACKUP.mkdir(parents=True)
@@ -481,20 +636,20 @@ def main():
             if dst.is_dir():
                 shutil.rmtree(dst)
             shutil.copytree(src, dst)
-            print("  updated %s/" % name)
+            say("  updated %s/" % name)
 
-        print("\nRefreshing modules...")
+        say("\nRefreshing modules...")
         try:
             subprocess.run(["ika-modules", "sync", "--local"], check=False)
         except OSError as exc:
             # Never fail an otherwise-good update over the module refresh.
-            print("  could not run ika-modules (%s) — run it yourself with:"
-                  "  ika modules" % exc)
+            say("  could not run ika-modules (%s) — run it yourself with:"
+                "  ika modules" % exc)
 
-        print("\nUpdated to %s" % describe(versions(APP)))
-        print("Previous copy saved — undo with:  ika update --rollback")
-        print("\nNow restart the instances to load it:")
-        print("  ika restart all")
+        say("\nUpdated to %s" % describe(versions(APP)))
+        say("Previous copy saved — undo with:  ika update --rollback")
+        say("\nNow restart the instances to load it:")
+        say("  ika restart all")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
