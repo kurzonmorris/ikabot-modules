@@ -14,11 +14,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent import futures
 from pathlib import Path
 
 REPO = os.environ.get("IKABOT_REPO", "kurzonmorris/ikabot-modules")
@@ -42,6 +44,26 @@ NET_ERRORS = (urllib.error.URLError, urllib.error.HTTPError,
               http.client.HTTPException, OSError)
 # What main() will report rather than let escape as a traceback.
 FAIL_ERRORS = NET_ERRORS + (zipfile.BadZipFile, RuntimeError, ValueError)
+
+# 136 files over 136 fresh TLS handshakes is most of the wall time of an
+# update, and one stalled handshake could eat four minutes of it on its own
+# (four tries of a sixty-second timeout). Two of those and the caller's ten
+# minutes are gone with nothing to show. So: a handful of connections, each
+# reused, each given a short leash, and a budget for the whole job.
+WORKERS = int(os.environ.get("IKA_UPDATE_WORKERS", "8"))
+FILE_TIMEOUT = float(os.environ.get("IKA_UPDATE_FILE_TIMEOUT", "20"))
+FILE_TRIES = 3
+BUDGET = float(os.environ.get("IKA_UPDATE_BUDGET", "300"))
+
+
+class SlowLink(RuntimeError):
+    """The listing worked but the files will not come down in time.
+
+    Its own class because the answer is not the answer to everything else:
+    falling back to the full archive means pulling a quarter of a gigabyte
+    over the link that has just proved too slow for nine megabytes.
+    """
+
 
 
 def versions(tree):
@@ -96,6 +118,74 @@ def get(url, tries=4, timeout=60):
             delay *= 2
 
 
+class RawPool:
+    """Keep-alive connections to the raw file host, one per worker thread.
+
+    urllib opens, negotiates and closes a connection for every single file.
+    Reusing one connection per worker removes that handshake from 135 of the
+    136 fetches; a connection that breaks or stalls is dropped and reopened
+    rather than poisoning the rest of that worker's files.
+    """
+
+    def __init__(self, base):
+        parts = urllib.parse.urlsplit(base)
+        self.secure = parts.scheme != "http"
+        self.host = parts.netloc
+        self.root = parts.path or "/"
+        self.local = threading.local()
+        # Cancelling a future does nothing to one already running, and a
+        # worker part-way through three tries of a twenty-second timeout would
+        # otherwise hold the process open for another minute after the budget
+        # is spent. Workers check this between attempts, which bounds the wait
+        # at whatever single request is in flight.
+        self.abort = threading.Event()
+
+    def _conn(self):
+        conn = getattr(self.local, "conn", None)
+        if conn is None:
+            cls = (http.client.HTTPSConnection if self.secure
+                   else http.client.HTTPConnection)
+            conn = cls(self.host, timeout=FILE_TIMEOUT)
+            self.local.conn = conn
+        return conn
+
+    def _drop(self):
+        conn = getattr(self.local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self.local.conn = None
+
+    def get(self, path):
+        """Return one file's bytes, or raise after FILE_TRIES attempts."""
+        url = self.root + urllib.parse.quote(path)
+        last = None
+        for attempt in range(1, FILE_TRIES + 1):
+            if self.abort.is_set():
+                raise RuntimeError("%s: given up on" % path)
+            try:
+                conn = self._conn()
+                conn.request("GET", url, headers=UA)
+                resp = conn.getresponse()
+                body = resp.read()          # always, or the connection is unusable
+                if resp.status == 200:
+                    return body
+                # A definite no is not worth asking three times; only an
+                # overloaded or rate-limiting server is.
+                if resp.status < 500 and resp.status != 429:
+                    raise RuntimeError("%s: HTTP %d" % (path, resp.status))
+                last = "HTTP %d" % resp.status
+                self._drop()
+            except NET_ERRORS as exc:
+                last = str(exc) or exc.__class__.__name__
+                self._drop()
+            if attempt < FILE_TRIES and not self.abort.is_set():
+                time.sleep(0.5 * attempt)
+        raise RuntimeError("%s: %s" % (path, last))
+
+
 def safe_under(root, rel):
     """Resolve rel under root, or None if it would escape.
 
@@ -135,17 +225,52 @@ def fetch_tracked(dest):
         raise RuntimeError("no %s files in the listing" % ", ".join(TRACKED))
 
     root = Path(dest) / "tree"
-    print("  %d file(s) to fetch" % len(wanted))
-    done = 0
-    for path in sorted(wanted):
+    wanted.sort()
+
+    # Checked before a single byte is fetched: one entry of "../../usr/local
+    # /bin" should stop the update, not be discovered halfway through it.
+    targets = {}
+    for path in wanted:
         target = safe_under(root, path)
         if target is None:
             raise RuntimeError("refusing path from the listing: %r" % path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(get(RAW_URL + urllib.parse.quote(path)))
-        done += 1
-        if done % 25 == 0 or done == len(wanted):
-            print("  %d/%d" % (done, len(wanted)))
+        targets[path] = target
+
+    pool = RawPool(RAW_URL)
+    started = time.time()
+    deadline = started + BUDGET
+    print("  %d file(s) to fetch" % len(wanted))
+    done = 0
+
+    # Not a "with": its exit waits for every running worker, which is the one
+    # thing that must not happen when the budget has just run out.
+    ex = futures.ThreadPoolExecutor(max_workers=WORKERS)
+    jobs = {ex.submit(pool.get, path): path for path in wanted}
+    pending = set(jobs)
+    try:
+        for fut in futures.as_completed(jobs, timeout=BUDGET):
+            pending.discard(fut)
+            path = jobs[fut]
+            target = targets[path]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(fut.result())
+            done += 1
+            if done % 25 == 0 or done == len(wanted):
+                print("  %d/%d (%.0fs)" % (done, len(wanted),
+                                           time.time() - started))
+    except futures.TimeoutError:
+        raise SlowLink(
+            "gave up after %.0fs with %d of %d file(s) — the connection to "
+            "%s is too slow or is being throttled"
+            % (time.time() - started, done, len(wanted), pool.host))
+    finally:
+        pool.abort.set()
+        for fut in pending:
+            fut.cancel()
+        ex.shutdown(wait=False)
+
+    if time.time() > deadline:
+        print("  (took longer than the %.0fs budget, but finished)" % BUDGET)
     return root
 
 
@@ -256,6 +381,17 @@ def from_local(source, dest):
 def download(dest):
     try:
         return fetch_tracked(dest)
+    except SlowLink as exc:
+        # The fallback is a quarter-gigabyte archive. Offering that to a link
+        # that has just failed to carry nine megabytes is not a fallback, it
+        # is a longer wait before the same failure.
+        raise RuntimeError(
+            "%s.\n\nThe files are there and the versions were read, so this is "
+            "the connection rather than the update.\n"
+            "  - press it again: a throttled link usually clears in a few "
+            "minutes\n"
+            "  - or download the release zip by hand and install from it:\n"
+            "      ika update --from /config/ikabot-docker_vX.Y.Z.zip" % exc)
     except Exception as exc:
         print("  could not fetch the file list (%s)" % exc)
         print("  falling back to the whole archive")
