@@ -427,6 +427,24 @@ Running instances keep going until you restart them.
 Continue? [y/N]:
 ```
 
+Only `ikabot`, `modules` and `config-examples` come down — about nine
+megabytes — not the repository archive, which carries the releases and build
+folders and is a quarter of a gigabyte. The files are fetched a few at a time
+over connections that are kept open, so a normal update is seconds rather than
+minutes.
+
+If the link is slow or GitHub is throttling, it **stops after five minutes and
+says so** rather than hanging until something else gives up on it. Pressing it
+again usually works; if the link is genuinely too poor, download the release
+zip by whatever means work and install from that:
+
+```bash
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.26.zip
+```
+
+Anything in `/config` is visible inside the container, so dropping the zip in
+that folder on the host is enough.
+
 Modules are refreshed at the same time. Then load the new code:
 
 ```bash
@@ -1500,7 +1518,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.25 ships panel 1.0.23. That looks like a failed
+> not match — installer 1.0.26 ships panel 1.0.24. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.

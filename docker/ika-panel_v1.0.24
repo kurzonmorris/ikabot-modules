@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.23"
+PANEL_VERSION = "1.0.24"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -231,8 +231,17 @@ def _sh(args, timeout=600):
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         return (p.stdout or "") + (p.stderr or "")
-    except subprocess.TimeoutExpired:
-        return "Timed out after %ds: %s" % (timeout, " ".join(args))
+    except subprocess.TimeoutExpired as exc:
+        # Everything it printed before it stopped, which is the only thing
+        # that says where it got to. Throwing it away leaves "timed out" and
+        # nothing else to go on.
+        got = ""
+        for part in (exc.stdout, exc.stderr):
+            if part:
+                got += part if isinstance(part, str) else part.decode("utf-8", "replace")
+        head = "Timed out after %ds: %s" % (timeout, " ".join(args))
+        return head + ("\n\nIt had got this far:\n\n" + got.strip() if got.strip()
+                       else "\n\nIt printed nothing before it stopped.")
     except OSError as exc:
         return "Could not run %s: %s" % (" ".join(args), exc)
 
@@ -1133,6 +1142,20 @@ def state():
 # Actions — nothing runs that is not in this table
 # --------------------------------------------------------------------------
 
+# Longer than the default for the things that fetch from GitHub. An update
+# gives itself 300s for the files and then has unpacking and copying to do;
+# the panel's limit has to sit above the script's own, or the script's clear
+# message about a slow link is replaced by the panel's blunt one about a
+# timeout.
+TIMEOUTS = {
+    "update": 900,
+    "update_rollback": 900,
+    "modules_all": 900,
+    "modules_local": 600,
+    "self_upgrade": 300,
+}
+
+
 def command_for(action, arg):
     if action == "restart_one":
         if not (arg or "").isdigit():
@@ -1626,7 +1649,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # One at a time: two updates or restarts at once would fight each other.
         with _run_lock:
-            out = _sh(cmd)
+            out = _sh(cmd, timeout=TIMEOUTS.get(act, 600))
         self._send(200, json.dumps({"output": out or "(no output)",
                                     "ran": " ".join(cmd)}))
 
