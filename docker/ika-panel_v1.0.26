@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.25"
+PANEL_VERSION = "1.0.26"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -1645,6 +1645,28 @@ class Handler(BaseHTTPRequestHandler):
 
             return self._send(200, json.dumps({"output": out, "ran": act}))
 
+        # Two commands, so it does not fit the one-argv table below. The bar
+        # along the bottom of the terminal is the only way between instances
+        # for someone who does not know tmux, and losing it strands them in
+        # whichever one they were in.
+        if payload.get("action") == "show_bar":
+            out = _sh(["tmux", "set", "-g", "status", "on"], timeout=15).strip()
+            if out:
+                return self._send(200, json.dumps({"output": out,
+                                                   "ran": "show instance bar"}))
+            # Setting the option does not repaint a browser that is already
+            # attached, so every client is nudged. Addressed one at a time
+            # because a bare refresh-client needs a "current" client and there
+            # is none out here — which is not a failure, just nobody watching.
+            names = _sh(["tmux", "list-clients", "-t", SESSION,
+                         "-F", "#{client_name}"], timeout=15).split()
+            for name in names:
+                _sh(["tmux", "refresh-client", "-t", name], timeout=10)
+            return self._send(200, json.dumps({
+                "output": "The instance bar is back%s."
+                          % (" on %d screen(s)" % len(names) if names else ""),
+                "ran": "show instance bar"}))
+
         if payload.get("action") == "check_updates":
             with _run_lock:
                 msg = refresh_available()
@@ -2125,21 +2147,25 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
 
 <section class="sec" id="sec-terminal">
   <h2>Terminal</h2>
-  <!-- Controls first, then the screen, and the explanation last. It is read
-       once and then never again, and every line above the terminal is a line
-       of terminal you cannot see. -->
-  <div class="row tscroll" style="margin-bottom:8px">
+  <!-- The screen first and everything else under it. Anything above the
+       terminal is a line of terminal you cannot see, and the controls are
+       closer to the thumb down here on a phone. -->
+  <div id="tbox" class="embed"></div>
+  <div class="row tscroll" style="margin:8px 0 0">
     <button data-scroll="top" title="Jump to the start of the scrollback">⤒ Top</button>
     <button data-scroll="up" title="Back one screen">▲ Page up</button>
     <button data-scroll="down" title="Forward one screen">▼ Page down</button>
     <button class="p" data-scroll="bottom" title="Back to the prompt">⤓ Bottom</button>
+    <button id="showbar" data-a="show_bar"
+            title="Bring back the bar listing every instance, if it has gone">Show instance bar</button>
     <span class="hint" id="tpos" style="margin:0"></span>
   </div>
-  <div id="tbox" class="embed"></div>
   <p class="hint" id="tnote"></p>
   <p class="hint" style="margin:6px 0 0">
     The same screens as <span class="mono">ika attach</span>. Ctrl-B then W lists
-    the instances, Ctrl-B then D leaves them running.
+    the instances, Ctrl-B then D leaves them running. If the bar along the
+    bottom ever goes and you are stuck in one instance, Ctrl-B then W still
+    works — or press <b>Show instance bar</b>.
     <a id="tnew" href="#" target="_blank" rel="noopener">Open in its own tab</a>
   </p>
 </section>

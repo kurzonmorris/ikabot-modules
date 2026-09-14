@@ -452,7 +452,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.29.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.30.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -944,8 +944,9 @@ nothing has changed.
 and password once more; if it stays blank, the link beside it opens the
 terminal in its own tab.
 
-Above it are **⤒ Top**, **▲ Page up**, **▼ Page down** and **⤓ Bottom**, with
-how far back you are beside them. On a desktop the mouse wheel does the same
+Under it are **⤒ Top**, **▲ Page up**, **▼ Page down** and **⤓ Bottom**, with
+how far back you are beside them. Everything sits below the screen, because a
+line above the terminal is a line of terminal you cannot see. On a desktop the mouse wheel does the same
 job, but on a phone nothing does: the scrollback belongs to tmux, and reaching
 it means entering copy mode, which a touch drag never does. So these drive tmux
 from the panel's side instead, which works whatever the browser makes of touch
@@ -954,6 +955,19 @@ from the panel's side instead, which works whatever the browser makes of touch
 They follow whichever screen is on show, and **⤓ Bottom** puts you back at the
 prompt. Scrolling back does not stop you typing: reaching the bottom leaves
 the scroll view by itself.
+
+#### If you get stuck in one instance
+
+The bar along the bottom listing every instance is how you move between them.
+If it ever disappears you are left in whichever instance you were in, with no
+obvious way out — and the way out is not obvious unless you know tmux.
+
+**Show instance bar** puts it back. Failing that, **Ctrl-B** then **W** still
+lists the instances whether the bar is there or not, and **Ctrl-B** then **N**
+moves to the next one.
+
+The bar is also switched on explicitly every time the container starts, so a
+restart clears it too.
 
 **Web servers** is one page at a time, read properly, rather than a wall of
 thumbnails.
@@ -1553,7 +1567,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.29 ships panel 1.0.25. That looks like a failed
+> not match — installer 1.0.30 ships panel 1.0.26. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.

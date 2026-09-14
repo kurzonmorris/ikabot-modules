@@ -29,19 +29,23 @@ fi
 
 # Bumping the version line rewrites an existing config; the old one is kept.
 TMUX_CONF=/config/.tmux.conf
-TMUX_CONF_MARK="# ika-tmux-conf v2"
+TMUX_CONF_MARK="# ika-tmux-conf v3"
 if [ ! -f "$TMUX_CONF" ] || ! grep -qxF "$TMUX_CONF_MARK" "$TMUX_CONF"; then
     if [ -f "$TMUX_CONF" ]; then
         cp "$TMUX_CONF" "$TMUX_CONF.bak"
         echo "[entrypoint] updated tmux config (previous kept as .tmux.conf.bak)"
     fi
     cat > "$TMUX_CONF" <<'TMUXCONF'
-# ika-tmux-conf v2
+# ika-tmux-conf v3
 set -g mouse on
 set -g history-limit 50000
 set -g default-terminal "screen-256color"
 set -g base-index 1
 setw -g remain-on-exit on
+# Stated rather than left to the default. The bar along the bottom is how
+# anyone who does not know tmux moves between instances, and a session that
+# has somehow lost it strands them in whichever one they were in.
+set -g status on
 set -g status-interval 5
 set -g status-left "[ikabot] "
 set -g status-left-length 20
