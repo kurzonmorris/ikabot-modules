@@ -960,7 +960,13 @@ class Session:
                 # make a request to check the connection
                 html = old_s.get(self.urlBase, verify=config.do_ssl_verify).text
             except Exception:
-                self.__proxy_error()
+                # Nothing below this can run without a page, so a changed
+                # proxy means starting the login again rather than falling
+                # through with html unset.
+                if self.__proxy_error():
+                    return self.__login(retries, mail=self.mail,
+                                        password=self.password)
+                raise
 
             cookies_are_valid = self.__isExpired(html) is False
             if cookies_are_valid:
@@ -1059,7 +1065,11 @@ class Session:
                                     self.urlBase, verify=config.do_ssl_verify
                                 ).text
                             except Exception:
-                                self.__proxy_error()
+                                if self.__proxy_error():
+                                    return self.__login(
+                                        retries, mail=self.mail,
+                                        password=self.password)
+                                raise
                             skipGetCookie = cookies_are_valid = (
                                 self.__isExpired(html) is False
                             )
@@ -1096,7 +1106,10 @@ class Session:
                 try:
                     html = self.s.get(url, verify=config.do_ssl_verify).text
                 except Exception:
-                    self.__proxy_error()
+                    if self.__proxy_error():
+                        return self.__login(retries, mail=self.mail,
+                                            password=self.password)
+                    raise
 
         if self.__isInVacation(html):
             msg = "The account went into vacation mode"
@@ -1177,29 +1190,37 @@ class Session:
             except Exception:
                 self.__sessionExpired(_retries - 1)
 
+    # A proxy that keeps failing must not turn into an endless question.
+    _PROXY_FIX_LIMIT = 3
+
     def __proxy_error(self):
+        """Deal with a request that failed while a proxy was in use.
+
+        Returns True when the proxy settings were changed and the caller
+        should try again. It used to end the process whichever way the
+        question was answered, which meant restarting the instance by hand —
+        and being asked the same thing again on the way back up.
+        """
         sessionData = self.getSessionData()
         if "proxy" not in sessionData or sessionData["proxy"]["set"] is False:
             sys.exit("network error")
-        elif self.padre is True:
-            print("There seems to be a problem connecting to ikariam.")
-            print("Do you want to disable the proxy? [Y/n]")
-            rta = read(values=["y", "Y", "n", "N", ""])
-            if rta.lower() == "n":
-                sys.exit()
-            else:
-                def _disable_proxy(data):
-                    data.setdefault("proxy", {})["set"] = False
-                    return data
-
-                self.mutateSessionData(_disable_proxy)
-                print("Proxy disabled, try again.")
-                enter()
-                sys.exit()
-        else:
+        if self.padre is not True:
             msg = "Network error. Consider disabling the proxy."
             sendToBot(self, msg)
             sys.exit()
+
+        self._proxy_fixes = getattr(self, "_proxy_fixes", 0) + 1
+        if self._proxy_fixes > self._PROXY_FIX_LIMIT:
+            sys.exit("the proxy could not be made to work")
+
+        # Imported here rather than at the top: proxyConf reaches back into
+        # the session helpers, and this is the only place that needs it.
+        from ikabot.function.proxyConf import handle_broken_proxy
+
+        handle_broken_proxy(
+            self, "There seems to be a problem connecting to Ikariam."
+        )
+        return True
 
     def __update_proxy(self, *, obj=None, sessionData=None):
         # set the proxy

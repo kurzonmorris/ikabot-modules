@@ -10,20 +10,55 @@ from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import read
 
 
-def show_proxy(session):
-    session_data = session.getSessionData()
-    msg = "using proxy:"
-    if "proxy" in session_data and session_data["proxy"]["set"] is True:
-        curr_proxy = session_data["proxy"]["conf"]["https"]
-        if test_proxy(session, session_data["proxy"]["conf"]) is False:
+def handle_broken_proxy(session, reason=""):
+    """Offer a new proxy, or turn the broken one off, and carry on.
+
+    A proxy that has stopped working is a setting to correct, not a reason to
+    end the process. Exiting here meant the instance had to be started again
+    by hand, only to be asked the very same question — and answering it still
+    ended the instance, so it took two restarts to get back to a menu.
+
+    Either answer leaves the session usable: a new proxy that has been tested,
+    or no proxy at all. Always returns True, meaning "something changed, the
+    caller may carry on".
+    """
+    if reason:
+        print(reason)
+
+    while True:
+        print("Do you want to enter a new proxy? [y/N]")
+        rta = read(values=["y", "Y", "n", "N", ""])
+
+        if rta.lower() != "y":
             def _disable_proxy(sd):
                 sd.setdefault("proxy", {})["set"] = False
                 return sd
 
             session.mutateSessionData(_disable_proxy)
-            sys.exit(
-                "the {} proxy does not work, it has been removed".format(curr_proxy)
-            )
+            print("The proxy has been turned off; carrying on without it.")
+            enter()
+            return True
+
+        proxy_dict = read_proxy(session)
+        if proxy_dict is None:
+            # read_proxy has already said it does not work. Ask again rather
+            # than leaving as the only way out the one that ends the process.
+            continue
+
+        def _store_proxy(sd):
+            sd.setdefault("proxy", {})["conf"] = proxy_dict
+            sd["proxy"]["set"] = True
+            return sd
+
+        session.mutateSessionData(_store_proxy)
+        return True
+
+
+def _proxy_message(session_data):
+    """Keep the banner's proxy line in step with what is actually set."""
+    msg = "using proxy:"
+    if session_data.get("proxy", {}).get("set") is True:
+        curr_proxy = session_data["proxy"]["conf"]["https"]
         if msg not in config.update_msg:
             # add proxy message
             config.update_msg += "{} {}\n".format(msg, curr_proxy)
@@ -39,6 +74,22 @@ def show_proxy(session):
         config.update_msg = config.update_msg.replace(
             "\n".join(config.update_msg.split("\n")[-2:]), ""
         )
+
+
+def show_proxy(session):
+    session_data = session.getSessionData()
+    if session_data.get("proxy", {}).get("set") is True:
+        if test_proxy(session, session_data["proxy"]["conf"]) is False:
+            handle_broken_proxy(
+                session,
+                "The {} proxy does not work.".format(
+                    session_data["proxy"]["conf"]["https"]
+                ),
+            )
+            # Whatever was chosen, what is set now is not what was set a
+            # moment ago, so the banner is built from a fresh read.
+            session_data = session.getSessionData()
+    _proxy_message(session_data)
 
 
 def test_proxy(session, proxy_dict):

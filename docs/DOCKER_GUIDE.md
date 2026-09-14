@@ -452,7 +452,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.27.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.28.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -1531,7 +1531,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.27 ships panel 1.0.24. That looks like a failed
+> not match — installer 1.0.28 ships panel 1.0.24. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.
