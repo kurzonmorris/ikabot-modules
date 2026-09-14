@@ -452,7 +452,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.30.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.31.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -940,7 +940,7 @@ nothing has changed.
 ### Two embedded sections
 
 **Terminal** puts the instance screens in the page, the same as opening port
-7681 yourself. A framed page has its own sign-in, so it asks for the username
+7681 yourself. The bar listing the instances is along the top. A framed page has its own sign-in, so it asks for the username
 and password once more; if it stays blank, the link beside it opens the
 terminal in its own tab.
 
@@ -956,18 +956,34 @@ They follow whichever screen is on show, and **⤓ Bottom** puts you back at the
 prompt. Scrolling back does not stop you typing: reaching the bottom leaves
 the scroll view by itself.
 
-#### If you get stuck in one instance
+#### The instance bar, and getting stuck
 
-The bar along the bottom listing every instance is how you move between them.
-If it ever disappears you are left in whichever instance you were in, with no
-obvious way out — and the way out is not obvious unless you know tmux.
+The bar listing every instance is how you move between them, and it sits along
+the **top** of the terminal.
 
-**Show instance bar** puts it back. Failing that, **Ctrl-B** then **W** still
-lists the instances whether the bar is there or not, and **Ctrl-B** then **N**
-moves to the next one.
+It used to be at the bottom, which is where tmux puts it by default, and there
+it had a habit of disappearing — often the moment you pressed Enter. tmux was
+never turning it off: measured against a real attached client, the option stays
+on through Enter, through `clear`, and through a screen of scrolling output.
+What happens is at the browser's end. The bottom row of a terminal in a frame is
+the one a few pixels of rounding will clip, and the one the view scrolls past.
+The top row is neither, so that is where it lives now.
 
-The bar is also switched on explicitly every time the container starts, so a
-restart clears it too.
+If it ever does go, **Show instance bar** puts it back and moves it to the top.
+Failing that, **Ctrl-B** then **W** lists the instances whether the bar is
+visible or not, and **Ctrl-B** then **N** moves to the next one — worth knowing
+regardless, because it works from any terminal, panel or not.
+
+The position is set every time the container starts. To put it back at the
+bottom:
+
+```bash
+docker exec -it ikabot tmux set -g status-position bottom
+```
+
+To make that survive a restart, change the same line in
+`/config/.tmux.conf` — though note the container rewrites that file when its
+own version of it changes, keeping your copy as `.tmux.conf.bak`.
 
 **Web servers** is one page at a time, read properly, rather than a wall of
 thumbnails.
@@ -1567,7 +1583,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.30 ships panel 1.0.26. That looks like a failed
+> not match — installer 1.0.31 ships panel 1.0.27. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.
