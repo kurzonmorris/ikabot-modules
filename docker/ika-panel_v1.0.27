@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.26"
+PANEL_VERSION = "1.0.27"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -1651,6 +1651,12 @@ class Handler(BaseHTTPRequestHandler):
         # whichever one they were in.
         if payload.get("action") == "show_bar":
             out = _sh(["tmux", "set", "-g", "status", "on"], timeout=15).strip()
+            # Moved to the top as well as switched on. tmux never stopped
+            # drawing it — that was measured — so a bar nobody can see is the
+            # browser clipping or scrolling past the bottom row of the
+            # terminal. The top row is neither clipped nor scrolled past.
+            out += _sh(["tmux", "set", "-g", "status-position", "top"],
+                       timeout=15).strip()
             if out:
                 return self._send(200, json.dumps({"output": out,
                                                    "ran": "show instance bar"}))
@@ -1663,7 +1669,8 @@ class Handler(BaseHTTPRequestHandler):
             for name in names:
                 _sh(["tmux", "refresh-client", "-t", name], timeout=10)
             return self._send(200, json.dumps({
-                "output": "The instance bar is back%s."
+                "output": "The instance bar is back, at the top of the "
+                          "terminal%s."
                           % (" on %d screen(s)" % len(names) if names else ""),
                 "ran": "show instance bar"}))
 
@@ -2157,15 +2164,15 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     <button data-scroll="down" title="Forward one screen">▼ Page down</button>
     <button class="p" data-scroll="bottom" title="Back to the prompt">⤓ Bottom</button>
     <button id="showbar" data-a="show_bar"
-            title="Bring back the bar listing every instance, if it has gone">Show instance bar</button>
+            title="Put the bar listing every instance back, at the top where the browser cannot clip it">Show instance bar</button>
     <span class="hint" id="tpos" style="margin:0"></span>
   </div>
   <p class="hint" id="tnote"></p>
   <p class="hint" style="margin:6px 0 0">
     The same screens as <span class="mono">ika attach</span>. Ctrl-B then W lists
-    the instances, Ctrl-B then D leaves them running. If the bar along the
-    bottom ever goes and you are stuck in one instance, Ctrl-B then W still
-    works — or press <b>Show instance bar</b>.
+    the instances, Ctrl-B then D leaves them running. The bar listing them sits
+    along the top. If it ever goes and you are stuck in one instance, Ctrl-B
+    then W still works — or press <b>Show instance bar</b>.
     <a id="tnew" href="#" target="_blank" rel="noopener">Open in its own tab</a>
   </p>
 </section>
