@@ -8,6 +8,7 @@ import requests
 import ikabot.config as config
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import read
+from ikabot.helpers.taskWatchdog import set_proxy_state
 
 
 def handle_broken_proxy(session, reason=""):
@@ -25,6 +26,15 @@ def handle_broken_proxy(session, reason=""):
     if reason:
         print(reason)
 
+    # Recorded before the question is asked, not after it is answered: on an
+    # unattended instance nobody answers for hours, and the point of the
+    # panel's alert is to say so while it is still unnoticed.
+    session_data = session.getSessionData()
+    set_proxy_state(
+        session, ok=False,
+        url=session_data.get("proxy", {}).get("conf", {}).get("https"),
+    )
+
     while True:
         print("Do you want to enter a new proxy? [y/N]")
         rta = read(values=["y", "Y", "n", "N", ""])
@@ -35,6 +45,7 @@ def handle_broken_proxy(session, reason=""):
                 return sd
 
             session.mutateSessionData(_disable_proxy)
+            set_proxy_state(session, ok=True, url=None)   # none set: nothing to alert on
             print("The proxy has been turned off; carrying on without it.")
             enter()
             return True
@@ -51,6 +62,7 @@ def handle_broken_proxy(session, reason=""):
             return sd
 
         session.mutateSessionData(_store_proxy)
+        set_proxy_state(session, ok=True, url=proxy_dict["https"])
         return True
 
 
@@ -79,16 +91,18 @@ def _proxy_message(session_data):
 def show_proxy(session):
     session_data = session.getSessionData()
     if session_data.get("proxy", {}).get("set") is True:
+        curr_proxy = session_data["proxy"]["conf"]["https"]
         if test_proxy(session, session_data["proxy"]["conf"]) is False:
             handle_broken_proxy(
-                session,
-                "The {} proxy does not work.".format(
-                    session_data["proxy"]["conf"]["https"]
-                ),
+                session, "The {} proxy does not work.".format(curr_proxy)
             )
             # Whatever was chosen, what is set now is not what was set a
             # moment ago, so the banner is built from a fresh read.
             session_data = session.getSessionData()
+        else:
+            set_proxy_state(session, ok=True, url=curr_proxy)
+    else:
+        set_proxy_state(session, ok=True, url=None)
     _proxy_message(session_data)
 
 
