@@ -75,7 +75,8 @@ stale-lock check no longer compares PIDs across PID namespaces.
   "tasks": [
     { "pid": 102, "action": "alertAttacks", "status": "watching",            "started": 1755620001 },
     { "pid": 137, "action": "webServer",    "status": "running on :43000",   "started": 1755620500 }
-  ]
+  ],
+  "proxy": { "set": true, "ok": false, "url": "socks5://1.2.3.4:9050", "since": 1755624100 }
 }
 ```
 
@@ -89,6 +90,17 @@ stale-lock check no longer compares PIDs across PID namespaces.
 | `tasks[].action` | Module name, e.g. `webServer`, `alertAttacks`. |
 | `tasks[].status` | Free text the module sets via `session.setStatus()`. Display as-is; do not parse. |
 | `tasks[].started` | Unix seconds. |
+| `proxy` | Present from mod 2.0.2. Absent on older ones — treat that as *nothing known*, not as *nothing wrong*. |
+| `proxy.set` | Whether a proxy is configured at all. `false` means there is nothing to go wrong. |
+| `proxy.ok` | Whether it was last seen working. **Alert on `set && !ok`** — nothing else. |
+| `proxy.url` | The proxy in use, or `null`. |
+| `proxy.since` | Unix seconds since this state began, so a reader can say how long it has been broken rather than "just now". |
+
+`proxy` is written the moment the state is known, not on the next pass of the
+menu. A failing proxy makes ikabot stop and ask whether to enter a new one,
+and an unattended instance can sit at that question for hours — so waiting for
+the next full write would mean the file only became accurate once somebody was
+already looking at the screen.
 
 Writes are atomic (temp file + `os.replace`), so a reader never sees a partial
 file and **no locking is needed**. Just read it.

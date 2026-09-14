@@ -57,6 +57,73 @@ def status_path(session):
     return os.path.join(STATUS_DIR, f"{account_id(session)}.json")
 
 
+def _read_status(session):
+    """The status file as it stands, or {} if there is not a readable one."""
+    try:
+        with open(status_path(session), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_status_file(session, payload):
+    """Atomic write, so a reader never sees half a file. Never raises."""
+    try:
+        os.makedirs(STATUS_DIR, exist_ok=True)
+        path = status_path(session)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        logger.debug("Could not write status file", exc_info=True)
+
+
+def set_proxy_state(session, ok, url=None):
+    """Record whether this account's proxy is working. Never raises.
+
+    Written on its own rather than waiting for the next write_status(),
+    because a failing proxy makes the menu stop and ask a question — and on an
+    unattended instance nobody answers it for hours. An alert that only
+    appears once somebody is already looking at the screen is no alert at all.
+
+    Kept on the session too, so the next full write does not drop it.
+    """
+    state = {
+        "set": url is not None,
+        "ok": bool(ok),
+        "url": url,
+        "since": int(time.time()),
+    }
+    try:
+        previous = getattr(session, "_proxy_state", None)
+        # Keep the original timestamp while nothing has changed, so the panel
+        # can say how long it has been broken rather than "just now" forever.
+        if previous and previous.get("ok") == state["ok"] \
+                and previous.get("url") == state["url"]:
+            state["since"] = previous.get("since", state["since"])
+        session._proxy_state = state
+    except Exception:
+        pass
+
+    payload = _read_status(session)
+    if not payload:
+        # No file yet: the account has not reached the menu. Write only what
+        # is known rather than inventing task state.
+        payload = {
+            "schema": 1,
+            "account": account_id(session),
+            "pid": os.getpid(),
+            "updated": int(time.time()),
+        }
+    payload["proxy"] = state
+    payload["updated"] = int(time.time())
+    _write_status_file(session, payload)
+
+
 def write_status(session, process_list):
     """Export current task state for external monitors. Never raises."""
     try:
@@ -82,13 +149,12 @@ def write_status(session, process_list):
                 for p in process_list
             ],
         }
-        path = status_path(session)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        # Carried across so a full write does not drop what set_proxy_state
+        # recorded between two passes of the menu.
+        proxy = getattr(session, "_proxy_state", None)
+        if proxy:
+            payload["proxy"] = proxy
+        _write_status_file(session, payload)
     except Exception:
         logger.debug("Could not write status file", exc_info=True)
 

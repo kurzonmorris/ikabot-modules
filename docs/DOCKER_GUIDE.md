@@ -452,7 +452,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.28.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.29.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -906,6 +906,7 @@ Sign in with the same username and password as the terminal.
 |---|---|
 | **Instances** | Every instance with running/crashed state and its web server port. Restart one, restart only the crashed ones, restart all, or ask a dead one **Why?** to see its traceback. **Open all web servers** opens a tab per running web server, in instance order |
 | **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
+| **Instances** — proxy alert | Tick **Alert on proxy trouble** and any instance whose proxy has stopped working breathes blue, with *proxy not working* and how long it has been so on the card. Off by default, remembered per browser, and it can only fire on an instance that has a proxy configured |
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Says so plainly at the top when there is one to install, and marks the menu item **new**. Download and install an update, or roll the last one back |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
 | **Accounts** | Paste every account in at once and save them to ikabot's vault in one press — for a fresh install, or a machine that has no vault yet |
@@ -1014,6 +1015,27 @@ This replaces keeping twenty-four browser tabs open. It needs the ports to be
 reachable from your browser, which they are on Unraid, TrueNAS, Linux and a
 Steam Deck; on Windows and Mac Docker cannot share the host's network, so only
 the panel and terminal are reachable there.
+
+### When a proxy stops working
+
+An instance whose proxy has died is not crashed — it is up, logged in, and
+unable to reach the game. That is a different thing from a crash and it looks
+different on the page: **blue, and breathing slowly**, against the flat red of
+an instance that has fallen over. It is meant to be noticeable from across the
+room and still bearable on a screen left open for an hour, because a proxy
+often comes back on its own and there is no sense making it an emergency.
+
+Turn it on with **Alert on proxy trouble** in the **Instances** section. It is
+off by default, and remembered per browser. An instance with no proxy
+configured can never raise it, so leaving it on costs nothing on a mixed
+setup where only some accounts use one.
+
+The card says *proxy not working* and how long it has been that way. Anyone
+who has asked their system not to animate things gets the colour without the
+movement.
+
+> Needs mod 2.0.2 or later, which is what writes the proxy's state where the
+> panel can read it. On anything older the alert simply never fires.
 
 ### The instance grid
 
@@ -1531,7 +1553,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.28 ships panel 1.0.24. That looks like a failed
+> not match — installer 1.0.29 ships panel 1.0.25. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.
