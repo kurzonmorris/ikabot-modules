@@ -2845,16 +2845,22 @@ def issues_col_for_run(run_column):
     return run_column.replace("Run_", "Issues_", 1)
 
 
+_AMOUNT_SUFFIXES = {"k": 1000, "m": 1000000}
+
+
 def _parse_amount(s):
-    """Parse a number string with optional 'k' suffix and comma separators.
-    '500' -> 500, '10k' -> 10000, '1.5k' -> 1500, '10,000' -> 10000."""
+    """Parse a number string with an optional k/m suffix and comma separators.
+    '500' -> 500, '10k' -> 10000, '1.5k' -> 1500, '10,000' -> 10000,
+    '4m' -> 4000000, '4404m' -> 4404000000."""
     s = s.strip().replace(",", "")
     if not s:
         return 0
-    if s.lower().endswith("k"):
-        num = s[:-1].strip()
+    multiplier = _AMOUNT_SUFFIXES.get(s[-1:].lower())
+    if multiplier:
         try:
-            return int(float(num) * 1000)
+            # Rounded, not truncated: 0.7k is 700, and float(0.7) * 1000 is
+            # 699.9999999999999.
+            return int(round(float(s[:-1].strip()) * multiplier))
         except ValueError:
             return 0
     try:
@@ -2865,7 +2871,8 @@ def _parse_amount(s):
 
 def parse_resource_value(val):
     """Parse a resource cell.
-    Exact amounts:  '500' -> ('exact', 500),  '10k' -> ('exact', 10000)
+    Exact amounts:  '500' -> ('exact', 500),  '10k' -> ('exact', 10000),
+                    '4m' -> ('exact', 4000000)
     Send all:       'all' or 'a' -> ('except', 0)
     All-except:     'all-10k' or 'a-5000' -> ('except', 10000) / ('except', 5000)
     Legacy prefix:  'e10000' -> ('except', 10000)
@@ -3033,12 +3040,12 @@ def readResourceAmount(resource_name):
             return amount
         if amount == 0:
             return None
-        print(f"  {C.HINT}Examples: 500, 10k, all, a, all-10k, a-5000{C.RESET}")
+        print(f"  {C.HINT}Examples: 500, 10k, 4m, all, a, all-10k, a-5000{C.RESET}")
         print(f"  {C.HINT}blank = skip, ' = exit, = = restart{C.RESET}")
 
 
 def get_resource_config(send_mode=2):
-    print(f"  {C.HINT}Resource input:  500 or 10k = exact amount{C.RESET}")
+    print(f"  {C.HINT}Resource input:  500, 10k or 4m = exact amount{C.RESET}")
     print(f"  {C.HINT}                 all or a   = send everything{C.RESET}")
     print(f"  {C.HINT}                 all-10k    = send all, keep 10k{C.RESET}")
     print(f"  {C.HINT}                 blank      = skip resource{C.RESET}")
@@ -3959,7 +3966,7 @@ def distributeMode(session, event, stdin_fd, predetermined_input,
         print(f"  Source: {C.CYAN}{origin_city['name']}{C.RESET}")
         print(f"  Destinations: {C.CYAN}{dest_summary}{C.RESET}\n")
         print(f"  {C.DIM}Enter how much of each resource to send to EACH destination.{C.RESET}\n")
-        print(f"  {C.HINT}  500 or 10k = exact  |  all or a = send all{C.RESET}")
+        print(f"  {C.HINT}  500, 10k, 4m = exact  |  all or a = send all{C.RESET}")
         print(f"  {C.HINT}  all-10k = keep 10k  |  blank = skip  |  ' = exit{C.RESET}\n")
 
         resource_config = get_resource_config(send_mode=2)
@@ -4621,7 +4628,7 @@ def _create_csv_template(session):
         write_csv_atomic(csv_path, BULK_CSV_COLUMNS, example_rows)
         print(f"\n  {C.OK}Template created: {csv_path}{C.RESET}")
         print(f"  {C.DIM}Edit it with a spreadsheet or the built-in editor.{C.RESET}")
-        print(f"\n  {C.HINT}Resource values:  500 or 10k = exact amount{C.RESET}")
+        print(f"\n  {C.HINT}Resource values:  500, 10k or 4m = exact amount{C.RESET}")
         print(f"  {C.HINT}                  all or a   = send everything{C.RESET}")
         print(f"  {C.HINT}                  all-10k    = send all, keep 10k{C.RESET}")
         print(f"  {C.HINT}From column:      a = all cities, 1,3 = specific city indices{C.RESET}")
@@ -4910,7 +4917,7 @@ def _bulk_editor_set_resources(rows):
 
     if choice == 1:
         print("\n  Enter resource amounts for ALL rows:")
-        print("  (Formats: 5000, e0=send all, e10000=except 10k, "
+        print("  (Formats: 5000, 10k, 4m, e0=send all, e10000=except 10k, "
               "0 or blank=skip)")
         res_names = ["Wood", "Wine", "Marble", "Crystal", "Sulphur"]
         values = []
@@ -5198,7 +5205,7 @@ def _bulkDistributionModeInner(session, event, stdin_fd, predetermined_input,
             print(f"  {C.DIM}Press Enter to reuse, or type a new path.{C.RESET}")
         else:
             print(f"  Enter the full path to your CSV file, or create a template.")
-        print(f"\n  {C.HINT}Resource values:  500 or 10k = exact, all or a = send all{C.RESET}")
+        print(f"\n  {C.HINT}Resource values:  500, 10k, 4m = exact, all or a = send all{C.RESET}")
         print(f"  {C.HINT}                  all-10k    = send all but keep 10k{C.RESET}")
         print(f"  {C.HINT}From: a = all cities, or 1,3,5  |  Transport: m or f{C.RESET}")
         print(f"\n  {C.BOLD}(N){C.RESET} Create new template")
