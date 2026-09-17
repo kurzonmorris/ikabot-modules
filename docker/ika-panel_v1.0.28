@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.27"
+PANEL_VERSION = "1.0.28"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -887,6 +887,36 @@ def term_scroll(what):
     return "%s line(s) back" % pos
 
 
+def term_window(which):
+    """Step the terminal to the next or previous instance.
+
+    tmux's own next-window and previous-window wrap round, which is what makes
+    the last instance's "next" the first one — measured, not assumed. Ctrl-B
+    then N does the same thing, but only if you know it exists and have a
+    keyboard, and neither is true of somebody on a phone.
+    """
+    cmd = {"next": "next-window", "prev": "previous-window"}.get(which)
+    if cmd is None:
+        return "unknown direction"
+
+    out = _sh(["tmux", cmd, "-t", SESSION], timeout=15).strip()
+    if out:
+        return out
+
+    # A pane left in copy mode ignores typing, and arriving somewhere you
+    # cannot type into looks like the switch half worked.
+    if in_copy_mode(SESSION):
+        _sh(["tmux", "send-keys", "-t", SESSION, "-X", "cancel"], timeout=15)
+
+    try:
+        name = subprocess.run(["tmux", "display", "-p", "-t", SESSION,
+                               "#{window_name}"],
+                              capture_output=True, text=True).stdout.strip()
+    except OSError:
+        name = ""
+    return "on %s" % name if name else "moved"
+
+
 def press(window, keys, delay=DEFAULT_DELAY, menu=True):
     """Send each entry followed by Enter, pausing so the screen redraws.
 
@@ -1532,6 +1562,10 @@ class Handler(BaseHTTPRequestHandler):
         # the only reachable processes are ones ikabot itself reported.
         # Scrolling is pressed repeatedly, so it answers on its own without
         # the run lock or a state rebuild -- it changes nothing but the view.
+        if act == "term_window":
+            return self._send(200, json.dumps(
+                {"where": term_window(payload.get("arg", ""))}))
+
         if act == "term_scroll":
             arg = str(payload.get("arg", ""))
             if arg not in ("up", "down", "top", "bottom"):
@@ -1808,6 +1842,10 @@ min-width:34px;text-align:center}
 /* Big enough to hit with a thumb: on a phone these are the only way to read
    back up the screen, since a touch drag never reaches tmux's copy mode. */
 .tscroll button{padding:8px 14px;font-size:13px}
+/* Set apart from the four that scroll: these move between instances, which
+   is a different kind of thing to do with a terminal. */
+.tscroll button.step{font-weight:600;border-color:var(--accent);color:var(--accent)}
+.tscroll button.step:hover{background:var(--accent);color:#fff}
 @media(pointer:coarse){.tscroll button{padding:11px 16px;font-size:14px}}
 .wrail{border:1px solid var(--rule);border-radius:6px;background:var(--card);
 padding:6px;display:flex;flex-direction:column;gap:6px;align-items:center}
@@ -2159,10 +2197,14 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
        closer to the thumb down here on a phone. -->
   <div id="tbox" class="embed"></div>
   <div class="row tscroll" style="margin:8px 0 0">
+    <button class="step" data-window="prev"
+            title="The instance before this one — wraps round from the first to the last">◀ Instance</button>
     <button data-scroll="top" title="Jump to the start of the scrollback">⤒ Top</button>
     <button data-scroll="up" title="Back one screen">▲ Page up</button>
     <button data-scroll="down" title="Forward one screen">▼ Page down</button>
     <button class="p" data-scroll="bottom" title="Back to the prompt">⤓ Bottom</button>
+    <button class="step" data-window="next"
+            title="The next instance — wraps round from the last back to the first">Instance ▶</button>
     <button id="showbar" data-a="show_bar"
             title="Put the bar listing every instance back, at the top where the browser cannot clip it">Show instance bar</button>
     <span class="hint" id="tpos" style="margin:0"></span>
@@ -2170,8 +2212,9 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <p class="hint" id="tnote"></p>
   <p class="hint" style="margin:6px 0 0">
     The same screens as <span class="mono">ika attach</span>. Ctrl-B then W lists
-    the instances, Ctrl-B then D leaves them running. The bar listing them sits
-    along the top. If it ever goes and you are stuck in one instance, Ctrl-B
+    the instances, Ctrl-B then D leaves them running — or use
+    <b>◀ Instance</b> and <b>Instance ▶</b>, which step through them in order
+    and wrap round at either end. The bar listing them sits along the top. If it ever goes and you are stuck in one instance, Ctrl-B
     then W still works — or press <b>Show instance bar</b>.
     <a id="tnew" href="#" target="_blank" rel="noopener">Open in its own tab</a>
   </p>
@@ -2975,10 +3018,13 @@ document.addEventListener('click',function(e){
 // it changes nothing, so it should not grey out every button on the page or
 // trigger a rebuild for each press.
 document.addEventListener('click',function(e){
-  var b=e.target.closest('button[data-scroll]'); if(!b)return;
+  var b=e.target.closest('button[data-scroll],button[data-window]'); if(!b)return;
   var pos=el('tpos');
+  var body = b.dataset.window
+    ? {action:'term_window', arg:b.dataset.window}
+    : {action:'term_scroll', arg:b.dataset.scroll};
   fetch('api/run',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'term_scroll',arg:b.dataset.scroll})})
+    body:JSON.stringify(body)})
   .then(function(r){return r.json()})
   .then(function(d){ pos.textContent=d.error?('Error: '+d.error):(d.where||''); })
   .catch(function(err){ pos.textContent='Request failed: '+err; });

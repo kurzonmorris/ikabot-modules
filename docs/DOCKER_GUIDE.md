@@ -452,7 +452,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.31.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.32.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -944,9 +944,17 @@ nothing has changed.
 and password once more; if it stays blank, the link beside it opens the
 terminal in its own tab.
 
-Under it are **⤒ Top**, **▲ Page up**, **▼ Page down** and **⤓ Bottom**, with
-how far back you are beside them. Everything sits below the screen, because a
-line above the terminal is a line of terminal you cannot see. On a desktop the mouse wheel does the same
+Under it are **◀ Instance**, **⤒ Top**, **▲ Page up**, **▼ Page down**,
+**⤓ Bottom** and **Instance ▶**, with where you are beside them. Everything sits
+below the screen, because a line above the terminal is a line of terminal you
+cannot see.
+
+The two on the ends step between instances and **wrap round**: from the last
+one, **Instance ▶** goes to the first, and from the first, **◀ Instance** goes
+to the last. Ctrl-B then N does the same thing, but only if you know it exists
+and have a keyboard to do it with — neither of which is true on a phone. A pane
+somebody had scrolled up is taken out of copy mode on arrival, so the instance
+you land on can be typed into straight away. On a desktop the mouse wheel does the same
 job, but on a phone nothing does: the scrollback belongs to tmux, and reaching
 it means entering copy mode, which a touch drag never does. So these drive tmux
 from the panel's side instead, which works whatever the browser makes of touch
@@ -1583,7 +1591,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.31 ships panel 1.0.27. That looks like a failed
+> not match — installer 1.0.32 ships panel 1.0.28. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.
