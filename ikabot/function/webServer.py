@@ -188,6 +188,22 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                     pass
                 return Response("Not found", 404)
 
+            # Serve the FULL extension bundle for experimental in-page full mode
+            # (Phase 2). Same defensive treatment as the lite route.
+            if path.startswith("ikaeasy-full/"):
+                try:
+                    from ikabot.helpers.ikaEasyFull import serve_full_asset
+                    asset = serve_full_asset(path)
+                    if asset is not None:
+                        content, ctype = asset
+                        return Response(content, 200, {
+                            "Content-Type": ctype,
+                            "Cache-Control": "no-cache",
+                        })
+                except Exception:
+                    pass
+                return Response("Not found", 404)
+
             # replace mayor
             if "/cdn/all/both/layout/advisors/mayor" in request.url:
                 image_data = (
