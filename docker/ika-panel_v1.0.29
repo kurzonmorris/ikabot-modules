@@ -13,6 +13,7 @@ import io
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -23,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.28"
+PANEL_VERSION = "1.0.29"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -72,6 +73,15 @@ VIEW_MAX_ROWS = 3000
 QUICK_KEYS = [k.strip() for k in os.environ.get("QUICK_KEYS", "5,6,9,11").split(",")
               if k.strip().isdigit()]
 BUTTONS_FILE = os.environ.get("PANEL_BUTTONS", "/config/panel-buttons.json")
+
+# The terminal's font size. It belongs to ttyd, which only takes it as a
+# command-line option at startup — there is no way to set it per browser, and
+# tmux cannot size its own status bar because a terminal has one font for the
+# whole grid. So making the instance bar bigger means restarting ttyd, and
+# remembering the choice somewhere the panel can re-apply it after a restart.
+SETTINGS_FILE = os.environ.get("PANEL_SETTINGS", "/config/panel-settings.json")
+FONT_DEFAULT, FONT_MIN, FONT_MAX = 15, 8, 40
+_settings_lock = threading.Lock()
 
 REPO = os.environ.get("IKABOT_REPO", "kurzonmorris/ikabot-modules")
 BRANCH = os.environ.get("IKABOT_BRANCH", "main")
@@ -731,6 +741,154 @@ def _new_id():
     return "b%d" % int(time.time() * 1000 % 1000000000)
 
 
+def load_settings():
+    with _settings_lock:
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+
+def save_settings(**changes):
+    with _settings_lock:
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
+            data = {}
+        data.update(changes)
+        try:
+            tmp = SETTINGS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, SETTINGS_FILE)
+        except OSError:
+            pass
+        return data
+
+
+def font_size():
+    """The terminal font size in effect, saved or default."""
+    try:
+        n = int(load_settings().get("font_size", FONT_DEFAULT))
+    except (TypeError, ValueError):
+        return FONT_DEFAULT
+    return n if FONT_MIN <= n <= FONT_MAX else FONT_DEFAULT
+
+
+def restart_ttyd(size):
+    """Relaunch ttyd at *size*. Returns "" when it came back, else why not.
+
+    Nothing in tmux is disturbed: ttyd only serves the terminal to the
+    browser, and the instances go on running behind it. The browser drops its
+    connection for a moment and reconnects to the same screens.
+    """
+    if not PASS:
+        return "no terminal password set, so there is no terminal to restart"
+
+    # Found by scanning /proc rather than by name: pkill -f matches this
+    # process's own command line too, which has ended a panel more than once.
+    victims = []
+    me = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == me:
+            continue
+        try:
+            with open("/proc/%s/cmdline" % entry, "rb") as f:
+                argv = [a for a in f.read().decode("utf-8", "replace").split("\0") if a]
+        except OSError:
+            continue
+        # Either the binary itself, or something running a file called ttyd
+        # — a wrapper script is still the ttyd that holds the port. "--port"
+        # has to be there too, so this cannot match a command that merely
+        # mentions ttyd in an argument.
+        looks_like = any(os.path.basename(a) == "ttyd" for a in argv)
+        if looks_like and (os.path.basename(argv[0]) == "ttyd"
+                           or "--port" in argv):
+            victims.append(int(entry))
+
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    for _ in range(20):
+        if not any(os.path.exists("/proc/%d" % p) for p in victims):
+            break
+        time.sleep(0.1)
+
+    log = os.path.join(DATA_DIR, "logs", "ttyd.log")
+    try:
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+    except OSError:
+        pass
+    cmd = ["ttyd", "--port", str(TTYD_PORT),
+           "--credential", "%s:%s" % (USER, PASS),
+           "--writable",
+           "--client-option", "fontSize=%d" % size,
+           "--client-option", 'theme={"background":"#0A1119"}',
+           "/usr/local/bin/ika-web-attach"]
+    try:
+        with open(log, "a") as fh:
+            subprocess.Popen(cmd, stdout=fh, stderr=fh,
+                             start_new_session=True)
+    except OSError as exc:
+        return "could not start ttyd: %s" % exc
+
+    # Confirmed by the port answering rather than by the process existing: a
+    # ttyd that starts and exits at once would otherwise look like success.
+    for _ in range(30):
+        time.sleep(0.1)
+        with socket.socket() as sk:
+            sk.settimeout(0.3)
+            if sk.connect_ex(("127.0.0.1", TTYD_PORT)) == 0:
+                return ""
+    return "ttyd did not come back on port %d — see %s" % (TTYD_PORT, log)
+
+
+def running_font():
+    """The size the ttyd that is up was started with, or None."""
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % entry, "rb") as f:
+                argv = [a for a in f.read().decode("utf-8", "replace").split("\0") if a]
+        except OSError:
+            continue
+        if not any(os.path.basename(a) == "ttyd" for a in argv):
+            continue
+        for a in argv:
+            if a.startswith("fontSize="):
+                try:
+                    return int(a.split("=", 1)[1])
+                except ValueError:
+                    return None
+    return None
+
+
+def apply_saved_font():
+    """Put a remembered size back after a container restart.
+
+    Only when it is not already right: an entrypoint new enough to read the
+    same setting has started ttyd at the right size, and restarting it then
+    would drop every open terminal for nothing.
+    """
+    size = font_size()
+    time.sleep(3)          # let the entrypoint's ttyd finish starting first
+    if running_font() == size:
+        return
+    err = restart_ttyd(size)
+    print("ika-panel: terminal font size %d%s"
+          % (size, " — %s" % err if err else ""), file=sys.stderr)
+
+
 def save_buttons(buttons):
     """Atomic write, so a reader never sees a half-written file."""
     with _buttons_lock:
@@ -1152,6 +1310,7 @@ def state():
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
         "ttyd_port": TTYD_PORT,
+        "font_size": font_size(),
         "installer_version": installer_version(),
         "vault": vault_present(),
         "vault_labels": vault_labels(),
@@ -1562,6 +1721,24 @@ class Handler(BaseHTTPRequestHandler):
         # the only reachable processes are ones ikabot itself reported.
         # Scrolling is pressed repeatedly, so it answers on its own without
         # the run lock or a state rebuild -- it changes nothing but the view.
+        if act == "term_font":
+            try:
+                size = int(payload.get("arg", ""))
+            except (TypeError, ValueError):
+                return self._send(400, json.dumps({"error": "not a size"}))
+            if not FONT_MIN <= size <= FONT_MAX:
+                return self._send(400, json.dumps(
+                    {"error": "size must be between %d and %d"
+                              % (FONT_MIN, FONT_MAX)}))
+            with _run_lock:
+                err = restart_ttyd(size)
+                if not err:
+                    save_settings(font_size=size)
+            return self._send(200, json.dumps(
+                {"error": err} if err else
+                {"size": size,
+                 "where": "terminal text is now %dpx" % size}))
+
         if act == "term_window":
             return self._send(200, json.dumps(
                 {"where": term_window(payload.get("arg", ""))}))
@@ -2205,6 +2382,11 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     <button class="p" data-scroll="bottom" title="Back to the prompt">⤓ Bottom</button>
     <button class="step" data-window="next"
             title="The next instance — wraps round from the last back to the first">Instance ▶</button>
+    <span class="zoom" style="margin-left:4px">Text size
+      <button id="fsmall" title="Smaller — more fits on screen">−</button>
+      <b id="fsize">15</b>
+      <button id="fbig" title="Bigger — the instance bar and everything else">+</button>
+    </span>
     <button id="showbar" data-a="show_bar"
             title="Put the bar listing every instance back, at the top where the browser cannot clip it">Show instance bar</button>
     <span class="hint" id="tpos" style="margin:0"></span>
@@ -3053,6 +3235,32 @@ function proxyNote(){
     : (proxyAlert ? 'No proxy trouble.' : '');
 }
 
+// The size belongs to the terminal, not to this browser: tmux draws the
+// instance bar in the terminal's one font, so making the bar bigger means
+// making the terminal's font bigger for everyone looking at it.
+function setFont(size){
+  var pos = el('tpos');
+  pos.textContent = 'resizing…';
+  fetch('api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'term_font', arg:size})})
+  .then(function(r){return r.json()})
+  .then(function(d){
+    if(d.error){ pos.textContent = 'Error: ' + d.error; return; }
+    el('fsize').textContent = d.size;
+    pos.textContent = d.where || '';
+    // ttyd was restarted, so the frame is talking to something that no longer
+    // exists until it reconnects.
+    termUp = false;
+    var box = el('tbox');
+    if(box){ box.innerHTML = ''; mountTerminal(); }
+  })
+  .catch(function(err){ pos.textContent = 'Request failed: ' + err; });
+}
+el('fsmall').addEventListener('click', function(){
+  setFont(Math.max(8, (parseInt(el('fsize').textContent,10)||15) - 2)); });
+el('fbig').addEventListener('click', function(){
+  setFont(Math.min(40, (parseInt(el('fsize').textContent,10)||15) + 2)); });
+
 el('fopen').addEventListener('click',openFile);
 el('fpick').addEventListener('change',openFile);
 el('frefresh').addEventListener('click',loadFileList);
@@ -3150,6 +3358,7 @@ function refresh(){
     }
     if(current==='webservers')renderServers();
     proxyNote();
+    if(s.font_size) el('fsize').textContent = s.font_size;
 
     showVault(s.vault_labels);
     var vs=el('vstate'), have=!!s.vault;
@@ -3341,6 +3550,7 @@ def main():
               "to serve a control panel unauthenticated.", file=sys.stderr)
         return 1
     threading.Thread(target=check_loop, daemon=True).start()
+    threading.Thread(target=apply_saved_font, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("ika-panel v%s listening on port %d (user: %s)"
           % (PANEL_VERSION, PORT, USER))

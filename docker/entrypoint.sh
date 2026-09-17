@@ -112,11 +112,28 @@ TTYD_PORT="${TTYD_PORT:-7681}"
 TTYD_USER="${TTYD_USER:-ikabot}"
 TTYD_PASS="${TTYD_PASS:-}"
 
+# The terminal's font size, which is also the size tmux draws the instance
+# bar at -- a terminal has one font for the whole grid, so there is no making
+# the bar bigger on its own. Whatever was last chosen in the panel wins, so
+# the choice survives a restart without the panel having to restart ttyd to
+# put it back. TTYD_FONT_SIZE is the starting point for a fresh install.
+READ_FONT='
+import json, sys
+fallback = sys.argv[1]
+try:
+    n = int(json.load(open("/config/panel-settings.json"))["font_size"])
+    print(n if 8 <= n <= 40 else fallback)
+except Exception:
+    print(fallback)
+'
+TTYD_FONT_SIZE="$(python3 -c "$READ_FONT" "${TTYD_FONT_SIZE:-15}" 2>/dev/null || echo "${TTYD_FONT_SIZE:-15}")"
+echo "[entrypoint] terminal font size $TTYD_FONT_SIZE"
+
 if [ -n "$TTYD_PASS" ]; then
     ttyd --port "$TTYD_PORT" \
          --credential "${TTYD_USER}:${TTYD_PASS}" \
          --writable \
-         --client-option fontSize=15 \
+         --client-option "fontSize=$TTYD_FONT_SIZE" \
          --client-option 'theme={"background":"#0A1119"}' \
          /usr/local/bin/ika-web-attach \
          >> "$DATA_DIR/logs/ttyd.log" 2>&1 &

@@ -452,7 +452,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.32.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.33.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -948,6 +948,21 @@ Under it are **◀ Instance**, **⤒ Top**, **▲ Page up**, **▼ Page down**,
 **⤓ Bottom** and **Instance ▶**, with where you are beside them. Everything sits
 below the screen, because a line above the terminal is a line of terminal you
 cannot see.
+
+**Text size** sets how big the terminal's text is, which is also how big the
+instance bar is. tmux cannot size its own bar: a terminal has one font for the
+whole grid, so the bar is exactly as big as everything else. The size belongs to
+the terminal rather than to your browser, so changing it changes it for every
+screen looking at that terminal.
+
+Each press moves it by 2px, from a default of 15. Four presses of **+** gets
+you to 23, about half as big again — at which point roughly two thirds as many
+instance labels fit across the bar, and each is that much easier to read.
+
+Changing it restarts ttyd, so the terminal blinks and reconnects. Nothing is
+lost: tmux is what holds your instances, and it is not touched. The choice is
+remembered in `/config/panel-settings.json` and put back after a restart, so it
+only has to be made once.
 
 The two on the ends step between instances and **wrap round**: from the last
 one, **Instance ▶** goes to the first, and from the first, **◀ Instance** goes
@@ -1591,7 +1606,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.32 ships panel 1.0.28. That looks like a failed
+> not match — installer 1.0.33 ships panel 1.0.29. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.
