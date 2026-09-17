@@ -23,7 +23,7 @@ helpers so it can be unit-tested on its own.
 import os
 
 # Bump when the served bundle changes so browsers re-fetch it (cache-buster).
-LITE_VERSION = "1.0.0"
+LITE_VERSION = "1.0.1"
 
 # URL path prefix the web server routes to serve_lite_asset().
 LITE_ROUTE_PREFIX = "ikaeasy-lite/"

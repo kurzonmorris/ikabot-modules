@@ -5,10 +5,12 @@
     var IKEL = window.IKEL;
 
     function findAnchor() {
-        // Sit below the production panel if it exists, else the town hall box.
-        return document.getElementById('ikel-prod') ||
-               document.querySelector('#townHall') ||
-               (function () { var n = document.querySelectorAll('.contentBox01h'); return n.length ? n[n.length - 1] : null; })();
+        // Sit below the production panel if it exists, else below the last
+        // town-hall content box (inserted after it, so it's under everything).
+        var prod = document.getElementById('ikel-prod');
+        if (prod) return prod;
+        var n = document.querySelectorAll('#townHall, .contentBox01h');
+        return n.length ? n[n.length - 1] : null;
     }
 
     // Best-effort read of the current city's stock + hourly production from the

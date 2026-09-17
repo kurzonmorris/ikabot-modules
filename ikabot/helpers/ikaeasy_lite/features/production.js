@@ -12,9 +12,11 @@
     function set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 
     function findAnchor() {
-        var sel = document.querySelector('#townHall') ||
-                  (function () { var n = document.querySelectorAll('.contentBox01h'); return n.length ? n[n.length - 1] : null; })();
-        return sel;
+        // Anchor to the LAST town-hall content box in document order and insert
+        // AFTER it, so the panel sits below all the normal town-hall content
+        // (not above it) and isn't clipped by the game's scroll pane.
+        var n = document.querySelectorAll('#townHall, .contentBox01h');
+        return n.length ? n[n.length - 1] : null;
     }
 
     IKEL.register({
