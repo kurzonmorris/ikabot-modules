@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 
 import csv
 import glob
@@ -2486,6 +2486,51 @@ def _print_note(flag, text, colour="", indent="  "):
         print(f"{indent}{colour}{mark}{line}{bcolors.ENDC if colour else ''}")
 
 
+def _city_location(session, city, island_cache):
+    """Return "[x:y] plot N" for *city*, or as much of it as is available.
+
+    The island coordinates sit on the city itself, but the plot number only
+    exists in the island's city list, so that costs one request per island —
+    cached here because several cities often share one island.  Any failure
+    degrades to just the coordinates rather than losing the whole header.
+    """
+    try:
+        coords = f"[{int(city['x'])}:{int(city['y'])}]"
+    except (KeyError, TypeError, ValueError):
+        coords = ""
+
+    island_id = str(city.get("islandId", "") or "")
+    if not island_id:
+        return coords
+
+    if island_id not in island_cache:
+        try:
+            island_cache[island_id] = fetch_island(session, city)
+        except Exception:
+            island_cache[island_id] = None
+    island = island_cache[island_id]
+    if not island:
+        return coords
+
+    # Plot is `position`/`pos` where the game supplies it, else the index in
+    # the island's city list + 1 — the same rule islandColonizeMonitor uses.
+    target = str(city.get("id", ""))
+    for i, entry in enumerate(island.get("cities", []) or []):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("id", "")) != target:
+            continue
+        plot = entry.get("position", entry.get("pos"))
+        if plot is None:
+            plot = i + 1
+        try:
+            plot = int(plot)
+        except (TypeError, ValueError):
+            return coords
+        return f"{coords} plot {plot}".strip()
+    return coords
+
+
 def _resource_requirements(session):
     """Show, per city, the resources still needed to finish its queue.
 
@@ -2521,9 +2566,11 @@ def _resource_requirements(session):
         {str(c) for c in by_city} | {str(c) for c in all_ids},
         key=lambda s: (len(s), s),
     )
-    print(f"  Fetching {len(wanted_ids)} city/cities…\n")
+    print(f"  Fetching {len(wanted_ids)} city/cities, plus each island for "
+          f"its plot number…\n")
 
     cities, failed = {}, []
+    island_cache = {}          # islandId -> island dict (or None if unreachable)
     for cid in wanted_ids:
         try:
             cities[str(cid)] = fetch_city(session, cid)
@@ -2568,6 +2615,8 @@ def _resource_requirements(session):
             continue
 
         city_name = city.get("cityName") or city.get("name", str(cid))
+        where = _city_location(session, city, island_cache)
+        heading = f"{city_name} {where}".strip() + f" (id {cid})"
         avail = [int(v or 0) for v in city.get("availableResources", [0] * 5)]
         free  = [int(v or 0) for v in city.get("freeSpaceForResources", [0] * 5)]
         cap   = [a + f for a, f in zip(avail, free)]
@@ -2579,7 +2628,7 @@ def _resource_requirements(session):
         capped = [i for i in range(5) if shortfall[i] > free[i]]
 
         _print_cost_table(
-            f"{city_name} (id {cid}) — {len(city_rows)} row(s) queued",
+            f"{heading} — {len(city_rows)} row(s) queued",
             [
                 ("Needed to finish", needed),
                 ("In city now",      avail),
