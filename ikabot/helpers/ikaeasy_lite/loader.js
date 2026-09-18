@@ -102,8 +102,9 @@
     }
 
     function renderToggle() {
-        var existing = document.getElementById('ikel-toggle');
+        var existing = document.getElementById('ikel-bar');
         if (existing) existing.remove();
+        var bar = IKEL.el('div', { id: 'ikel-bar' });
         var btn = IKEL.el('button', { id: 'ikel-toggle', type: 'button' });
         var deferred = extensionPresent();
         var full = fullModeEnabled();
@@ -128,11 +129,19 @@
             if (isDisabled()) { removeAllPanels(); IKEL.adjustScroll(); }
             else { mountForView(); }
         });
-        document.body.appendChild(btn);
+        bar.appendChild(btn);
+
+        // Version label, right below the button, so it's easy to see which
+        // build is running and when a newer one is available.
+        var ver = IKEL.el('div', { id: 'ikel-version' });
+        ver.textContent = 'IkaEasy v' + (IKEL.version || '?');
+        bar.appendChild(ver);
+
+        document.body.appendChild(bar);
     }
 
     function removeAllPanels() {
-        var nodes = document.querySelectorAll('.ikel-panel');
+        var nodes = document.querySelectorAll('.ikel-panel, #ikel-tavern');
         for (var i = 0; i < nodes.length; i++) nodes[i].remove();
     }
 
