@@ -95,6 +95,19 @@ class TestInject(unittest.TestCase):
         self.assertEqual(inj.inject(None), None)
         self.assertEqual(inj.inject(123), 123)
 
+    def test_mod_version_embedded(self):
+        out = inj.inject(FULL_PAGE, mod_version="2.1.0")
+        self.assertIn('data-mod-ver="2.1.0"', out)
+
+    def test_mod_version_sanitised(self):
+        out = inj.inject(FULL_PAGE, mod_version='2.1.0"><script>x')
+        self.assertNotIn('"><script>', out)
+        self.assertIn('data-mod-ver="2.1.0scriptx"', out)
+
+    def test_no_mod_version_no_attr(self):
+        out = inj.inject(FULL_PAGE)
+        self.assertNotIn("data-mod-ver", out)
+
     def test_ajax_response_shape_never_injected_end_to_end(self):
         # Belt and braces: even if someone passed an AJAX body to inject(),
         # the caller gates on is_full_html_page first — verify that gate.

@@ -21,9 +21,10 @@ helpers so it can be unit-tested on its own.
 """
 
 import os
+import re
 
 # Bump when the served bundle changes so browsers re-fetch it (cache-buster).
-LITE_VERSION = "1.0.3"
+LITE_VERSION = "1.0.4"
 
 # URL path prefix the web server routes to serve_lite_asset().
 LITE_ROUTE_PREFIX = "ikaeasy-lite/"
@@ -90,25 +91,34 @@ def is_full_html_page(text):
     return "</head>" in lowered or "</body>" in lowered
 
 
-def _script_tag():
-    return (
-        f'<script {_INJECT_MARKER}="1" '
-        f'src="/{LITE_ROUTE_PREFIX}loader.js?v={LITE_VERSION}" defer></script>'
+def _script_tag(mod_version=None):
+    attrs = (
+        f'{_INJECT_MARKER}="1" '
+        f'src="/{LITE_ROUTE_PREFIX}loader.js?v={LITE_VERSION}" defer'
     )
+    if mod_version:
+        # Embed the ikabot mod build version so the on-screen badge can show it
+        # alongside the bundle version. Sanitised to a safe attribute value.
+        safe = re.sub(r'[^\w.\-+]', '', str(mod_version))
+        attrs = f'data-mod-ver="{safe}" ' + attrs
+    return f'<script {attrs}></script>'
 
 
-def inject(html):
+def inject(html, mod_version=None):
     """Return *html* with the IkaEasy-lite loader script inserted.
 
     Idempotent: if the marker is already present the input is returned
     unchanged. If no anchor is found the input is returned unchanged. Never
     raises — on any unexpected input it returns the original string.
+
+    *mod_version* (optional) is embedded on the script tag so the on-screen
+    version badge can display the ikabot mod build version too.
     """
     try:
         if not isinstance(html, str) or _INJECT_MARKER in html:
             return html
 
-        tag = _script_tag()
+        tag = _script_tag(mod_version)
 
         # Prefer to inject right before </head>; fall back to </body>. Match
         # the tag case-insensitively but preserve the document otherwise.

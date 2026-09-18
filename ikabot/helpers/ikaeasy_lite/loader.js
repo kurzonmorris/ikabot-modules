@@ -37,6 +37,7 @@
     // ---- Tiny helpers ---------------------------------------------------
     var IKEL = window.IKEL = {
         version: null,
+        modVersion: null,
         base: '/ikaeasy-lite/',
         features: [],          // each: { id, matches(view), mount(ctx) }
         register: function (f) { this.features.push(f); },
@@ -134,7 +135,8 @@
         // Version label, right below the button, so it's easy to see which
         // build is running and when a newer one is available.
         var ver = IKEL.el('div', { id: 'ikel-version' });
-        ver.textContent = 'IkaEasy v' + (IKEL.version || '?');
+        ver.textContent = 'IkaEasy v' + (IKEL.version || '?') +
+            (IKEL.modVersion ? ' · mod v' + IKEL.modVersion : '');
         bar.appendChild(ver);
 
         document.body.appendChild(bar);
@@ -196,7 +198,10 @@
         // Read our version off the loader's own <script src=?v=...>.
         try {
             var s = document.querySelector('script[data-ikaeasy-lite]');
-            if (s) { var m = /[?&]v=([^&]+)/.exec(s.getAttribute('src') || ''); if (m) IKEL.version = m[1]; }
+            if (s) {
+                var m = /[?&]v=([^&]+)/.exec(s.getAttribute('src') || ''); if (m) IKEL.version = m[1];
+                IKEL.modVersion = s.getAttribute('data-mod-ver') || null;
+            }
         } catch (e) {}
 
         renderToggle();
