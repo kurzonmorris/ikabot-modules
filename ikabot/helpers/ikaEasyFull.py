@@ -25,8 +25,17 @@ FULL_ROUTE_PREFIX = "ikaeasy-full/"
 _HELPERS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HELPERS_DIR, "..", ".."))
 
+
+def _data_dir():
+    if os.name == "nt":
+        return os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), ".ikabot")
+    return os.path.expanduser("~/.ikabot")
+
+
 _CANDIDATE_DIRS = [
     os.environ.get("IKAEASY_EXT_DIR", ""),
+    # User-writable override that survives rebuilds — edit here for quick fixes.
+    os.path.join(_data_dir(), "ikaeasy_full"),
     # A copy bundled inside ikabot (how a real deployment would ship it).
     os.path.join(_HELPERS_DIR, "ikaeasy_full"),
     # A folder placed next to the ikabot package.

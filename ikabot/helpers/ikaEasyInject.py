@@ -32,7 +32,32 @@ LITE_ROUTE_PREFIX = "ikaeasy-lite/"
 _INJECT_MARKER = "data-ikaeasy-lite"
 
 # Directory holding the static bundle (loader.js, css, feature widgets).
-_LITE_DIR = os.path.join(os.path.dirname(__file__), "ikaeasy_lite")
+# The PACKAGED copy ships inside ikabot; but so that JS/CSS can be tweaked
+# without rebuilding ikabot, we look in user-writable override locations first
+# (per file), falling back to the packaged copy. Drop an edited file into
+# ~/.ikabot/ikaeasy_lite/<same relative path> and a browser refresh picks it up.
+_PACKAGED_LITE_DIR = os.path.join(os.path.dirname(__file__), "ikaeasy_lite")
+_LITE_DIR = _PACKAGED_LITE_DIR  # back-compat alias
+
+
+def _data_dir():
+    """~/.ikabot (or %APPDATA%\\.ikabot on Windows) — mirrors ikabot.config,
+    kept dependency-free so this module stays standalone-testable."""
+    if os.name == "nt":
+        return os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), ".ikabot")
+    return os.path.expanduser("~/.ikabot")
+
+
+def _lite_base_dirs():
+    """Ordered list of directories to search for a bundle file. Override
+    locations first, packaged copy last."""
+    dirs = []
+    env = os.environ.get("IKAEASY_LITE_DIR")
+    if env:
+        dirs.append(env)
+    dirs.append(os.path.join(_data_dir(), "ikaeasy_lite"))
+    dirs.append(_PACKAGED_LITE_DIR)
+    return dirs
 
 _CONTENT_TYPES = {
     ".js":   "application/javascript; charset=utf-8",
@@ -101,7 +126,7 @@ def _safe_asset_path(request_path):
     bundle directory, or None if it escapes the directory / doesn't exist.
 
     Blocks path traversal by resolving real paths and confirming the result
-    stays within _LITE_DIR.
+    stays within whichever base directory it was found under.
     """
     if not request_path:
         return None
@@ -114,15 +139,17 @@ def _safe_asset_path(request_path):
     if not rel or rel.endswith("/"):
         return None
 
-    base = os.path.realpath(_LITE_DIR)
-    candidate = os.path.realpath(os.path.join(base, rel))
-
-    # Must stay within the bundle directory and be an existing file.
-    if candidate != base and not candidate.startswith(base + os.sep):
-        return None
-    if not os.path.isfile(candidate):
-        return None
-    return candidate
+    for base_dir in _lite_base_dirs():
+        if not base_dir:
+            continue
+        base = os.path.realpath(base_dir)
+        candidate = os.path.realpath(os.path.join(base, rel))
+        # Must stay within this base directory and be an existing file.
+        if candidate != base and not candidate.startswith(base + os.sep):
+            continue
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def serve_lite_asset(request_path):
@@ -142,3 +169,28 @@ def serve_lite_asset(request_path):
     ext = os.path.splitext(path)[1].lower()
     ctype = _CONTENT_TYPES.get(ext, "application/octet-stream")
     return content, ctype
+
+
+def install_editable_copy(dest=None):
+    """Copy the packaged lite bundle into a user-writable directory so it can be
+    edited without rebuilding ikabot. Returns the destination path.
+
+    Default destination is ~/.ikabot/ikaeasy_lite, which the server searches
+    before the packaged copy. After editing a file there, just refresh the
+    browser — no restart, no rebuild.
+    """
+    import shutil
+    if dest is None:
+        dest = os.path.join(_data_dir(), "ikaeasy_lite")
+    if os.path.abspath(dest) == os.path.abspath(_PACKAGED_LITE_DIR):
+        raise ValueError("Refusing to overwrite the packaged bundle.")
+    shutil.copytree(_PACKAGED_LITE_DIR, dest, dirs_exist_ok=True)
+    return dest
+
+
+if __name__ == "__main__":
+    # `python3 -m ikabot.helpers.ikaEasyInject` seeds the editable copy.
+    where = install_editable_copy()
+    print("IkaEasy-lite editable bundle installed at:")
+    print("  " + where)
+    print("Edit files there and refresh the browser — no ikabot rebuild needed.")
