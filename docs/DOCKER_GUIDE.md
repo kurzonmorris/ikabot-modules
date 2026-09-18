@@ -395,6 +395,17 @@ The panel asks GitHub what is published when it starts and **once an hour**
 after that, so a panel left open for days does not go on reporting whatever
 was current the morning it started.
 
+Three things are tracked: **ikabot** itself, the **mod**, and **IkaEasy**.
+IkaEasy keeps its version in `ikabot/helpers/ikaEasyInject.py` rather than in
+`config.py`, so it is a second small file to fetch — one that is allowed to
+fail on its own, so a fork without IkaEasy does not make the whole check look
+broken. All three update the same way, with **Download & update ikabot**.
+
+If you have edited the bundle, a line under the table says how many files are
+being served from your copy in `.ikabot/ikaeasy_lite`. Those win over what
+shipped, so while anything is in there the IkaEasy version above is no longer
+the whole story.
+
 When something newer is out, the **ikabot** section says so in a line across
 the top — *Ready to install: ikabot 7.5.2 (you have 7.5.1)* — and the
 **ikabot** item in the section menu is marked **new**, so you can see it from
@@ -452,7 +463,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.33.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.34.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -1606,7 +1617,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.33 ships panel 1.0.29. That looks like a failed
+> not match — installer 1.0.34 ships panel 1.0.30. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.

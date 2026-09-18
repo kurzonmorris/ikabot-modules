@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.29"
+PANEL_VERSION = "1.0.30"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -89,6 +89,18 @@ BRANCH = os.environ.get("IKABOT_BRANCH", "main")
 # needs no rate-limited call.
 CONFIG_URL = ("https://raw.githubusercontent.com/%s/%s/ikabot/config.py"
               % (REPO, BRANCH))
+# IkaEasy keeps its version in the module that injects it, not in config.py,
+# so it needs a second small file. Fetched separately and allowed to fail on
+# its own: a fork without IkaEasy should not make the ikabot check look broken.
+INJECT_URL = ("https://raw.githubusercontent.com/%s/%s/ikabot/helpers/"
+              "ikaEasyInject.py" % (REPO, BRANCH))
+INJECT_PATH = ("ikabot", "helpers", "ikaEasyInject.py")
+# Where an edited bundle overrides the packaged one. Files here are served in
+# preference to what shipped, so a version number alone stops being the whole
+# story once anything is in it.
+LITE_OVERRIDE = os.path.join(
+    os.environ.get("IKABOT_DATA_DIR", os.path.join(HOME_DIR, ".ikabot")),
+    "ikaeasy_lite")
 
 LABEL_OK = re.compile(r"^[\w \-/&().+#]{1,24}$")
 # Anything printable is allowed — ikabot prompts take "s", "all", "a-20k",
@@ -187,6 +199,21 @@ def remote_ikabot_versions():
             out[label] = m.group(1)
     if not out:
         return {}, "no version lines in %s" % CONFIG_URL.rsplit("/", 1)[-1]
+
+    # A second small file, and deliberately not fatal: IkaEasy going missing
+    # or unreadable should leave the ikabot and mod numbers standing rather
+    # than reporting the whole check as failed.
+    try:
+        req = urllib.request.Request(INJECT_URL,
+                                     headers={"User-Agent": "ika-panel/%s" % PANEL_VERSION})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            inject = resp.read().decode("utf-8", "replace")
+        m = re.search(r'^LITE_VERSION\s*=\s*"([^"]+)"', inject, re.M)
+        if m:
+            out["ikaeasy"] = m.group(1)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            http.client.HTTPException):
+        pass
     return out, ""
 
 
@@ -722,19 +749,44 @@ def _address():
     return ""
 
 
-def _versions():
-    cfg = os.path.join(os.environ.get("APP_DIR", "/app"), "ikabot", "config.py")
-    out = {}
+def _read_version(path, key):
+    """One `KEY = "1.2.3"` out of a source file, or None."""
     try:
-        with open(cfg, encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             text = f.read()
     except OSError:
-        return out
+        return None
+    m = re.search(r'^%s\s*=\s*"([^"]+)"' % key, text, re.M)
+    return m.group(1) if m else None
+
+
+def _versions():
+    app = os.environ.get("APP_DIR", "/app")
+    out = {}
+    cfg = os.path.join(app, "ikabot", "config.py")
     for key, label in (("IKABOT_VERSION", "ikabot"), ("IKABOT_MOD_VERSION", "mod")):
-        m = re.search(r'^%s\s*=\s*"([^"]+)"' % key, text, re.M)
-        if m:
-            out[label] = m.group(1)
+        got = _read_version(cfg, key)
+        if got:
+            out[label] = got
+    # IkaEasy is versioned where it is injected from, not in config.py. Absent
+    # on a build from before it existed, which reads as "—" rather than as a
+    # problem.
+    got = _read_version(os.path.join(app, *INJECT_PATH), "LITE_VERSION")
+    if got:
+        out["ikaeasy"] = got
     return out
+
+
+def lite_overrides():
+    """How many bundle files are being served from the editable copy.
+
+    Not a version: files there win over the packaged bundle, so a version
+    number on its own stops describing what is actually running.
+    """
+    n = 0
+    for root, _dirs, files in os.walk(LITE_OVERRIDE):
+        n += len([f for f in files if not f.startswith(".")])
+    return n
 
 
 def _new_id():
@@ -1325,6 +1377,7 @@ def state():
         "instances": instances,
         "modules": modules,
         "versions": _versions(),
+        "lite_overrides": lite_overrides(),
         "host": _address(),
         "running": sum(1 for i in instances if not i["dead"]),
         "dead": sum(1 for i in instances if i["dead"]),
@@ -2341,6 +2394,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
             title="Refresh ika, ika-update and the other helper scripts from GitHub">Refresh ika's own scripts</button>
   </div>
   <p class="hint" id="corechecked" style="margin:10px 0 0"></p>
+  <p class="hint" id="liteedit" style="margin:4px 0 0"></p>
   <p class="sub" style="margin:8px 0 0">
     Red means a newer version is published. Instances keep running the old code
     until you restart them.
@@ -3474,7 +3528,7 @@ function refresh(){
 
     var ca=s.versions_available||{}, cv=s.versions||{}, coreDue=[];
     document.getElementById('corever').innerHTML=[
-      ['ikabot','ikabot'],['mod','modded by kurzon']
+      ['ikabot','ikabot'],['mod','modded by kurzon'],['ikaeasy','IkaEasy']
     ].map(function(pair){
       var k=pair[0], have=cv[k]||'', want=ca[k]||'';
       var due=!!want&&newer(want,have);
@@ -3498,6 +3552,15 @@ function refresh(){
         + 'Press Download &amp; update ikabot, then restart the instances.'
       : '';
     tag('ikabot', coreDue.length ? 'new' : '');
+
+    // An edited bundle is served in preference to the packaged one, so the
+    // IkaEasy row above stops being the whole story once anything is in it.
+    var le=el('liteedit'), overrides=s.lite_overrides||0;
+    le.textContent = overrides
+      ? overrides + ' IkaEasy file(s) are being served from your edited copy '
+          + 'in .ikabot/ikaeasy_lite, so what is running is not what the '
+          + 'version above says.'
+      : '';
 
     // When it was last asked, and when it will ask again on its own — without
     // this the Available column is a number of unknown age.
