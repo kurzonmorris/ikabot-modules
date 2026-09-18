@@ -53,10 +53,11 @@
             var cid = ctx.cityId || IKEL.currentCityId();
             IKEL.api('&ikaeasy=construction' + (cid ? '&city_id=' + cid : ''))
                 .then(function (r) { return r.json(); })
-                .then(function (d) { render(panel, d, cid); })
+                .then(function (d) { render(panel, d, cid); IKEL.adjustScroll(); })
                 .catch(function () {
                     panel.querySelector('.ikel-body').innerHTML =
                         '<div class="ikel-note">Play through the ikabot web server to use this.</div>';
+                    IKEL.adjustScroll();
                 });
         }
     });
