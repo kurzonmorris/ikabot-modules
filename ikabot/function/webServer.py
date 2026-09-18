@@ -346,7 +346,7 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
             try:
                 from ikabot.helpers.ikaEasyInject import is_full_html_page, inject
                 if is_full_html_page(modified_content):
-                    modified_content = inject(modified_content)
+                    modified_content = inject(modified_content, mod_version=IKABOT_MOD_VERSION)
             except Exception:
                 pass
 
