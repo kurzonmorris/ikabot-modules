@@ -145,5 +145,36 @@ class TestServeLiteAsset(unittest.TestCase):
         self.assertIsNone(inj.serve_lite_asset("ikaeasy-lite/"))
 
 
+class TestOverrideDir(unittest.TestCase):
+    """The server should serve an override file (e.g. ~/.ikabot/ikaeasy_lite)
+    ahead of the packaged copy, per file, so quick edits need no rebuild."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        os.environ["IKAEASY_LITE_DIR"] = self._tmp
+
+    def tearDown(self):
+        import shutil
+        os.environ.pop("IKAEASY_LITE_DIR", None)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_override_file_wins(self):
+        with open(os.path.join(self._tmp, "loader.js"), "w") as f:
+            f.write("/* OVERRIDDEN */")
+        content, _ = inj.serve_lite_asset("ikaeasy-lite/loader.js")
+        self.assertIn(b"OVERRIDDEN", content)
+
+    def test_falls_back_to_packaged_when_not_overridden(self):
+        # css/lite.css isn't in the override dir, so the packaged one serves.
+        res = inj.serve_lite_asset("ikaeasy-lite/css/lite.css")
+        self.assertIsNotNone(res)
+        content, _ = res
+        self.assertNotIn(b"OVERRIDDEN", content)
+
+    def test_override_traversal_blocked(self):
+        self.assertIsNone(inj.serve_lite_asset("ikaeasy-lite/../../etc/passwd"))
+
+
 if __name__ == "__main__":
     unittest.main()
