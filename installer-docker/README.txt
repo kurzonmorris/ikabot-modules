@@ -1,5 +1,5 @@
 ==========================================================
-  ikabot in Docker  —  installer v1.0.33
+  ikabot in Docker  —  installer v1.0.34
 ==========================================================
 
 Runs ikabot for as many game accounts as you like, in one

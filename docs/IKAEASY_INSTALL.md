@@ -52,6 +52,16 @@ ika update --rollback && ika restart all
 
 ---
 
+## Spotting an update without checking by hand
+
+The control panel's **ikabot** section lists IkaEasy next to ikabot and the
+mod: installed version, published version, and whether one is newer. It asks
+GitHub hourly, and marks the **ikabot** menu item **new** when there is
+something to install, so you do not have to compare the on-screen badge
+against the repo yourself.
+
+Needs control panel v1.0.30 or later — `ika panel upgrade`.
+
 ## Quick fixes without a full rebuild (optional)
 
 The JS/CSS bundle is read from disk on every request and searched in this
