@@ -67,6 +67,17 @@
                 if (window.ikariam && ikariam.model && ikariam.model.cityId != null) return String(ikariam.model.cityId);
             } catch (e) {}
             return null;
+        },
+        // Tell Ikariam's building view to recompute its scroll height after we
+        // add content, otherwise the scrollbar stays sized to the original
+        // content and our panels are clipped below the fold.
+        adjustScroll: function () {
+            try {
+                if (window.ikariam && ikariam.templateView && ikariam.templateView.mainbox &&
+                    ikariam.templateView.mainbox.scrollbar) {
+                    ikariam.templateView.mainbox.scrollbar.adjustSize();
+                }
+            } catch (e) {}
         }
     };
 
@@ -114,7 +125,7 @@
             setDisabled(!isDisabled());
             btn.textContent = label();
             btn.classList.toggle('ikel-off', isDisabled());
-            if (isDisabled()) { removeAllPanels(); }
+            if (isDisabled()) { removeAllPanels(); IKEL.adjustScroll(); }
             else { mountForView(); }
         });
         document.body.appendChild(btn);
@@ -145,6 +156,12 @@
         } finally {
             _mounting = false;
         }
+        // Panels fill asynchronously (bridge probes), each growing the view.
+        // Nudge Ikariam's scrollbar a few times so nothing ends up clipped.
+        IKEL.adjustScroll();
+        setTimeout(IKEL.adjustScroll, 200);
+        setTimeout(IKEL.adjustScroll, 800);
+        setTimeout(IKEL.adjustScroll, 1600);
     }
 
     // Re-evaluate on every game AJAX navigation (the game is a single page).

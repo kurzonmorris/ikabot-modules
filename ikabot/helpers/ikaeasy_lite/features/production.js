@@ -37,12 +37,14 @@
                 if (!st || !st.available) {
                     panel.querySelector('.ikel-body').innerHTML =
                         '<div class="ikel-note">Install the <b>Resource Production Manager</b> ikabot module (main menu &rarr; option 30) to use this.</div>';
-                    return;
+                } else {
+                    render(panel, ctx);
                 }
-                render(panel, ctx);
+                IKEL.adjustScroll();
             }).catch(function () {
                 panel.querySelector('.ikel-body').innerHTML =
                     '<div class="ikel-note">Play through the ikabot web server to use this.</div>';
+                IKEL.adjustScroll();
             });
         }
     });
