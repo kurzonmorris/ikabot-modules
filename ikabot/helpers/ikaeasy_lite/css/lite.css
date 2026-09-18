@@ -24,6 +24,18 @@
 
 .ikel-body { padding: 8px 10px; }
 
+/* Inline section appended INSIDE a game box (not its own bordered panel).
+   Caps its height and scrolls so every option is reachable. */
+.ikel-inline {
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid #b78f5d;
+    color: #3a2a12;
+    font-size: 12px;
+}
+.ikel-inline-title { font-weight: bold; margin-bottom: 4px; color: #5a4520; }
+.ikel-inline .ikel-body { padding: 4px 2px; max-height: 240px; overflow-y: auto; }
+
 .ikel-row { margin: 5px 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .ikel-row > label:first-child { min-width: 78px; font-weight: bold; }
 

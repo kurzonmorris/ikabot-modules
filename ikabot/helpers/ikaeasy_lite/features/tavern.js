@@ -8,9 +8,14 @@
     function getInt() { try { return parseInt(localStorage.getItem(INT_KEY), 10) || 24; } catch (e) { return 24; } }
     function setInt(v) { try { localStorage.setItem(INT_KEY, v); } catch (e) {} }
 
-    function findAnchor() {
-        return document.querySelector('#buildingPositionDiv, #tavern') ||
-               (function () { var n = document.querySelectorAll('.contentBox01h'); return n.length ? n[n.length - 1] : null; })();
+    function findHost() {
+        // Append INSIDE the primary tavern box (its .content region) so the
+        // controls sit at the bottom of the normal tavern box rather than in a
+        // separate box. The section caps its own height and scrolls.
+        var boxes = document.querySelectorAll('.contentBox01h');
+        var box = boxes.length ? boxes[boxes.length - 1] : null;
+        if (box) return box.querySelector('.content') || box;
+        return document.querySelector('#buildingPositionDiv') || document.querySelector('#tavern');
     }
 
     IKEL.register({
@@ -18,13 +23,13 @@
         matches: function (view) { return view === 'tavern'; },
         mount: function () {
             if (document.getElementById('ikel-tavern')) return;
-            var anchor = findAnchor();
-            if (!anchor) return;
+            var host = findHost();
+            if (!host) return;
 
-            var panel = IKEL.el('div', { id: 'ikel-tavern', 'class': 'ikel-panel' });
-            panel.innerHTML = '<h3 class="ikel-header">Tavern Manager</h3>' +
+            var panel = IKEL.el('div', { id: 'ikel-tavern', 'class': 'ikel-inline' });
+            panel.innerHTML = '<div class="ikel-inline-title">Tavern Manager</div>' +
                 '<div class="ikel-body"><div class="ikel-note">Checking ikabot…</div></div>';
-            anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+            host.appendChild(panel);
 
             IKEL.api('&ikaeasy=tavern_status').then(function (r) { return r.json(); }).then(function (st) {
                 if (!st || !st.available) {

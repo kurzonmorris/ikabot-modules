@@ -78,19 +78,39 @@
         try { localStorage.setItem(DISABLE_KEY, v ? '1' : '0'); } catch (e) {}
     }
 
+    // Experimental full mode: run the entire unmodified extension in-page
+    // instead of the lite feature panels. Opt-in via ?ikaeasy_full=1 (sticky),
+    // ?ikaeasy_full=0 to leave.
+    var FULL_KEY = 'ikaeasy_full';
+    function fullModeEnabled() {
+        try {
+            if (/[?&]ikaeasy_full=1(&|$)/.test(location.search)) localStorage.setItem(FULL_KEY, '1');
+            if (/[?&]ikaeasy_full=0(&|$)/.test(location.search)) localStorage.setItem(FULL_KEY, '0');
+            return localStorage.getItem(FULL_KEY) === '1';
+        } catch (e) { return false; }
+    }
+
     function renderToggle() {
         var existing = document.getElementById('ikel-toggle');
         if (existing) existing.remove();
         var btn = IKEL.el('button', { id: 'ikel-toggle', type: 'button' });
         var deferred = extensionPresent();
+        var full = fullModeEnabled();
         function label() {
             if (deferred) return 'IkaEasy: extension active';
+            if (full) return 'IkaEasy: FULL (click to exit)';
             return isDisabled() ? 'IkaEasy: OFF' : 'IkaEasy: on';
         }
         btn.textContent = label();
         if (deferred || isDisabled()) btn.classList.add('ikel-off');
         btn.addEventListener('click', function () {
             if (deferred) { return; } // nothing to toggle; extension owns the page
+            if (full) {
+                // Escape hatch out of experimental full mode.
+                try { localStorage.setItem(FULL_KEY, '0'); } catch (e) {}
+                location.reload();
+                return;
+            }
             setDisabled(!isDisabled());
             btn.textContent = label();
             btn.classList.toggle('ikel-off', isDisabled());
@@ -156,6 +176,19 @@
         renderToggle();
 
         if (extensionPresent()) { return; } // extension wins; stay dormant
+
+        // Experimental full mode: boot the entire extension in-page instead of
+        // the lite panels. Kept fully separate so it can't affect lite.
+        if (fullModeEnabled()) {
+            var shim = IKEL.el('script', { src: IKEL.base + 'full/chrome-shim.js?v=' + (IKEL.version || '') });
+            shim.onload = function () {
+                var fm = IKEL.el('script', { src: IKEL.base + 'full/full-mode.js?v=' + (IKEL.version || '') });
+                document.head.appendChild(fm);
+            };
+            shim.onerror = function () { try { console.error('[IkaEasy] full-mode shim failed to load'); } catch (e) {} };
+            document.head.appendChild(shim);
+            return;
+        }
 
         // Load the shared stylesheet, then the feature modules, then mount.
         var link = IKEL.el('link', { rel: 'stylesheet', href: IKEL.base + 'css/lite.css?v=' + (IKEL.version || '') });
