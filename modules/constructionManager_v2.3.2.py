@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.3.1"
+__version__ = "2.3.2"
 
 import csv
 import glob
@@ -3112,7 +3112,10 @@ def pick_affordable_row(city, rows, positions):
         slot_pos = int(cand["slot_position"])
         if slot_pos >= len(positions):
             continue
-        if positions[slot_pos].get("canUpgrade") is False:
+        # canUpgrade only means anything for an existing building; an empty
+        # ground reports it false, which would hide every new build here.
+        if (cand.get("action") != "build"
+                and positions[slot_pos].get("canUpgrade") is False):
             continue        # the game itself refuses this one
         cost = cost_tuple(cand)
         if not any(cost):
@@ -3388,6 +3391,59 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
 # service_city — per-city state machine  (plan §7)
 # ---------------------------------------------------------------------------
 
+def align_row_to_slot(session, city, row, slot):
+    """Retarget *row* to the step the slot can actually take next.
+
+    Rows are stored one per level, but which level is genuinely next depends
+    on the live city, not on what was queued: an empty slot must be built at
+    level 1 before anything can be upgraded, and an occupied slot can only go
+    to current + 1.  Trusting the stored level meant an upgrade row left on an
+    empty slot (its build row lost to a skip) was posted as an upgrade of a
+    building that does not exist, failed, and took the rest of the queue down
+    with it one row per tick.
+
+    Returns the row to act on — updated in place on disk when it had drifted.
+    """
+    is_empty = str(slot.get("building", "") or "") in ("", "empty")
+    try:
+        current_lv = 0 if is_empty else int(slot.get("level", 0) or 0)
+    except (TypeError, ValueError):
+        current_lv = 0
+
+    want_action = "build" if is_empty else "upgrade"
+    want_level  = current_lv + 1
+
+    try:
+        have_level = int(row["target_level"])
+    except (TypeError, ValueError):
+        have_level = -1
+    if row.get("action") == want_action and have_level == want_level:
+        return row
+
+    fields = {"action": want_action, "target_level": want_level}
+
+    # A build needs the game's buildingId, which an upgrade row never carried.
+    if want_action == "build" and not str(row.get("building_id", "") or ""):
+        try:
+            for opt in _get_buildable_options(session, city, int(row["slot_position"])):
+                if opt["building"].lower() == str(row["building"]).lower():
+                    fields["building_id"] = opt["buildingId"]
+                    break
+        except Exception:
+            pass
+
+    updated = csv_update(session, row["queue_id"], **fields) or row
+    sendToBotDebug(
+        session,
+        f"row {row['queue_id']} realigned to the slot: "
+        f"{row.get('action')} lv {row.get('target_level')} -> "
+        f"{want_action} lv {want_level} "
+        f"({row['building']} in city {city.get('id')})",
+        True,
+    )
+    return updated
+
+
 def service_city(session, city_id, st, rows, stop_event):
     now = int(time.time())
 
@@ -3488,6 +3544,10 @@ def service_city(session, city_id, st, rows, stop_event):
             st["next_check"] = now + SHIP_RETRY_SECONDS
             return
 
+        # Work out the step this slot can actually take next, before any cost
+        # lookup — the level we fetch costs for must be the level we build.
+        row = align_row_to_slot(session, city, row, positions[slot_pos])
+
         # Pre-execution cost recompute (plan §2b).
         all_costs = fetch_costs_for_building(session, city, row["building"])
         if all_costs is None:
@@ -3532,7 +3592,13 @@ def service_city(session, city_id, st, rows, stop_event):
             # canUpgrade=False means the game won't accept the POST yet
             # (insufficient citizens, wine/happiness, or game-side resource check).
             # Retry after a short wait rather than wasting a POST.
-            if positions[slot_pos].get("canUpgrade") is False:
+            #
+            # It applies to UPGRADES only: an empty building ground has no
+            # building to upgrade, so the game reports canUpgrade false (or
+            # omits it) and gating a new build on it blocked construction of
+            # anything not already built.
+            if (row["action"] != "build"
+                    and positions[slot_pos].get("canUpgrade") is False):
                 set_wait_note(
                     session, row,
                     "the game won't start this upgrade yet — usually too few "
