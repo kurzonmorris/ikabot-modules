@@ -1382,7 +1382,7 @@ in your module.
 ## 27. Concurrency, Locks and Multi-Instance Safety
 
 Learned the hard way while hardening `resourceTransportManager` (v10.4.1 →
-v10.9.0) across Windows and Docker. Every rule below caused a real,
+v10.10.0) across Windows and Docker. Every rule below caused a real,
 observed failure.
 
 ### ⚠ Per-account filenames must include the WORLD number
