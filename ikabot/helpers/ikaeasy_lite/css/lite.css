@@ -71,12 +71,21 @@
 .ikel-num { text-align: right; }
 .ikel-muted { color: #999; }
 
-/* Floating on/off toggle button (always available as an escape hatch). */
-#ikel-toggle {
+/* Floating on/off toggle + version, bottom-right (always available). */
+#ikel-bar {
     position: fixed;
     right: 6px;
     bottom: 6px;
     z-index: 2147483000;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    font-family: Arial, sans-serif;
+    pointer-events: none;
+}
+#ikel-bar > * { pointer-events: auto; }
+#ikel-toggle {
     padding: 3px 8px;
     font-size: 11px;
     border: 1px solid #6f5528;
@@ -84,8 +93,16 @@
     background: rgba(200, 160, 90, 0.92);
     color: #2a1c07;
     cursor: pointer;
-    opacity: .55;
-    font-family: Arial, sans-serif;
+    opacity: .75;
 }
 #ikel-toggle:hover { opacity: 1; }
 #ikel-toggle.ikel-off { background: rgba(150, 150, 150, 0.9); }
+#ikel-version {
+    font-size: 10px;
+    color: #333;
+    background: rgba(255, 248, 227, 0.85);
+    border: 1px solid #b78f5d;
+    border-radius: 3px;
+    padding: 1px 6px;
+    letter-spacing: .02em;
+}
