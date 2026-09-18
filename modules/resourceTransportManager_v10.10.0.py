@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.9.0"
+MODULE_VERSION = "10.10.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -659,7 +659,8 @@ def should_notify(notif_config, event_type):
 # ============================================================================
 
 LOG_COLUMNS = [
-    "Date", "Time", "Account", "Mode", "Source_City", "Source_Island",
+    "Date", "Time", "Account", "Schedule", "Mode", "Source_City",
+    "Source_Island",
     "Dest_City", "Dest_Island", "Dest_Player",
     "Wood", "Wine", "Marble", "Crystal", "Sulphur", "Total_Resources",
     "Ships_Used", "Ship_Type", "Status", "Error", "Next_Shipment",
@@ -777,10 +778,37 @@ def get_log_path(session):
     return own
 
 
+def _upgrade_log_header(log_path):
+    """Rewrite an older log so its header matches LOG_COLUMNS.
+
+    Appending a row with a column the file's header does not have would put
+    every later value in the wrong place. Runs once, under the log lock, and
+    leaves the file untouched when the header is already current.
+    """
+    try:
+        with open(log_path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+        if header is None or header == LOG_COLUMNS:
+            return
+        with open(log_path, newline="", encoding="utf-8") as f:
+            old_rows = list(csv.DictReader(f))
+        tmp = f"{log_path}.upgrade"
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=LOG_COLUMNS,
+                                    extrasaction="ignore")
+            writer.writeheader()
+            for row in old_rows:
+                writer.writerow({c: row.get(c, "") or "" for c in LOG_COLUMNS})
+        os.replace(tmp, log_path)
+    except Exception:
+        pass  # a log that cannot be upgraded is still better than no log
+
+
 def log_shipment(log_path, session, mode, source_city, source_island,
                  dest_city, dest_island, dest_player, resources,
                  ships_used, ship_type, status, error_msg=None,
-                 next_shipment=None):
+                 next_shipment=None, schedule_id=""):
     if not log_path:
         return
     # Every account appends to ONE shared file, so concurrent writes could
@@ -792,11 +820,14 @@ def log_shipment(log_path, session, mode, source_city, source_island,
                               token=_log_token)
     try:
         file_exists = os.path.isfile(log_path)
+        if file_exists:
+            _upgrade_log_header(log_path)
         now = datetime.datetime.now()
         row = {
             "Date": now.strftime("%Y-%m-%d"),
             "Time": now.strftime("%H:%M:%S"),
             "Account": session.username,
+            "Schedule": str(schedule_id or ""),
             "Mode": mode,
             "Source_City": source_city,
             "Source_Island": source_island,
@@ -918,7 +949,7 @@ def release_shipping_lock(session, use_freighters=False):
 #  TRANSPORT SCHEDULE CSV  — persistent state for all shipping modes
 # ============================================================================
 
-SCHEDULE_SCHEMA_VERSION = 3
+SCHEDULE_SCHEMA_VERSION = 4
 
 SCHEDULE_COLUMNS = [
     "schedule_id",
@@ -947,6 +978,7 @@ SCHEDULE_COLUMNS = [
     "schema_version",
     "priority",
     "last_duration",
+    "last_error",
 ]
 
 # Priority 1 = vital .. 5 = least vital. Everything defaults to 3 (standard).
@@ -966,6 +998,7 @@ SCHEDULE_COLUMN_DEFAULTS = {
     "run_at_time": "",
     "priority": PRIORITY_DEFAULT,
     "last_duration": 0,
+    "last_error": "",
 }
 
 SCHEDULE_INT_COLS = {
@@ -1762,6 +1795,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "schema_version":  SCHEDULE_SCHEMA_VERSION,
         "priority":        _clamp_priority(priority),
         "last_duration":   0,
+        "last_error":      "",
     }
 
 
@@ -2296,7 +2330,8 @@ def _explain_exception(exc):
 def send_shipment(session, route, useFreighters, notif_config, log_path,
                   mode_name, dest_island_coords="", dest_player="",
                   max_lock_retries=3, next_shipment_str=None,
-                  min_threshold=0, deadline_ts=None, derived_mask=None):
+                  min_threshold=0, deadline_ts=None, derived_mask=None,
+                  schedule_id=""):
     origin_city = route[0]
     dest_city = route[1]
     resources = list(route[3:])
@@ -2335,7 +2370,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                              origin_city["name"], "", dest_city["name"],
                              dest_island_coords, dest_player, resources,
                              0, ship_type_name, "SKIPPED", result["error"],
-                             next_shipment_str)
+                             next_shipment_str, schedule_id)
                 return result
 
     if min_threshold > 0 and total_cargo < min_threshold:
@@ -2362,7 +2397,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str)
+                     next_shipment_str, schedule_id)
         return result
     if src_block:
         result["city_unavailable"] = True
@@ -2378,7 +2413,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str)
+                     next_shipment_str, schedule_id)
         return result
 
     # 0b. Check destination city for occupation / blockade
@@ -2402,7 +2437,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str)
+                     next_shipment_str, schedule_id)
         return result
     if dest_block:
         result["city_unavailable"] = True
@@ -2419,7 +2454,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str)
+                     next_shipment_str, schedule_id)
         return result
 
     # 0c. Is the source port already loading something? Hold this order and
@@ -2452,7 +2487,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "HELD", result["error"],
-                     next_shipment_str)
+                     next_shipment_str, schedule_id)
         return result
 
     # 1. Wait for ships (with timeout, never past the cycle deadline)
@@ -2475,7 +2510,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str)
+                     next_shipment_str, schedule_id)
         return result
 
     # 1b. Check action points on source city (quick check, no long wait)
@@ -2531,7 +2566,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "FAILED", result["error"],
-                     next_shipment_str)
+                     next_shipment_str, schedule_id)
         return result
 
     # 3. Lock held — ALWAYS release in finally
@@ -2554,7 +2589,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                          origin_city["name"], "", dest_city["name"],
                          dest_island_coords, dest_player, resources,
                          0, ship_type_name, "DELAYED", result["error"],
-                         next_shipment_str)
+                         next_shipment_str, schedule_id)
             return result
 
         # 3a. Re-check source city for resource exhaustion
@@ -2583,7 +2618,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                                  dest_island_coords, dest_player, resources,
                                  0, ship_type_name, "EXHAUSTED",
                                  "All planned resources exhausted at source",
-                                 next_shipment_str)
+                                 next_shipment_str, schedule_id)
                     return result
         except Exception:
             pass
@@ -2599,7 +2634,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                              origin_city["name"], "", dest_city["name"],
                              dest_island_coords, dest_player, resources,
                              0, ship_type_name, "SKIPPED", result["error"],
-                             next_shipment_str)
+                             next_shipment_str, schedule_id)
                 return result
             if sum(sent) < sum(resources):
                 result["partial"] = True
@@ -2649,7 +2684,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      dest_island_coords, dest_player, resources,
                      ships_needed, ship_type_name, status_str,
                      error_msg=partial_note,
-                     next_shipment=next_shipment_str)
+                     next_shipment=next_shipment_str,
+                     schedule_id=schedule_id)
 
     except Exception as e:
         result["error"] = str(e)
@@ -2670,7 +2706,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "FAILED", result["error"],
-                     next_shipment_str)
+                     next_shipment_str, schedule_id)
     finally:
         release_shipping_lock(session, use_freighters=useFreighters)
 
@@ -6317,6 +6353,7 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                 session, route, useFreighters, notif_config, log_path,
                 "Consolidate", coords, min_threshold=min_threshold,
                 deadline_ts=deadline_ts, derived_mask=fs_derived,
+                schedule_id=sched.get("schedule_id", ""),
             )
             if result.get("below_threshold"):
                 small_shipments.append(
@@ -6416,6 +6453,7 @@ def run_distribute_cycle(session, sched, notif_config, log_path):
                 session, route, useFreighters, notif_config, log_path,
                 "Distribute", coords, min_threshold=min_threshold,
                 deadline_ts=deadline_ts, derived_mask=fs_derived,
+                schedule_id=sched.get("schedule_id", ""),
             )
             if result.get("below_threshold"):
                 small_shipments.append(
@@ -6518,6 +6556,7 @@ def run_topup_cycle(session, sched, notif_config, log_path):
                     "TopUp", coords, min_threshold=min_threshold,
                     deadline_ts=deadline_ts,
                     derived_mask=[True] * len(materials_names),
+                    schedule_id=sched.get("schedule_id", ""),
                 )
                 if result.get("below_threshold"):
                     small_shipments.append(
@@ -6629,6 +6668,7 @@ def run_even_cycle(session, sched, notif_config, log_path):
                     "Even Distribution", coords, min_threshold=min_threshold,
                     deadline_ts=deadline_ts,
                     derived_mask=[True] * len(materials_names),
+                    schedule_id=sched.get("schedule_id", ""),
                 )
                 if result.get("below_threshold"):
                     small_shipments.append(
@@ -6752,6 +6792,7 @@ def run_autosend_cycle(session, sched, notif_config, log_path):
             session, route, useFreighters, notif_config, log_path,
             "Auto Send", min_threshold=min_threshold,
             deadline_ts=deadline_ts, derived_mask=fs_derived,
+            schedule_id=sched.get("schedule_id", ""),
         )
         if result.get("below_threshold"):
             small_shipments.append(
@@ -7191,6 +7232,7 @@ def run_bulk_cycle(session, sched, notif_config, log_path):
             log_path, "Bulk Distribution", coords, player,
             min_threshold=min_threshold, deadline_ts=deadline_ts,
             derived_mask=fs_derived,
+            schedule_id=sched.get("schedule_id", ""),
         )
 
         if result.get("shortfalls"):
@@ -7456,10 +7498,33 @@ MODE_HANDLERS = {
 #  Schedule dispatcher
 # ----------------------------------------------------------------------------
 
+# Why the last cycle failed, so the scheduler loop can store it on the row
+# for "View schedules" to show. Written and read by the single scheduler
+# thread between one execute_schedule call and the update that follows it.
+_last_cycle_error = {"text": "", "detail": ""}
+
+
+def _record_cycle_error(text, detail=""):
+    _last_cycle_error["text"] = text
+    _last_cycle_error["detail"] = detail
+
+
+def _cycle_error_note():
+    """One line combining the plain reason and the technical detail."""
+    text = _last_cycle_error["text"]
+    detail = _last_cycle_error["detail"]
+    if text and detail:
+        return f"{text} [{detail}]"
+    return text or detail
+
+
 def execute_schedule(session, sched, notif_config, log_path):
     mode = sched.get("mode", "")
     handler = MODE_HANDLERS.get(mode)
     if handler is None:
+        _record_cycle_error(
+            f"This schedule's mode ({mode or 'blank'}) is not one this "
+            f"version knows how to run, so nothing was attempted.")
         return 0
 
     sid = sched.get("schedule_id", "?")
@@ -7474,12 +7539,17 @@ def execute_schedule(session, sched, notif_config, log_path):
             f"Mode: {mode_label}",
         )
 
+    _record_cycle_error("")
     try:
         cycle_sent = handler(session, sched, notif_config, log_path)
-    except Exception:
+    except Exception as exc:
         # Returning 0 here was indistinguishable from "ran fine, sent
         # nothing", so a one-time schedule that CRASHED was marked
         # completed and never retried. None means failure.
+        _record_cycle_error(
+            _explain_exception(exc)
+            or "The cycle stopped on an unexpected error.",
+            str(exc))
         _rrs_release_all(session)
         if should_notify(notif_config, "error"):
             sendToBot(
@@ -7641,6 +7711,11 @@ def transport_scheduler_loop(session, stop_event):
                 try:
                     cycle_sent = execute_schedule(session, sched, notif_config, log_path)
                 except Exception as exc:
+                    _record_cycle_error(
+                        _explain_exception(exc)
+                        or "The schedule hit an unexpected problem and this "
+                           "cycle was skipped.",
+                        str(exc))
                     try:
                         sendToBot(
                             session,
@@ -7654,7 +7729,7 @@ def transport_scheduler_loop(session, stop_event):
                     transport_csv_update(
                         session, sid,
                         last_run=now, next_run=now + 3600,
-                        status="active",
+                        status="active", last_error=_cycle_error_note(),
                     )
                     _preempt["schedule_id"] = None
                     continue
@@ -7665,7 +7740,7 @@ def transport_scheduler_loop(session, stop_event):
                     transport_csv_update(
                         session, sid,
                         last_run=now, next_run=int(time.time()) + 3600,
-                        status="active",
+                        status="active", last_error=_cycle_error_note(),
                     )
                     _preempt["schedule_id"] = None
                     continue
@@ -7691,6 +7766,7 @@ def transport_scheduler_loop(session, stop_event):
                         session, sid,
                         last_run=now, next_run=now,
                         total_shipments=total, status="active",
+                        last_error="",
                     )
                     if should_notify(notif_config, "error"):
                         try:
@@ -7720,6 +7796,7 @@ def transport_scheduler_loop(session, stop_event):
                         last_run=finished, next_run=next_ts,
                         total_shipments=total, status="active",
                         last_duration=elapsed,
+                        last_error=_cycle_error_note(),
                     )
                 elif total > 0:
                     # One-time schedule that actually shipped: mark it done
@@ -7729,7 +7806,7 @@ def transport_scheduler_loop(session, stop_event):
                         session, sid,
                         last_run=finished, next_run="",
                         total_shipments=total, status="completed",
-                        last_duration=elapsed,
+                        last_duration=elapsed, last_error="",
                     )
                 else:
                     # Nothing was shipped, so this is NOT done. A cycle can
@@ -7746,6 +7823,13 @@ def transport_scheduler_loop(session, stop_event):
                             session, sid,
                             last_run=finished, next_run="",
                             status="error", last_duration=elapsed,
+                            last_error=(
+                                "Gave up: retried for over 24 hours and "
+                                "never shipped anything. The usual causes "
+                                "are no free ships of the type this "
+                                "schedule uses, no action points in the "
+                                "source city, or a blockade. The shipment "
+                                "list below records each attempt."),
                         )
                         if should_notify(notif_config, "error"):
                             try:
@@ -7770,6 +7854,13 @@ def transport_scheduler_loop(session, stop_event):
                             last_run=finished,
                             next_run=finished + ONE_SHOT_RETRY_SECONDS,
                             status="active", last_duration=elapsed,
+                            last_error=(
+                                _cycle_error_note()
+                                or "The cycle ran but shipped nothing, so it "
+                                   "has NOT been marked done. Most often "
+                                   "there were no free ships of the type "
+                                   "this schedule uses. The shipment list "
+                                   "below records the exact reason."),
                         )
                         if first_try and should_notify(notif_config, "error"):
                             try:
@@ -8463,13 +8554,7 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
             _delete_schedules(session)
 
 
-def _view_schedules(session):
-    rows = transport_csv_load(session)
-    if not rows:
-        print(f"\n  {C.DIM}No schedules found.{C.RESET}\n")
-        enter()
-        return
-
+def _print_schedule_table(session, rows):
     _status_colours = {"pending": C.YELLOW, "active": C.GREEN,
                        "paused": C.DIM, "completed": C.CYAN,
                        "error": C.RED}
@@ -8502,6 +8587,8 @@ def _view_schedules(session):
         ship = "F" if r.get("ship_type", "m") == "f" else "M"
         total_sent = r.get("total_shipments", 0)
         notes = (r.get("notes", "") or "")[:20]
+        if r.get("last_error"):
+            notes = f"{C.RED}! {C.RESET}{notes}"
         interval_str = f"{interval}h" if interval > 0 else "once"
 
         last_run = r.get("last_run", "")
@@ -8520,8 +8607,203 @@ def _view_schedules(session):
               f"{sc}{status:<10}{C.RESET} {interval_str:<10} "
               f"{ship:<5} {total_sent:>6} {last_str:<12} {notes}")
 
-    print(f"\n  {C.DIM}Total: {len(rows)} schedule(s){C.RESET}\n")
+    print(f"\n  {C.DIM}Total: {len(rows)} schedule(s){C.RESET}")
+    return rows
+
+
+def _view_schedules(session):
+    """List schedules, then let one be opened to see what it has been doing."""
+    while True:
+        rows = transport_csv_load(session)
+        if not rows:
+            print_module_banner("View Schedules")
+            print(f"\n  {C.DIM}No schedules found.{C.RESET}\n")
+            enter()
+            return
+
+        def _draw_list():
+            print_module_banner("View Schedules")
+            _print_schedule_table(session, rows)
+            errored = [r for r in rows if r.get("status") == "error"
+                       or r.get("last_error")]
+            if errored:
+                ids = ", ".join(f"#{r.get('schedule_id', '?')}"
+                                for r in errored)
+                print(f"  {C.RED}Reported a problem last run: "
+                      f"{ids}{C.RESET}")
+            print(f"\n  {C.HINT}Type a schedule ID to see what it did and "
+                  f"why anything failed.{C.RESET}")
+
+        _draw_list()
+        _set_redraw(_draw_list)
+        choice = read(msg="  Schedule ID (blank = back): ", empty=True,
+                      additionalValues=["'"])
+        if choice in ("", "'", None):
+            return
+        match = None
+        for r in rows:
+            if str(r.get("schedule_id", "")) == str(choice).strip():
+                match = r
+                break
+        if match is None:
+            print(f"\n  {C.WARN}No schedule with ID {choice}.{C.RESET}\n")
+            enter()
+            continue
+        _show_schedule_report(session, match)
+
+
+def _show_schedule_report(session, sched):
+    sid = sched.get("schedule_id", "?")
+
+    def _draw_report():
+        print_module_banner(f"Schedule #{sid}")
+        _view_schedule_detail(sched)
+        _print_schedule_issues(session, sched)
+        print("")
+
+    _draw_report()
+    _set_redraw(_draw_report)
     enter()
+
+
+def _wrap_note(text, indent, width=72):
+    """Break a stored reason across lines so nothing scrolls off."""
+    words = str(text).split()
+    lines, current = [], ""
+    for word in words:
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}" if current else word
+    if current:
+        lines.append(current)
+    return [f"{indent}{line}" for line in lines]
+
+
+def _explain_log_reason(reason):
+    """Plain English for a logged reason that is raw Python wording.
+
+    Deliberately narrow. The module's own logged messages are already
+    readable and must pass through untouched — "No merchant ships available
+    (timed out)" is not a server timeout, and rewording it would say
+    something that is not true.
+    """
+    low = str(reason).lower()
+    if "nonetype" in low and "group" in low:
+        return ("the game sent back a page ikabot could not read, usually a "
+                "busy server or a page that changed mid-request")
+    if low.startswith(("keyerror", "indexerror", "typeerror",
+                       "attributeerror", "valueerror")):
+        return ("the game's reply was missing something ikabot expected, "
+                "usually a half-loaded page from a busy server")
+    return ""
+
+
+_LOG_STATUS_HELP = {
+    "SENT": "delivered",
+    "PARTIAL": "only part of the cargo went — the cycle ran out of time",
+    "HELD": "the trading port was still loading an earlier shipment",
+    "SKIPPED": "could not be attempted this cycle",
+    "DELAYED": "the free ships were taken at the last moment",
+    "FAILED": "the send itself went wrong",
+    "EXHAUSTED": "the source city had nothing left to send",
+}
+
+
+def _schedule_log_rows(session, sched, limit=12):
+    """This schedule's most recent shipment-log rows, newest last.
+
+    Rows written before the log carried a schedule id fall back to matching
+    on mode, and are marked so the display does not overstate what it knows.
+    """
+    try:
+        prefs = load_prefs()
+        base = (prefs.get(f"log_path_{_account_suffix(session)}")
+                or prefs.get("log_path")
+                or os.path.join(os.path.expanduser("~"), "shipment_log.csv"))
+        path = _account_log_path(base, session)
+    except Exception:
+        path = ""
+    if not path or not os.path.isfile(path):
+        return None, ""
+    sid = str(sched.get("schedule_id", ""))
+    mode_names = {
+        "consolidate": "Consolidate", "distribute": "Distribute",
+        "even": "Even Distribution", "autosend": "Auto Send",
+        "bulk": "Bulk Distribution", "topup": "TopUp",
+    }
+    mode_label = mode_names.get(sched.get("mode", ""), "")
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            all_rows = list(csv.DictReader(f))
+    except Exception:
+        return None, ""
+    mine = [r for r in all_rows if str(r.get("Schedule", "")).strip() == sid]
+    note = ""
+    if not mine and mode_label:
+        mine = [r for r in all_rows
+                if str(r.get("Mode", "")).strip() == mode_label
+                and not str(r.get("Schedule", "")).strip()]
+        if mine:
+            note = (f"older entries, matched on mode ({mode_label}) because "
+                    f"they predate per-schedule logging")
+    return mine[-limit:], note
+
+
+def _print_schedule_issues(session, sched):
+    """What this schedule has actually been doing, problems spelled out."""
+    last_error = str(sched.get("last_error", "") or "").strip()
+    print("")
+    if last_error:
+        print(f"  {C.RED}What went wrong on the last run{C.RESET}")
+        for line in _wrap_note(last_error, "    "):
+            print(f"  {C.RED}{line}{C.RESET}")
+    elif sched.get("status") == "error":
+        print(f"  {C.RED}Marked as an error, but no reason was recorded "
+              f"(it predates this version).{C.RESET}")
+    else:
+        print(f"  {C.OK}No problem reported on the last run.{C.RESET}")
+
+    rows, note = _schedule_log_rows(session, sched)
+    if rows is None:
+        print(f"\n  {C.DIM}No shipment log for this account yet, so there is "
+              f"no per-shipment history to show.{C.RESET}")
+        return
+    if not rows:
+        print(f"\n  {C.DIM}This schedule has not logged a shipment yet."
+              f"{C.RESET}")
+        return
+
+    print(f"\n  {C.BOLD}Recent shipments{C.RESET}")
+    if note:
+        print(f"  {C.DIM}({note}){C.RESET}")
+    for r in rows:
+        status = str(r.get("Status", "")).strip().upper()
+        colour = (C.OK if status == "SENT" else
+                  C.YELLOW if status in ("PARTIAL", "HELD", "SKIPPED",
+                                         "DELAYED", "EXHAUSTED") else C.RED)
+        when = f"{str(r.get('Date', ''))[5:]} {str(r.get('Time', ''))[:5]}"
+        route = f"{r.get('Source_City', '')} -> {r.get('Dest_City', '')}"
+        total = r.get("Total_Resources", "") or "0"
+        print(f"    {when}  {colour}{status:<9}{C.RESET} {route}  "
+              f"{C.DIM}({total}){C.RESET}")
+        reason = str(r.get("Error", "") or "").strip()
+        meaning = _LOG_STATUS_HELP.get(status, "")
+        if reason:
+            plain = _explain_log_reason(reason)
+            for line in _wrap_note(plain or reason, "        ", width=64):
+                print(f"  {C.DIM}{line}{C.RESET}")
+            if plain:
+                print(f"  {C.DIM}        (technical: {reason}){C.RESET}")
+        elif meaning and status != "SENT":
+            print(f"  {C.DIM}        {meaning}{C.RESET}")
+
+    bad = [r for r in rows
+           if str(r.get("Status", "")).strip().upper() not in ("SENT",)]
+    if bad:
+        print(f"\n  {C.DIM}{len(bad)} of the last {len(rows)} shipment(s) did "
+              f"not go through.{C.RESET}")
 
 
 def _view_schedule_detail(sched):
@@ -8564,6 +8846,8 @@ def _view_schedule_detail(sched):
             print(f"  Next run:      {getDateTime(next_run)}")
         except Exception:
             pass
+    elif status == "error":
+        print(f"  Next run:      {C.RED}stopped — will not run again{C.RESET}")
 
     src_ids = sched.get("source_city_ids") or []
     if src_ids:
