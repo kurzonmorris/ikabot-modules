@@ -392,16 +392,43 @@ def getShipCapacity(session):
     capacity : int
         an integer representing the ship capacity of the user's current city
     """
-    html = session.get('view=merchantNavy')
-    _m = re.search(r'ajax.Responder, (\[\[\S\s]*?\]\])\)\;', html)
-    if _m is None:
-        raise RuntimeError("Could not read ship capacity from the trading port page (unexpected server response)")
-    data = json.loads(_m.group(1), strict=False)
+    for attempt in range(3):
+        for fetch in (lambda: session.post('view=merchantNavy'),
+                      lambda: session.get('view=merchantNavy')):
+            try:
+                found = parseShipCapacity(fetch())
+            except Exception:
+                found = None
+            if found is not None:
+                return found
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError("Could not read ship capacity from the trading port page (unexpected server response)")
 
-    ship_capacity = data[3][1]['singleTransporterCapacity']
-    freighter_capacity = data[3][1]['singleFreighterCapacity']
 
-    return int(ship_capacity), int(freighter_capacity)
+def parseShipCapacity(html):
+    """(transporter, freighter) capacity from a merchant navy response.
+
+    The data comes back in two different shapes: an ajax responder wrapper,
+    or the fields on their own in the page body. Which one you get depends
+    on how the view was requested, so accept either and return None when
+    the response carries neither.
+    """
+    if not html:
+        return None
+    _m = re.search(r'ajax.Responder, (\[\[[\S\s]*?\]\])\)\;', html)
+    if _m is not None:
+        try:
+            data = json.loads(_m.group(1), strict=False)
+            return (int(data[3][1]['singleTransporterCapacity']),
+                    int(data[3][1]['singleFreighterCapacity']))
+        except (ValueError, TypeError, KeyError, IndexError):
+            pass
+    ship = re.search(r'singleTransporterCapacity"?\s*:\s*"?(\d+)', html)
+    freighter = re.search(r'singleFreighterCapacity"?\s*:\s*"?(\d+)', html)
+    if ship and freighter:
+        return int(ship.group(1)), int(freighter.group(1))
+    return None
 
 
 
