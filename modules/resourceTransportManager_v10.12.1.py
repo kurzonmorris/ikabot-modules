@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.12.0"
+MODULE_VERSION = "10.12.1"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -1896,23 +1896,56 @@ def _get_schedule_timing(event, mode_name):
 #  SHIP HELPERS
 # ============================================================================
 
+# Ship capacity only ever goes up (research, port level), so a remembered
+# value is at worst conservative — it sends more ships than strictly needed,
+# never fewer. Worth far more than losing a shipment to one bad response.
+_ship_capacity_cache = {}
+
+
+def _parse_ship_capacity(html):
+    """(transporter, freighter) from a merchant navy response, or None.
+
+    Two shapes come back depending on how the view was asked for: an ajax
+    responder wrapper, or the fields loose in the page body.
+    """
+    if not html:
+        return None
+    m = re.search(r'ajax.Responder, (\[\[[\S\s]*?\]\])\)\;', html)
+    if m is not None:
+        try:
+            data = json.loads(m.group(1), strict=False)
+            return (int(data[3][1]["singleTransporterCapacity"]),
+                    int(data[3][1]["singleFreighterCapacity"]))
+        except (ValueError, TypeError, KeyError, IndexError):
+            pass
+    ship = re.search(r'singleTransporterCapacity"?\s*:\s*"?(\d+)', html)
+    freighter = re.search(r'singleFreighterCapacity"?\s*:\s*"?(\d+)', html)
+    if ship and freighter:
+        return int(ship.group(1)), int(freighter.group(1))
+    return None
+
+
 def getShipCapacity(session):
-    try:
-        html = session.post("view=merchantNavy")
-        ship_capacity = int(
-            html.split('singleTransporterCapacity":')[1]
-            .split(',"singleFreighterCapacity')[0]
-        )
-        freighter_capacity = int(
-            html.split('singleFreighterCapacity":')[1]
-            .split(',"draftEffect')[0]
-        )
-        return ship_capacity, freighter_capacity
-    except Exception:
-        raise Exception(
-            "Could not read ship capacity from game server — "
-            "the response format may have changed"
-        )
+    key = _account_suffix(session)
+    for attempt in range(3):
+        for fetch in (lambda: session.post("view=merchantNavy"),
+                      lambda: session.get("view=merchantNavy")):
+            try:
+                found = _parse_ship_capacity(fetch())
+            except Exception:
+                found = None
+            if found is not None:
+                _ship_capacity_cache[key] = found
+                return found
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+    remembered = _ship_capacity_cache.get(key)
+    if remembered is not None:
+        return remembered
+    raise RuntimeError(
+        "Could not read ship capacity from the trading port page "
+        "(unexpected server response)"
+    )
 
 
 def wait_for_ships(session, useFreighters, status_prefix="", max_wait=3600):
@@ -2374,7 +2407,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                              dest_island_coords, dest_player, resources,
                              0, ship_type_name, "SKIPPED", result["error"],
                              next_shipment_str, schedule_id,
-                     origin_city["id"], dest_city["id"])
+                             origin_city["id"], dest_city["id"])
                 return result
 
     if min_threshold > 0 and total_cargo < min_threshold:
@@ -2601,7 +2634,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                          dest_island_coords, dest_player, resources,
                          0, ship_type_name, "DELAYED", result["error"],
                          next_shipment_str, schedule_id,
-                     origin_city["id"], dest_city["id"])
+                         origin_city["id"], dest_city["id"])
             return result
 
         # 3a. Re-check source city for resource exhaustion
@@ -2631,7 +2664,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                                  0, ship_type_name, "EXHAUSTED",
                                  "All planned resources exhausted at source",
                                  next_shipment_str, schedule_id,
-                     origin_city["id"], dest_city["id"])
+                                 origin_city["id"], dest_city["id"])
                     return result
         except Exception:
             pass
@@ -2648,7 +2681,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                              dest_island_coords, dest_player, resources,
                              0, ship_type_name, "SKIPPED", result["error"],
                              next_shipment_str, schedule_id,
-                     origin_city["id"], dest_city["id"])
+                             origin_city["id"], dest_city["id"])
                 return result
             if sum(sent) < sum(resources):
                 result["partial"] = True
