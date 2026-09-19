@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.10.0"
+MODULE_VERSION = "10.11.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -8533,11 +8533,14 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
             print(f"  {C.DIM}    Change interval, resources, ship type, notes, etc.{C.RESET}")
             print(f"  {C.BOLD}(3){C.RESET} Pause / resume a schedule")
             print(f"  {C.BOLD}(4){C.RESET} Delete schedule(s)")
+            print(f"  {C.BOLD}(5){C.RESET} Retry failed schedules")
+            print(f"  {C.DIM}    Queue anything that errored to run again, "
+                  f"settings and all.{C.RESET}")
             print(f"  {C.BOLD}('){C.RESET} Back")
 
         _draw_sched_menu()
         _set_redraw(_draw_sched_menu)
-        choice = read(min=1, max=4, digit=True, additionalValues=["'", ""])
+        choice = read(min=1, max=5, digit=True, additionalValues=["'", ""])
         if choice == "":
             continue
         if choice == "'":
@@ -8552,6 +8555,8 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
             _toggle_schedule_pause(session)
         elif choice == 4:
             _delete_schedules(session)
+        elif choice == 5:
+            _retry_all_failed(session, transport_csv_load(session))
 
 
 def _print_schedule_table(session, rows):
@@ -8631,15 +8636,20 @@ def _view_schedules(session):
                                 for r in errored)
                 print(f"  {C.RED}Reported a problem last run: "
                       f"{ids}{C.RESET}")
-            print(f"\n  {C.HINT}Type a schedule ID to see what it did and "
-                  f"why anything failed.{C.RESET}")
+                print(f"  {C.BOLD}(r){C.RESET} Retry all of them, keeping "
+                      f"their settings")
+            print(f"\n  {C.HINT}Type a schedule ID to see what it did, why "
+                  f"anything failed, and to retry it.{C.RESET}")
 
         _draw_list()
         _set_redraw(_draw_list)
         choice = read(msg="  Schedule ID (blank = back): ", empty=True,
-                      additionalValues=["'"])
+                      additionalValues=["'", "r", "R"])
         if choice in ("", "'", None):
             return
+        if str(choice).lower() == "r":
+            _retry_all_failed(session, rows)
+            continue
         match = None
         for r in rows:
             if str(r.get("schedule_id", "")) == str(choice).strip():
@@ -8654,15 +8664,33 @@ def _view_schedules(session):
 
 def _show_schedule_report(session, sched):
     sid = sched.get("schedule_id", "?")
+    is_bulk = sched.get("mode", "") == "bulk"
 
     def _draw_report():
         print_module_banner(f"Schedule #{sid}")
         _view_schedule_detail(sched)
         _print_schedule_issues(session, sched)
         print("")
+        if sched.get("status") == "completed":
+            print(f"  {C.BOLD}(r){C.RESET} Send again — queue this schedule "
+                  f"to run once more")
+        else:
+            print(f"  {C.BOLD}(r){C.RESET} Retry now — queue it to run again "
+                  f"with the same settings")
+        if is_bulk:
+            print(f"  {C.BOLD}(a){C.RESET} Retry the whole file — clear this "
+                  f"run's progress so every row ships again")
+        print(f"  {C.BOLD}('){C.RESET} Back")
 
     _draw_report()
     _set_redraw(_draw_report)
+    values = ["r", "'"] + (["a"] if is_bulk else [])
+    choice = read(msg="  Choice: ", values=values, empty=True,
+                  additionalValues=values + [""])
+    if choice in ("", "'"):
+        return
+    _retry_schedule(session, sched, reset_bulk_rows=(choice == "a"))
+    print("")
     enter()
 
 
@@ -9225,6 +9253,98 @@ def _modify_schedule(session):
         enter()
 
 
+def _reset_bulk_run_column(sched):
+    """Clear a bulk run's progress so every row ships again.
+
+    Returns (rows_reset, error). Only touches the run slot this schedule
+    uses, so other runs of the same file keep their history.
+    """
+    csv_path = sched.get("bulk_csv_path", "")
+    run_column = sched.get("bulk_run_column", "")
+    if not csv_path or not run_column:
+        return 0, "this schedule has no CSV or run slot recorded"
+    if not os.path.isfile(csv_path):
+        return 0, f"the CSV is no longer at {csv_path}"
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+    except Exception as exc:
+        return 0, f"the CSV could not be read ({exc})"
+    if run_column not in fieldnames:
+        return 0, f"the CSV has no {run_column} column any more"
+    issues_col = issues_col_for_run(run_column)
+    reset = 0
+    for row in rows:
+        if normalize_text(row.get(run_column, "")):
+            reset += 1
+        row[run_column] = ""
+        if issues_col in fieldnames:
+            row[issues_col] = ""
+    try:
+        write_csv_atomic(csv_path, fieldnames, rows)
+    except Exception as exc:
+        return 0, f"the CSV could not be written ({exc})"
+    return reset, ""
+
+
+def _retry_schedule(session, sched, reset_bulk_rows=False):
+    """Queue a schedule to run again, keeping everything it was set up with.
+
+    A schedule that errored or finished has no next_run and a status the
+    scheduler skips, so until now the only way to send it again was to
+    delete it and build the whole thing a second time.
+    """
+    sid = sched.get("schedule_id", "?")
+    if reset_bulk_rows:
+        reset, err = _reset_bulk_run_column(sched)
+        if err:
+            print(f"\n  {C.WARN}Could not reset the CSV progress: "
+                  f"{err}{C.RESET}")
+            print(f"  {C.DIM}The schedule is still being retried — rows that "
+                  f"had not gone yet will be sent.{C.RESET}")
+        else:
+            print(f"\n  {C.OK}Cleared progress on {reset} row(s) — the whole "
+                  f"file will be sent again.{C.RESET}")
+
+    transport_csv_update(session, sid, status="active",
+                         next_run=int(time.time()), last_error="")
+    print(f"  {C.OK}Schedule #{sid} is queued to run again.{C.RESET}")
+    if sched.get("mode") == "bulk" and not reset_bulk_rows:
+        print(f"  {C.DIM}Rows already marked done stay done; the ones that "
+              f"did not go are retried.{C.RESET}")
+    elif sched.get("interval_hours", 0) == 0:
+        print(f"  {C.DIM}This is a one-time schedule, so it sends once more "
+              f"and then finishes.{C.RESET}")
+    if not _is_transport_worker_running(session):
+        print(f"  {C.WARN}The background scheduler is not running — start it "
+              f"with (s) on the main page or nothing will be sent.{C.RESET}")
+
+
+def _retry_all_failed(session, rows):
+    """Re-queue every schedule that reported a problem."""
+    failed = [r for r in rows
+              if r.get("status") == "error" or r.get("last_error")]
+    if not failed:
+        print(f"\n  {C.DIM}No schedules are reporting a problem.{C.RESET}\n")
+        enter()
+        return
+    ids = ", ".join(f"#{r.get('schedule_id', '?')}" for r in failed)
+    print(f"\n  Retry {len(failed)} schedule(s): {ids}")
+    print(f"  {C.DIM}Each keeps its own settings — nothing is rebuilt."
+          f"{C.RESET}")
+    print(f"  {C.BOLD}(1){C.RESET} Yes, queue them all to run again")
+    print(f"  {C.BOLD}('){C.RESET} Cancel")
+    if _safe_read(min=1, max=1, digit=True, additionalValues=["'"]) == "'":
+        return
+    print("")
+    for sched in failed:
+        _retry_schedule(session, sched)
+    print("")
+    enter()
+
+
 def _toggle_schedule_pause(session):
     rows = transport_csv_load(session)
     if not rows:
@@ -9266,10 +9386,20 @@ def _toggle_schedule_pause(session):
     elif current_status == "pending":
         transport_csv_update(session, sid, status="active")
         print(f"  Schedule #{sid} activated. Start the background scheduler to run it.")
+    elif current_status in ("error", "completed"):
+        label = ("stopped after an error" if current_status == "error"
+                 else "done")
+        print(f"  Schedule #{sid} is {label}, so there is nothing to pause.")
+        print(f"  {C.BOLD}(1){C.RESET} Queue it to run again with the same "
+              f"settings")
+        print(f"  {C.BOLD}('){C.RESET} Leave it alone")
+        if _safe_read(min=1, max=1, digit=True,
+                      additionalValues=["'"]) != "'":
+            print("")
+            _retry_schedule(session, target)
     else:
-        _sd = {"completed": "done", "error": "error"}
-        label = _sd.get(current_status, current_status)
-        print(f"  Schedule #{sid} is '{label}' and cannot be paused/resumed.")
+        print(f"  Schedule #{sid} is '{current_status}' and cannot be "
+              f"paused/resumed.")
     enter()
 
 
