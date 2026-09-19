@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.10.0"
+MODULE_VERSION = "10.12.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -659,9 +659,9 @@ def should_notify(notif_config, event_type):
 # ============================================================================
 
 LOG_COLUMNS = [
-    "Date", "Time", "Account", "Schedule", "Mode", "Source_City",
-    "Source_Island",
-    "Dest_City", "Dest_Island", "Dest_Player",
+    "Date", "Time", "Account", "Schedule", "Mode",
+    "Source_City", "Source_Id", "Source_Island",
+    "Dest_City", "Dest_Id", "Dest_Island", "Dest_Player",
     "Wood", "Wine", "Marble", "Crystal", "Sulphur", "Total_Resources",
     "Ships_Used", "Ship_Type", "Status", "Error", "Next_Shipment",
 ]
@@ -808,7 +808,8 @@ def _upgrade_log_header(log_path):
 def log_shipment(log_path, session, mode, source_city, source_island,
                  dest_city, dest_island, dest_player, resources,
                  ships_used, ship_type, status, error_msg=None,
-                 next_shipment=None, schedule_id=""):
+                 next_shipment=None, schedule_id="",
+                 source_id="", dest_id=""):
     if not log_path:
         return
     # Every account appends to ONE shared file, so concurrent writes could
@@ -830,8 +831,10 @@ def log_shipment(log_path, session, mode, source_city, source_island,
             "Schedule": str(schedule_id or ""),
             "Mode": mode,
             "Source_City": source_city,
+            "Source_Id": str(source_id or ""),
             "Source_Island": source_island,
             "Dest_City": dest_city,
+            "Dest_Id": str(dest_id or ""),
             "Dest_Island": dest_island,
             "Dest_Player": dest_player,
             "Wood": resources[0] if len(resources) > 0 else 0,
@@ -2370,7 +2373,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                              origin_city["name"], "", dest_city["name"],
                              dest_island_coords, dest_player, resources,
                              0, ship_type_name, "SKIPPED", result["error"],
-                             next_shipment_str, schedule_id)
+                             next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
                 return result
 
     if min_threshold > 0 and total_cargo < min_threshold:
@@ -2397,7 +2401,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str, schedule_id)
+                     next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
         return result
     if src_block:
         result["city_unavailable"] = True
@@ -2413,7 +2418,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str, schedule_id)
+                     next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
         return result
 
     # 0b. Check destination city for occupation / blockade
@@ -2437,7 +2443,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str, schedule_id)
+                     next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
         return result
     if dest_block:
         result["city_unavailable"] = True
@@ -2454,7 +2461,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str, schedule_id)
+                     next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
         return result
 
     # 0c. Is the source port already loading something? Hold this order and
@@ -2487,7 +2495,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "HELD", result["error"],
-                     next_shipment_str, schedule_id)
+                     next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
         return result
 
     # 1. Wait for ships (with timeout, never past the cycle deadline)
@@ -2510,7 +2519,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "SKIPPED", result["error"],
-                     next_shipment_str, schedule_id)
+                     next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
         return result
 
     # 1b. Check action points on source city (quick check, no long wait)
@@ -2566,7 +2576,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "FAILED", result["error"],
-                     next_shipment_str, schedule_id)
+                     next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
         return result
 
     # 3. Lock held — ALWAYS release in finally
@@ -2589,7 +2600,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                          origin_city["name"], "", dest_city["name"],
                          dest_island_coords, dest_player, resources,
                          0, ship_type_name, "DELAYED", result["error"],
-                         next_shipment_str, schedule_id)
+                         next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
             return result
 
         # 3a. Re-check source city for resource exhaustion
@@ -2618,7 +2630,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                                  dest_island_coords, dest_player, resources,
                                  0, ship_type_name, "EXHAUSTED",
                                  "All planned resources exhausted at source",
-                                 next_shipment_str, schedule_id)
+                                 next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
                     return result
         except Exception:
             pass
@@ -2634,7 +2647,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                              origin_city["name"], "", dest_city["name"],
                              dest_island_coords, dest_player, resources,
                              0, ship_type_name, "SKIPPED", result["error"],
-                             next_shipment_str, schedule_id)
+                             next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
                 return result
             if sum(sent) < sum(resources):
                 result["partial"] = True
@@ -2685,7 +2699,9 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      ships_needed, ship_type_name, status_str,
                      error_msg=partial_note,
                      next_shipment=next_shipment_str,
-                     schedule_id=schedule_id)
+                     schedule_id=schedule_id,
+                     source_id=origin_city["id"],
+                     dest_id=dest_city["id"])
 
     except Exception as e:
         result["error"] = str(e)
@@ -2706,7 +2722,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                      origin_city["name"], "", dest_city["name"],
                      dest_island_coords, dest_player, resources,
                      0, ship_type_name, "FAILED", result["error"],
-                     next_shipment_str, schedule_id)
+                     next_shipment_str, schedule_id,
+                     origin_city["id"], dest_city["id"])
     finally:
         release_shipping_lock(session, use_freighters=useFreighters)
 
@@ -3479,12 +3496,14 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                 print(f"  {C.DIM}    View, edit, pause, or delete saved schedules.{C.RESET}")
                 print(f"  {C.BOLD}(8){C.RESET} Island Cache")
                 print(f"  {C.DIM}    Browse, search, and cache island data for faster lookups.{C.RESET}")
+                print(f"  {C.BOLD}(9){C.RESET} Shipment History")
+                print(f"  {C.DIM}    What was sent, what failed, and send any of it again.{C.RESET}")
 
             _draw_main_menu()
             _set_redraw(_draw_main_menu)
             print(f"\n  {C.BOLD}('){C.RESET} Back to main menu")
 
-            shipping_mode = read(min=1, max=8, digit=True,
+            shipping_mode = read(min=1, max=9, digit=True,
                                  additionalValues=["'", "s", "S", "o", "O",
                                                     "x", "X", "n", "N",
                                                     "f", "F", "h", "H", ""])
@@ -3569,6 +3588,9 @@ def resourceTransportManager(session, event, stdin_fd, predetermined_input):
                 continue
             if shipping_mode == 8:
                 _island_cache_menu(session)
+                continue
+            if shipping_mode == 9:
+                shipment_history(session)
                 continue
 
             if shipping_mode == 1:
@@ -8533,11 +8555,14 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
             print(f"  {C.DIM}    Change interval, resources, ship type, notes, etc.{C.RESET}")
             print(f"  {C.BOLD}(3){C.RESET} Pause / resume a schedule")
             print(f"  {C.BOLD}(4){C.RESET} Delete schedule(s)")
+            print(f"  {C.BOLD}(5){C.RESET} Retry failed schedules")
+            print(f"  {C.DIM}    Queue anything that errored to run again, "
+                  f"settings and all.{C.RESET}")
             print(f"  {C.BOLD}('){C.RESET} Back")
 
         _draw_sched_menu()
         _set_redraw(_draw_sched_menu)
-        choice = read(min=1, max=4, digit=True, additionalValues=["'", ""])
+        choice = read(min=1, max=5, digit=True, additionalValues=["'", ""])
         if choice == "":
             continue
         if choice == "'":
@@ -8552,6 +8577,8 @@ def manage_schedules_menu(session, event, telegram_enabled, log_path):
             _toggle_schedule_pause(session)
         elif choice == 4:
             _delete_schedules(session)
+        elif choice == 5:
+            _retry_all_failed(session, transport_csv_load(session))
 
 
 def _print_schedule_table(session, rows):
@@ -8631,15 +8658,20 @@ def _view_schedules(session):
                                 for r in errored)
                 print(f"  {C.RED}Reported a problem last run: "
                       f"{ids}{C.RESET}")
-            print(f"\n  {C.HINT}Type a schedule ID to see what it did and "
-                  f"why anything failed.{C.RESET}")
+                print(f"  {C.BOLD}(r){C.RESET} Retry all of them, keeping "
+                      f"their settings")
+            print(f"\n  {C.HINT}Type a schedule ID to see what it did, why "
+                  f"anything failed, and to retry it.{C.RESET}")
 
         _draw_list()
         _set_redraw(_draw_list)
         choice = read(msg="  Schedule ID (blank = back): ", empty=True,
-                      additionalValues=["'"])
+                      additionalValues=["'", "r", "R"])
         if choice in ("", "'", None):
             return
+        if str(choice).lower() == "r":
+            _retry_all_failed(session, rows)
+            continue
         match = None
         for r in rows:
             if str(r.get("schedule_id", "")) == str(choice).strip():
@@ -8654,15 +8686,33 @@ def _view_schedules(session):
 
 def _show_schedule_report(session, sched):
     sid = sched.get("schedule_id", "?")
+    is_bulk = sched.get("mode", "") == "bulk"
 
     def _draw_report():
         print_module_banner(f"Schedule #{sid}")
         _view_schedule_detail(sched)
         _print_schedule_issues(session, sched)
         print("")
+        if sched.get("status") == "completed":
+            print(f"  {C.BOLD}(r){C.RESET} Send again — queue this schedule "
+                  f"to run once more")
+        else:
+            print(f"  {C.BOLD}(r){C.RESET} Retry now — queue it to run again "
+                  f"with the same settings")
+        if is_bulk:
+            print(f"  {C.BOLD}(a){C.RESET} Retry the whole file — clear this "
+                  f"run's progress so every row ships again")
+        print(f"  {C.BOLD}('){C.RESET} Back")
 
     _draw_report()
     _set_redraw(_draw_report)
+    values = ["r", "'"] + (["a"] if is_bulk else [])
+    choice = read(msg="  Choice: ", values=values, empty=True,
+                  additionalValues=values + [""])
+    if choice in ("", "'"):
+        return
+    _retry_schedule(session, sched, reset_bulk_rows=(choice == "a"))
+    print("")
     enter()
 
 
@@ -9225,6 +9275,379 @@ def _modify_schedule(session):
         enter()
 
 
+# ============================================================================
+#  SHIPMENT HISTORY  (what was sent, what failed, and send it again)
+# ============================================================================
+
+HISTORY_RECENT_COUNT = 20
+HISTORY_RECENT_DAYS = 5
+
+_HISTORY_STATUS_COLOURS = {
+    "SENT": "OK", "PARTIAL": "YELLOW", "HELD": "YELLOW",
+    "SKIPPED": "YELLOW", "DELAYED": "YELLOW", "EXHAUSTED": "YELLOW",
+    "FAILED": "RED",
+}
+
+
+def _history_log_path(session):
+    """This account's shipment log, without prompting for one."""
+    try:
+        prefs = load_prefs()
+        base = (prefs.get(f"log_path_{_account_suffix(session)}")
+                or prefs.get("log_path")
+                or os.path.join(os.path.expanduser("~"), "shipment_log.csv"))
+        return _account_log_path(base, session)
+    except Exception:
+        return ""
+
+
+def _row_timestamp(row):
+    """Epoch for a log row, or 0 when the date/time cannot be read."""
+    try:
+        return datetime.datetime.strptime(
+            f"{row.get('Date', '')} {row.get('Time', '')}",
+            "%Y-%m-%d %H:%M:%S").timestamp()
+    except (ValueError, TypeError):
+        return 0
+
+
+def _load_history(session, days=None, count=None):
+    """Recent shipments, oldest first. None when there is no log at all."""
+    path = _history_log_path(session)
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return None
+    if days is not None:
+        cutoff = time.time() - days * 86400
+        # A row whose timestamp will not parse is kept rather than dropped:
+        # hiding a shipment because its date is odd is worse than showing it.
+        rows = [r for r in rows
+                if _row_timestamp(r) == 0 or _row_timestamp(r) >= cutoff]
+    if count is not None:
+        rows = rows[-count:]
+    return rows
+
+
+def _history_resources(row):
+    return [int(row.get(name, 0) or 0) for name in
+            ("Wood", "Wine", "Marble", "Crystal", "Sulphur")]
+
+
+def _history_brief(row):
+    """One-line resource summary, short enough for the list."""
+    values = _history_resources(row)
+    parts = [f"{addThousandSeparator(v)}{n[0]}"
+             for n, v in zip(("Wood", "Wine", "Marble", "Crystal", "Sulphur"),
+                             values) if v]
+    return " ".join(parts) if parts else "-"
+
+
+def _history_colour(status):
+    return getattr(C, _HISTORY_STATUS_COLOURS.get(status, ""), "")
+
+
+def shipment_history(session):
+    """Recent shipments, with the detail and a resend behind each row."""
+    days = HISTORY_RECENT_DAYS
+    while True:
+        rows = (_load_history(session, days=days) if days
+                else _load_history(session, count=HISTORY_RECENT_COUNT))
+        if rows is None:
+            print_module_banner("Shipment History")
+            print(f"\n  {C.DIM}No shipment log for this account yet. One is "
+                  f"written the first time a shipment runs.{C.RESET}\n")
+            enter()
+            return
+        if not rows:
+            print_module_banner("Shipment History")
+            print(f"\n  {C.DIM}Nothing shipped in the last {days} day(s)."
+                  f"{C.RESET}\n")
+            print(f"  {C.BOLD}(n){C.RESET} Show the last "
+                  f"{HISTORY_RECENT_COUNT} shipments instead")
+            print(f"  {C.BOLD}('){C.RESET} Back\n")
+            if read(msg="  Choice: ", values=["n", "'"], empty=True,
+                    additionalValues=["n", "'", ""]) == "n":
+                days = 0
+                continue
+            return
+
+        # Newest first on screen — the row you came to look at is at the top.
+        display = list(reversed(rows))
+
+        def _draw_history():
+            scope = (f"last {days} day(s)" if days
+                     else f"last {HISTORY_RECENT_COUNT} shipments")
+            print_module_banner("Shipment History")
+            print(f"  {C.DIM}Newest first — {scope}, "
+                  f"{len(display)} shipment(s).{C.RESET}\n")
+            print(f"  {C.BOLD}{'#':>3} {'When':<11} {'Status':<9} "
+                  f"{'Mode':<18} {'Route':<30} {'Sent'}{C.RESET}")
+            print(f"  {'---':>3} {'---':<11} {'---':<9} {'---':<18} "
+                  f"{'---':<30} {'---'}")
+            for i, r in enumerate(display, start=1):
+                status = str(r.get("Status", "")).strip().upper()
+                when = f"{str(r.get('Date', ''))[5:]} {str(r.get('Time', ''))[:5]}"
+                route = (f"{r.get('Source_City', '?')} -> "
+                         f"{r.get('Dest_City', '?')}")
+                if len(route) > 30:
+                    route = route[:27] + "..."
+                print(f"  {i:>3} {when:<11} "
+                      f"{_history_colour(status)}{status:<9}{C.RESET} "
+                      f"{str(r.get('Mode', ''))[:18]:<18} {route:<30} "
+                      f"{_history_brief(r)}")
+            failed = [i for i, r in enumerate(display, start=1)
+                      if str(r.get("Status", "")).strip().upper()
+                      not in ("SENT",)]
+            if failed:
+                print(f"\n  {C.RED}{len(failed)} did not go through "
+                      f"(rows {', '.join(str(i) for i in failed[:10])}"
+                      f"{'...' if len(failed) > 10 else ''}){C.RESET}")
+            print(f"\n  {C.HINT}Type a row number for the full details and "
+                  f"to send it again.{C.RESET}")
+            if days:
+                print(f"  {C.BOLD}(n){C.RESET} Show the last "
+                      f"{HISTORY_RECENT_COUNT} shipments instead")
+            else:
+                print(f"  {C.BOLD}(n){C.RESET} Show the last "
+                      f"{HISTORY_RECENT_DAYS} days instead")
+            print(f"  {C.BOLD}('){C.RESET} Back")
+
+        _draw_history()
+        _set_redraw(_draw_history)
+        choice = read(msg="  Choice: ", empty=True,
+                      additionalValues=["'", "n", "N", ""])
+        if choice in ("", "'", None):
+            return
+        if str(choice).lower() == "n":
+            days = 0 if days else HISTORY_RECENT_DAYS
+            continue
+        try:
+            index = int(str(choice).strip())
+        except ValueError:
+            continue
+        if not 1 <= index <= len(display):
+            print(f"\n  {C.WARN}Pick a row between 1 and {len(display)}."
+                  f"{C.RESET}\n")
+            enter()
+            continue
+        _show_shipment_detail(session, display[index - 1])
+
+
+def _show_shipment_detail(session, row):
+    status = str(row.get("Status", "")).strip().upper()
+    failed = status not in ("SENT",)
+    resources = _history_resources(row)
+
+    def _draw_detail():
+        print_module_banner("Shipment Detail")
+        print(f"\n  {'─' * 46}")
+        print(f"  When:          {row.get('Date', '')} "
+              f"{row.get('Time', '')}")
+        print(f"  Status:        {_history_colour(status)}{status}{C.RESET}"
+              f"  {C.DIM}{_LOG_STATUS_HELP.get(status, '')}{C.RESET}")
+        print(f"  Mode:          {row.get('Mode', '?')}")
+        sched_id = str(row.get("Schedule", "") or "")
+        print(f"  From schedule: {('#' + sched_id) if sched_id else '(not recorded)'}")
+        src_id = str(row.get("Source_Id", "") or "")
+        print(f"  Source:        {row.get('Source_City', '?')}"
+              f"{f'  (id {src_id})' if src_id else ''}")
+        dest_id = str(row.get("Dest_Id", "") or "")
+        dest_line = f"  Destination:   {row.get('Dest_City', '?')}"
+        if row.get("Dest_Island"):
+            dest_line += f"  {row['Dest_Island']}"
+        if dest_id:
+            dest_line += f"  (id {dest_id})"
+        print(dest_line)
+        if row.get("Dest_Player"):
+            print(f"  Player:        {row['Dest_Player']}")
+        print(f"  Ships:         {row.get('Ships_Used', '0')} "
+              f"{row.get('Ship_Type', '')}")
+        print(f"  {'─' * 46}")
+        for i, name in enumerate(materials_names):
+            amount = resources[i] if i < len(resources) else 0
+            if amount:
+                print(f"  {name + ':':<14} {addThousandSeparator(amount)}")
+        print(f"  {'Total:':<14} "
+              f"{addThousandSeparator(sum(resources))}")
+        print(f"  {'─' * 46}")
+        reason = str(row.get("Error", "") or "").strip()
+        if reason:
+            label = "Why it failed" if failed else "Note"
+            print(f"  {C.RED if failed else C.DIM}{label}:{C.RESET}")
+            plain = _explain_log_reason(reason)
+            for line in _wrap_note(plain or reason, "    ", width=66):
+                print(f"  {C.RED if failed else C.DIM}{line}{C.RESET}")
+            if plain:
+                print(f"  {C.DIM}    (technical: {reason}){C.RESET}")
+            print(f"  {'─' * 46}")
+        print("")
+        if sum(resources) <= 0:
+            print(f"  {C.DIM}Nothing was loaded, so there is nothing to "
+                  f"send again. Retry the schedule instead.{C.RESET}")
+        elif not (src_id and dest_id):
+            print(f"  {C.DIM}This entry predates the city ids being logged, "
+                  f"so it cannot be sent again from here.{C.RESET}")
+        else:
+            verb = "Retry" if failed else "Send again"
+            print(f"  {C.BOLD}(r){C.RESET} {verb} — queue this exact "
+                  f"shipment as a one-off")
+        print(f"  {C.BOLD}('){C.RESET} Back")
+
+    _draw_detail()
+    _set_redraw(_draw_detail)
+    can_resend = (sum(resources) > 0 and str(row.get("Source_Id", "") or "")
+                  and str(row.get("Dest_Id", "") or ""))
+    values = (["r", "'"] if can_resend else ["'"])
+    choice = read(msg="  Choice: ", values=values, empty=True,
+                  additionalValues=values + [""])
+    if choice in ("", "'", None):
+        return
+    _resend_shipment(session, row)
+
+
+def _resend_shipment(session, row):
+    """Queue a logged shipment again, exactly as it was, as a one-off."""
+    resources = _history_resources(row)
+    src_id = str(row.get("Source_Id", "") or "")
+    dest_id = str(row.get("Dest_Id", "") or "")
+    use_freighters = "freight" in str(row.get("Ship_Type", "")).lower()
+
+    priority = _ask_priority(
+        "Resend Shipment", default=PRIORITY_DEFAULT,
+        note=(f"{row.get('Source_City', '?')} -> "
+              f"{row.get('Dest_City', '?')}: "
+              f"{_format_resource_list(resources)}"))
+    if priority is None:
+        return
+
+    print_module_banner("Resend Shipment")
+    sched = build_schedule_row(
+        schedule_id=0, mode="consolidate",
+        ship_type=("f" if use_freighters else "m"),
+        source_city_ids=[src_id], dest_city_ids=[dest_id],
+        resource_config=resources, send_mode="send",
+        interval_hours=0, status="active",
+        notes=f"Resend of {row.get('Date', '')} {row.get('Time', '')}",
+        priority=priority,
+    )
+    try:
+        sid = transport_csv_append_with_id(session, sched)
+    except Exception as exc:
+        print(f"\n  {C.WARN}Could not queue the shipment: {exc}{C.RESET}\n")
+        enter()
+        return
+
+    print(f"\n  {C.OK}Queued as schedule #{sid} — a one-off sending"
+          f"{C.RESET}")
+    print(f"  {C.CYAN}{_format_resource_list(resources)}{C.RESET}")
+    print(f"  from {row.get('Source_City', '?')} to "
+          f"{row.get('Dest_City', '?')} "
+          f"{row.get('Dest_Island', '')}")
+    print(f"\n  {C.DIM}Amounts are capped at what the source actually has "
+          f"when it runs, so nothing is over-committed.{C.RESET}")
+    if not _is_transport_worker_running(session):
+        print(f"  {C.WARN}The background scheduler is not running — start it "
+              f"with (s) on the main page or nothing will be sent.{C.RESET}")
+    print("")
+    enter()
+
+
+def _reset_bulk_run_column(sched):
+    """Clear a bulk run's progress so every row ships again.
+
+    Returns (rows_reset, error). Only touches the run slot this schedule
+    uses, so other runs of the same file keep their history.
+    """
+    csv_path = sched.get("bulk_csv_path", "")
+    run_column = sched.get("bulk_run_column", "")
+    if not csv_path or not run_column:
+        return 0, "this schedule has no CSV or run slot recorded"
+    if not os.path.isfile(csv_path):
+        return 0, f"the CSV is no longer at {csv_path}"
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+    except Exception as exc:
+        return 0, f"the CSV could not be read ({exc})"
+    if run_column not in fieldnames:
+        return 0, f"the CSV has no {run_column} column any more"
+    issues_col = issues_col_for_run(run_column)
+    reset = 0
+    for row in rows:
+        if normalize_text(row.get(run_column, "")):
+            reset += 1
+        row[run_column] = ""
+        if issues_col in fieldnames:
+            row[issues_col] = ""
+    try:
+        write_csv_atomic(csv_path, fieldnames, rows)
+    except Exception as exc:
+        return 0, f"the CSV could not be written ({exc})"
+    return reset, ""
+
+
+def _retry_schedule(session, sched, reset_bulk_rows=False):
+    """Queue a schedule to run again, keeping everything it was set up with.
+
+    A schedule that errored or finished has no next_run and a status the
+    scheduler skips, so until now the only way to send it again was to
+    delete it and build the whole thing a second time.
+    """
+    sid = sched.get("schedule_id", "?")
+    if reset_bulk_rows:
+        reset, err = _reset_bulk_run_column(sched)
+        if err:
+            print(f"\n  {C.WARN}Could not reset the CSV progress: "
+                  f"{err}{C.RESET}")
+            print(f"  {C.DIM}The schedule is still being retried — rows that "
+                  f"had not gone yet will be sent.{C.RESET}")
+        else:
+            print(f"\n  {C.OK}Cleared progress on {reset} row(s) — the whole "
+                  f"file will be sent again.{C.RESET}")
+
+    transport_csv_update(session, sid, status="active",
+                         next_run=int(time.time()), last_error="")
+    print(f"  {C.OK}Schedule #{sid} is queued to run again.{C.RESET}")
+    if sched.get("mode") == "bulk" and not reset_bulk_rows:
+        print(f"  {C.DIM}Rows already marked done stay done; the ones that "
+              f"did not go are retried.{C.RESET}")
+    elif sched.get("interval_hours", 0) == 0:
+        print(f"  {C.DIM}This is a one-time schedule, so it sends once more "
+              f"and then finishes.{C.RESET}")
+    if not _is_transport_worker_running(session):
+        print(f"  {C.WARN}The background scheduler is not running — start it "
+              f"with (s) on the main page or nothing will be sent.{C.RESET}")
+
+
+def _retry_all_failed(session, rows):
+    """Re-queue every schedule that reported a problem."""
+    failed = [r for r in rows
+              if r.get("status") == "error" or r.get("last_error")]
+    if not failed:
+        print(f"\n  {C.DIM}No schedules are reporting a problem.{C.RESET}\n")
+        enter()
+        return
+    ids = ", ".join(f"#{r.get('schedule_id', '?')}" for r in failed)
+    print(f"\n  Retry {len(failed)} schedule(s): {ids}")
+    print(f"  {C.DIM}Each keeps its own settings — nothing is rebuilt."
+          f"{C.RESET}")
+    print(f"  {C.BOLD}(1){C.RESET} Yes, queue them all to run again")
+    print(f"  {C.BOLD}('){C.RESET} Cancel")
+    if _safe_read(min=1, max=1, digit=True, additionalValues=["'"]) == "'":
+        return
+    print("")
+    for sched in failed:
+        _retry_schedule(session, sched)
+    print("")
+    enter()
+
+
 def _toggle_schedule_pause(session):
     rows = transport_csv_load(session)
     if not rows:
@@ -9266,10 +9689,20 @@ def _toggle_schedule_pause(session):
     elif current_status == "pending":
         transport_csv_update(session, sid, status="active")
         print(f"  Schedule #{sid} activated. Start the background scheduler to run it.")
+    elif current_status in ("error", "completed"):
+        label = ("stopped after an error" if current_status == "error"
+                 else "done")
+        print(f"  Schedule #{sid} is {label}, so there is nothing to pause.")
+        print(f"  {C.BOLD}(1){C.RESET} Queue it to run again with the same "
+              f"settings")
+        print(f"  {C.BOLD}('){C.RESET} Leave it alone")
+        if _safe_read(min=1, max=1, digit=True,
+                      additionalValues=["'"]) != "'":
+            print("")
+            _retry_schedule(session, target)
     else:
-        _sd = {"completed": "done", "error": "error"}
-        label = _sd.get(current_status, current_status)
-        print(f"  Schedule #{sid} is '{label}' and cannot be paused/resumed.")
+        print(f"  Schedule #{sid} is '{current_status}' and cannot be "
+              f"paused/resumed.")
     enter()
 
 
