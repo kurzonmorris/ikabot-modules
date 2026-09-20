@@ -21,7 +21,7 @@ from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import *
-from ikabot.helpers.planRoutes import executeRoutes, sendGoods
+from ikabot.helpers.planRoutes import sendGoods
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.signals import setInfoSignal
 from ikabot.helpers.naval import getAvailableShips, getAvailableFreighters
@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.12.1"
+MODULE_VERSION = "10.12.2"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -2128,7 +2128,7 @@ def _execute_routes_bounded(session, route, useFreighters, deadline_ts,
         session.setStatus(
             f"{status_prefix}Sending {toSend[0]}W {toSend[1]}V "
             f"{toSend[2]}M {toSend[3]}C {toSend[4]}S "
-            f"(cycle deadline in {int(remaining_time / 60)}min)"
+            f"({int(remaining_time / 60)}min left)"
         )
         ships_available = wait_for_ships(
             session, useFreighters, status_prefix,
@@ -2221,6 +2221,8 @@ def _check_city_status(session, city_id):
 # queues behind the shipment already loading, so the send either sits there or
 # comes back rejected. Rather than wait, the port's busy-until time is
 # recorded and the order goes on a hold list so the next order can start.
+ONE_OFF_SEND_LIMIT_SECONDS = 6 * 3600
+
 PORT_HOLD_MAX_SECONDS = 3600
 # A queueTime further out than this is not a real port queue — it is a stale
 # or misread value, and acting on it would hold the order for hours.
@@ -2670,25 +2672,32 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
             pass
 
         session.setStatus(f"{prefix}Sending resources...")
-        if deadline_ts is not None:
-            sent = _execute_routes_bounded(session, route, useFreighters,
-                                           deadline_ts, prefix)
-            if sum(sent) == 0:
-                result["error"] = ("Cycle time limit reached before cargo "
-                                   "could be sent")
-                log_shipment(log_path, session, mode_name,
-                             origin_city["name"], "", dest_city["name"],
-                             dest_island_coords, dest_player, resources,
-                             0, ship_type_name, "SKIPPED", result["error"],
-                             next_shipment_str, schedule_id,
-                             origin_city["id"], dest_city["id"])
-                return result
-            if sum(sent) < sum(resources):
-                result["partial"] = True
-            resources = sent
-            total_cargo = sum(sent)
-        else:
-            executeRoutes(session, [route], useFreighters)
+        # Every shipment goes through the module's own sender. ikabot's
+        # executeRoutes reads ship capacity through core's parser, which a
+        # dropped-in module cannot fix — a module update would not reach it.
+        # One-off shipments used to take that route and failed on it every
+        # time while recurring ones, which already came through here, worked.
+        bounded = deadline_ts is not None
+        send_until = (deadline_ts if bounded
+                      else time.time() + ONE_OFF_SEND_LIMIT_SECONDS)
+        sent = _execute_routes_bounded(session, route, useFreighters,
+                                       send_until, prefix)
+        if sum(sent) == 0:
+            result["error"] = (
+                "Cycle time limit reached before cargo could be sent"
+                if bounded else
+                "No ships became free in time to send anything")
+            log_shipment(log_path, session, mode_name,
+                         origin_city["name"], "", dest_city["name"],
+                         dest_island_coords, dest_player, resources,
+                         0, ship_type_name, "SKIPPED", result["error"],
+                         next_shipment_str, schedule_id,
+                         origin_city["id"], dest_city["id"])
+            return result
+        if sum(sent) < sum(resources):
+            result["partial"] = True
+        resources = sent
+        total_cargo = sum(sent)
 
         # If the send loop completes without error, the shipment was sent.
         # We do NOT verify by comparing ship counts before/after because
@@ -2710,15 +2719,25 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
             if i < len(resources) and resources[i] > 0
         )
         status_str = "PARTIAL" if result["partial"] else "SENT"
-        partial_note = (
-            "Cycle time limit reached — remainder abandoned; "
-            "next cycle recalculates" if result["partial"] else None
-        )
+        if not result["partial"]:
+            partial_note = None
+        elif bounded:
+            partial_note = ("Cycle time limit reached — remainder abandoned; "
+                            "next cycle recalculates")
+        else:
+            partial_note = ("Ran out of free ships — remainder not sent; "
+                            "send it again from Shipment History")
         if should_notify(notif_config, "all"):
-            extra = ("\nNOTE: only part of the planned cargo was sent — "
-                     "the schedule's time ran out mid-delivery. The rest "
-                     "is included in the next cycle automatically."
-                     if result["partial"] else "")
+            if not result["partial"]:
+                extra = ""
+            elif bounded:
+                extra = ("\nNOTE: only part of the planned cargo was sent — "
+                         "the schedule's time ran out mid-delivery. The rest "
+                         "is included in the next cycle automatically.")
+            else:
+                extra = ("\nNOTE: only part of the planned cargo was sent — "
+                         "there were not enough free ships. The rest was not "
+                         "sent; use (9) Shipment History to send it again.")
             sendToBot(session,
                       f"SHIPMENT SENT\nAccount: {session.username}\n"
                       f"From: {origin_city['name']}\n"
