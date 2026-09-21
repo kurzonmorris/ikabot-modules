@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.3.4"
+__version__ = "2.4.0"
 
 import csv
 import glob
@@ -247,8 +247,16 @@ def _migrate_legacy_prefs(session):
         pass
 
 
-def get_queue_strategy(session):
+def get_queue_strategy(session, city_id=None):
+    """Strategy for *city_id*, or the account default when it has no override."""
     prefs = module_load_prefs(session, PREFS_NAME) or {}
+    if city_id is not None:
+        per_city = prefs.get("city_strategy")
+        # Hand-edited prefs can hold anything here, so check the shape.
+        value = (per_city.get(str(city_id))
+                 if isinstance(per_city, dict) else None)
+        if value in QUEUE_STRATEGIES:
+            return value
     value = prefs.get("queue_strategy")
     return value if value in QUEUE_STRATEGIES else DEFAULT_QUEUE_STRATEGY
 
@@ -257,6 +265,44 @@ def set_queue_strategy(session, value):
     prefs = module_load_prefs(session, PREFS_NAME) or {}
     prefs["queue_strategy"] = value
     module_save_prefs(session, PREFS_NAME, prefs)
+
+
+def get_city_strategies(session):
+    """The per-city overrides as {city_id_str: strategy}."""
+    prefs = module_load_prefs(session, PREFS_NAME) or {}
+    per_city = prefs.get("city_strategy")
+    if not isinstance(per_city, dict):
+        return {}
+    return {str(k): v for k, v in per_city.items() if v in QUEUE_STRATEGIES}
+
+
+def set_city_strategy(session, city_id, value):
+    """Override one city, or clear its override when *value* is None."""
+    prefs = module_load_prefs(session, PREFS_NAME) or {}
+    per_city = prefs.get("city_strategy")
+    if not isinstance(per_city, dict):
+        per_city = {}
+    if value is None:
+        per_city.pop(str(city_id), None)
+    else:
+        per_city[str(city_id)] = value
+    prefs["city_strategy"] = per_city
+    module_save_prefs(session, PREFS_NAME, prefs)
+
+
+def worker_strategy(city_id):
+    """Strategy the worker should use for *city_id*.
+
+    Reads the snapshot the scheduler refreshes each tick, so a menu change
+    reaches a running worker without a restart and without a file read per
+    city per tick.
+    """
+    per_city = WORKER_PREFS.get("city_strategy")
+    value = (per_city.get(str(city_id))
+             if isinstance(per_city, dict) else None)
+    if value in QUEUE_STRATEGIES:
+        return value
+    return WORKER_PREFS.get("queue_strategy", DEFAULT_QUEUE_STRATEGY)
 
 
 def _strategy_label(value):
@@ -2419,10 +2465,70 @@ def _requeue_skipped(session):
     enter()
 
 
+def _toggle_city_strategy(session):
+    """Turn skip-ahead on or off for one city."""
+    while True:
+        banner()
+        default = get_queue_strategy(session)
+        overrides = get_city_strategies(session)
+
+        # Only cities with unfinished work are worth toggling.
+        cities = {}
+        for r in csv_load(session):
+            if r["status"] in ACTIVE_STATUSES:
+                cities.setdefault(str(r["city_id"]),
+                                  r.get("city_name") or str(r["city_id"]))
+        if not cities:
+            print("Per-city queue strategy\n\n  No city has queued work.")
+            enter()
+            return
+
+        print("Per-city queue strategy\n")
+        print(f"  Account default: {_strategy_label(default)}\n")
+        print(f"  {'#':>3}  {'City':<22}  {'Uses':<12}  Source")
+        print("  " + "-" * 60)
+        ordered = sorted(cities.items(), key=lambda kv: kv[1].lower())
+        for i, (cid, name) in enumerate(ordered, 1):
+            value = overrides.get(cid, default)
+            source = "city setting" if cid in overrides else "account default"
+            short = "skip ahead" if value == "skip_ahead" else "wait in order"
+            colour = bcolors.GREEN if value == "skip_ahead" else ""
+            print(f"  {i:>3}  {name[:22]:<22}  "
+                  f"{colour}{short:<12}{bcolors.ENDC if colour else ''}  "
+                  f"{source}")
+
+        print(f"\n  Pick a city (1-{len(ordered)}) to switch it between "
+              f"skip ahead and wait in order.")
+        print("  Enter or ' to go back.")
+        choice = read(min=1, max=len(ordered), empty=True,
+                      additionalValues=["'"])
+        if choice == "'" or choice == "":
+            return
+
+        cid, name = ordered[choice - 1]
+        now_using = overrides.get(cid, default)
+        new_value = ("wait_in_order" if now_using == "skip_ahead"
+                     else "skip_ahead")
+        # Drop the override when it would only repeat the account default, so
+        # the city follows the default again if that default ever changes.
+        set_city_strategy(session, cid,
+                          None if new_value == default else new_value)
+
+        print(f"\n  {name} now uses: {_strategy_label(new_value)}")
+        if new_value == default:
+            print("  That matches the account default, so the city setting "
+                  "was removed.")
+        if _is_worker_running(session):
+            print(f"  The running worker applies this within "
+                  f"{TICK_BUDGET_SECONDS}s. No restart is needed.")
+        enter()
+
+
 def _choose_queue_strategy(session):
     """Pick what a city does when it can't afford the next queued item."""
     banner()
     current = get_queue_strategy(session)
+    overrides = get_city_strategies(session)
     print("Queue strategy\n")
     print("  When a city can't afford the next building on its list:\n")
     print("  (1) Wait in order — ship what's missing and keep re-checking "
@@ -2430,17 +2536,31 @@ def _choose_queue_strategy(session):
           "nothing is cancelled.\n")
     print("  (2) Skip ahead — try the next building on the list, and the one "
           "after,\n      until it finds one the city can already afford. "
-          "Skipped items stay\n      queued and are picked up later.\n")
-    print(f"  Current: {bcolors.GREEN}{_strategy_label(current)}"
-          f"{bcolors.ENDC}\n")
-    print("  Levels of the same building always run in order in both modes.\n")
+          "Skipped items stay\n      queued and are picked up later. Each "
+          "tick starts again from the\n      top of the queue, so a building "
+          "that was passed over is retried as\n      soon as its resources "
+          "arrive.\n")
+    print("  (3) Set this per city — leave the default alone and switch one "
+          "city.\n")
+    print(f"  Account default: {bcolors.GREEN}{_strategy_label(current)}"
+          f"{bcolors.ENDC}")
+    if overrides:
+        print(f"  {len(overrides)} city/cities have their own setting "
+              f"(option 3).")
+    print("\n  Levels of the same building always run in order in both "
+          "modes.\n")
 
-    choice = read(min=1, max=2, empty=True, additionalValues=["'"])
+    choice = read(min=1, max=3, empty=True, additionalValues=["'"])
     if choice == "'" or choice == "":
+        return
+    if choice == 3:
+        _toggle_city_strategy(session)
         return
     value = "wait_in_order" if choice == 1 else "skip_ahead"
     set_queue_strategy(session, value)
-    print(f"\n  Set to: {_strategy_label(value)}")
+    print(f"\n  Account default set to: {_strategy_label(value)}")
+    if overrides:
+        print(f"  {len(overrides)} city/cities keep their own setting.")
     if _is_worker_running(session):
         print("  The running worker will pick this up within "
               f"{TICK_BUDGET_SECONDS}s — no restart needed.")
@@ -3004,8 +3124,7 @@ def spawn_shipment(session, city_id, row, cost):
             routes    = rtm.allocate_from_suppliers(need, suppliers, city, island)
 
             if routes is None:
-                if (WORKER_PREFS.get("queue_strategy", DEFAULT_QUEUE_STRATEGY)
-                        == "wait_in_order"):
+                if worker_strategy(city_id) == "wait_in_order":
                     # Don't cancel: drop back to pending so the scheduler
                     # retries once production or trade has topped things up.
                     csv_update(session, queue_id, status="pending")
@@ -3578,8 +3697,7 @@ def service_city(session, city_id, st, rows, stop_event):
         # afford.  Nothing is cancelled — the rest stays queued in order.
         # If none is affordable we fall through to the head row so shipping
         # still gets kicked off for it.
-        if (WORKER_PREFS.get("queue_strategy", DEFAULT_QUEUE_STRATEGY)
-                == "skip_ahead"):
+        if worker_strategy(city_id) == "skip_ahead":
             chosen = pick_affordable_row(city, rows, positions)
             if chosen is not None and int(chosen["queue_id"]) != int(row["queue_id"]):
                 # set_wait_note replaces its own prefixed note in place and
@@ -3699,8 +3817,7 @@ def service_city(session, city_id, st, rows, stop_event):
             issue_and_confirm(session, city_id, st, row, city, cost)
             return
         if now >= (st.get("ship_deadline") or 0):
-            if (WORKER_PREFS.get("queue_strategy", DEFAULT_QUEUE_STRATEGY)
-                    == "wait_in_order"):
+            if worker_strategy(city_id) == "wait_in_order":
                 # Keep waiting rather than cancelling: back to pending so the
                 # next tick re-ships and re-checks.  Notification is throttled
                 # by maybe_notify_shortage's cooldown.
@@ -3897,6 +4014,7 @@ def scheduler_loop(session, stop_event, worker_token=None):
         # Re-read each tick so changing the strategy from the menu takes
         # effect on a running worker rather than needing a restart.
         WORKER_PREFS["queue_strategy"] = get_queue_strategy(session)
+        WORKER_PREFS["city_strategy"]  = get_city_strategies(session)
 
         now = int(time.time())
         drain_shortage_events(session, city_state, now)

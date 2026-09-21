@@ -230,7 +230,7 @@ Tracks changes made in this fork. Currently `1.7.6`. Banner displays
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
 resourceTransportManager_v10.3.1.py
-constructionManager_v2.3.4.py
+constructionManager_v2.4.0.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
 user's modules folder — *not* by the module loader. `MODULE_NAME` is the display
@@ -743,7 +743,7 @@ numbers below drift.**
 | Module | Does |
 |---|---|
 | `resourceTransportManager_v10.3.1.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
-| `constructionManager_v2.3.4.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §29. |
+| `constructionManager_v2.4.0.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per account or per city, per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §29. |
 | `autoRecruitmentManager_v2.14.0.py` | Trains units/ships across barracks and shipyards from a goals CSV, with per-type city include lists, configurable batch sizing and capacity-aware allocation (§ Population and citizens). **The working RRS integration example.** Also the reference for *verifying* an order was accepted before mutating state — see §Order verification. |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
 | `resourceProductionManager_v1.0.3.py` | Manages production/luxury assignment per city. Own persistence, predates `modulePrefs`. |
