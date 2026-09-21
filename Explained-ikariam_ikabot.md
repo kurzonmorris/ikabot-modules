@@ -216,20 +216,20 @@ Ikabot is an open-source Python automation bot for Ikariam, maintained by the Ik
 ## 3. Version Numbers
 
 ### ikabot Base Version (`IKABOT_VERSION` in `config.py`)
-Tracks the upstream ikabot version this mod is based on. Currently `7.4.5`;
-the fork is at **full parity** with upstream 7.4.5 (see `docs/UPSTREAM_PARITY.md`).
+Tracks the upstream ikabot version this mod is based on. Currently `7.5.1`
+(see `docs/UPSTREAM_PARITY.md`).
 Read the live value from `ikabot/config.py` rather than trusting this line.
 
 ### Mod Version (`IKABOT_MOD_VERSION` in `config.py`)
-Tracks changes made in this fork. Currently `1.7.6`. Banner displays
-`modded by kurzon v1.7.6`. Read the live value from `ikabot/config.py`.
+Tracks changes made in this fork. Currently `2.1.0`. Banner displays
+`modded by kurzon v2.1.0`. Read the live value from `ikabot/config.py`.
 
 **Bump it on every change you ship.** Patch for fixes, minor for new features.
 
 ### External Module Version (filename suffix — REMOVED at load time)
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
-resourceTransportManager_v10.3.1.py
+resourceTransportManager_v10.13.0.py
 constructionManager_v2.4.0.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
@@ -269,11 +269,11 @@ ikabot-modules/
 │   │   └── varios.py              ← wait(), addThousandSeparator(), getDateTime()
 │   └── web/
 │       └── session.py             ← Session class — all HTTP calls go through here
-├── resourceTransportManager_v10.3.1.py ← External module
-├── constructionManager.py              ← External module
-├── tavernManager.py                    ← External module
-├── autoRecruitment.py                  ← External module
-├── sequenceRunner.py                   ← External module (WIP)
+├── modules/                            ← External modules live here, versioned
+│   ├── resourceTransportManager_v10.13.0.py
+│   ├── constructionManager_v2.4.0.py
+│   ├── tavernManager_v2.0.1.py
+│   └── ...                             ← see §13 for the full list
 ├── GUIDE.md                            ← End-user guide
 ├── RELEASE_NOTES.md                    ← Changelog vs upstream
 └── ikariam_ikabot_explained.md         ← This file
@@ -619,7 +619,7 @@ name and the function name must match exactly. With a version still in the name
 that fallback resolves to nonsense:
 
 ```
-resourceTransportManager_v10.3.1.py  ->  looks for  resourceTransportManager_v10.3.1()  ✗
+resourceTransportManager_v10.13.0.py ->  looks for  resourceTransportManager_v10.13.0()  ✗
 resourceTransportManager.py          ->  looks for  resourceTransportManager()          ✓
 ```
 
@@ -637,7 +637,7 @@ does not matter at all. Do it in every new module.
 
 | Filename in repo `modules/` | base | version |
 |---|---|---|
-| `resourceTransportManager_v10.3.1.py` | `resourceTransportManager.py` | `10.3.1` |
+| `resourceTransportManager_v10.13.0.py` | `resourceTransportManager.py` | `10.13.0` |
 | `noVersion.py` | `noVersion.py` | *(none)* |
 
 A module without the suffix still installs, but shows "no version" in the
@@ -742,7 +742,7 @@ numbers below drift.**
 
 | Module | Does |
 |---|---|
-| `resourceTransportManager_v10.3.1.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
+| `resourceTransportManager_v10.13.0.py` | Moves resources between cities and to other players: ship routing, partial loads, per-shipment notifications with configurable levels. Priority scheduling 1-5 with a hold window, a trading-port hold list, shipment history with resend, retry of a failed schedule, per-account logs. Sends through its **own** copy of the route logic; it deliberately does not call `executeRoutes()`, because that path reads ship capacity through a core helper a dropped-in module cannot update. |
 | `constructionManager_v2.4.0.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per account or per city, per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §29. |
 | `autoRecruitmentManager_v2.14.0.py` | Trains units/ships across barracks and shipyards from a goals CSV, with per-type city include lists, configurable batch sizing and capacity-aware allocation (§ Population and citizens). **The working RRS integration example.** Also the reference for *verifying* an order was accepted before mutating state — see §Order verification. |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
@@ -1844,4 +1844,4 @@ building as skipped-with-a-note rather than deleting them silently.
 
 ---
 
-*Last updated: 2026-09-21. Reflects ikabot 7.4.5 / mod v1.7.7.*
+*Last updated: 2026-09-21. Reflects ikabot 7.5.1 / mod v2.1.0.*
