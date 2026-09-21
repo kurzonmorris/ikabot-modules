@@ -463,7 +463,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.34.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.35.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -959,6 +959,29 @@ Under it are **◀ Instance**, **⤒ Top**, **▲ Page up**, **▼ Page down**,
 **⤓ Bottom** and **Instance ▶**, with where you are beside them. Everything sits
 below the screen, because a line above the terminal is a line of terminal you
 cannot see.
+
+#### The keypad
+
+Under the controls is a row of keys: **1-9, 0**, then **y n e o s**, then
+**backspace** and **Enter**. Pressing one types it into whichever instance is
+on screen.
+
+It exists for a tablet or a phone, where the alternative is an on-screen
+keyboard that covers half the terminal it is being used to drive. Between the
+digits and those five letters, most of ikabot can be driven without one.
+
+**Enter is there because nothing works without it** — ikabot reads with
+`input()`, so a digit on its own is never submitted. Backspace is there so a
+mistyped digit does not send you back to the keyboard either.
+
+The keys fill the width and are the same height as the controls above them,
+wrapping onto more rows rather than shrinking below what a fingertip can hit —
+one row on a desktop, four on a phone, where Enter takes a row of its own. A
+pane you had scrolled up is taken out of copy mode first, so a keypress cannot
+disappear into the scrollback viewer.
+
+Only those keys can be sent. The panel refuses anything else rather than
+passing text through to a live session.
 
 **Text size** sets how big the terminal's text is, which is also how big the
 instance bar is. tmux cannot size its own bar: a terminal has one font for the
@@ -1617,7 +1640,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.34 ships panel 1.0.30. That looks like a failed
+> not match — installer 1.0.35 ships panel 1.0.31. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.
