@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.3.2"
+__version__ = "2.3.4"
 
 import csv
 import glob
@@ -2832,6 +2832,36 @@ shortage_event_queue = queue.Queue()
 # Build / upgrade POST  (plan §10)
 # ---------------------------------------------------------------------------
 
+def _parse_game_feedback(resp):
+    """Collect every "text" the game put in an ajax response.
+
+    The old parse was a fixed `[3][1][0]["text"]` inside a bare except, so any
+    other response shape silently discarded the game's own explanation — which
+    is exactly the message needed when a build is refused. Walking the whole
+    structure finds it wherever the game puts it.
+    """
+    try:
+        data = json.loads(resp, strict=False)
+    except Exception:
+        return ""
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            text = node.get("text")
+            if isinstance(text, str) and text.strip():
+                found.append(" ".join(text.split()))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(data)
+    # dict.fromkeys keeps first-seen order while dropping repeats.
+    return " | ".join(dict.fromkeys(found))[:300]
+
+
 def post_build_or_upgrade(session, city, row):
     """Issue the build or upgrade POST to the game server.
 
@@ -2841,21 +2871,19 @@ def post_build_or_upgrade(session, city, row):
     NOTE: as of Ikariam v17 the URL shape has been simplified.
     OLD: action=CityScreen&function=upgradeBuilding&...&ajax=1
     NEW: action=UpgradeExistingBuilding&...
-    The old action no longer exists and the server silently rejects with
-    a custom/reload-to-city response. Confirmed working via the
-    constructionDiagnostic Variant H run.
+    OLD: action=CityScreen&function=build&...
+    NEW: action=BuildNewBuilding&...
+    The old actions no longer exist and the server silently rejects with
+    a custom/reload-to-city response. Both confirmed against a captured
+    click from a live game (Build now! on an empty ground sends
+    action=BuildNewBuilding with no `function` parameter).
     """
     cid = city["id"]
     pos = int(row["slot_position"])
 
     if row["action"] == "build":
-        # TODO: the new-build URL has likely changed too (legacy used
-        #   action=CityScreen&function=build). Capture a real "Build"
-        #   click via the ikabot webserver to confirm the new action
-        #   name (probably action=BuildNewBuilding or similar).
         params = {
-            "action": "CityScreen",
-            "function": "build",
+            "action": "BuildNewBuilding",
             "cityId": cid,
             "position": pos,
             "building": row["building_id"],
@@ -2880,16 +2908,16 @@ def post_build_or_upgrade(session, city, row):
             "level": current_lv,
         }
         resp = session.post(params=params)
-    try:
-        msg = json.loads(resp, strict=False)[3][1][0]["text"]
-        if msg:
-            sendToBotDebug(
-                session,
-                f"build/upgrade POST response (city {cid} slot {pos}): {msg}",
-                True,
-            )
-    except Exception:
-        pass
+    feedback = _parse_game_feedback(resp)
+    sendToBotDebug(
+        session,
+        f"{row['action']} POST city {cid} slot {pos} "
+        f"({row['building']} lv {row['target_level']}, "
+        f"building_id={row.get('building_id', '')!r}) -> "
+        + (feedback or f"no feedback text; raw: {str(resp)[:200]}"),
+        True,
+    )
+    return feedback
 
 
 # ---------------------------------------------------------------------------
@@ -3277,10 +3305,23 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
     On verify failure: mark row skipped and enter skip-cooldown.
     """
     qid = int(row["queue_id"])
+
+    # Posting a build with no buildingId just spends the retry budget on a
+    # request the game will always refuse.
+    if row["action"] == "build" and not str(row.get("building_id", "") or ""):
+        set_wait_note(
+            session, row,
+            "waiting for the game's build menu to supply this building's id "
+            "before construction can start",
+        )
+        st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
+        return
+
     csv_update(session, qid, status="running")
 
+    feedback = ""
     try:
-        post_build_or_upgrade(session, city, row)
+        feedback = post_build_or_upgrade(session, city, row)
     except Exception:
         sendToBotDebug(
             session,
@@ -3335,7 +3376,8 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
                 session, row,
                 f"the game didn't start this build (attempt "
                 f"{st['post_fail_count']} of {POST_VERIFY_MAX_ATTEMPTS}) — "
-                f"retrying",
+                f"retrying"
+                + (f"; game said: {feedback}" if feedback else ""),
             )
             st["phase"]      = "idle"
             st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
@@ -3345,16 +3387,21 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
             session, qid,
             status="skipped",
             notes=(f"the game refused to start this build "
-                   f"{POST_VERIFY_MAX_ATTEMPTS} times — use (r) in the menu "
-                   f"to retry skipped rows"),
+                   f"{POST_VERIFY_MAX_ATTEMPTS} times"
+                   + (f"; game said: {feedback}" if feedback else
+                      " and sent no explanation")
+                   + " — use (r) in the menu to retry skipped rows"),
         )
         st["post_fail_qid"], st["post_fail_count"] = None, 0
         try:
             sendToBot(
                 session,
                 f"City {city.get('cityName', city_id)} slot "
-                f"{row['slot_position']}: build did not start after "
-                f"{POST_VERIFY_MAX_ATTEMPTS} attempts — row skipped",
+                f"{row['slot_position']}: {row['building']} lv "
+                f"{row['target_level']} did not start after "
+                f"{POST_VERIFY_MAX_ATTEMPTS} attempts — row skipped"
+                + (f". Game said: {feedback}" if feedback else
+                   ". The game sent no explanation."),
             )
         except Exception:
             pass
@@ -3417,13 +3464,24 @@ def align_row_to_slot(session, city, row, slot):
         have_level = int(row["target_level"])
     except (TypeError, ValueError):
         have_level = -1
-    if row.get("action") == want_action and have_level == want_level:
+
+    # A build cannot be posted without the game's buildingId. An upgrade row
+    # converted to a build never carried one, and a build row can reach here
+    # with it blank if the earlier lookup failed, so check it even when the
+    # action and level already line up.
+    needs_id = (want_action == "build"
+                and not str(row.get("building_id", "") or ""))
+
+    if (row.get("action") == want_action
+            and have_level == want_level
+            and not needs_id):
         return row
 
-    fields = {"action": want_action, "target_level": want_level}
+    fields = {}
+    if row.get("action") != want_action or have_level != want_level:
+        fields.update({"action": want_action, "target_level": want_level})
 
-    # A build needs the game's buildingId, which an upgrade row never carried.
-    if want_action == "build" and not str(row.get("building_id", "") or ""):
+    if needs_id:
         try:
             for opt in _get_buildable_options(session, city, int(row["slot_position"])):
                 if opt["building"].lower() == str(row["building"]).lower():
@@ -3431,6 +3489,8 @@ def align_row_to_slot(session, city, row, slot):
                     break
         except Exception:
             pass
+        if "building_id" not in fields and not fields:
+            return row      # nothing learned this tick; try again next one
 
     updated = csv_update(session, row["queue_id"], **fields) or row
     sendToBotDebug(
