@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.3.2"
+__version__ = "2.3.3"
 
 import csv
 import glob
@@ -2832,6 +2832,36 @@ shortage_event_queue = queue.Queue()
 # Build / upgrade POST  (plan §10)
 # ---------------------------------------------------------------------------
 
+def _parse_game_feedback(resp):
+    """Collect every "text" the game put in an ajax response.
+
+    The old parse was a fixed `[3][1][0]["text"]` inside a bare except, so any
+    other response shape silently discarded the game's own explanation — which
+    is exactly the message needed when a build is refused. Walking the whole
+    structure finds it wherever the game puts it.
+    """
+    try:
+        data = json.loads(resp, strict=False)
+    except Exception:
+        return ""
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            text = node.get("text")
+            if isinstance(text, str) and text.strip():
+                found.append(" ".join(text.split()))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(data)
+    # dict.fromkeys keeps first-seen order while dropping repeats.
+    return " | ".join(dict.fromkeys(found))[:300]
+
+
 def post_build_or_upgrade(session, city, row):
     """Issue the build or upgrade POST to the game server.
 
@@ -2880,16 +2910,16 @@ def post_build_or_upgrade(session, city, row):
             "level": current_lv,
         }
         resp = session.post(params=params)
-    try:
-        msg = json.loads(resp, strict=False)[3][1][0]["text"]
-        if msg:
-            sendToBotDebug(
-                session,
-                f"build/upgrade POST response (city {cid} slot {pos}): {msg}",
-                True,
-            )
-    except Exception:
-        pass
+    feedback = _parse_game_feedback(resp)
+    sendToBotDebug(
+        session,
+        f"{row['action']} POST city {cid} slot {pos} "
+        f"({row['building']} lv {row['target_level']}, "
+        f"building_id={row.get('building_id', '')!r}) -> "
+        + (feedback or f"no feedback text; raw: {str(resp)[:200]}"),
+        True,
+    )
+    return feedback
 
 
 # ---------------------------------------------------------------------------
@@ -3279,8 +3309,9 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
     qid = int(row["queue_id"])
     csv_update(session, qid, status="running")
 
+    feedback = ""
     try:
-        post_build_or_upgrade(session, city, row)
+        feedback = post_build_or_upgrade(session, city, row)
     except Exception:
         sendToBotDebug(
             session,
@@ -3335,7 +3366,8 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
                 session, row,
                 f"the game didn't start this build (attempt "
                 f"{st['post_fail_count']} of {POST_VERIFY_MAX_ATTEMPTS}) — "
-                f"retrying",
+                f"retrying"
+                + (f"; game said: {feedback}" if feedback else ""),
             )
             st["phase"]      = "idle"
             st["next_check"] = int(time.time()) + SHIP_RETRY_SECONDS
@@ -3345,16 +3377,21 @@ def issue_and_confirm(session, city_id, st, row, city, cost):
             session, qid,
             status="skipped",
             notes=(f"the game refused to start this build "
-                   f"{POST_VERIFY_MAX_ATTEMPTS} times — use (r) in the menu "
-                   f"to retry skipped rows"),
+                   f"{POST_VERIFY_MAX_ATTEMPTS} times"
+                   + (f"; game said: {feedback}" if feedback else
+                      " and sent no explanation")
+                   + " — use (r) in the menu to retry skipped rows"),
         )
         st["post_fail_qid"], st["post_fail_count"] = None, 0
         try:
             sendToBot(
                 session,
                 f"City {city.get('cityName', city_id)} slot "
-                f"{row['slot_position']}: build did not start after "
-                f"{POST_VERIFY_MAX_ATTEMPTS} attempts — row skipped",
+                f"{row['slot_position']}: {row['building']} lv "
+                f"{row['target_level']} did not start after "
+                f"{POST_VERIFY_MAX_ATTEMPTS} attempts — row skipped"
+                + (f". Game said: {feedback}" if feedback else
+                   ". The game sent no explanation."),
             )
         except Exception:
             pass
