@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.31"
+PANEL_VERSION = "1.0.32"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -2123,7 +2123,14 @@ gap:4px;margin:4px 0 0}
 font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .keypad button.two{grid-column:span 2;font-family:inherit}
 @media(pointer:coarse){
-  .keypad{gap:5px}
+  /* Pinned to the bottom of the screen while the terminal is on it, so the
+     keys are under the thumb without scrolling away from the thing they are
+     typing into. Sticky rather than fixed: it keeps its own place in the
+     layout, lets go by itself once you scroll past the section, and there is
+     nothing to toggle when the section changes. */
+  .keypad{gap:5px;position:sticky;bottom:0;z-index:5;
+  background:var(--card);padding:6px 0 4px;
+  box-shadow:0 -8px 14px -10px rgba(0,0,0,.5)}
   .keypad button{padding:11px 0;font-size:14px}
   /* On a phone the keys wrap and Enter ends up alone on the last row looking
      like a mistake. Given the whole row it reads as deliberate, and it is the

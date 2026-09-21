@@ -463,7 +463,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.35.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.36.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -979,6 +979,12 @@ wrapping onto more rows rather than shrinking below what a fingertip can hit —
 one row on a desktop, four on a phone, where Enter takes a row of its own. A
 pane you had scrolled up is taken out of copy mode first, so a keypress cannot
 disappear into the scrollback viewer.
+
+**On a touchscreen the keys pin to the bottom of the screen** while the
+terminal is on it, so you are not scrolling between the screen you are reading
+and the keys you are pressing. They let go by themselves once you scroll past
+the terminal section, and sit in their normal place. The terminal keeps its
+full height either way — nothing was traded for this.
 
 Only those keys can be sent. The panel refuses anything else rather than
 passing text through to a live session.
@@ -1640,7 +1646,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.35 ships panel 1.0.31. That looks like a failed
+> not match — installer 1.0.36 ships panel 1.0.32. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.
