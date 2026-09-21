@@ -132,22 +132,65 @@ Kurzon runs about **24 accounts at the same time**. Always assume concurrency:
 
 ## 5. File and Version Naming
 
-- A file name must explain itself. The name alone tells you what the file does.
-  Examples: `resourceTransportManager`, `constructionManager`, `tavernManager`.
-- Use **camelCase** for a name with several words.
-- Put the version before the extension, after `_v`:
+Kurzon works by version number. A version tells him what he is running and what
+changed. Put a version on anything that can carry one.
+
+### Where a version goes
+
+- **A file.** Put the version before the extension, after `_v`:
 
   ```
   constructionManager_v2.3.4.py
   ```
 
+- **Inside the file.** Keep a `__version__` constant that matches the name.
+- **A banner or a title screen.** Show the version to the user. He must see the
+  version without opening the file.
+- **A file group.** Files that ship together share one version. Give the group
+  one number. Do not let the members drift apart.
+
+### Naming rules
+
+- A file name must explain itself. The name alone tells you what the file does.
+  Examples: `resourceTransportManager`, `constructionManager`, `tavernManager`.
+- Use **camelCase** for a name with several words.
 - Use `MAJOR.MINOR.PATCH`:
   - **MAJOR** — a large or breaking change.
   - **MINOR** — a new feature or a real improvement.
   - **PATCH** — a bug fix.
-- **Never change a version number unless Kurzon tells you the new number**, or
-  tells you to increase it.
-- Change only the version he names. Do not touch another version number.
+
+### Who decides a version, and who updates it
+
+These two rules work together. Keep them apart in your mind.
+
+**Kurzon decides the number.** Never invent a bump. Never raise a version he did
+not name, and never touch a different version at the same time. Example: a
+module bump does not change the mod version.
+
+**You update every location. Do this automatically.** When a version changes,
+change it everywhere in the same commit. Do not ask first. Do not leave one
+place behind.
+
+Update all of these:
+
+1. The file name.
+2. The `__version__` constant inside the file.
+3. The banner or title screen.
+4. Every other file in the same group.
+5. Every reference in the documentation. This includes example file names and
+   module tables.
+6. Any installer, manifest, or script that names the file.
+
+**Then prove it.** Search the repository for the old number before you report
+the work as done:
+
+```bash
+grep -rn "v2\.3\.3" --include=*.py --include=*.md .
+```
+
+A stale version in a document is a real error. It tells Kurzon he runs an old
+build. This has happened: a module reached v2.3.4 while the reference file still
+said v2.2.8 in two places.
 
 ---
 
@@ -197,8 +240,10 @@ Do these steps before you say the work is complete.
    fails and the new code passes. This proves the diagnosis, not only the fix.
 4. **Check your own test.** A test can fail because the test is wrong. Find out
    which side is wrong before you believe the result.
-5. **Commit and push.**
-6. **Report.** Say what you changed, what you tested, what you decided, and what
+5. **Check the version numbers.** If a version changed, search for the old
+   number. Confirm that no file, banner, or document still holds it. See §5.
+6. **Commit and push.**
+7. **Report.** Say what you changed, what you tested, what you decided, and what
    is still open.
 
 ---
