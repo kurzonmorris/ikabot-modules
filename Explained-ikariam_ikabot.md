@@ -1387,30 +1387,6 @@ Learned the hard way while hardening `resourceTransportManager` (v10.4.1 →
 v10.13.0) across Windows and Docker. Every rule below caused a real,
 observed failure.
 
-### ⚠ Per-account filenames must include the WORLD number
-
-State files keyed only by server + username collide when the same player name
-exists on two worlds of the same server — and it usually does, because players
-reuse their name. Both accounts then share one goals CSV, one config, one lock
-and one cache, silently corrupting each other.
-
-```python
-# WRONG — 'en' + 'Stave' is not unique
-f"{session.servidor}_{session.username}"
-
-# RIGHT — session.mundo is the world number
-f"{session.servidor}_{session.mundo}_{session.username}"
-```
-
-`session.mundo` is always available (`session.py` sets it from
-`account["server"]["number"]`). When adding it to an existing module, migrate
-the old files on first run — rename old → new only when the new name does not
-exist, so it can never clobber newer data.
-
-Also make **every** per-account file per-*type* where the module has types. A
-shared `..._stop_{account}` flag meant stopping the troops worker also stopped
-the ships worker, and starting one erased the other's stop request.
-
 ### ⚠ NEVER use `os.kill(pid, 0)` to test if a process is alive
 
 On Windows there is no signal 0. Per the `os.kill` docs, any sig other than
@@ -1524,6 +1500,17 @@ Shared *preferences* have the same trap: one global "last used path" key
 offered whichever value was typed last in **any** account, so pressing
 Enter silently attached another account's file. Key remembered paths per
 account.
+
+**Adding the world to a module that shipped without it** renames every file.
+Migrate on first run: move old → new only when the new name does not exist, so
+it can never clobber newer data. If `session.mundo` is somehow missing, fall
+back to the *legacy* suffix rather than inventing a third namespace — an
+invented placeholder orphans the user's existing data (RTM does this).
+
+**Per-account is not enough on its own — go per-*type* too** where a module has
+types. `autoRecruitmentManager` keyed its stop flag by account only, so stopping
+the troops worker also stopped the ships worker, and starting one erased the
+other's pending stop.
 
 ---
 
