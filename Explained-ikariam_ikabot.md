@@ -125,8 +125,10 @@ https://s{N}-{country}.ikariam.gameforge.com/index.php?{params}
 Common patterns:
 - `view=city&cityId=123` — fetch city HTML/JSON
 - `view=island&islandId=456` — fetch island data
-- `action=CityScreen&function=...` — perform city actions
+- `action=CityScreen&function=...` — **dead.** The game dropped this form. The
+  server accepts the request and does nothing. See §29.3.
 - `action=UpgradeExistingBuilding&...` — upgrade a building
+- `action=BuildNewBuilding&...` — construct on an empty building ground
 - `action=WorldMap&function=getJSONArea&x_min=0&x_max=50&y_min=0&y_max=50` — world map data
 - `ajax=1` on most requests returns JSON instead of full HTML
 - `actionRequest=REQUESTID` — CSRF token, stored in `config.actionRequest`
@@ -228,7 +230,7 @@ Tracks changes made in this fork. Currently `1.7.6`. Banner displays
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
 resourceTransportManager_v10.3.1.py
-constructionManager_v2.2.8.py
+constructionManager_v2.4.0.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
 user's modules folder — *not* by the module loader. `MODULE_NAME` is the display
@@ -741,7 +743,7 @@ numbers below drift.**
 | Module | Does |
 |---|---|
 | `resourceTransportManager_v10.3.1.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
-| `constructionManager_v2.2.8.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §27. |
+| `constructionManager_v2.4.0.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per account or per city, per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §29. |
 | `autoRecruitmentManager_v2.14.0.py` | Trains units/ships across barracks and shipyards from a goals CSV, with per-type city include lists, configurable batch sizing and capacity-aware allocation (§ Population and citizens). **The working RRS integration example.** Also the reference for *verifying* an order was accepted before mutating state — see §Order verification. |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
 | `resourceProductionManager_v1.0.3.py` | Manages production/luxury assignment per city. Own persistence, predates `modulePrefs`. |
@@ -1720,7 +1722,36 @@ glass(=crystal), sulfur. **Never assume column position** — a building only
 renders columns for resources it actually costs, so a barracks table is not a
 prefix of a town hall table.
 
-### 29.3 City slot data (`getCity`)
+### 29.3 Build and upgrade POSTs — the old action form is dead
+
+Two different actions, and neither is the legacy `CityScreen` form:
+
+```python
+# Upgrade an existing building
+{"action": "UpgradeExistingBuilding", "actionRequest": token,
+ "cityId": cid, "position": slot, "level": current_level}   # game builds level+1
+
+# Construct on an empty building ground
+{"action": "BuildNewBuilding", "cityId": cid, "position": slot,
+ "building": building_id, "backgroundView": "city", "currentCityId": cid,
+ "templateView": "buildingGround", "actionRequest": token, "ajax": "1"}
+```
+
+Both were `action=CityScreen&function=upgradeBuilding` / `function=build`.
+**That form no longer exists and the server rejects it silently** — it returns
+200 and starts nothing. The upgrade was migrated when it broke; the build was
+left behind for months with a TODO, so no new building could ever be
+constructed while every upgrade worked. If one action works and its sibling
+silently does nothing, suspect a stale action name first.
+
+The method is POST but every parameter travels in the **query string**
+(`session.post(params=..., noIndex=True)` for the build). `building` is the
+same id the ikipedia uses — a captured Trading Post build sent `building=13`,
+matching `branchoffice: 13` in the map above. One matching sample is not proof
+for every building, so do not derive a build id from the ikipedia map; read it
+from the game's own `view=buildingGround` menu.
+
+### 29.4 City slot data (`getCity`)
 
 `getCity()` post-processes each entry of `city["position"]`:
 
@@ -1729,15 +1760,32 @@ prefix of a town hall table.
   `constructionSite`; the suffix is then stripped, so `building` stays the
   plain slug
 - empty slots become `building == "empty"`, `name == "empty"`
-- `position["canUpgrade"]` — **the game's own gate.** False means the POST
-  will be refused (citizens, wine/happiness, or its resource check). Check it
-  before spending a request.
+- `position["canUpgrade"]` — **the game's own gate, and it means upgrades
+  only.** False means an upgrade POST will be refused (citizens,
+  wine/happiness, or its resource check). An empty building ground has no
+  building to upgrade and reports it false, so gating a *new build* on it
+  blocks construction of anything not already built. Check it for upgrades;
+  ignore it for builds.
 - a busy slot carries `completed` (unix timestamp)
 
 **One build per city at a time.** If any slot is busy, a build POST for a
 different slot is refused — check for a busy slot first.
 
-### 29.4 Distinguish transient failure from permanent absence
+**Derive the step from the live slot, not from stored state.** A queue that
+stores one row per level will eventually hold a row that no longer matches the
+city — a build row lost to a skip leaves an *upgrade* row pointing at an empty
+slot, which is posted as an upgrade of a building that does not exist. Read the
+slot first: empty means build level 1, occupied means upgrade to `level + 1`.
+Fix the stored row to match before the cost lookup, so the cost fetched is the
+cost of the level actually built.
+
+**Read the game's feedback properly.** Responses carry the reason a request was
+refused, but not at a fixed position — a refusal puts it somewhere a
+`json[3][1][0]["text"]` index misses, and inside a bare `except: pass` that
+silently discards it. Walk the whole response for `text` fields instead.
+Without this a failed action reports nothing and cannot be diagnosed.
+
+### 29.5 Distinguish transient failure from permanent absence
 
 The worst bug in this module: a cost helper returned `{}` both when a building
 genuinely had no data **and** when the lookup failed (request error, unexpected
@@ -1761,7 +1809,7 @@ The same discipline applies to actions:
   auto-cancelled is otherwise unrecoverable, and re-entering it by hand is the
   thing they will ask for next.
 
-### 29.5 Long-running queues must reconcile with manual play
+### 29.6 Long-running queues must reconcile with manual play
 
 The user still plays the game by hand. A queue that stores one row per level
 and executes each as "do one upgrade" will overshoot: build two levels
@@ -1771,7 +1819,7 @@ reached, so the next item is always current + 1 — that also keeps cost lookups
 and shipped amounts correct. Mark items whose slot now holds a *different*
 building as skipped-with-a-note rather than deleting them silently.
 
-### 29.6 Prompt and table gotchas
+### 29.7 Prompt and table gotchas
 
 - **`read()` re-asks silently on out-of-range input.** It erases the line and
   recurses, printing nothing. A user typing a value your `min=`/`max=` rejects
@@ -1796,4 +1844,4 @@ building as skipped-with-a-note rather than deleting them silently.
 
 ---
 
-*Last updated: 2026-09-06. Reflects ikabot 7.4.5 / mod v1.7.7.*
+*Last updated: 2026-09-21. Reflects ikabot 7.4.5 / mod v1.7.7.*
