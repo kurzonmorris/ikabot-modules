@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.12.2"
+MODULE_VERSION = "10.13.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -952,7 +952,7 @@ def release_shipping_lock(session, use_freighters=False):
 #  TRANSPORT SCHEDULE CSV  — persistent state for all shipping modes
 # ============================================================================
 
-SCHEDULE_SCHEMA_VERSION = 4
+SCHEDULE_SCHEMA_VERSION = 5
 
 SCHEDULE_COLUMNS = [
     "schedule_id",
@@ -982,6 +982,7 @@ SCHEDULE_COLUMNS = [
     "priority",
     "last_duration",
     "last_error",
+    "armed_at",
 ]
 
 # Priority 1 = vital .. 5 = least vital. Everything defaults to 3 (standard).
@@ -1002,12 +1003,13 @@ SCHEDULE_COLUMN_DEFAULTS = {
     "priority": PRIORITY_DEFAULT,
     "last_duration": 0,
     "last_error": "",
+    "armed_at": 0,
 }
 
 SCHEDULE_INT_COLS = {
     "schedule_id", "interval_hours", "total_shipments",
     "created_at", "schema_version", "ap_max_wait_minutes",
-    "min_shipment_threshold", "priority", "last_duration",
+    "min_shipment_threshold", "priority", "last_duration", "armed_at",
 }
 SCHEDULE_INT_OR_BLANK_COLS = {"last_run", "next_run"}
 SCHEDULE_JSON_COLS = {
@@ -1799,6 +1801,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "priority":        _clamp_priority(priority),
         "last_duration":   0,
         "last_error":      "",
+        "armed_at":        now_ts,
     }
 
 
@@ -2509,6 +2512,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
         hold_mins = max(1, hold_secs // 60)
         result["port_busy"] = True
         result["hold_seconds"] = hold_secs
+        _record_port_hold(hold_secs)
         result["error"] = (
             f"{origin_city['name']} trading port is loading another "
             f"shipment for about {hold_mins} more minute(s)"
@@ -7578,9 +7582,29 @@ MODE_HANDLERS = {
 _last_cycle_error = {"text": "", "detail": ""}
 
 
+# When a cycle sends nothing because a trading port was still loading, the
+# next attempt is scheduled for when that port frees up rather than a flat
+# retry interval. A port queue is also not a failure — it must not burn the
+# give-up budget, or a city shipping several orders in a row would stop
+# itself after the first one.
+_last_cycle_hold = {"until": 0.0}
+
+
+def _record_port_hold(seconds):
+    until = time.time() + max(0, seconds)
+    if until > _last_cycle_hold["until"]:
+        _last_cycle_hold["until"] = until
+
+
+def _cycle_hold_until():
+    return _last_cycle_hold["until"]
+
+
 def _record_cycle_error(text, detail=""):
     _last_cycle_error["text"] = text
     _last_cycle_error["detail"] = detail
+    if not text:
+        _last_cycle_hold["until"] = 0.0
 
 
 def _cycle_error_note():
@@ -7888,11 +7912,21 @@ def transport_scheduler_loop(session, stop_event):
                     # the required type, no action points, a blockade —
                     # and closing it as "done, 0 sent" silently threw the
                     # delivery away. Keep it and try again.
-                    created = sched.get("created_at", 0)
-                    age = (finished - created
-                           if isinstance(created, int) and created > 0 else 0)
+                    # Measured from when the schedule was last put in
+                    # the queue, not when it was first created — retrying a
+                    # week-old order must give it a fresh 24 hours, not one
+                    # attempt before the clock says it has run out.
+                    armed = (sched.get("armed_at", 0)
+                             or sched.get("created_at", 0))
+                    age = (finished - armed
+                           if isinstance(armed, int) and armed > 0 else 0)
                     first_try = sched.get("last_run", "") in ("", 0)
-                    if age > ONE_SHOT_GIVEUP_SECONDS:
+                    # A port that is loading something else is a queue, not a
+                    # failure: come back when it frees up and do not count it
+                    # against the give-up budget.
+                    hold_until = _cycle_hold_until()
+                    port_held = hold_until > finished
+                    if age > ONE_SHOT_GIVEUP_SECONDS and not port_held:
                         transport_csv_update(
                             session, sid,
                             last_run=finished, next_run="",
@@ -7923,20 +7957,40 @@ def transport_scheduler_loop(session, stop_event):
                             except Exception:
                                 pass
                     else:
-                        transport_csv_update(
-                            session, sid,
-                            last_run=finished,
-                            next_run=finished + ONE_SHOT_RETRY_SECONDS,
-                            status="active", last_duration=elapsed,
-                            last_error=(
+                        if port_held:
+                            # A little past the reported finish, so the port
+                            # has actually released before we ask again.
+                            retry_at = max(finished + 60,
+                                           int(hold_until) + 30)
+                            why = (
+                                "Waiting for the trading port: it is still "
+                                "loading an earlier shipment. This order is "
+                                "queued behind it and goes as soon as the "
+                                "port is free.")
+                        else:
+                            retry_at = finished + ONE_SHOT_RETRY_SECONDS
+                            why = (
                                 _cycle_error_note()
                                 or "The cycle ran but shipped nothing, so it "
                                    "has NOT been marked done. Most often "
                                    "there were no free ships of the type "
                                    "this schedule uses. The shipment list "
-                                   "below records the exact reason."),
+                                   "below records the exact reason.")
+                        transport_csv_update(
+                            session, sid,
+                            last_run=finished, next_run=retry_at,
+                            status="active", last_duration=elapsed,
+                            last_error=why,
                         )
-                        if first_try and should_notify(notif_config, "error"):
+                        if port_held:
+                            try:
+                                session.setStatus(
+                                    f"Schedule #{sid}: port busy, retrying "
+                                    f"in {max(1, (retry_at - finished) // 60)}"
+                                    f"min")
+                            except Exception:
+                                pass
+                        elif first_try and should_notify(notif_config, "error"):
                             try:
                                 sendToBot(
                                     session,
@@ -9663,8 +9717,12 @@ def _retry_schedule(session, sched, reset_bulk_rows=False):
             print(f"\n  {C.OK}Cleared progress on {reset} row(s) — the whole "
                   f"file will be sent again.{C.RESET}")
 
+    # armed_at restarts the give-up clock. Without it a schedule older than
+    # a day is allowed exactly one attempt before the 24 hour rule fires and
+    # marks it failed again, which makes retrying an old order pointless.
     transport_csv_update(session, sid, status="active",
-                         next_run=int(time.time()), last_error="")
+                         next_run=int(time.time()), last_error="",
+                         armed_at=int(time.time()))
     print(f"  {C.OK}Schedule #{sid} is queued to run again.{C.RESET}")
     if sched.get("mode") == "bulk" and not reset_bulk_rows:
         print(f"  {C.DIM}Rows already marked done stay done; the ones that "
