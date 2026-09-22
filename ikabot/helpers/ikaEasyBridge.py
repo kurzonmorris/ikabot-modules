@@ -116,37 +116,39 @@ def get_cities(session):
 def get_resources_overview(session):
     """Return every city's five resource amounts and storage capacity.
 
-    Fetches each city the account owns. The web server restores the browser's
-    last city on the next GET, so the server-side city switches here do not
-    change what the user sees.
+    Reuses ikabot's own account scan (getStatus.collectData) instead of
+    fetching each city again, so the numbers match the account-status view and
+    the gather logic stays in one place. The web server restores the browser's
+    city on the next GET, so the server-side city switches do not change what
+    the user sees.
     """
-    from ikabot.helpers.pedirInfo import getIdsOfCities
-    from ikabot.helpers.getJson import getCity
-    from ikabot.config import city_url
+    from ikabot.function.getStatus import collectData
 
     try:
-        ids, _cities = getIdsOfCities(session)
+        data = collectData(session)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
     out = []
-    for cid in ids:
-        try:
-            city = getCity(session.get(city_url + str(cid)))
-        except Exception:
-            continue
-        res = city.get("availableResources") or [0, 0, 0, 0, 0]
-        res = (list(res) + [0, 0, 0, 0, 0])[:5]
-        cap = city.get("storageCapacity")
+    for cid in data.get("own_ids", []):
+        cur = (data["city_headers"].get(cid, {}) or {}).get("currentResources", {}) or {}
+        info = data["city_info"].get(cid, {}) or {}
+
+        def _int(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return 0
+
         out.append({
             "id":      cid,
-            "name":    city.get("name", str(cid)),
-            "wood":    res[0],
-            "wine":    res[1],
-            "marble":  res[2],
-            "crystal": res[3],
-            "sulphur": res[4],
-            "storage": cap,
+            "name":    data["city_names"].get(cid, cid),
+            "wood":    _int(cur.get("resource")),
+            "wine":    _int(cur.get("1")),
+            "marble":  _int(cur.get("2")),
+            "crystal": _int(cur.get("3")),
+            "sulphur": _int(cur.get("4")),
+            "storage": info.get("storageCapacity"),
         })
     return {"ok": True, "cities": out}
 
