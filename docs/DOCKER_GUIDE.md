@@ -395,11 +395,27 @@ The panel asks GitHub what is published when it starts and **once an hour**
 after that, so a panel left open for days does not go on reporting whatever
 was current the morning it started.
 
-Three things are tracked: **ikabot** itself, the **mod**, and **IkaEasy**.
+Four things are tracked: **ikabot** itself, the **mod**, **IkaEasy**, and the
+**container**.
 IkaEasy keeps its version in `ikabot/helpers/ikaEasyInject.py` rather than in
 `config.py`, so it is a second small file to fetch — one that is allowed to
 fail on its own, so a fork without IkaEasy does not make the whole check look
 broken. All three update the same way, with **Download & update ikabot**.
+
+The **container** row is different from the other three. It compares the
+installer that built your container against the newest zip published on GitHub.
+It tells you when a rebuild is due. **The panel cannot do that rebuild.** The
+panel runs inside the container, and a container cannot replace itself. It gets
+its own line saying so, separate from the *Download & update ikabot* banner,
+because that button does not touch the container.
+
+To rebuild: download the newest zip and run the installer again against the
+same data folder. Nothing in `config` is touched.
+
+**Update the control panel** runs `ika panel upgrade` from the page. The panel
+restarts itself, so the page waits for it to come back and then reloads. The
+rest of the page stays usable while it works. Your instances are not affected —
+tmux keeps them running.
 
 If you have edited the bundle, a line under the table says how many files are
 being served from your copy in `.ikabot/ikaeasy_lite`. Those win over what
