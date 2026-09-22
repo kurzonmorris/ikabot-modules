@@ -178,3 +178,37 @@ page when a view misbehaves, which is the fastest way to fix Phase E items.
 
 *Full mode is the vehicle. Lite is the fallback. The extension is abandoned, so
 this fork is now its home.*
+
+---
+
+## 6. Crossovers — reuse ikabot instead of re-fetching
+
+ikabot already gathers most of the game state IkaEasy shows. Reuse it. This
+avoids a second fetch, keeps the numbers the same as ikabot's own screens, and
+keeps the logic in one place.
+
+**Already applied**
+
+- **`getStatus.collectData(session)`** — one scan of the account. It returns
+  every city's resources, production, wine consumption, storage, gold, ships,
+  and buildings, plus totals. The resources overview now uses this instead of
+  its own city fetch. `getStatus.cityProduction(data, cid)` gives the hourly
+  wood and luxury production per city from the same scan.
+
+**To apply as full mode grows**
+
+| ikabot capability | Where it lives | IkaEasy feature it serves |
+|---|---|---|
+| `collectData` totals + `cityProduction` | `function/getStatus.py` | Empire resources tab: production, wine, gold, ships, storage — not just amounts |
+| `getWineConsumptionPerHour` + `wineConsumptionPerHour` | `helpers/resources.py`, city dict | Tavern: hours of wine left, wine countdown across cities |
+| `getProductionPerHour` | `helpers/resources.py` | Construction time-to-start, read on the server instead of the browser model |
+| `getTransportLoadingAndTravelTime` | `helpers/getJson.py` | Transport/RTM: port busy time and travel time; hold, do not block (§28) |
+| `naval.getAvailableShips` / `getAvailableFreighters` | `helpers/naval.py` | Transport/RTM: show free ships before sending |
+| `planRoutes.executeRoutes` | `helpers/planRoutes.py` | Send resources now, not only schedule them |
+| `market` helpers | `helpers/market.py` | Marketplace panels: prices and offers |
+| `updateProcessList` | `helpers/process.py` | Show running ikabot tasks in the page (already used for processes) |
+| `getIdsOfCities` | `helpers/pedirInfo.py` | Any all-cities panel (already used) |
+
+**Rule:** before a bridge endpoint fetches game data itself, check
+`helpers/` and `function/getStatus.py` for a function that already gathers it.
+
