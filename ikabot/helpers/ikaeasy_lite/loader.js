@@ -225,7 +225,7 @@
         var link = IKEL.el('link', { rel: 'stylesheet', href: IKEL.base + 'css/lite.css?v=' + (IKEL.version || '') });
         document.head.appendChild(link);
 
-        var features = ['production', 'tavern', 'construction', 'transport'];
+        var features = ['production', 'tavern', 'construction', 'transport', 'resources'];
         var pending = features.length;
         features.forEach(function (name) {
             var sc = IKEL.el('script', { src: IKEL.base + 'features/' + name + '.js?v=' + (IKEL.version || '') });

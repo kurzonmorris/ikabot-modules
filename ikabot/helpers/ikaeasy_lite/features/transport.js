@@ -111,4 +111,65 @@
             stat.className = 'ikel-status ikel-err'; stat.textContent = 'Could not reach ikabot.';
         }).then(function () { panel.querySelector('#ikel_rtm_go').removeAttribute('disabled'); });
     }
+
+    // ── Quick-amount buttons on the transport goods form ────────────────────
+    // Mirrors the IkaEasy extension: a -500/+500/+1k/+5k/+50k bar per resource,
+    // with +100k added. Rounds to the button step the same way the extension
+    // does, then nudges the game input so it recomputes ship counts.
+    var STEPS = [
+        { sum: -500,   label: '−', title: '-500' },
+        { sum: 500,    label: '+',      title: '+500' },
+        { sum: 1000,   label: '+1k',    title: '+1000' },
+        { sum: 5000,   label: '+5k',    title: '+5000' },
+        { sum: 50000,  label: '+50k',   title: '+50000' },
+        { sum: 100000, label: '+100k',  title: '+100000' }
+    ];
+
+    function applySum(input, sum) {
+        var val = parseInt(String(input.value).replace(/[^\d-]/g, ''), 10) || 0;
+        if (sum === -500) {
+            if (val > 0 && val % 500 !== 0) val -= (val % 500);
+            else val += sum;
+        } else if (val % 500 === 0) {
+            val += sum;
+        } else if (val % sum !== 0) {
+            val += sum - (val % sum);
+        } else {
+            val += sum;
+        }
+        if (val < 0) val = 0;
+        input.value = val;
+        try { input.focus(); } catch (e) {}
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        try { input.blur(); } catch (e) {}
+    }
+
+    function addButtons() {
+        var form = document.getElementById('transportGoods');
+        if (!form) return;
+        RES.forEach(function (r) {
+            var input = document.getElementById('textfield_' + r);
+            if (!input || input.getAttribute('data-ikel-btns') === '1') return;
+            input.setAttribute('data-ikel-btns', '1');
+
+            var bar = IKEL.el('div', { 'class': 'ikel-tbtns' });
+            STEPS.forEach(function (s) {
+                var b = IKEL.el('a', { href: '#', 'class': 'ikel-tbtn', title: s.title });
+                b.textContent = s.label;
+                b.addEventListener('click', function (e) { e.preventDefault(); applySum(input, s.sum); });
+                bar.appendChild(b);
+            });
+            // Sit the bar just under the resource's input.
+            var host = input.parentNode;
+            host.insertBefore(bar, input.nextSibling);
+        });
+    }
+
+    IKEL.register({
+        id: 'transportButtons',
+        matches: function (view) { return view === 'transport'; },
+        mount: function () { addButtons(); }
+    });
 })();
+

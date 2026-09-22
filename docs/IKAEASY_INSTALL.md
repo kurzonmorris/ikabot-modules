@@ -2,7 +2,7 @@
 
 > **Current versions**
 > - **ikabot mod build:** `v2.1.0`  (`IKABOT_MOD_VERSION` in `ikabot/config.py`)
-> - **IkaEasy bundle:** `v1.0.4`  (`LITE_VERSION` in `ikabot/helpers/ikaEasyInject.py`, shown bottom-right in the browser)
+> - **IkaEasy bundle:** `v1.1.0`  (`LITE_VERSION` in `ikabot/helpers/ikaEasyInject.py`, shown bottom-right in the browser)
 >
 > Compare these two numbers against this file on GitHub
 > (`kurzonmorris/ikabot-modules`, branch `main`). If either number here is
@@ -45,7 +45,7 @@ ika update --rollback && ika restart all
    (town hall, tavern, transport/port).
 4. **Bottom-right of the screen** you will see:
    - an **`IkaEasy: on`** button (click to turn the UI off/on), and
-   - directly beneath it a combined **`IkaEasy v1.0.4 · mod v2.1.0`** version badge.
+   - directly beneath it a combined **`IkaEasy v1.1.0 · mod v2.1.0`** version badge.
 
    The badge is the running bundle version — use it to confirm the update took
    and to spot when a newer version exists on GitHub.
