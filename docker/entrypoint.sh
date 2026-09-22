@@ -1,4 +1,9 @@
 #!/bin/bash
+# The last line of this file is a marker. The stub that runs first refuses to
+# use a copy without it. It sits at the end because that is what a truncation
+# removes: a file cut on a clean line is still valid shell, so it would start,
+# do nothing, exit, and stop the container.
+#
 # Starts one tmux window per ikabot instance and keeps the container alive
 # for as long as that tmux session exists.
 set -uo pipefail
@@ -162,3 +167,5 @@ while tmux has-session -t "$SESSION" 2>/dev/null; do
 done
 
 echo "[entrypoint] tmux session '$SESSION' ended — stopping container"
+
+# ika-entrypoint-complete

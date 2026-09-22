@@ -42,7 +42,10 @@ TREE_URL = ("https://api.github.com/repos/%s/git/trees/%s?recursive=1"
 RAW_URL = "https://raw.githubusercontent.com/%s/%s/" % (REPO, BRANCH)
 
 # Copied wholesale from the downloaded tree; anything else in /app is left alone.
-TRACKED = ("ikabot", "modules", "config-examples")
+# "docker" carries entrypoint.sh, which the container's entry point prefers over
+# the copy baked into the image — so how the container starts can be updated
+# without rebuilding it.
+TRACKED = ("ikabot", "modules", "config-examples", "docker")
 
 UA = {"User-Agent": "ika-update/2.0"}
 # A dropped transfer raises http.client.IncompleteRead, which is an
