@@ -83,5 +83,29 @@ class TestServeFullAsset(unittest.TestCase):
         self.assertIsNone(full.serve_full_asset("ikaeasy-full/js/"))
 
 
+class TestFullModePathRewrites(unittest.TestCase):
+    """Full mode serves the extension from /ikaeasy-full/, so the few files
+    with root-absolute asset paths must be rewritten at serve time."""
+
+    def setUp(self):
+        full._reset_cache_for_tests()
+
+    def test_sandbox_html_rewritten(self):
+        content, _ = full.serve_full_asset("ikaeasy-full/sandbox.html")
+        text = content.decode("utf-8")
+        self.assertIn('src="/ikaeasy-full/js/', text)
+        self.assertNotIn('src="/js/', text)
+
+    def test_templater_prefix_rewritten(self):
+        content, _ = full.serve_full_asset("ikaeasy-full/js/sandbox/templater.js")
+        text = content.decode("utf-8")
+        self.assertIn("this._prefix = '/ikaeasy-full/tpl/'", text)
+        self.assertNotIn("this._prefix = '/tpl/'", text)
+
+    def test_other_files_untouched(self):
+        content, _ = full.serve_full_asset("ikaeasy-full/manifest.json")
+        self.assertIn(b"manifest_version", content)
+
+
 if __name__ == "__main__":
     unittest.main()
