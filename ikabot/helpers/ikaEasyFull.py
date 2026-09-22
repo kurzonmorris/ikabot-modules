@@ -113,6 +113,20 @@ def _safe_asset_path(request_path):
     return candidate
 
 
+# A few extension files use root-absolute asset paths (/js/, /tpl/) that assume
+# the extension is served from the server root. In full mode it is served from
+# /ikaeasy-full/, so those paths would hit the game proxy and 404. Rewrite just
+# these known files at serve time. Keyed by path relative to the extension dir.
+_FULL_REWRITES = {
+    "sandbox.html": [
+        ('src="/js/', 'src="/ikaeasy-full/js/'),
+    ],
+    "js/sandbox/templater.js": [
+        ("this._prefix = '/tpl/'", "this._prefix = '/ikaeasy-full/tpl/'"),
+    ],
+}
+
+
 def serve_full_asset(request_path):
     """Return (bytes, content_type) for an extension file, or None if not found.
     Safe against path traversal."""
@@ -124,5 +138,18 @@ def serve_full_asset(request_path):
             content = f.read()
     except OSError:
         return None
+
+    base = extension_dir()
+    rel = os.path.relpath(path, base).replace(os.sep, "/") if base else ""
+    rewrites = _FULL_REWRITES.get(rel)
+    if rewrites:
+        try:
+            text = content.decode("utf-8")
+            for old, new in rewrites:
+                text = text.replace(old, new)
+            content = text.encode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+
     ext = os.path.splitext(path)[1].lower()
     return content, _CONTENT_TYPES.get(ext, "application/octet-stream")
