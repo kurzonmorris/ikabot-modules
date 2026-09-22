@@ -24,7 +24,7 @@ import os
 import re
 
 # Bump when the served bundle changes so browsers re-fetch it (cache-buster).
-LITE_VERSION = "1.0.4"
+LITE_VERSION = "1.1.0"
 
 # URL path prefix the web server routes to serve_lite_asset().
 LITE_ROUTE_PREFIX = "ikaeasy-lite/"
