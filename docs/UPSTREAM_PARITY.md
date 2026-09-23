@@ -48,8 +48,7 @@ our own way, deliberately · **Present** = already in the fork before the audit
 ### 7.5.1 → 7.6.0 audit (2026-09-07)
 
 > "unreleased" below means the code is on `main` but no `IKABOT_MOD_VERSION`
-> bump has been made for it yet. `IKABOT_VERSION` still reads 7.5.1 although
-> the fork is now level with upstream 7.6.0.
+> bump has been made for it yet.
 
 | PR | Title | Status | Landed |
 |---|---|---|---|

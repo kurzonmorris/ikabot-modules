@@ -11,6 +11,8 @@ Read this file first. Open the others only when the task touches them.
 | `Explained-user_kurzon.md` | How Kurzon works, branch naming, what he expects back |
 | `docs/UPSTREAM_PARITY.md` | **Before any upstream sync.** Which upstream PRs are in, which were deliberately adapted, and what a port must never remove |
 | `docs/AUTOSTART_BRIEF.md` | Making a module start automatically at login (§24) |
+| `docs/DRIVING_IKABOT.md` | Driving ikabot from a script or a web front end (§9) |
+| `docs/DOCKER_STATUS_API.md` | Reading live task state from outside (§30) |
 | `RRS_INTEGRATION_GUIDE.md` | Any module that reserves or spends resources (§26) |
 | `docs/SELF_HOSTED_API.md` | The blackbox/captcha API, running your own, and the failover (§25) |
 | `MIGRATION_GUIDE.md` | Applying the fork's changes onto a fresh upstream tree |
@@ -216,20 +218,25 @@ Ikabot is an open-source Python automation bot for Ikariam, maintained by the Ik
 ## 3. Version Numbers
 
 ### ikabot Base Version (`IKABOT_VERSION` in `config.py`)
-Tracks the upstream ikabot version this mod is based on. Currently `7.4.5`;
-the fork is at **full parity** with upstream 7.4.5 (see `docs/UPSTREAM_PARITY.md`).
-Read the live value from `ikabot/config.py` rather than trusting this line.
+Tracks the upstream ikabot version this mod is level with. Currently `7.6.3`
+(see `docs/UPSTREAM_PARITY.md`). Read the live value from `ikabot/config.py`
+rather than trusting this line.
 
 ### Mod Version (`IKABOT_MOD_VERSION` in `config.py`)
-Tracks changes made in this fork. Currently `1.7.6`. Banner displays
-`modded by kurzon v1.7.6`. Read the live value from `ikabot/config.py`.
+Tracks changes made in this fork. Currently `2.1.0`. The banner shows
+`modded by kurzon v2.1.0`. Read the live value from `ikabot/config.py`.
 
-**Bump it on every change you ship.** Patch for fixes, minor for new features.
+**You never choose a version number.** Kurzon names it. When he does, change it
+in every place in the same commit, then `grep` for the old number to prove that
+none is left. See `Explained-user_kurzon.md` §5.
+
+There is also a marker file, `ikabot/version_vX.Y.Z`, which carries the mod
+version. Nothing reads it. Rename it with the mod version.
 
 ### External Module Version (filename suffix — REMOVED at load time)
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
-resourceTransportManager_v10.3.1.py
+resourceTransportManager_v10.13.0.py
 constructionManager_v2.4.0.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
@@ -269,7 +276,7 @@ ikabot-modules/
 │   │   └── varios.py              ← wait(), addThousandSeparator(), getDateTime()
 │   └── web/
 │       └── session.py             ← Session class — all HTTP calls go through here
-├── resourceTransportManager_v10.3.1.py ← External module
+├── modules/                             ← External modules, versioned filenames
 ├── constructionManager.py              ← External module
 ├── tavernManager.py                    ← External module
 ├── autoRecruitment.py                  ← External module
@@ -284,9 +291,9 @@ ikabot-modules/
 ## 5. config.py — Global State
 
 ```python
-IKABOT_VERSION = "7.3.3"
-IKABOT_MOD_VERSION = "0.9.4"
-IKABOT_MOD_VERSION_TAG = "modded by kurzon v0.9.4"
+IKABOT_VERSION          # upstream version this fork is level with
+IKABOT_MOD_VERSION      # this fork's own version
+IKABOT_MOD_VERSION_TAG  # "modded by kurzon v" + IKABOT_MOD_VERSION
 
 IKABOT_DATA_DIR   # Windows: %APPDATA%\.ikabot  Linux: ~/.ikabot
 IKABOT_SESSIONS_DIR = os.path.join(IKABOT_DATA_DIR, "sessions")
@@ -513,6 +520,39 @@ def myFunction(session, event, stdin_fd, predetermined_input):
 - Always use `read()` for user input — never `input()` directly.
 - The pop mechanism respects all the same `min`/`max`/`digit` validation as interactive input.
 
+### `/menu` — return to the main menu from any prompt
+
+Type `/menu` at any prompt. ikabot abandons the current module and redraws the
+main menu. It works at a digit-only prompt, a yes/no prompt, a city picker, a
+sub-menu, and an `[Enter]` pause.
+
+Anything after the token becomes menu input, so one line is a whole command:
+
+```
+/menu 17 1      # back to the menu, pick Auto-Pirate, then pick 1
+```
+
+This exists so a script or a web front end can reach a known starting point.
+It cannot know which screen the session is on. Ctrl+C cannot do this job: it is
+a terminal signal, not a character, so it cannot travel down a pipe, and at the
+top level it closes ikabot.
+
+**What this means for a module.** `/menu` raises `ReturnToMenu`, which is a
+subclass of `KeyboardInterrupt`. Two consequences:
+
+- An `except Exception` block does **not** swallow it. That is deliberate.
+- The `except KeyboardInterrupt: event.set(); return` ending that every module
+  already has performs exactly the right unwind. A module needs no new code.
+
+Match the token as the first whole word only. A proxy URL or a path that
+contains `/menu` is ordinary input.
+
+### `read(ignore_predetermined=True)`
+
+Forces an interactive prompt and skips `config.predetermined_input`. Use it
+only for the rare question a recorded sequence must not answer for the user.
+Every other `read()` call must stay automatable.
+
 ---
 
 ## 10. Adding a Built-in Function to the Menu
@@ -579,16 +619,22 @@ if selected == 7:   # Alerts submenu
 | 20     | Dump / Monitor world               | 2001, 2002, 2003  |
 | 21     | Options / Settings                 | 2101–2108 + vault |
 | 22     | Consolidate resources              |                   |
-| 23     | Set Production                     |                   |
+| 23     | City Management                    | 2301–2304         |
+| 24     | Plugins (only shown if any exist)  |                   |
 | 25     | Send cultural treaty requests      |                   |
-| 24     | Plugins (if any)                   |                   |
-| 30     | External Modules                   | dynamic 31+       |
+| 40+    | External Modules                   | one per module    |
+| 99     | Configure external modules         |                   |
+| 100    | Refresh the menu                   |                   |
+
+City Management (23) holds: (1) Set Production, (2) Set Academy workers,
+(3) Reorganize city buildings, (4) Set Temple priests.
 
 ---
 
 ## 11. External Modules
 
-External modules are `.py` files dropped into a configured folder (global or per-account). They appear under `(30) External Modules` in the menu, numbered starting at 31.
+External modules are `.py` files dropped into a configured folder (global or
+per-account). The menu lists them at the end, one number each, starting at 40.
 
 ### File naming convention
 ```
@@ -619,7 +665,7 @@ name and the function name must match exactly. With a version still in the name
 that fallback resolves to nonsense:
 
 ```
-resourceTransportManager_v10.3.1.py  ->  looks for  resourceTransportManager_v10.3.1()  ✗
+resourceTransportManager_v10.13.0.py  ->  looks for  resourceTransportManager_v10.13.0()  ✗
 resourceTransportManager.py          ->  looks for  resourceTransportManager()          ✓
 ```
 
@@ -637,7 +683,7 @@ does not matter at all. Do it in every new module.
 
 | Filename in repo `modules/` | base | version |
 |---|---|---|
-| `resourceTransportManager_v10.3.1.py` | `resourceTransportManager.py` | `10.3.1` |
+| `resourceTransportManager_v10.13.0.py` | `resourceTransportManager.py` | `10.13.0` |
 | `noVersion.py` | `noVersion.py` | *(none)* |
 
 A module without the suffix still installs, but shows "no version" in the
@@ -742,14 +788,16 @@ numbers below drift.**
 
 | Module | Does |
 |---|---|
-| `resourceTransportManager_v10.3.1.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
+| `resourceTransportManager_v10.13.0.py` | Moves resources between cities: ship routing, multiple legs, partial loads, retry, per-shipment notifications with configurable levels. Uses `executeRoutes()` from `planRoutes`. |
 | `constructionManager_v2.4.0.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per account or per city, per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §29. |
 | `autoRecruitmentManager_v2.14.0.py` | Trains units/ships across barracks and shipyards from a goals CSV, with per-type city include lists, configurable batch sizing and capacity-aware allocation (§ Population and citizens). **The working RRS integration example.** Also the reference for *verifying* an order was accepted before mutating state — see §Order verification. |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
 | `resourceProductionManager_v1.0.3.py` | Manages production/luxury assignment per city. Own persistence, predates `modulePrefs`. |
 | `islandColonizeMonitor_v1.5.0.py` | Watches islands for free colonisation slots. |
 | `resourceReservationSystem_v1.0.0.py` | Shared reservation data layer, not a user-facing module. See §26. |
-| `sequenceRunner_v1.1.2.py` | Stores named input sequences and replays them through `predetermined_input` (§9). Replaces the AutoHotkey scripts. |
+| `sequenceRunner_v1.2.2.py` | Stores named input sequences and replays them through `predetermined_input` (§9). Replaces the AutoHotkey scripts. |
+| `autoMarketTrader_v2.1.0.py` | Buys and sells on the marketplace to a price rule. |
+| `messagingHub_v1.1.0.py` | Reads and sends in-game messages from one screen. |
 | `schedulerMonitor_v1.0.0.py` | Watches the worker locks of constructionManager, resourceTransportManager and autoRecruitmentManager on a timer and relaunches any scheduler that is down while work is still queued. Starts them headlessly — through the module's own auto-start path where it has one, otherwise by driving its worker loop directly. |
 
 **Before writing a new module, check whether one of these already does part of
@@ -791,7 +839,17 @@ The vault (`credentialStore.py`) stores game account credentials encrypted with 
 
 - **Location:** `%APPDATA%\.ikabot\vault` (Windows) / `~/.ikabot/vault` (Linux)
 - **Migration:** Old `~/.ikabot_vault` is moved automatically on first run
-- **Concurrency:** PID-based lock file prevents corruption under simultaneous access
+- **Concurrency:** a lock file that records the owning **host and pid**. A pid
+  is trusted only on the host that wrote it, because a pid from another
+  container means nothing here (§27). A lock that cannot be attributed is
+  broken on age instead.
+- **Writes merge.** Every write re-reads the vault and applies the change
+  inside one lock hold. Writing the copy loaded at `open_vault()` time would
+  roll the file back to that copy, and every login writes, so this fired
+  constantly rather than rarely.
+- **Accounts carry a stable `id`.** A write finds its account by that id, not
+  by list position, because a position moves as soon as another instance adds
+  or removes an account.
 - **Key validation:** `verify_password()` decrypts the first account to confirm the password before showing the account list
 - **Wrong password:** Shows error before listing accounts (never displays accounts for wrong password)
 
@@ -828,7 +886,7 @@ Modules must work correctly when running from **both** the vanilla upstream ikab
 | Data dir | `~/.ikabot/` (no APPDATA on Windows) | `%APPDATA%\.ikabot\` (Windows) |
 | Menu options | Up to 23 + plugins | 23 + 25 (treaties) + 30 (external) |
 | New functions | Not present | alertMessages, inactivePlayersRadiusMonitor, sendCulturalTreatyRequests |
-| Session locking | Basic | PID-based stale lock removal |
+| Session locking | Basic | Host-and-pid lock, merged writes, stable account ids |
 
 When writing external modules, only import from `ikabot.config`, `ikabot.helpers.*`, and `ikabot.function.*`. Do not depend on mod-specific internals. Use `notificationDataIsValid(session)` rather than assuming Telegram is the only backend.
 
@@ -1044,7 +1102,8 @@ Run for every modified file.
 - [ ] `banner()` called at start of each interactive screen
 
 ### Step 3: Commit and push
-All changes committed to `claude/fix-ikabot-logging-MfYdW` branch and pushed to `kurzonmorris/ikabot-modules`.
+Commit to the branch Kurzon named and push to `kurzonmorris/ikabot-modules`.
+Never push to `main` without permission. See `Explained-user_kurzon.md` §6.
 
 ### Step 4: Report
 Provide a summary covering:
@@ -1345,14 +1404,51 @@ is attached as `X-API-Key` to the fallbacks only.
 
 Two things to keep in mind if you touch it:
 
-- **`IKABOT_API_TIMEOUT` (120s) is what makes failover possible.** An
-  unbounded wait means there is nothing to fail over *from* — the login just
-  hangs. Do not raise it back to the old 900s.
+- **The bounded wait is what makes failover possible.** An unbounded wait
+  leaves nothing to fail over *from* — the login simply hangs. The wait is
+  split in two: `IKABOT_API_CONNECT_TIMEOUT` (10s) bounds reaching the server,
+  and `IKABOT_API_TIMEOUT` (120s) bounds producing the answer. The split
+  matters: a server that is down is abandoned in seconds instead of two
+  minutes, so the next endpoint is tried quickly. Do not merge them back into
+  one long wait.
 - **Whatever an attempt sends must be re-sendable.** The pirate captcha
   passes `bytes`; hand it a file object and the second endpoint receives an
   empty upload, because the first attempt drained the stream.
 
 Self-hosting it: `docker/ikabot-api/` and `docs/SELF_HOSTED_API.md`.
+
+### Session takeover *(upstream #448 / #470, adapted)*
+
+Ikariam allows one session per account. A login from a browser or another
+device closes this one. `session.py` detects that and stops the process, after
+it notifies through `sendToBot`.
+
+Judge a takeover on the **redirect host**, never on page text. An earlier
+upstream version searched the body for `lobby.ikariam.gameforge.com` plus
+`consent.gameforge.com`, which an ordinary page with a cookie banner also
+carries. It stopped healthy instances.
+
+This fork deliberately differs from upstream in three ways, because it runs
+many unattended instances:
+
+1. Upstream waits on `enter()`. Nobody answers a prompt on a headless
+   instance, so it would hang for ever instead of stopping.
+2. Upstream terminates the parent process and every sibling task. Here only
+   the affected process stops. The menu already breaks out of its wait when a
+   child dies, and `taskWatchdog` reports the task that stopped.
+3. Upstream replaces the re-login on a 404 at `index.php` with an exit. That
+   turns a recoverable expiry into a dead instance, so the re-login stays.
+
+A module needs no code for this. Know only that a process can stop for this
+reason, and that a stopped task is reported.
+
+### The actionRequest token cache
+
+`Session` scrapes the token out of **every** response into `self._cached_token`
+and clears it when the server answers `TXT_ERROR_WRONG_REQUEST_ID`. A POST
+therefore costs no extra page fetch and no file write. Upstream stores the same
+token in the session file instead. Do not copy that: it adds a write on every
+action, and those writes contend across a fleet.
 
 ### The vault
 
@@ -1844,4 +1940,55 @@ building as skipped-with-a-note rather than deleting them silently.
 
 ---
 
-*Last updated: 2026-09-21. Reflects ikabot 7.4.5 / mod v1.7.7.*
+## 30. Task Watchdog and Status Export
+
+`ikabot/helpers/taskWatchdog.py` does two jobs. The main menu calls both on
+every redraw.
+
+### The watchdog
+
+A background task whose process died used to vanish from the task table with
+nothing said. On an unattended instance that is a silent failure.
+`check_for_dead_tasks()` compares the tasks the menu saw last time against the
+tasks alive now, and reports any that disappeared without finishing. It reports
+each one once.
+
+It compares through `session.mutateSessionData()`, not through
+`getSessionData()` then `setSessionData()`. Use the same call for any
+read-modify-write on session data. `setSessionData` replaces the whole account
+block, so a read, a change and a write as three steps loses whatever another
+process wrote in between. Measured before the fix: 26 of 150 concurrent writes
+survived.
+
+### The status export
+
+`write_status()` writes one small JSON file per account:
+
+```
+$IKABOT_STATUS_DIR/<username>_<server><world>.json
+```
+
+`IKABOT_STATUS_DIR` defaults to `$IKABOT_DATA_DIR/status/`. An external monitor
+reads those files directly. It needs no HTTP, no port and no password.
+
+**Set `IKABOT_STATUS_DIR` when you run one container per account.** Point every
+container at one shared volume, and keep each container's `~/.ikabot` private.
+Sharing the whole data directory puts several ikabots on one vault file.
+
+The shipped image runs many ikabot processes in **one** container, which share
+`/config/.ikabot` already. There you need set nothing.
+
+The file is written with a temp file and `os.replace`, so a reader never sees
+half a file and needs no lock. Full field list and reader guidance:
+`docs/DOCKER_STATUS_API.md`.
+
+### `set_proxy_state()`
+
+Records whether the account's proxy works, and writes it at once rather than
+at the next menu redraw. A failing proxy makes the menu stop and ask a
+question. Nobody answers that on an unattended instance, so an alert that
+appears only when somebody looks at the screen is no alert at all.
+
+---
+
+*Last updated: 2026-09-23. Reflects ikabot 7.6.3 / mod v2.1.0.*
