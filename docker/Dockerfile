@@ -48,7 +48,10 @@ RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r /tmp/requirements.txt \
  && rm /tmp/requirements.txt
 
-COPY entrypoint.sh    /usr/local/bin/entrypoint.sh
+# entrypoint.sh is installed as the fallback. The stub is what actually runs,
+# and it prefers the copy in /app so a startup change ships with `ika update`.
+COPY entrypoint.sh      /usr/local/bin/entrypoint-builtin.sh
+COPY entrypoint-stub.sh /usr/local/bin/entrypoint.sh
 COPY ika              /usr/local/bin/ika
 COPY ika-modules      /usr/local/bin/ika-modules
 COPY ika-update       /usr/local/bin/ika-update
@@ -73,6 +76,7 @@ RUN set -eu; \
     rm -rf /tmp/panel
 
 RUN chmod +x /usr/local/bin/entrypoint.sh \
+             /usr/local/bin/entrypoint-builtin.sh \
              /usr/local/bin/ika \
              /usr/local/bin/ika-modules \
              /usr/local/bin/ika-update \

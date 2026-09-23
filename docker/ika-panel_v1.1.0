@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.32"
+PANEL_VERSION = "1.1.0"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -95,6 +95,10 @@ CONFIG_URL = ("https://raw.githubusercontent.com/%s/%s/ikabot/config.py"
 INJECT_URL = ("https://raw.githubusercontent.com/%s/%s/ikabot/helpers/"
               "ikaEasyInject.py" % (REPO, BRANCH))
 INJECT_PATH = ("ikabot", "helpers", "ikaEasyInject.py")
+# The newest published installer. Read over raw.githubusercontent, which has no
+# rate limit, the same way ika-update finds it.
+LATEST_URL = ("https://raw.githubusercontent.com/%s/%s/releases/LATEST"
+              % (REPO, BRANCH))
 # Where an edited bundle overrides the packaged one. Files here are served in
 # preference to what shipped, so a version number alone stops being the whole
 # story once anything is in it.
@@ -211,6 +215,21 @@ def remote_ikabot_versions():
         m = re.search(r'^LITE_VERSION\s*=\s*"([^"]+)"', inject, re.M)
         if m:
             out["ikaeasy"] = m.group(1)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            http.client.HTTPException):
+        pass
+
+    # The newest published installer, named by releases/LATEST. Also allowed
+    # to fail on its own: it says whether a rebuild is due, and nothing else
+    # depends on it.
+    try:
+        req = urllib.request.Request(LATEST_URL,
+                                     headers={"User-Agent": "ika-panel/%s" % PANEL_VERSION})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            name = resp.read().decode("utf-8", "replace").strip()
+        m = re.match(r"^ikabot-docker_v([\d.]+)\.zip$", name)
+        if m:
+            out["container"] = m.group(1)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError,
             http.client.HTTPException):
         pass
@@ -774,6 +793,11 @@ def _versions():
     got = _read_version(os.path.join(app, *INJECT_PATH), "LITE_VERSION")
     if got:
         out["ikaeasy"] = got
+    # The installer that built this container. Written by install.sh, so it is
+    # absent on a container built before that, which reads as "—".
+    got = installer_version()
+    if got:
+        out["container"] = got
     return out
 
 
@@ -1952,6 +1976,25 @@ class Handler(BaseHTTPRequestHandler):
         # along the bottom of the terminal is the only way between instances
         # for someone who does not know tmux, and losing it strands them in
         # whichever one they were in.
+        # Detached on purpose. The upgrade restarts this very process, so a
+        # normal run would be killed before it could answer, and the browser
+        # would see a failed request over a job that in fact succeeded.
+        if payload.get("action") == "panel_upgrade":
+            log = os.path.join(DATA_DIR, "logs", "panel.log")
+            try:
+                os.makedirs(os.path.dirname(log), exist_ok=True)
+                with open(log, "a") as fh:
+                    subprocess.Popen(["ika", "panel", "upgrade"],
+                                     stdout=fh, stderr=fh, start_new_session=True)
+            except OSError as exc:
+                return self._send(200, json.dumps(
+                    {"output": "Could not start the upgrade: %s" % exc,
+                     "ran": "panel upgrade"}))
+            return self._send(200, json.dumps(
+                {"output": "Fetching the newest control panel. This page "
+                           "reloads by itself when it is back.",
+                 "reloading": True, "ran": "panel upgrade"}))
+
         if payload.get("action") == "show_bar":
             out = _sh(["tmux", "set", "-g", "status", "on"], timeout=15).strip()
             # Moved to the top as well as switched on. tmux never stopped
@@ -2448,6 +2491,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
 <section class="sec" id="sec-ikabot">
   <h2>ikabot</h2>
   <p class="upnote" id="coreup" style="display:none"></p>
+  <p class="upnote" id="boxup" style="display:none"></p>
   <table style="margin-bottom:12px"><thead><tr>
     <th>Component</th><th>Installed</th><th>Available</th><th></th></tr></thead>
   <tbody id="corever"></tbody></table>
@@ -2455,6 +2499,8 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     <button class="p" data-a="update">Download &amp; update ikabot</button>
     <button class="d" data-a="update_rollback">Roll back last update</button>
     <button data-a="check_updates">Check GitHub now</button>
+    <button id="panelup"
+            title="Fetch the newest control panel from GitHub and reload this page">Update the control panel</button>
     <button data-a="self_upgrade"
             title="Refresh ika, ika-update and the other helper scripts from GitHub">Refresh ika's own scripts</button>
   </div>
@@ -3401,6 +3447,36 @@ el('fsmall').addEventListener('click', function(){
 el('fbig').addEventListener('click', function(){
   setFont(Math.min(40, (parseInt(el('fsize').textContent,10)||15) + 2)); });
 
+// Its own handler, not run(): the panel restarts itself part way through, so
+// the page must wait for it to answer again before it reloads.
+el('panelup').addEventListener('click', function(){
+  var btn = this;
+  btn.disabled = true;
+  out.textContent = 'Fetching the newest control panel...';
+  fetch('api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'panel_upgrade'})})
+  .then(function(r){return r.json()})
+  .then(function(d){
+    out.textContent = d.output || 'Upgrading...';
+    if(d.reloading) waitForPanel(0); else btn.disabled = false;
+  })
+  // A dropped request here means the panel restarted before it could reply,
+  // which is the expected case rather than a failure.
+  .catch(function(){ out.textContent = 'The panel is restarting...'; waitForPanel(0); });
+});
+
+function waitForPanel(tries){
+  if(tries > 40){
+    out.textContent = 'The panel did not come back. Reload the page by hand.';
+    return;
+  }
+  setTimeout(function(){
+    fetch('api/state', {cache:'no-store'})
+      .then(function(r){ if(r.ok) location.reload(); else waitForPanel(tries+1); })
+      .catch(function(){ waitForPanel(tries+1); });
+  }, 1500);
+}
+
 el('fopen').addEventListener('click',openFile);
 el('fpick').addEventListener('change',openFile);
 el('frefresh').addEventListener('click',loadFileList);
@@ -3612,13 +3688,18 @@ function refresh(){
         esc(m.name)+'"'+hi+'>'+act+'</button></td></tr>';
     }).join('') || '<tr><td colspan="5" class="sub">No modules installed.</td></tr>';
 
-    var ca=s.versions_available||{}, cv=s.versions||{}, coreDue=[];
+    var ca=s.versions_available||{}, cv=s.versions||{}, coreDue=[], boxDue='';
     document.getElementById('corever').innerHTML=[
-      ['ikabot','ikabot'],['mod','modded by kurzon'],['ikaeasy','IkaEasy']
+      ['ikabot','ikabot'],['mod','modded by kurzon'],['ikaeasy','IkaEasy'],
+      ['container','container']
     ].map(function(pair){
       var k=pair[0], have=cv[k]||'', want=ca[k]||'';
       var due=!!want&&newer(want,have);
-      if(due)coreDue.push(pair[1]+' '+want+(have?' (you have '+have+')':''));
+      // The container is listed but kept out of the banner below. That banner
+      // says "press Download & update ikabot", and that button does not touch
+      // the container — a rebuild is a job on the host.
+      if(due && k==='container') boxDue=want+(have?' (you have '+have+')':'');
+      else if(due)coreDue.push(pair[1]+' '+want+(have?' (you have '+have+')':''));
       var state=!want?'v-unknown':(due?'v-outdated':'v-current');
       return '<tr><td>'+pair[1]+'</td>'+
         '<td class="mono '+state+'">'+(have||'—')+'</td>'+
@@ -3637,7 +3718,17 @@ function refresh(){
       ? 'Ready to install: <b>' + coreDue.map(esc).join('</b>, <b>') + '</b>. '
         + 'Press Download &amp; update ikabot, then restart the instances.'
       : '';
-    tag('ikabot', coreDue.length ? 'new' : '');
+    tag('ikabot', (coreDue.length || boxDue) ? 'new' : '');
+
+    // Its own line, because its answer is its own: the panel cannot rebuild
+    // the container it runs inside.
+    var bx=el('boxup');
+    bx.style.display = boxDue ? '' : 'none';
+    bx.textContent = boxDue
+      ? 'A newer container is published: ' + boxDue + '. Rebuilding it is a '
+        + 'job on the host — download the new zip and run the installer again '
+        + 'against the same data folder. Nothing in /config is touched.'
+      : '';
 
     // An edited bundle is served in preference to the packaged one, so the
     // IkaEasy row above stops being the whole story once anything is in it.
