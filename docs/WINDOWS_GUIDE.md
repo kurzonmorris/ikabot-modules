@@ -36,12 +36,18 @@ Click this link and the file will download:
 
 It is about 7 MB and lands in your **Downloads** folder.
 
-> **Getting a newer one.** All the versions live in
+> **Getting a newer one.** The file
+> [releases/LATEST](https://github.com/kurzonmorris/ikabot-modules/blob/main/releases/LATEST)
+> holds one line. That line is the name of the newest installer zip. Read it,
+> then take that file from
 > [the releases folder](https://github.com/kurzonmorris/ikabot-modules/tree/main/releases).
-> Take the one with the highest number. Click it, then click the **Download raw
-> file** button — the little downward arrow at the top right. Do **not**
-> right-click and *Save link as* on the file's name: that saves the web page
-> about the file instead of the file, and the zip will not open.
+> Click the file, then click the **Download raw file** button — the little
+> downward arrow at the top right. Do **not** right-click and *Save link as* on
+> the file's name: that saves the web page about the file instead of the file,
+> and the zip will not open.
+>
+> The link above always points at the version this guide was written for. See
+> **Download links** at the end for the rest.
 
 ---
 
@@ -300,6 +306,28 @@ Unraid or TrueNAS, or a Steam Deck.
 Nothing here can be broken by trying again. Running `INSTALL.bat` a second
 time is safe: it keeps your accounts and settings and leaves an ikabot you have
 already updated alone.
+
+---
+
+## Download links
+
+Every file below lives in
+[the releases folder](https://github.com/kurzonmorris/ikabot-modules/tree/main/releases).
+Use the **Download raw file** button on GitHub, or click the direct links here.
+
+| What it is | Newest file | Direct link |
+|---|---|---|
+| The Windows and Docker installer. This guide uses it | `ikabot-docker_v1.1.0.zip` | [download](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-docker_v1.1.0.zip) |
+| The name of the newest installer zip, in one line | `LATEST` | [open](https://github.com/kurzonmorris/ikabot-modules/blob/main/releases/LATEST) |
+| ikabot and the mod together, without Docker | `ikabot-v7.5.1-mod-v2.1.0.zip` | [download](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-v7.5.1-mod-v2.1.0.zip) |
+| The mod installer on its own | `ikabot-mod-install_v2.1.3.zip` | [download](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-mod-install_v2.1.3.zip) |
+
+Follow this guide with the first file only. The last two are for a PC that
+runs ikabot without Docker.
+
+Read `LATEST` before you download. The version numbers in this table are
+correct for installer v1.1.0. They change with each release, and `LATEST`
+does not.
 
 ---
 
