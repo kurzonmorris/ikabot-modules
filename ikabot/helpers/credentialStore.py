@@ -394,7 +394,17 @@ def _atomic_write(path: str, data: dict) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    # On Windows a reader holding the vault open makes os.replace raise
+    # PermissionError (WinError 32). Readers release almost at once, so retry
+    # briefly. Losing this write loses a refreshed token.
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
 
 
 # ---------------------------------------------------------------------------

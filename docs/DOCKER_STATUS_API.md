@@ -67,7 +67,7 @@ stale-lock check no longer compares PIDs across PID namespaces.
   "username": "kurzon",
   "server": "s55",
   "world": "en",
-  "ikabot_version": "7.5.1",
+  "ikabot_version": "7.6.3",
   "mod_version": "1.8.1",
   "pid": 41,
   "updated": 1755624901,

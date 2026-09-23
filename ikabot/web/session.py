@@ -13,6 +13,7 @@ import re
 import sys
 import time
 import traceback
+import urllib.parse
 from collections import deque
 
 import requests
@@ -145,6 +146,84 @@ class Session:
 
     def __isExpired(self, html):
         return "index.php?logout" in html or '<a class="logout"' in html
+
+    def __isSessionRotated(self, html, response=None):
+        """True when another browser or device has taken this session over.
+
+        Ikariam answers such a request with a protocol command that forces a
+        reload to the lobby, or it redirects to the lobby host.
+
+        Judge it on the redirect target, never on page text. An earlier
+        upstream version searched the body for "lobby.ikariam.gameforge.com"
+        plus "consent.gameforge.com", which an ordinary page with a cookie
+        banner also contains. That reported a takeover on a healthy session.
+        """
+        if not isinstance(html, str):
+            return False
+        if re.search(
+            r'"reload"\s*,\s*\{\s*"link"\s*:\s*"https://lobby\.ikariam\.gameforge\.com',
+            html,
+        ):
+            return True
+        if response is not None:
+            try:
+                candidates = [getattr(response, "url", "")] + [
+                    h.headers.get("Location", "") for h in getattr(response, "history", [])
+                ]
+                for candidate in candidates:
+                    host = urllib.parse.urlsplit(candidate).hostname or ""
+                    if host == "lobby.ikariam.gameforge.com":
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def __handleSessionRotated(self):
+        """Report the takeover and stop this process.
+
+        A fresh login would win the session back from the browser, which would
+        then take it again. That loop is exactly the churn that draws anti-bot
+        attention, so stop instead.
+
+        This deliberately differs from upstream in two ways, because this fork
+        runs many unattended instances:
+
+        * Upstream waits on enter(). Nobody answers a prompt on a headless
+          instance, so it would hang for ever instead of stopping.
+        * Upstream terminates the parent process and every sibling task. Here
+          only this process stops. The menu already breaks out of its wait when
+          a child dies, and taskWatchdog reports a task that stopped, so the
+          loss is visible without killing the account's other work.
+        """
+        if getattr(self, "_session_rotated_handled", False):
+            os._exit(1)
+        self._session_rotated_handled = True
+
+        msg = (
+            "The session for this account was closed by another login.\n"
+            "Ikariam allows one session per account, so a login from a browser "
+            "or another device ends this one.\n"
+            "This ikabot task has stopped. Options:\n"
+            "  1) Use the Web Server module and control the account from it.\n"
+            "  2) Move the cookie across with Options -> Import / Export cookie."
+        )
+        self.logger.error("Session taken over by another login; stopping this process")
+        try:
+            print("\n{}[!]{} {}\n".format(bcolors.RED, bcolors.ENDC, msg))
+        except Exception:
+            pass
+        try:
+            sendToBot(self, "{}\n\n{}".format(self.__account_label(), msg))
+        except Exception:
+            self.logger.debug("Could not notify about the session takeover", exc_info=True)
+        os._exit(1)
+
+    def __account_label(self):
+        return "{}@{}{}".format(
+            getattr(self, "username", "?"),
+            getattr(self, "servidor", "?"),
+            getattr(self, "mundo", "?"),
+        )
 
     def isExpired(self, html):
         return self.__isExpired(html)
@@ -958,7 +1037,8 @@ class Session:
             self.__update_proxy(obj=old_s, sessionData=sessionData)
             try:
                 # make a request to check the connection
-                html = old_s.get(self.urlBase, verify=config.do_ssl_verify).text
+                old_resp = old_s.get(self.urlBase, verify=config.do_ssl_verify)
+                html = old_resp.text
             except Exception:
                 # Nothing below this can run without a page, so a changed
                 # proxy means starting the login again rather than falling
@@ -969,6 +1049,17 @@ class Session:
                 raise
 
             cookies_are_valid = self.__isExpired(html) is False
+            # Cookies that look alive but answer with the takeover payload
+            # belong to a session another login already claimed. Log in fresh
+            # rather than reusing them.
+            if cookies_are_valid and self.__isSessionRotated(html, response=old_resp):
+                self.logger.warning(
+                    "Stored cookies were invalidated by another login; logging in fresh"
+                )
+                cookies_are_valid = False
+            if cookies_are_valid and old_resp.status_code == 404:
+                self.logger.warning("Stored cookies returned 404; logging in fresh")
+                cookies_are_valid = False
             if cookies_are_valid:
                 self.logger.info("using old cookies")
                 used_old_cookies = True
@@ -1346,11 +1437,12 @@ class Session:
                 }
                 html = response.text
 
-               # modifica redirect 302
-                if response.status_code == 302:
-                    location = response.headers.get('Location', '')
-                    if 'lobby.ikariam.gameforge.com' in location:
-                        raise AssertionError("Redirect to lobby detected")
+                # A takeover sends us to the lobby. requests follows the
+                # redirect by default, so the final status is 200 and the 302
+                # is only visible in response.history — checking the status
+                # code alone almost never fired.
+                if self.__isSessionRotated(html, response=response):
+                    self.__handleSessionRotated()
                 
                 # Upstream #406: only a 404 from Ikariam itself means the
                 # session died. A 404 from a local or external route (the web
@@ -1495,6 +1587,8 @@ class Session:
                     raise requests.exceptions.ConnectionError  # repeat after 10 minutes
                 if ignoreExpire is False:
                     assert self.__isExpired(resp) is False
+                if self.__isSessionRotated(resp, response=response):
+                    self.__handleSessionRotated()
                 if "TXT_ERROR_WRONG_REQUEST_ID" in resp:
                     # The actionRequest token was stale — another concurrent
                     # request (a background task, or the web-server browser)
