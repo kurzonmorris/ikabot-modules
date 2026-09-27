@@ -1039,7 +1039,8 @@ cannot see.
 
 #### The keypad
 
-Under the controls is a row of keys: **1-9, 0**, then **y n e o s**, then
+Under the controls is a row of keys: **1-9, 0**, then **y n e o s d**, then
+**'** — for the city names that carry one — then
 **backspace** and **Enter**. Pressing one types it into whichever instance is
 on screen.
 

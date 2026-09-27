@@ -1152,7 +1152,9 @@ def term_scroll(what):
 # What the on-screen pad is allowed to type. A fixed set rather than "any one
 # character": this types into a live session, so the keys that drive ikabot
 # without a keyboard are listed rather than inferred.
-PAD_KEYS = "1234567890yneos"
+# The apostrophe is here because ikabot asks for city names, and several of
+# them carry one.
+PAD_KEYS = "1234567890yneosd'"
 PAD_SPECIAL = {"enter": ("Enter", "Enter"), "back": ("BSpace", "backspace")}
 
 
@@ -2351,7 +2353,13 @@ min-width:34px;text-align:center}
 /* Full width, as many keys to a row as will fit, wrapping onto more rows
    rather than shrinking below what a fingertip can hit. Same height as the
    controls above, so the two rows read as one block of buttons. */
-.keypad{display:grid;grid-template-columns:repeat(auto-fit,minmax(44px,1fr));
+/* 30px, not 44: nineteen keys and a two-wide backspace and Enter make
+   twenty-one cells, and at 44px those wrap onto a second row on anything
+   narrower than a large desktop -- twice the height of the controls above.
+   The minimum only decides how many fit; each cell then stretches to 1fr, so
+   on a wide screen they are still about 43px. A coarse pointer keeps the full
+   44px target below, where the row wraps whatever the minimum is. */
+.keypad{display:grid;grid-template-columns:repeat(auto-fit,minmax(30px,1fr));
 gap:4px;margin:4px 0 0}
 /* Padding and font-size copied from .tscroll button on purpose, including
    under a coarse pointer: "the same height as the buttons above" is only
@@ -2365,7 +2373,8 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
      typing into. Sticky rather than fixed: it keeps its own place in the
      layout, lets go by itself once you scroll past the section, and there is
      nothing to toggle when the section changes. */
-  .keypad{gap:5px;position:sticky;bottom:0;z-index:5;
+  .keypad{grid-template-columns:repeat(auto-fit,minmax(44px,1fr));
+  gap:5px;position:sticky;bottom:0;z-index:5;
   background:var(--card);padding:6px 0 4px;
   box-shadow:0 -8px 14px -10px rgba(0,0,0,.5)}
   .keypad button{padding:11px 0;font-size:14px}
@@ -3677,12 +3686,12 @@ document.addEventListener('click',function(e){
 // Its own handler rather than run(): scrolling is pressed over and over, and
 // it changes nothing, so it should not grey out every button on the page or
 // trigger a rebuild for each press.
-// Built here rather than written out: sixteen near-identical buttons in the
-// markup is sixteen chances for one of them to drift.
+// Built here rather than written out: seventeen near-identical buttons in the
+// markup is seventeen chances for one of them to drift.
 (function(){
   var pad = el('keypad');
   if(!pad) return;
-  var keys = '1234567890'.split('').concat(['y','n','e','o','s']);
+  var keys = '1234567890'.split('').concat(['y','n','e','o','s','d',"'"]);
   var html = keys.map(function(k){
     return '<button data-key="'+k+'" title="Type '+k+'">'+k+'</button>';
   }).join('');
