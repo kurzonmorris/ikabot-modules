@@ -170,9 +170,15 @@ def updateProcessList(session, programprocesslist=[]):
                 continue
 
         # add new to the list and write to file only if it's given
+        # Match on pid, not on the whole dict. The status field changes as a
+        # task runs, so an entry whose status moved on no longer equals the
+        # stored one and was appended a second time, leaving one pid listed
+        # twice in the task table.
+        existing_pids = {p["pid"] for p in runningIkabotProcessList}
         for process in programprocesslist:
-            if process not in runningIkabotProcessList:
+            if process["pid"] not in existing_pids:
                 runningIkabotProcessList.append(process)
+                existing_pids.add(process["pid"])
 
         for p in runningIkabotProcessList:
             p.setdefault("status", "running")

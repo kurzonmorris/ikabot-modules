@@ -98,6 +98,13 @@ def modifyProduction(session, event, stdin_fd, predetermined_input):
                     selected_good_name = resource_name if resource_type == "resource" else tradegood_name
                     print(f"{finalWorkers} workers set for {selected_good_name} in {city['name']}.")
 
+                    # The game drops a second workerPlan request that arrives
+                    # too soon after the first on the same island, and answers
+                    # normally, so the second resource type silently kept its
+                    # old worker count. Space the two apart.
+                    if resource_type != resource_types_to_modify[-1]:
+                        wait(2, 2)
+
                 wait(3, 4)
 
         print("\nAll productions have been set!")

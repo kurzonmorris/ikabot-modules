@@ -1,7 +1,7 @@
 # IkaEasy — Install & Update
 
 > **Current versions**
-> - **ikabot mod build:** `v2.1.0`  (`IKABOT_MOD_VERSION` in `ikabot/config.py`)
+> - **ikabot mod build:** `v2.2.0`  (`IKABOT_MOD_VERSION` in `ikabot/config.py`)
 > - **IkaEasy bundle:** `v1.1.1`  (`LITE_VERSION` in `ikabot/helpers/ikaEasyInject.py`, shown bottom-right in the browser)
 >
 > Compare these two numbers against this file on GitHub
@@ -10,7 +10,7 @@
 
 IkaEasy is **built into this ikabot build** — it is not a separate option-30
 module. Installing it = updating ikabot to a build that includes it
-(mod `v2.1.0` or newer). Once installed it serves its own UI into the game
+(mod `v2.2.0` or newer). Once installed it serves its own UI into the game
 page through the ikabot web server, so it works in **any browser** with no
 Chrome extension.
 
@@ -45,7 +45,7 @@ ika update --rollback && ika restart all
    (town hall, tavern, transport/port).
 4. **Bottom-right of the screen** you will see:
    - an **`IkaEasy: on`** button (click to turn the UI off/on), and
-   - directly beneath it a combined **`IkaEasy v1.1.1 · mod v2.1.0`** version badge.
+   - directly beneath it a combined **`IkaEasy v1.1.1 · mod v2.2.0`** version badge.
 
    The badge is the running bundle version — use it to confirm the update took
    and to spot when a newer version exists on GitHub.
@@ -91,6 +91,6 @@ Python changes (the bridge, injection, web-server hooks) still need
 
 ## Requirements
 
-- ikabot mod build **v2.1.0+** (this build).
+- ikabot mod build **v2.2.0+** (this build).
 - The ikabot **web server** (option 16) must be running; play through its link.
 - Nothing else — no browser extension required.

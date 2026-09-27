@@ -32,27 +32,33 @@ Leave Docker Desktop open. Nothing else works until it says *Engine running*.
 
 Click this link and the file will download:
 
-**[ikabot-docker_v1.0.36.zip](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-docker_v1.0.36.zip)**
+**[ikabot-docker_v1.1.0.zip](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-docker_v1.1.0.zip)**
 
 It is about 7 MB and lands in your **Downloads** folder.
 
-> **Getting a newer one.** All the versions live in
+> **Getting a newer one.** The file
+> [releases/LATEST](https://github.com/kurzonmorris/ikabot-modules/blob/main/releases/LATEST)
+> holds one line. That line is the name of the newest installer zip. Read it,
+> then take that file from
 > [the releases folder](https://github.com/kurzonmorris/ikabot-modules/tree/main/releases).
-> Take the one with the highest number. Click it, then click the **Download raw
-> file** button — the little downward arrow at the top right. Do **not**
-> right-click and *Save link as* on the file's name: that saves the web page
-> about the file instead of the file, and the zip will not open.
+> Click the file, then click the **Download raw file** button — the little
+> downward arrow at the top right. Do **not** right-click and *Save link as* on
+> the file's name: that saves the web page about the file instead of the file,
+> and the zip will not open.
+>
+> The link above always points at the version this guide was written for. See
+> **Download links** at the end for the rest.
 
 ---
 
 ## Step 3 — Unzip it
 
 1. Open your **Downloads** folder
-2. **Right-click** `ikabot-docker_v1.0.36.zip` → **Properties**
+2. **Right-click** `ikabot-docker_v1.1.0.zip` → **Properties**
 3. If you see an **Unblock** tickbox at the bottom, tick it and press **OK**
 4. **Right-click** the file again → **Extract All…** → **Extract**
 
-A folder called `ikabot-docker_v1.0.36` opens. Inside it you should see:
+A folder called `ikabot-docker_v1.1.0` opens. Inside it you should see:
 
 ```
 INSTALL.bat        README.txt        app        docker        install.sh
@@ -110,12 +116,12 @@ You should now see the ikabot control panel, with a menu down the left and a
 box for every account you asked for.
 
 > **Two version numbers, and that is normal.** The heading shows the control
-> panel's own version; the line under it ends with the installer's. They are
-> numbered separately and are usually a little apart — installer `v1.0.36`
-> carries control panel `v1.0.32`, for instance. A lower number on the page
-> than on the file you downloaded does **not** mean the install went wrong.
-> The installer prints both numbers when it finishes, so you can check the
-> page against that line rather than against the file name.
+> panel's own version. The line under it ends with the installer's. They are
+> numbered separately. They match in `v1.1.0`, but they will drift apart
+> again, because the panel updates on its own with `ika panel upgrade`. A
+> lower number on the page than on the file you downloaded does **not** mean
+> the install went wrong. The installer prints both numbers when it finishes.
+> Check the page against that line, not against the file name.
 
 ---
 
@@ -191,6 +197,25 @@ In the control panel:
 - **Modules** in the menu → **Update all from GitHub**
 
 You do not need to download the installer again for those.
+
+---
+
+## Step 9a — Reading what ikabot sent you
+
+**Messages** in the menu lists every notification ikabot has sent, newest
+first.
+
+Pick one instance from the numbered strip on the right, or press the wide
+**All** button above them for every instance at once. A dot on a square means
+something arrived since you last looked.
+
+The messages are kept on your own PC as they are sent. Telegram will not list a
+bot's own messages and a Discord webhook cannot be read, so this list works
+even when no service is set up.
+
+Under the list, **Where messages go** holds one row per place ikabot sends to.
+Add a second Telegram row for a second Telegram account. Leave **Instances**
+blank to use that row for every instance.
 
 ---
 
@@ -300,6 +325,28 @@ Unraid or TrueNAS, or a Steam Deck.
 Nothing here can be broken by trying again. Running `INSTALL.bat` a second
 time is safe: it keeps your accounts and settings and leaves an ikabot you have
 already updated alone.
+
+---
+
+## Download links
+
+Every file below lives in
+[the releases folder](https://github.com/kurzonmorris/ikabot-modules/tree/main/releases).
+Use the **Download raw file** button on GitHub, or click the direct links here.
+
+| What it is | Newest file | Direct link |
+|---|---|---|
+| The Windows and Docker installer. This guide uses it | `ikabot-docker_v1.1.0.zip` | [download](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-docker_v1.1.0.zip) |
+| The name of the newest installer zip, in one line | `LATEST` | [open](https://github.com/kurzonmorris/ikabot-modules/blob/main/releases/LATEST) |
+| ikabot and the mod together, without Docker | `ikabot-v7.5.1-mod-v2.1.0.zip` | [download](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-v7.5.1-mod-v2.1.0.zip) |
+| The mod installer on its own | `ikabot-mod-install_v2.1.3.zip` | [download](https://github.com/kurzonmorris/ikabot-modules/raw/main/releases/ikabot-mod-install_v2.1.3.zip) |
+
+Follow this guide with the first file only. The last two are for a PC that
+runs ikabot without Docker.
+
+Read `LATEST` before you download. The version numbers in this table are
+correct for installer v1.1.0. They change with each release, and `LATEST`
+does not.
 
 ---
 

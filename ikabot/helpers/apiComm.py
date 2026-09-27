@@ -17,6 +17,17 @@ logger = getLogger(__name__)
 # *from*. Token generation drives a real browser, so keep it generous.
 API_TIMEOUT = int(os.getenv("IKABOT_API_TIMEOUT", "120"))
 
+# Split the wait into connect and read. A server that is down refuses or drops
+# the connection quickly, so waiting the full read timeout to discover that
+# delays the failover by two minutes per dead endpoint. Reaching a server is
+# fast or not happening; producing a token is the slow part.
+API_CONNECT_TIMEOUT = int(os.getenv("IKABOT_API_CONNECT_TIMEOUT", "10"))
+if API_CONNECT_TIMEOUT <= 0:
+    API_CONNECT_TIMEOUT = 10
+if API_TIMEOUT <= 0:
+    API_TIMEOUT = 120
+API_TIMEOUTS = (API_CONNECT_TIMEOUT, API_TIMEOUT)
+
 
 def getFallbackEndpoints():
     """Self-hosted API base URLs to try after the public one, in order."""
@@ -77,7 +88,7 @@ def requestBlackBoxToken(address, headers, user_agent, params):
         params=params,
         headers=headers,
         verify=do_ssl_verify,
-        timeout=API_TIMEOUT,
+        timeout=API_TIMEOUTS,
     )
 
     # Older API deployments don't know the locale/timezone parameters — retry
@@ -88,14 +99,14 @@ def requestBlackBoxToken(address, headers, user_agent, params):
             params={"user_agent": user_agent},
             headers=headers,
             verify=do_ssl_verify,
-            timeout=API_TIMEOUT,
+            timeout=API_TIMEOUTS,
         )
     if response.status_code == 400 and "Unsupported user_agent" in response.text:
         response = get(
             address + "/v1/token",
             headers=headers,
             verify=do_ssl_verify,
-            timeout=API_TIMEOUT,
+            timeout=API_TIMEOUTS,
         )
     assert response.status_code == 200, (
         "API response code is not OK: "
@@ -156,7 +167,7 @@ def requestPiratesCaptchaSolution(address, headers, image):
         files={"image": image},
         headers=headers,
         verify=do_ssl_verify,
-        timeout=API_TIMEOUT,
+        timeout=API_TIMEOUTS,
     )
     assert response.status_code == 200, (
         "API response code is not OK: "

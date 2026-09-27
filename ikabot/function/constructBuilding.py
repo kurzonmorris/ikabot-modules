@@ -80,9 +80,11 @@ def constructBuilding(session, event, stdin_fd, predetermined_input):
                 for free_space in free_spaces
                 if free_space["type"] == type_space
             ]
-            if len(free_spaces_of_type) > 0:
-                # we take any space in the desired area
-                free_space_of_type = free_spaces_of_type[0]
+            # Try each free slot of this type, not only the first. A slot can
+            # be locked behind research (position 13 needs Bureaucracy) and
+            # then answers with empty HTML. Taking only the first slot hid
+            # every building that the other slots of that type offer.
+            for free_space_of_type in free_spaces_of_type:
                 params = {
                     "view": "buildingGround",
                     "cityId": city["id"],
@@ -103,6 +105,8 @@ def constructBuilding(session, event, stdin_fd, predetermined_input):
                 html = buildings_response[1]
 
                 blocks = splitBuildingBlocks(html)
+                if len(blocks) == 0:
+                    continue
                 for block in blocks:
                     btype = block["type"]
                     block_html = block["html"]
@@ -131,6 +135,9 @@ def constructBuilding(session, event, stdin_fd, predetermined_input):
                             "canAfford": can_afford,
                         }
                     )
+                # This slot answered, so the rest of this type offer the same
+                # list. Stop and move to the next surface type.
+                break
 
         if len(buildings) == 0:
             print("No building can be built.")

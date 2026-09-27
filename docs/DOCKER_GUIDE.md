@@ -395,11 +395,43 @@ The panel asks GitHub what is published when it starts and **once an hour**
 after that, so a panel left open for days does not go on reporting whatever
 was current the morning it started.
 
-Three things are tracked: **ikabot** itself, the **mod**, and **IkaEasy**.
+Four things are tracked: **ikabot** itself, the **mod**, **IkaEasy**, and the
+**container**.
 IkaEasy keeps its version in `ikabot/helpers/ikaEasyInject.py` rather than in
 `config.py`, so it is a second small file to fetch — one that is allowed to
 fail on its own, so a fork without IkaEasy does not make the whole check look
 broken. All three update the same way, with **Download & update ikabot**.
+
+The **container** row is different from the other three. It compares the
+installer that built your container against the newest zip published on GitHub.
+It tells you when a rebuild is due. **The panel cannot do that rebuild.** The
+panel runs inside the container, and a container cannot replace itself. It gets
+its own line saying so, separate from the *Download & update ikabot* banner,
+because that button does not touch the container.
+
+To rebuild: download the newest zip and run the installer again against the
+same data folder. Nothing in `config` is touched.
+
+**From installer v1.1.0 a rebuild is rarely needed.** The container's entry
+point is a small stub. It runs `/app/docker/entrypoint.sh` when that file
+exists, and `ika update` now keeps that file up to date. So a change to how
+the container starts — the tmux settings, the terminal font, the web server
+launch — arrives with `ika update` and a `docker restart ikabot`.
+
+Only a change to the base image or the installed packages still needs a
+rebuild. Neither has changed since this setup was built.
+
+The stub checks the mounted file with `bash -n` before it uses it. A truncated
+or broken file is ignored, and the copy inside the image runs instead. If you
+ever need to force that, create the file `.no-app-entrypoint` in your `config`
+folder from the host and restart the container. A broken entry point stops the
+container before the terminal and the panel exist, so this switch is the way
+back in.
+
+**Update the control panel** runs `ika panel upgrade` from the page. The panel
+restarts itself, so the page waits for it to come back and then reloads. The
+rest of the page stays usable while it works. Your instances are not affected —
+tmux keeps them running.
 
 If you have edited the bundle, a line under the table says how many files are
 being served from your copy in `.ikabot/ikaeasy_lite`. Those win over what
@@ -463,7 +495,7 @@ works; if the link is genuinely too poor, download the release zip by whatever
 means work and install from that:
 
 ```bash
-docker exec -it ikabot ika update --from /config/ikabot-docker_v1.0.36.zip
+docker exec -it ikabot ika update --from /config/ikabot-docker_v1.1.0.zip
 ```
 
 Anything in `/config` is visible inside the container, so dropping the zip in
@@ -926,6 +958,7 @@ Sign in with the same username and password as the terminal.
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Terminal** | The instance screens, embedded — the same thing as opening port 7681 |
 | **Web servers** | Pick an instance from a numbered strip and read its web server full size |
+| **Messages** | Every notification ikabot has sent, newest first. Pick one instance from a numbered strip, or press the wide **All** button for every instance at once. Below the list, the destinations those messages are sent to |
 | **Output** | What the command you just pressed actually printed — always on screen, whichever section you are in |
 
 ### Getting around
@@ -948,6 +981,50 @@ On a phone the menu becomes a row of chips you swipe along, and instance cards
 collapse to their name and state — tap one to open its buttons. On a desktop
 nothing has changed.
 
+### Messages
+
+Every notification ikabot sends is written to a file as it is sent, one file
+per account. The **Messages** section reads those files.
+
+The copy is made locally because the services cannot be asked. Telegram will
+not list a bot's own messages. A Discord webhook can only be written to. So
+what was sent is kept here, and it is kept even when no service is set up at
+all.
+
+The strip on the right works like the Web servers strip: one square per
+instance, numbered. Above them is a wide **All** button, five squares across,
+which shows every instance at once. A dot on a square means something arrived
+since you last looked.
+
+Each message shows the time, the instance, the module that sent it, and a chip
+for each service it went to. A red chip means that service refused it. The
+search box matches plain text in the subject and the body.
+
+#### Where messages go
+
+Under the list is one row per place ikabot sends to. Each row has a name you
+choose, a kind, and its own credentials. Two Telegram rows are two Telegram
+accounts.
+
+| Column | Means |
+|---|---|
+| **Name** | Whatever you called it |
+| **Kind** | `telegram`, `discord` or `ntfy` |
+| **Where it points** | The chat, webhook or topic, with the token shown as its last four characters only |
+| **Instances** | The instance numbers that use this row, or **all** |
+| **On** | Turn a row off without deleting it |
+
+**Test** sends a test message through that row alone. **Edit** reopens it —
+leave a token box empty to keep the token already stored.
+
+While the list is empty, ikabot uses the single Telegram, Discord and ntfy
+settings it has always used, so an existing install is untouched. The first row
+you add replaces them.
+
+> The destinations are kept in `/config/.ikabot/notify_targets.json`. It holds
+> bot tokens, so it is written readable by its owner only. The panel never
+> sends a token to the browser.
+
 ### Two embedded sections
 
 **Terminal** puts the instance screens in the page, the same as opening port
@@ -962,7 +1039,8 @@ cannot see.
 
 #### The keypad
 
-Under the controls is a row of keys: **1-9, 0**, then **y n e o s**, then
+Under the controls is a row of keys: **1-9, 0**, then **y n e o s d**, then
+**'** — for the city names that carry one — then
 **backspace** and **Enter**. Pressing one types it into whichever instance is
 on screen.
 
@@ -1646,7 +1724,7 @@ script refuses to build if that number disagrees with the copies printed inside
 they see on screen can never drift apart.
 
 > **The installer and the panel are versioned separately** and the numbers do
-> not match — installer 1.0.36 ships panel 1.0.32. That looks like a failed
+> not match — installer 1.1.0 ships panel 1.1.0. That looks like a failed
 > update if only one of them is on screen, so both are: the installer prints
 > both when it finishes, writes its own into `config/.installer-version`, and
 > the panel shows it beside its own in the line under the heading.

@@ -41,6 +41,13 @@ try:
 except ImportError:
     from ikabot.helpers.botComm import telegramDataIsValid as notificationDataIsValid
 
+# Absent on a tree from before the message log, where the hub still runs and
+# simply keeps no local copy.
+try:
+    from ikabot.helpers.messageLog import log_message as _log_message
+except ImportError:
+    _log_message = None
+
 try:
     from ikabot.helpers.modulePrefs import (
         load_prefs,
@@ -2395,8 +2402,16 @@ def _send_events(session, cfg, events, state):
 
     sent = 0
     failed = 0
+    # One entry per event, holding every destination it was tried against, so
+    # an event routed to three places is one line in the log and not three.
+    results = {}
+    seen = {}
     for dest, dest_events in by_dest.values():
         ok, detail = _deliver(session, dest, dest_events, fmt, footer)
+        kind = dest.get("kind", "?")
+        for event in dest_events:
+            results.setdefault(event["id"], []).append((kind, ok))
+            seen[event["id"]] = event
         if ok:
             sent += len(dest_events)
         else:
@@ -2404,9 +2419,21 @@ def _send_events(session, cfg, events, state):
             state["last_error"] = "{}: {}".format(dest.get("name", dest.get("id")), detail)
             logger.warning("Delivery to %s failed: %s", dest.get("name"), detail)
 
+    _log_events(session, seen, results)
     state["delivered"] = int(state.get("delivered", 0)) + sent
     state["failed"] = int(state.get("failed", 0)) + failed
     return sent, failed
+
+
+def _log_events(session, events, results):
+    """Keep a local copy of each delivered event, for the control panel."""
+    if _log_message is None:
+        return
+    for event_id, attempts in results.items():
+        event = events.get(event_id) or {}
+        title = event.get("title") or event.get("type") or "Messaging Hub"
+        text = "{}\n{}".format(title, event.get("body") or "")
+        _log_message(session, text, attempts, module="messagingHub")
 
 
 def _notify_status(session, cfg, text):

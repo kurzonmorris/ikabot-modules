@@ -7,9 +7,9 @@ deviation back into a bug.
 
 | | |
 |---|---|
-| **Parity point** | upstream **v7.6.0** |
+| **Parity point** | upstream **v7.6.3** |
 | **Fork version at parity** | `IKABOT_MOD_VERSION` **1.9.1** |
-| **Last audited** | 2026-09-07 (upstream `0c60ebc`) |
+| **Last audited** | 2026-09-23 (upstream `422ed5f`) |
 | **Scope** | `ikabot/` core only — `modules/` is fork-specific, no upstream counterpart |
 
 > Everything at or below upstream **7.4.0** is the fork's base and is assumed
@@ -48,8 +48,7 @@ our own way, deliberately · **Present** = already in the fork before the audit
 ### 7.5.1 → 7.6.0 audit (2026-09-07)
 
 > "unreleased" below means the code is on `main` but no `IKABOT_MOD_VERSION`
-> bump has been made for it yet. `IKABOT_VERSION` still reads 7.5.1 although
-> the fork is now level with upstream 7.6.0.
+> bump has been made for it yet.
 
 | PR | Title | Status | Landed |
 |---|---|---|---|
@@ -430,3 +429,76 @@ The fork already writes **one log file per account**
 (`ikabot_<user>_<server><world>.log`, via `setup_file_logging()`), which
 separates the accounts more strongly than a column does. Adding the column
 would only repeat the filename on every line.
+
+
+### 7.6.0 → 7.6.3 audit (2026-09-23)
+
+| PR | Title | Status | Landed |
+|---|---|---|---|
+| #449 | constructBuilding: locked ground slots hid buildings | **Ported** | unreleased |
+| #450 | autoPirate announced "Got captcha: Error" | **Ported** | unreleased |
+| #451 | CI Python matrix 3.10-3.14 | N/A | this repo has no such workflow |
+| #457 | Persist the actionRequest token after an action | **Equivalent, ours is better** | pre-audit |
+| #458 | processList deduplicated on the whole dict | **Ported** | unreleased |
+| #460 | Retry os.replace on PermissionError | **Present, extended** | pre-audit |
+| #461 | Reuse the token the action response returns | **Equivalent, ours is better** | pre-audit |
+| #467 | UpgradeUnits read a success as a failure | **Ported** | unreleased |
+| #469 | autoPirate rescanned every city each run | **Ported** | unreleased |
+| #472 | Bound the blackbox request | **Ported, adapted** | unreleased |
+| #448 + #470 | Detect a session taken over by another login | **Ported, adapted** | unreleased |
+| #441 | Rework session storage into plain JSON | **Rejected** | — |
+| #474 *(open)* | modifyProduction dropped the second resource type | **Ported** | unreleased |
+
+Open upstream PRs, still not taken:
+
+| PR | Title | Why not |
+|---|---|---|
+| #456 | @configurator / @task decorators | See below |
+| #425 | constructionList total time + free speedup | Polls every 5s for the final 5 minutes of every level |
+| #475 | Fix modifyProduction (stacked) | Its unique content is #456's rewrite of UpgradeUnits |
+
+### #441 — session storage rework  *(rejected)*
+
+Replaces the encrypted session file with a directory of **plain JSON** files,
+so a person can read and hot-swap them. Two reasons not to take it.
+
+It writes session data, the lobby cookie included, **unencrypted**. This fork
+encrypts that on purpose, and keeps credentials in an AES-GCM vault.
+
+Its concurrency fix is also weaker than the one already here. `set_session_data`
+re-reads the file before writing, which narrows the window, but it holds no
+lock across the read and the write, so a concurrent writer is still lost.
+`mutateSessionData` holds the lock across the whole read-modify-write.
+
+### #457 / #461 — the actionRequest token  *(equivalent, ours is better)*
+
+Upstream stores the token in the session file and rewrites that file after
+every action. This fork already scrapes the token out of **every** response
+into `self._cached_token`, an in-memory cache, and clears it when the server
+reports a wrong token. Same saving, no file write, no write contention.
+
+### #448 / #470 — session takeover  *(ported, adapted)*
+
+The detection is taken, in #470's form: match the redirect **host**, never the
+page body. The first version searched for "lobby.ikariam.gameforge.com" plus
+"consent.gameforge.com", which an ordinary page with a cookie banner also
+carries, so it reported a takeover on a healthy session — and the response to
+a takeover is to stop the process.
+
+Three parts of upstream's handling are **not** taken:
+
+1. Upstream calls `enter()` before closing. Nobody answers a prompt on a
+   headless instance, so it would hang for ever instead of stopping.
+2. Upstream terminates the parent process and every sibling task. Here only
+   this process stops. The menu already breaks out of its wait when a child
+   dies, and `taskWatchdog` reports the task that stopped.
+3. Upstream replaces the re-login on a 404 at `index.php` with an exit. For an
+   unattended instance that turns a recoverable expiry into a dead instance.
+
+### #472 — blackbox timeout  *(ported, adapted)*
+
+This fork already bounds every API call with `IKABOT_API_TIMEOUT`. Upstream's
+improvement is the split of connect from read: a server that is down is
+abandoned in 10 seconds instead of 120, which is what makes the failover to
+`IKABOT_API_FALLBACK` quick. Added as `IKABOT_API_CONNECT_TIMEOUT`, keeping
+the failover upstream does not have.

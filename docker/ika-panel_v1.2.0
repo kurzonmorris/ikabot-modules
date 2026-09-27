@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.0.32"
+PANEL_VERSION = "1.2.0"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -42,7 +42,18 @@ INSTALLER_STAMP = os.path.join(HOME_DIR, ".installer-version")
 DATA_DIR = os.environ.get("IKABOT_DATA_DIR", os.path.join(HOME_DIR, ".ikabot"))
 # Subfolders of the data folder that never hold a module lock. Skipped so a
 # large logs folder is not listed every five seconds.
-LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache"}
+LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache", "messages"}
+
+# A local copy of every notification ikabot sent, written by
+# ikabot/helpers/messageLog.py. One file per account, one JSON object a line.
+# Telegram and Discord cannot be read back, so this is the only place the
+# messages exist in one list.
+MESSAGE_DIR = os.environ.get("MESSAGE_DIR", os.path.join(DATA_DIR, "messages"))
+# Read from the end of each file rather than all of it: a log at its 2 MB cap
+# holds thousands of records and the page shows the newest few hundred.
+MSG_TAIL_BYTES = 512 * 1024
+MSG_LIMIT = 200
+MSG_MAX_LIMIT = 1000
 
 # --- file viewer ----------------------------------------------------------
 # Only data files, and only below /config. Module CSVs are awkward to reach
@@ -95,6 +106,10 @@ CONFIG_URL = ("https://raw.githubusercontent.com/%s/%s/ikabot/config.py"
 INJECT_URL = ("https://raw.githubusercontent.com/%s/%s/ikabot/helpers/"
               "ikaEasyInject.py" % (REPO, BRANCH))
 INJECT_PATH = ("ikabot", "helpers", "ikaEasyInject.py")
+# The newest published installer. Read over raw.githubusercontent, which has no
+# rate limit, the same way ika-update finds it.
+LATEST_URL = ("https://raw.githubusercontent.com/%s/%s/releases/LATEST"
+              % (REPO, BRANCH))
 # Where an edited bundle overrides the packaged one. Files here are served in
 # preference to what shipped, so a version number alone stops being the whole
 # story once anything is in it.
@@ -211,6 +226,21 @@ def remote_ikabot_versions():
         m = re.search(r'^LITE_VERSION\s*=\s*"([^"]+)"', inject, re.M)
         if m:
             out["ikaeasy"] = m.group(1)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            http.client.HTTPException):
+        pass
+
+    # The newest published installer, named by releases/LATEST. Also allowed
+    # to fail on its own: it says whether a rebuild is due, and nothing else
+    # depends on it.
+    try:
+        req = urllib.request.Request(LATEST_URL,
+                                     headers={"User-Agent": "ika-panel/%s" % PANEL_VERSION})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            name = resp.read().decode("utf-8", "replace").strip()
+        m = re.match(r"^ikabot-docker_v([\d.]+)\.zip$", name)
+        if m:
+            out["container"] = m.group(1)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError,
             http.client.HTTPException):
         pass
@@ -353,6 +383,23 @@ def vault_api():
         # the exact failure this lazy import exists to avoid.
         return None, ("Could not load ikabot's vault code (%s: %s). Accounts "
                       "need a working ikabot in %s."
+                      % (type(exc).__name__, exc,
+                         os.environ.get("APP_DIR", "/app")))
+
+
+def notify_api():
+    """ikabot's notification destinations, imported only when needed.
+
+    Same reasoning as vault_api(): the panel is otherwise stdlib-only, so a
+    broken /app mid-update turns into a sentence on screen rather than a panel
+    that will not start.
+    """
+    try:
+        from ikabot.helpers import notifyTargets
+        return notifyTargets, ""
+    except BaseException as exc:
+        return None, ("Could not load ikabot's notification code (%s: %s). "
+                      "Destinations need a working ikabot in %s."
                       % (type(exc).__name__, exc,
                          os.environ.get("APP_DIR", "/app")))
 
@@ -774,6 +821,11 @@ def _versions():
     got = _read_version(os.path.join(app, *INJECT_PATH), "LITE_VERSION")
     if got:
         out["ikaeasy"] = got
+    # The installer that built this container. Written by install.sh, so it is
+    # absent on a container built before that, which reads as "—".
+    got = installer_version()
+    if got:
+        out["container"] = got
     return out
 
 
@@ -1100,7 +1152,9 @@ def term_scroll(what):
 # What the on-screen pad is allowed to type. A fixed set rather than "any one
 # character": this types into a live session, so the keys that drive ikabot
 # without a keyboard are listed rather than inferred.
-PAD_KEYS = "1234567890yneos"
+# The apostrophe is here because ikabot asks for city names, and several of
+# them carry one.
+PAD_KEYS = "1234567890yneosd'"
 PAD_SPECIAL = {"enter": ("Enter", "Enter"), "back": ("BSpace", "backspace")}
 
 
@@ -1228,6 +1282,88 @@ def read_status():
             continue
         out.append(data)
     return out
+
+
+def message_meta():
+    """When each account's log last changed, and how big it is.
+
+    Sent with every poll, so it must stay cheap: two stat calls a file and no
+    reading. The page decides what counts as new by comparing the timestamp
+    against what it last showed.
+    """
+    out = {}
+    try:
+        names = sorted(os.listdir(MESSAGE_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        try:
+            st = os.stat(os.path.join(MESSAGE_DIR, name))
+        except OSError:
+            continue
+        out[name[:-6]] = {"last": int(st.st_mtime), "size": st.st_size}
+    return out
+
+
+def _tail_lines(path, max_bytes=None):
+    """The last whole lines of a file, oldest first."""
+    # Read at call time rather than bound as a default, so the cap can be
+    # changed without reloading the module.
+    max_bytes = MSG_TAIL_BYTES if max_bytes is None else max_bytes
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            blob = f.read()
+    except OSError:
+        return []
+    lines = blob.decode("utf-8", "replace").split("\n")
+    # The first line is a fragment whenever the seek landed mid-record.
+    if size > max_bytes and lines:
+        lines.pop(0)
+    return lines
+
+
+def read_message_log(accounts=None, limit=MSG_LIMIT, query=""):
+    """Records from the chosen accounts, newest first.
+
+    *accounts* of None means every account. The search is a plain
+    case-insensitive substring over the title and the body, because a regular
+    expression typed into a box on a page is a way to hang the server.
+    """
+    limit = max(1, min(int(limit or MSG_LIMIT), MSG_MAX_LIMIT))
+    needle = (query or "").strip().lower()[:200]
+    wanted = set(accounts) if accounts else None
+    out = []
+    for account in message_meta():
+        if wanted is not None and account not in wanted:
+            continue
+        path = os.path.join(MESSAGE_DIR, "%s.jsonl" % account)
+        for line in reversed(_tail_lines(path)):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if needle and needle not in (
+                    "%s\n%s" % (record.get("title", ""),
+                                record.get("body", ""))).lower():
+                continue
+            record["account"] = account
+            out.append(record)
+            # Per file, so one chatty account cannot crowd out the rest before
+            # the merge below sorts them into one list.
+            if len(out) >= limit * 4:
+                break
+    out.sort(key=lambda r: r.get("t", 0), reverse=True)
+    return out[:limit]
 
 
 def state():
@@ -1394,6 +1530,7 @@ def state():
         "avail_error": avail_err,
         "core_error": core_err,
         "panel_version": PANEL_VERSION,
+        "messages": message_meta(),
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
         "ttyd_port": TTYD_PORT,
@@ -1516,6 +1653,32 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/state"):
             return self._send(200, json.dumps(state()))
 
+        if self.path.startswith("/api/targets"):
+            notify, why = notify_api()
+            if notify is None:
+                return self._send(200, json.dumps({"targets": [], "error": why}))
+            # public() and nothing else: a bot token must not travel to a
+            # browser, not even to be shown back in its own form.
+            return self._send(200, json.dumps({
+                "targets": [notify.public(t) for t in notify.load()["targets"]],
+                "kinds": list(notify.KINDS),
+                "max": notify.MAX_TARGETS,
+                "error": "",
+            }))
+
+        if self.path.startswith("/api/messages"):
+            q = self._query()
+            raw = (q.get("acct") or [""])[0]
+            accounts = [a for a in raw.split(",") if a] or None
+            try:
+                limit = int((q.get("limit") or ["0"])[0] or 0)
+            except ValueError:
+                limit = 0
+            return self._send(200, json.dumps({
+                "messages": read_message_log(accounts, limit or MSG_LIMIT,
+                                             (q.get("q") or [""])[0]),
+            }))
+
         if self.path.startswith("/api/files"):
             return self._send(200, json.dumps({"root": FILES_ROOT,
                                                "files": list_files()}))
@@ -1562,6 +1725,63 @@ class Handler(BaseHTTPRequestHandler):
         # body: a password must never reach a URL, where it would land in
         # browser history. Nothing here is logged — log_message is a no-op —
         # and nothing is kept once the vault has been written.
+        if self.path.startswith("/api/targets"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or "{}")
+            except (ValueError, OSError):
+                return self._send(400, json.dumps({"error": "bad request"}))
+
+            notify, why = notify_api()
+            if notify is None:
+                return self._send(500, json.dumps({"error": why}))
+
+            data = notify.load()
+            index = {t["id"]: n for n, t in enumerate(data["targets"])}
+            action = str(body.get("action") or "")
+            tid = str(body.get("id") or "")
+
+            if action == "save":
+                raw = body.get("target") or {}
+                at = index.get(str(raw.get("id") or ""))
+                previous = data["targets"][at] if at is not None else None
+                target, error = notify.clean_target(raw, previous=previous)
+                if target is None:
+                    return self._send(400, json.dumps({"error": error}))
+                if at is not None:
+                    data["targets"][at] = target
+                elif len(data["targets"]) >= notify.MAX_TARGETS:
+                    return self._send(400, json.dumps(
+                        {"error": "At most %d destinations."
+                                  % notify.MAX_TARGETS}))
+                else:
+                    data["targets"].append(target)
+                if not notify.save(data):
+                    return self._send(500, json.dumps(
+                        {"error": "Could not write the destinations file."}))
+                return self._send(200, json.dumps({"ok": True,
+                                                   "id": target["id"]}))
+
+            if action == "delete":
+                if tid not in index:
+                    return self._send(404, json.dumps({"error": "no such destination"}))
+                data["targets"].pop(index[tid])
+                if not notify.save(data):
+                    return self._send(500, json.dumps(
+                        {"error": "Could not write the destinations file."}))
+                return self._send(200, json.dumps({"ok": True}))
+
+            if action == "test":
+                if tid not in index:
+                    return self._send(404, json.dumps({"error": "no such destination"}))
+                target = data["targets"][index[tid]]
+                ok, detail = notify.send_one(
+                    target, "ikabot control panel\nTest message for %s."
+                            % target.get("name", ""))
+                return self._send(200, json.dumps({"ok": ok, "detail": detail}))
+
+            return self._send(400, json.dumps({"error": "unknown action"}))
+
         if self.path.startswith("/api/accounts"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1952,6 +2172,25 @@ class Handler(BaseHTTPRequestHandler):
         # along the bottom of the terminal is the only way between instances
         # for someone who does not know tmux, and losing it strands them in
         # whichever one they were in.
+        # Detached on purpose. The upgrade restarts this very process, so a
+        # normal run would be killed before it could answer, and the browser
+        # would see a failed request over a job that in fact succeeded.
+        if payload.get("action") == "panel_upgrade":
+            log = os.path.join(DATA_DIR, "logs", "panel.log")
+            try:
+                os.makedirs(os.path.dirname(log), exist_ok=True)
+                with open(log, "a") as fh:
+                    subprocess.Popen(["ika", "panel", "upgrade"],
+                                     stdout=fh, stderr=fh, start_new_session=True)
+            except OSError as exc:
+                return self._send(200, json.dumps(
+                    {"output": "Could not start the upgrade: %s" % exc,
+                     "ran": "panel upgrade"}))
+            return self._send(200, json.dumps(
+                {"output": "Fetching the newest control panel. This page "
+                           "reloads by itself when it is back.",
+                 "reloading": True, "ran": "panel upgrade"}))
+
         if payload.get("action") == "show_bar":
             out = _sh(["tmux", "set", "-g", "status", "on"], timeout=15).strip()
             # Moved to the top as well as switched on. tmux never stopped
@@ -2114,7 +2353,13 @@ min-width:34px;text-align:center}
 /* Full width, as many keys to a row as will fit, wrapping onto more rows
    rather than shrinking below what a fingertip can hit. Same height as the
    controls above, so the two rows read as one block of buttons. */
-.keypad{display:grid;grid-template-columns:repeat(auto-fit,minmax(44px,1fr));
+/* 30px, not 44: nineteen keys and a two-wide backspace and Enter make
+   twenty-one cells, and at 44px those wrap onto a second row on anything
+   narrower than a large desktop -- twice the height of the controls above.
+   The minimum only decides how many fit; each cell then stretches to 1fr, so
+   on a wide screen they are still about 43px. A coarse pointer keeps the full
+   44px target below, where the row wraps whatever the minimum is. */
+.keypad{display:grid;grid-template-columns:repeat(auto-fit,minmax(30px,1fr));
 gap:4px;margin:4px 0 0}
 /* Padding and font-size copied from .tscroll button on purpose, including
    under a coarse pointer: "the same height as the buttons above" is only
@@ -2128,7 +2373,8 @@ font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
      typing into. Sticky rather than fixed: it keeps its own place in the
      layout, lets go by itself once you scroll past the section, and there is
      nothing to toggle when the section changes. */
-  .keypad{gap:5px;position:sticky;bottom:0;z-index:5;
+  .keypad{grid-template-columns:repeat(auto-fit,minmax(44px,1fr));
+  gap:5px;position:sticky;bottom:0;z-index:5;
   background:var(--card);padding:6px 0 4px;
   box-shadow:0 -8px 14px -10px rgba(0,0,0,.5)}
   .keypad button{padding:11px 0;font-size:14px}
@@ -2161,6 +2407,43 @@ display:grid;place-items:center;line-height:1}
   .wpad button{font-size:12px}
 }
 /* Retracted: just the arrow, so the page gets the whole width. */
+/* Messages. The strip is the Web servers strip, down to the class names, so
+   the two read the same way. The one addition is the wide button across the
+   top: five squares plus the gaps between them, from grid-column 1 / -1. */
+.mpad button.all{grid-column:1 / -1;width:auto;height:var(--sq);
+  font-size:10px;letter-spacing:.4px}
+.mview{border:1px solid var(--rule);border-radius:6px;background:var(--card);
+  overflow:auto;max-height:72vh;min-height:220px}
+.msg{border-bottom:1px solid var(--rule);padding:8px 10px}
+.msg:last-child{border-bottom:0}
+.msg .top{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.msg .when{color:var(--soft);font-size:12px;white-space:nowrap}
+.msg .who{font-size:12px;color:var(--soft)}
+.msg .subject{font-weight:600}
+.msg .body{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;
+  font-size:13px;max-height:5.4em;overflow:hidden}
+.msg.open .body{max-height:none}
+.msg .more{background:none;border:0;color:var(--accent);padding:0;
+  font-size:12px;cursor:pointer;text-decoration:underline}
+.chip{border:1px solid var(--rule);border-radius:10px;padding:0 6px;
+  font-size:11px;color:var(--soft)}
+.chip.bad{color:var(--bad);border-color:var(--bad)}
+.mempty{color:var(--soft);padding:14px;margin:0}
+/* A dot rather than a number: the strip squares are half a centimetre and a
+   count would not fit in one. */
+.wpad button.unread::after{content:'';position:absolute;top:1px;right:1px;
+  width:5px;height:5px;border-radius:50%;background:var(--warn)}
+.wpad button{position:relative}
+@media(max-width:820px){
+  .mview{max-height:60vh}
+  /* The strip drops to one column here, so the wide button becomes a square
+     like the rest. The label has to fit inside half a centimetre. */
+  .mpad button.all{font-size:9px;letter-spacing:0}
+}
+@media(pointer:coarse){
+  .mpad button.all{font-size:12px}
+}
+
 /* The retract class lives on .wsplit, and the strip is not always inside it
    any more, so match it from the shell instead. */
 .shell.railoff .wpad{display:none}
@@ -2448,6 +2731,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
 <section class="sec" id="sec-ikabot">
   <h2>ikabot</h2>
   <p class="upnote" id="coreup" style="display:none"></p>
+  <p class="upnote" id="boxup" style="display:none"></p>
   <table style="margin-bottom:12px"><thead><tr>
     <th>Component</th><th>Installed</th><th>Available</th><th></th></tr></thead>
   <tbody id="corever"></tbody></table>
@@ -2455,6 +2739,8 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     <button class="p" data-a="update">Download &amp; update ikabot</button>
     <button class="d" data-a="update_rollback">Roll back last update</button>
     <button data-a="check_updates">Check GitHub now</button>
+    <button id="panelup"
+            title="Fetch the newest control panel from GitHub and reload this page">Update the control panel</button>
     <button data-a="self_upgrade"
             title="Refresh ika, ika-update and the other helper scripts from GitHub">Refresh ika's own scripts</button>
   </div>
@@ -2552,6 +2838,72 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     </div>
   </div>
   <p class="hint" id="wnote"></p>
+</section>
+
+<section class="sec" id="sec-messages">
+  <h2>Messages</h2>
+  <!-- Every notification ikabot sent, kept here as it was sent. Telegram
+       cannot list a bot's own messages and a Discord webhook cannot be read
+       at all, so this is the only place they exist as one list. -->
+  <div class="row" style="margin-bottom:10px">
+    <input id="mq" type="search" placeholder="Search the text"
+           style="min-width:180px">
+    <button id="mfind" class="p">Search</button>
+    <button id="mrefresh">Refresh</button>
+    <button id="mseen">Mark all read</button>
+    <span class="hint" id="mcount" style="margin:0"></span>
+  </div>
+  <div class="wsplit" id="msplit">
+    <div class="mview" id="mview">
+      <p class="mempty" id="mempty">Loading…</p>
+    </div>
+    <div class="wrail" id="mrail">
+      <button class="wtoggle" id="mtoggle" title="Hide the instance strip">›</button>
+      <div class="wpad mpad" id="mpad"></div>
+    </div>
+  </div>
+  <p class="hint" id="mnote"></p>
+
+  <h3 style="margin:18px 0 6px;font-size:15px">Where messages go</h3>
+  <p class="hint" style="margin:0 0 10px">
+    Each row is one place ikabot sends to. Add a second Telegram row for a
+    second Telegram account. Leave <b>Instances</b> blank to send from every
+    instance, or write numbers, such as <span class="mono">1,3,7</span>.
+    While this list is empty ikabot uses the single Telegram, Discord and ntfy
+    settings it has always used. The first row you add replaces them.
+  </p>
+  <p class="err" id="derr"></p>
+  <div class="form">
+    <div class="f"><label for="dname">Name</label>
+      <input id="dname" maxlength="32" placeholder="My phone"></div>
+    <div class="f"><label for="dkind">Kind</label>
+      <select id="dkind">
+        <option value="telegram">Telegram</option>
+        <option value="discord">Discord</option>
+        <option value="ntfy">ntfy</option>
+      </select></div>
+    <div class="f dk tg"><label for="dtoken">Bot token</label>
+      <input id="dtoken" placeholder="123456:AA…"></div>
+    <div class="f dk tg"><label for="dchat">Chat id</label>
+      <input id="dchat" placeholder="123456789"></div>
+    <div class="f dk dc"><label for="dhook">Webhook URL</label>
+      <input id="dhook" style="min-width:260px"
+             placeholder="https://discord.com/api/webhooks/…"></div>
+    <div class="f dk nt"><label for="dserver">Server</label>
+      <input id="dserver" placeholder="https://ntfy.sh"></div>
+    <div class="f dk nt"><label for="dtopic">Topic</label>
+      <input id="dtopic" placeholder="a long random word"></div>
+    <div class="f dk nt"><label for="dntoken">Access token</label>
+      <input id="dntoken" placeholder="blank if the topic is public"></div>
+    <div class="f"><label for="dinst">Instances</label>
+      <input id="dinst" placeholder="blank = all" style="min-width:100px"></div>
+    <button class="p" id="dsave">Add</button>
+    <button id="dcancel" style="display:none">Cancel</button>
+  </div>
+  <table><thead><tr><th>Name</th><th>Kind</th><th>Where it points</th>
+    <th>Instances</th><th>On</th><th></th></tr></thead>
+  <tbody id="dbody"></tbody></table>
+  <p class="hint" id="dnote"></p>
 </section>
 
 </div>
@@ -2772,7 +3124,8 @@ document.getElementById('openweb').addEventListener('click',function(){
 
 // --- section switcher ----------------------------------------------------
 var SECTIONS=[['instances','Instances','Inst'],['terminal','Terminal','Term'],
-              ['webservers','Web servers','Web'],['accounts','Accounts','Acct'],
+              ['webservers','Web servers','Web'],['messages','Messages','Msg'],
+              ['accounts','Accounts','Acct'],
               ['buttons','Buttons','Btn'],['modules','Modules','Mod'],
               ['ikabot','ikabot','ika'],['files','Files','File']];
 var current='instances';
@@ -2789,6 +3142,7 @@ function showSection(id){
   // but the two embedded ones only start loading once they are asked for.
   if(id==='terminal')mountTerminal();
   if(id==='webservers'){ renderServers(); fitServers(); }
+  if(id==='messages'){ renderMsgPad(); loadMessages(); dLoad(); }
   placeRail();
   window.scrollTo({top:0});
 }
@@ -2859,18 +3213,28 @@ function wHost(){ return location.hostname || last.host || 'localhost'; }
 // The strip lives under the section menu on a wide screen and beside the page
 // on a narrow one. Rather than keep two copies in step, the one element is
 // moved between the two places whenever the layout crosses the breakpoint.
+// Web servers and Messages each have a strip, and on a wide screen the strip
+// belongs under the menu rather than beside the content. Only one section is
+// on screen at a time, so both can use the one slot.
+var RAILS = {webservers:['wrail','wsplit'], messages:['mrail','msplit']};
+
 function placeRail(){
-  var rail = el('wrail'), slot = el('railslot'), split = el('wsplit');
-  if(!rail || !slot || !split) return;
+  var slot = el('railslot');
+  if(!slot) return;
   var narrow = window.matchMedia('(max-width:820px)').matches;
-  var wanted = narrow ? split : slot;
-  if(rail.parentNode !== wanted){
-    wanted.appendChild(rail);
-    // Moving it changes how much width the page has, so re-fit the frames.
-    fitServers();
-  }
-  // Only worth showing while that section is the one on screen.
-  slot.style.display = (!narrow && current === 'webservers') ? '' : 'none';
+  Object.keys(RAILS).forEach(function(sec){
+    var rail = el(RAILS[sec][0]), split = el(RAILS[sec][1]);
+    if(!rail || !split) return;
+    var wanted = (!narrow && current === sec) ? slot : split;
+    if(rail.parentNode !== wanted){
+      wanted.appendChild(rail);
+      // Moving it changes how much width the page has, so re-fit the frames.
+      if(sec === 'webservers') fitServers();
+    }
+  });
+  // Only worth showing while one of those sections is the one on screen.
+  slot.style.display =
+    (!narrow && RAILS.hasOwnProperty(current)) ? '' : 'none';
 }
 window.addEventListener('resize', placeRail);
 window.addEventListener('orientationchange', placeRail);
@@ -3322,12 +3686,12 @@ document.addEventListener('click',function(e){
 // Its own handler rather than run(): scrolling is pressed over and over, and
 // it changes nothing, so it should not grey out every button on the page or
 // trigger a rebuild for each press.
-// Built here rather than written out: sixteen near-identical buttons in the
-// markup is sixteen chances for one of them to drift.
+// Built here rather than written out: seventeen near-identical buttons in the
+// markup is seventeen chances for one of them to drift.
 (function(){
   var pad = el('keypad');
   if(!pad) return;
-  var keys = '1234567890'.split('').concat(['y','n','e','o','s']);
+  var keys = '1234567890'.split('').concat(['y','n','e','o','s','d',"'"]);
   var html = keys.map(function(k){
     return '<button data-key="'+k+'" title="Type '+k+'">'+k+'</button>';
   }).join('');
@@ -3400,6 +3764,36 @@ el('fsmall').addEventListener('click', function(){
   setFont(Math.max(8, (parseInt(el('fsize').textContent,10)||15) - 2)); });
 el('fbig').addEventListener('click', function(){
   setFont(Math.min(40, (parseInt(el('fsize').textContent,10)||15) + 2)); });
+
+// Its own handler, not run(): the panel restarts itself part way through, so
+// the page must wait for it to answer again before it reloads.
+el('panelup').addEventListener('click', function(){
+  var btn = this;
+  btn.disabled = true;
+  out.textContent = 'Fetching the newest control panel...';
+  fetch('api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'panel_upgrade'})})
+  .then(function(r){return r.json()})
+  .then(function(d){
+    out.textContent = d.output || 'Upgrading...';
+    if(d.reloading) waitForPanel(0); else btn.disabled = false;
+  })
+  // A dropped request here means the panel restarted before it could reply,
+  // which is the expected case rather than a failure.
+  .catch(function(){ out.textContent = 'The panel is restarting...'; waitForPanel(0); });
+});
+
+function waitForPanel(tries){
+  if(tries > 40){
+    out.textContent = 'The panel did not come back. Reload the page by hand.';
+    return;
+  }
+  setTimeout(function(){
+    fetch('api/state', {cache:'no-store'})
+      .then(function(r){ if(r.ok) location.reload(); else waitForPanel(tries+1); })
+      .catch(function(){ waitForPanel(tries+1); });
+  }, 1500);
+}
 
 el('fopen').addEventListener('click',openFile);
 el('fpick').addEventListener('change',openFile);
@@ -3486,6 +3880,7 @@ function refresh(){
     var tag=function(id,v){var e=el('tag-'+id); if(e)e.textContent=v||'';};
     tag('instances', s.running + (s.dead?'/'+(s.running+s.dead):''));
     tag('webservers', srv||'');
+    tag('messages', Object.keys(s.messages||{}).some(mUnread) ? 'new' : '');
     tag('buttons', (s.buttons||[]).length||'');
     tag('modules', modsDue||'');
     tag('accounts', (s.vault_labels||[]).length||'');
@@ -3497,6 +3892,14 @@ function refresh(){
       renderButtons(s.buttons||[]);
     }
     if(current==='webservers')renderServers();
+    // The strip follows every poll. The list is only re-fetched when a log has
+    // actually grown, so an open Messages section is not a request every five
+    // seconds for the same two hundred records.
+    if(current==='messages'){
+      var sig=JSON.stringify(s.messages||{});
+      renderMsgPad();
+      if(sig!==mSig){ mSig=sig; loadMessages(); }
+    }
     proxyNote();
     if(s.font_size) el('fsize').textContent = s.font_size;
 
@@ -3612,13 +4015,18 @@ function refresh(){
         esc(m.name)+'"'+hi+'>'+act+'</button></td></tr>';
     }).join('') || '<tr><td colspan="5" class="sub">No modules installed.</td></tr>';
 
-    var ca=s.versions_available||{}, cv=s.versions||{}, coreDue=[];
+    var ca=s.versions_available||{}, cv=s.versions||{}, coreDue=[], boxDue='';
     document.getElementById('corever').innerHTML=[
-      ['ikabot','ikabot'],['mod','modded by kurzon'],['ikaeasy','IkaEasy']
+      ['ikabot','ikabot'],['mod','modded by kurzon'],['ikaeasy','IkaEasy'],
+      ['container','container']
     ].map(function(pair){
       var k=pair[0], have=cv[k]||'', want=ca[k]||'';
       var due=!!want&&newer(want,have);
-      if(due)coreDue.push(pair[1]+' '+want+(have?' (you have '+have+')':''));
+      // The container is listed but kept out of the banner below. That banner
+      // says "press Download & update ikabot", and that button does not touch
+      // the container — a rebuild is a job on the host.
+      if(due && k==='container') boxDue=want+(have?' (you have '+have+')':'');
+      else if(due)coreDue.push(pair[1]+' '+want+(have?' (you have '+have+')':''));
       var state=!want?'v-unknown':(due?'v-outdated':'v-current');
       return '<tr><td>'+pair[1]+'</td>'+
         '<td class="mono '+state+'">'+(have||'—')+'</td>'+
@@ -3637,7 +4045,17 @@ function refresh(){
       ? 'Ready to install: <b>' + coreDue.map(esc).join('</b>, <b>') + '</b>. '
         + 'Press Download &amp; update ikabot, then restart the instances.'
       : '';
-    tag('ikabot', coreDue.length ? 'new' : '');
+    tag('ikabot', (coreDue.length || boxDue) ? 'new' : '');
+
+    // Its own line, because its answer is its own: the panel cannot rebuild
+    // the container it runs inside.
+    var bx=el('boxup');
+    bx.style.display = boxDue ? '' : 'none';
+    bx.textContent = boxDue
+      ? 'A newer container is published: ' + boxDue + '. Rebuilding it is a '
+        + 'job on the host — download the new zip and run the installer again '
+        + 'against the same data folder. Nothing in /config is touched.'
+      : '';
 
     // An edited bundle is served in preference to the packaged one, so the
     // IkaEasy row above stops being the whole story once anything is in it.
@@ -3687,6 +4105,369 @@ function refresh(){
     if(busy)setBusy(true);
   }).catch(function(){head.textContent='Lost contact with the container.';});
 }
+// --- messages -------------------------------------------------------------
+// The local copy each instance writes as it sends. Nothing here talks to
+// Telegram, Discord or ntfy: a bot cannot list its own messages and a webhook
+// cannot be read at all, so the copy made at send time is the whole list.
+var mPick='all', mBusy=false, mSeen={}, mQuery='', mSig='';
+try{ mSeen=JSON.parse(localStorage.getItem('ikaMsgSeen')||'{}')||{}; }
+catch(e){ mSeen={}; }
+try{ mPick=localStorage.getItem('ikaMsgPick')||'all'; }catch(e){}
+
+function mSaveSeen(){
+  try{ localStorage.setItem('ikaMsgSeen',JSON.stringify(mSeen)); }catch(e){}
+}
+
+// Instance number -> the account its log is named after. Both come from the
+// same status file, so one numbered square means exactly one log.
+function mByNum(){
+  var map={};
+  (last.instances||[]).forEach(function(i){ if(i.account) map[i.num]=i.account; });
+  return map;
+}
+
+function mUnread(account){
+  var meta=(last.messages||{})[account];
+  return !!(meta && meta.last > (mSeen[account]||0));
+}
+
+function tagMessages(){
+  var e=el('tag-messages'); if(!e) return;
+  e.textContent = Object.keys(last.messages||{}).some(mUnread) ? 'new' : '';
+}
+
+// The strip is the Web servers strip with one button added across the top.
+// Every instance keeps its square whether or not it has ever sent anything,
+// so the numbers stay where they were.
+function renderMsgPad(){
+  var pad=el('mpad'); if(!pad) return;
+  var accounts=mByNum();
+  var nums=(last.instances||[]).map(function(i){return i.num;})
+                               .sort(function(a,b){return a-b;});
+  var anyNew=Object.keys(last.messages||{}).some(mUnread);
+  var html='<button class="all'+(mPick==='all'?' on':'')+
+           (anyNew?' unread':'')+'" data-msg="all" '+
+           'title="The newest from every instance at once">All</button>';
+  html+=nums.map(function(n){
+    var account=accounts[n]||'';
+    var meta=account?(last.messages||{})[account]:null;
+    var cls=[];
+    if(meta) cls.push('live');
+    if(mPick===String(n)) cls.push('on');
+    if(account && mUnread(account)) cls.push('unread');
+    return '<button data-msg="'+n+'"'+(meta?'':' disabled')+
+      (cls.length?' class="'+cls.join(' ')+'"':'')+
+      ' title="'+(meta?'instance '+n+' — '+esc(account)
+                     :'instance '+n+' — nothing sent yet')+'">'+n+'</button>';
+  }).join('');
+  pad.innerHTML=html;
+}
+
+function mWhen(t){
+  if(!t) return '';
+  try{ return new Date(t*1000).toLocaleString(); }
+  catch(e){ return String(t); }
+}
+
+function renderMsgList(rows){
+  var view=el('mview'), accounts=mByNum(), numOf={};
+  Object.keys(accounts).forEach(function(n){ numOf[accounts[n]]=n; });
+
+  if(!rows.length){
+    view.innerHTML='<p class="mempty">'+
+      (mQuery ? 'Nothing matches '+esc(mQuery)+'.'
+              : 'No messages yet. They appear here as the instances send them, '+
+                'whether or not Telegram, Discord or ntfy is set up.')+'</p>';
+  } else {
+    view.innerHTML=rows.map(function(r){
+      var chips=(r.sent||[]).map(function(x){
+        return '<span class="chip'+(x.ok?'':' bad')+'">'+esc(x.kind)+
+               (x.ok?'':' failed')+'</span>';
+      }).join(' ');
+      if(!(r.sent||[]).length)
+        chips='<span class="chip">kept here only</span>';
+      var num=numOf[r.account], body=r.body||'';
+      return '<div class="msg">'+
+        '<div class="top">'+
+          '<span class="when">'+esc(mWhen(r.t))+'</span>'+
+          '<span class="subject">'+esc(r.title||'(no subject)')+'</span>'+
+          '<span class="who">'+(num?'instance '+esc(num)+' · ':'')+
+            esc(r.account||'')+(r.module?' · '+esc(r.module):'')+'</span>'+
+          chips+
+        '</div>'+
+        (body?'<p class="body">'+esc(body)+'</p>':'')+
+        // The body is clipped at about four lines, so the button appears
+        // whenever there is more than that — by length or by line count,
+        // because six short lines are clipped just as five long ones are.
+        (body.length>220||body.split('\n').length>4
+          ?'<button class="more">Show all</button>':'')+
+      '</div>';
+    }).join('');
+  }
+
+  el('mcount').textContent = rows.length
+    ? rows.length+' message'+(rows.length===1?'':'s')+
+      (mPick==='all'?' from every instance':' from instance '+mPick)
+    : '';
+
+  // What is on screen has been read. Done here rather than on the click, so a
+  // list that failed to load does not clear the mark that says it is new.
+  var now=Math.floor(Date.now()/1000);
+  if(mPick==='all'){
+    Object.keys(last.messages||{}).forEach(function(a){ mSeen[a]=now; });
+  } else {
+    var one=accounts[mPick]; if(one) mSeen[one]=now;
+  }
+  mSaveSeen(); renderMsgPad(); tagMessages();
+}
+
+function loadMessages(){
+  var view=el('mview'); if(!view || mBusy) return;
+  var accounts=mByNum(), url='api/messages?limit=200';
+  if(mPick!=='all'){
+    var one=accounts[mPick];
+    if(!one){
+      renderMsgList([]);
+      el('mnote').textContent='Instance '+mPick+' has not sent anything yet.';
+      return;
+    }
+    url+='&acct='+encodeURIComponent(one);
+  }
+  if(mQuery) url+='&q='+encodeURIComponent(mQuery);
+  mBusy=true;
+  fetch(url).then(function(r){return r.json()}).then(function(d){
+    renderMsgList(d.messages||[]);
+    el('mnote').textContent = mPick==='all'
+      ? 'Newest first, from every instance. Press a number for one instance on '+
+        'its own. A dot on a square means something arrived since you last looked.'
+      : 'Newest first, from instance '+mPick+' only. Press All for every instance.';
+  }).catch(function(err){
+    view.innerHTML='<p class="mempty">Could not read the messages: '+
+                   esc(String(err))+'</p>';
+  }).then(function(){ mBusy=false; });
+}
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-msg]');
+  if(b && !b.disabled){
+    mPick=b.dataset.msg;
+    try{ localStorage.setItem('ikaMsgPick',mPick); }catch(err){}
+    renderMsgPad(); loadMessages();
+    return;
+  }
+  var more=e.target.closest('.msg .more');
+  if(more){
+    var open=more.closest('.msg').classList.toggle('open');
+    more.textContent = open ? 'Show less' : 'Show all';
+  }
+});
+
+el('mfind').addEventListener('click',function(){
+  mQuery=(el('mq').value||'').trim(); loadMessages();
+});
+el('mq').addEventListener('keydown',function(e){
+  if(e.key==='Enter'){ mQuery=(this.value||'').trim(); loadMessages(); }
+});
+el('mrefresh').addEventListener('click',function(){ loadMessages(); });
+el('mseen').addEventListener('click',function(){
+  var now=Math.floor(Date.now()/1000);
+  Object.keys(last.messages||{}).forEach(function(a){ mSeen[a]=now; });
+  mSaveSeen(); renderMsgPad(); tagMessages();
+});
+el('mtoggle').addEventListener('click',function(){
+  var off=el('shell').classList.toggle('railoff');
+  this.textContent = off ? '‹' : '›';
+});
+
+// --- where messages go ----------------------------------------------------
+// One row per place ikabot sends to, so a second Telegram account is a second
+// row rather than nowhere to put it. Credentials only ever travel one way: the
+// server sends back the last four characters and nothing else, and a field
+// left blank on an edit keeps what is already stored.
+var dEdit='', dRows=[];
+
+function dFields(){
+  var k=el('dkind').value;
+  Array.prototype.forEach.call(document.querySelectorAll('.f.dk'),function(f){
+    f.style.display =
+      (k==='telegram'&&f.classList.contains('tg')) ||
+      (k==='discord' &&f.classList.contains('dc')) ||
+      (k==='ntfy'    &&f.classList.contains('nt')) ? '' : 'none';
+  });
+}
+
+// Instance numbers on screen, account names on disk. ikabot knows which
+// account it is and nothing about window numbers, so the page translates.
+function dToAccounts(text){
+  var m=mByNum(), out=[], bad=[];
+  (text||'').split(/[,\s]+/).forEach(function(x){
+    if(!x) return;
+    var a=m[parseInt(x,10)];
+    if(a) out.push(a); else bad.push(x);
+  });
+  return {accounts:out, bad:bad};
+}
+
+function dToNumbers(accounts){
+  var m=mByNum(), rev={};
+  Object.keys(m).forEach(function(n){ rev[m[n]]=n; });
+  return (accounts||[]).map(function(a){ return rev[a]||a; }).join(',');
+}
+
+function dWhere(t){
+  if(t.kind==='telegram') return 'chat '+esc(t.telegram.chatId||'?')+
+                                 ' · token '+esc(t.telegram.botToken||'');
+  if(t.kind==='discord')  return 'webhook '+esc(t.discord.webhookUrl||'');
+  return esc(t.ntfy.server||'')+' · topic '+esc(t.ntfy.topic||'');
+}
+
+function dRender(){
+  var body=el('dbody'); if(!body) return;
+  body.innerHTML = dRows.length ? dRows.map(function(t){
+    var where=dToNumbers(t.accounts);
+    return '<tr><td>'+esc(t.name)+'</td>'+
+      '<td class="mono">'+esc(t.kind)+'</td>'+
+      '<td class="scope">'+dWhere(t)+'</td>'+
+      '<td class="mono">'+(where?esc(where):'all')+'</td>'+
+      '<td>'+(t.enabled?'<span class="badge">yes</span>'
+                       :'<span class="badge" style="color:var(--bad)">no</span>')+'</td>'+
+      '<td style="text-align:right">'+
+        '<button data-dt="test" data-id="'+esc(t.id)+'">Test</button> '+
+        '<button data-dt="edit" data-id="'+esc(t.id)+'">Edit</button> '+
+        '<button data-dt="off" data-id="'+esc(t.id)+'">'+
+          (t.enabled?'Turn off':'Turn on')+'</button> '+
+        '<button class="d" data-dt="del" data-id="'+esc(t.id)+'">Delete</button>'+
+      '</td></tr>';
+  }).join('') : '<tr><td colspan="6" class="sub">No destinations. ikabot is '+
+                'using the single Telegram, Discord and ntfy settings.</td></tr>';
+}
+
+function dLoad(){
+  fetch('api/targets').then(function(r){return r.json()}).then(function(d){
+    dRows=d.targets||[];
+    el('derr').textContent=d.error||'';
+    dRender();
+    el('dnote').textContent = dRows.length
+      ? dRows.length+' destination'+(dRows.length===1?'':'s')+
+        '. Every message from an instance goes to each row that applies to it.'
+      : '';
+  }).catch(function(err){
+    el('derr').textContent='Could not read the destinations: '+err;
+  });
+}
+
+function dClear(){
+  dEdit='';
+  ['dname','dtoken','dchat','dhook','dserver','dtopic','dntoken','dinst']
+    .forEach(function(id){ el(id).value=''; });
+  el('dsave').textContent='Add';
+  el('dcancel').style.display='none';
+  el('derr').textContent='';
+  dFields();
+}
+
+function dFill(t){
+  dEdit=t.id;
+  el('dname').value=t.name||'';
+  el('dkind').value=t.kind;
+  dFields();
+  // The hint is shown as a placeholder, never as a value: typing nothing keeps
+  // the stored credential, and typing something replaces it.
+  if(t.kind==='telegram'){
+    el('dtoken').value=''; el('dtoken').placeholder='keeps '+(t.telegram.botToken||'');
+    el('dchat').value=t.telegram.chatId||'';
+  } else if(t.kind==='discord'){
+    el('dhook').value=''; el('dhook').placeholder='keeps '+(t.discord.webhookUrl||'');
+  } else {
+    el('dserver').value=t.ntfy.server||'';
+    el('dtopic').value=''; el('dtopic').placeholder='keeps '+(t.ntfy.topic||'');
+    el('dntoken').value=''; el('dntoken').placeholder='keeps '+(t.ntfy.token||'');
+  }
+  el('dinst').value=dToNumbers(t.accounts);
+  el('dsave').textContent='Save';
+  el('dcancel').style.display='';
+  el('derr').textContent='';
+}
+
+function dPost(body, done){
+  fetch('api/targets',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)})
+  .then(function(r){return r.json()})
+  .then(function(d){ done(d); })
+  .catch(function(err){ el('derr').textContent='Request failed: '+err; });
+}
+
+el('dkind').addEventListener('change',dFields);
+el('dcancel').addEventListener('click',function(){ dClear(); });
+
+el('dsave').addEventListener('click',function(){
+  var kind=el('dkind').value, settings={};
+  if(kind==='telegram') settings={botToken:el('dtoken').value,
+                                  chatId:el('dchat').value};
+  else if(kind==='discord') settings={webhookUrl:el('dhook').value};
+  else settings={server:el('dserver').value, topic:el('dtopic').value,
+                 token:el('dntoken').value};
+  var picked=dToAccounts(el('dinst').value);
+  if(picked.bad.length){
+    el('derr').textContent='No instance is numbered '+picked.bad.join(', ')+
+      '. Leave it blank for every instance.';
+    return;
+  }
+  var target={name:el('dname').value, kind:kind, accounts:picked.accounts,
+              enabled:true};
+  target[kind]=settings;
+  if(dEdit){
+    target.id=dEdit;
+    var was=dRows.filter(function(t){return t.id===dEdit;})[0];
+    if(was) target.enabled=was.enabled;
+  }
+  dPost({action:'save', target:target}, function(d){
+    if(d.error){ el('derr').textContent=d.error; return; }
+    dClear(); dLoad();
+  });
+});
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-dt]'); if(!b) return;
+  var id=b.dataset.id, row=dRows.filter(function(t){return t.id===id;})[0];
+  if(!row) return;
+  if(b.dataset.dt==='edit'){ dFill(row); return; }
+  if(b.dataset.dt==='test'){
+    el('dnote').textContent='Sending a test to '+row.name+'…';
+    dPost({action:'test', id:id}, function(d){
+      el('dnote').textContent = d.ok
+        ? 'Test message sent to '+row.name+'. Check that it arrived.'
+        : 'Test failed for '+row.name+': '+(d.detail||d.error||'no reason given');
+    });
+    return;
+  }
+  if(b.dataset.dt==='off'){
+    var copy={id:row.id, name:row.name, kind:row.kind,
+              accounts:row.accounts, enabled:!row.enabled};
+    // No credentials: blank fields keep whatever is stored.
+    copy[row.kind]={};
+    if(row.kind==='telegram') copy.telegram={chatId:row.telegram.chatId};
+    if(row.kind==='ntfy') copy.ntfy={server:row.ntfy.server};
+    dPost({action:'save', target:copy}, function(d){
+      if(d.error){ el('derr').textContent=d.error; return; }
+      dLoad();
+    });
+    return;
+  }
+  if(b.dataset.dt==='del'){
+    if(!confirm('Delete the destination "'+row.name+'"?\n\n'+
+                'Its token is removed with it and cannot be recovered.')) return;
+    dPost({action:'delete', id:id}, function(d){
+      if(d.error){ el('derr').textContent=d.error; return; }
+      if(dEdit===id) dClear();
+      dLoad();
+    });
+  }
+});
+
+dFields();
+
 showSection(saved);
 refresh(); setInterval(function(){if(!busy)refresh();},5000);
 </script></body></html>
