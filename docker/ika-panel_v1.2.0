@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.1.0"
+PANEL_VERSION = "1.2.0"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -42,7 +42,18 @@ INSTALLER_STAMP = os.path.join(HOME_DIR, ".installer-version")
 DATA_DIR = os.environ.get("IKABOT_DATA_DIR", os.path.join(HOME_DIR, ".ikabot"))
 # Subfolders of the data folder that never hold a module lock. Skipped so a
 # large logs folder is not listed every five seconds.
-LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache"}
+LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache", "messages"}
+
+# A local copy of every notification ikabot sent, written by
+# ikabot/helpers/messageLog.py. One file per account, one JSON object a line.
+# Telegram and Discord cannot be read back, so this is the only place the
+# messages exist in one list.
+MESSAGE_DIR = os.environ.get("MESSAGE_DIR", os.path.join(DATA_DIR, "messages"))
+# Read from the end of each file rather than all of it: a log at its 2 MB cap
+# holds thousands of records and the page shows the newest few hundred.
+MSG_TAIL_BYTES = 512 * 1024
+MSG_LIMIT = 200
+MSG_MAX_LIMIT = 1000
 
 # --- file viewer ----------------------------------------------------------
 # Only data files, and only below /config. Module CSVs are awkward to reach
@@ -1254,6 +1265,88 @@ def read_status():
     return out
 
 
+def message_meta():
+    """When each account's log last changed, and how big it is.
+
+    Sent with every poll, so it must stay cheap: two stat calls a file and no
+    reading. The page decides what counts as new by comparing the timestamp
+    against what it last showed.
+    """
+    out = {}
+    try:
+        names = sorted(os.listdir(MESSAGE_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        try:
+            st = os.stat(os.path.join(MESSAGE_DIR, name))
+        except OSError:
+            continue
+        out[name[:-6]] = {"last": int(st.st_mtime), "size": st.st_size}
+    return out
+
+
+def _tail_lines(path, max_bytes=None):
+    """The last whole lines of a file, oldest first."""
+    # Read at call time rather than bound as a default, so the cap can be
+    # changed without reloading the module.
+    max_bytes = MSG_TAIL_BYTES if max_bytes is None else max_bytes
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            blob = f.read()
+    except OSError:
+        return []
+    lines = blob.decode("utf-8", "replace").split("\n")
+    # The first line is a fragment whenever the seek landed mid-record.
+    if size > max_bytes and lines:
+        lines.pop(0)
+    return lines
+
+
+def read_message_log(accounts=None, limit=MSG_LIMIT, query=""):
+    """Records from the chosen accounts, newest first.
+
+    *accounts* of None means every account. The search is a plain
+    case-insensitive substring over the title and the body, because a regular
+    expression typed into a box on a page is a way to hang the server.
+    """
+    limit = max(1, min(int(limit or MSG_LIMIT), MSG_MAX_LIMIT))
+    needle = (query or "").strip().lower()[:200]
+    wanted = set(accounts) if accounts else None
+    out = []
+    for account in message_meta():
+        if wanted is not None and account not in wanted:
+            continue
+        path = os.path.join(MESSAGE_DIR, "%s.jsonl" % account)
+        for line in reversed(_tail_lines(path)):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if needle and needle not in (
+                    "%s\n%s" % (record.get("title", ""),
+                                record.get("body", ""))).lower():
+                continue
+            record["account"] = account
+            out.append(record)
+            # Per file, so one chatty account cannot crowd out the rest before
+            # the merge below sorts them into one list.
+            if len(out) >= limit * 4:
+                break
+    out.sort(key=lambda r: r.get("t", 0), reverse=True)
+    return out[:limit]
+
+
 def state():
     raw = subprocess.run(
         ["tmux", "list-windows", "-t", SESSION, "-F",
@@ -1418,6 +1511,7 @@ def state():
         "avail_error": avail_err,
         "core_error": core_err,
         "panel_version": PANEL_VERSION,
+        "messages": message_meta(),
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
         "ttyd_port": TTYD_PORT,
@@ -1539,6 +1633,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny()
         if self.path.startswith("/api/state"):
             return self._send(200, json.dumps(state()))
+
+        if self.path.startswith("/api/messages"):
+            q = self._query()
+            raw = (q.get("acct") or [""])[0]
+            accounts = [a for a in raw.split(",") if a] or None
+            try:
+                limit = int((q.get("limit") or ["0"])[0] or 0)
+            except ValueError:
+                limit = 0
+            return self._send(200, json.dumps({
+                "messages": read_message_log(accounts, limit or MSG_LIMIT,
+                                             (q.get("q") or [""])[0]),
+            }))
 
         if self.path.startswith("/api/files"):
             return self._send(200, json.dumps({"root": FILES_ROOT,
@@ -2204,6 +2311,43 @@ display:grid;place-items:center;line-height:1}
   .wpad button{font-size:12px}
 }
 /* Retracted: just the arrow, so the page gets the whole width. */
+/* Messages. The strip is the Web servers strip, down to the class names, so
+   the two read the same way. The one addition is the wide button across the
+   top: five squares plus the gaps between them, from grid-column 1 / -1. */
+.mpad button.all{grid-column:1 / -1;width:auto;height:var(--sq);
+  font-size:10px;letter-spacing:.4px}
+.mview{border:1px solid var(--rule);border-radius:6px;background:var(--card);
+  overflow:auto;max-height:72vh;min-height:220px}
+.msg{border-bottom:1px solid var(--rule);padding:8px 10px}
+.msg:last-child{border-bottom:0}
+.msg .top{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.msg .when{color:var(--soft);font-size:12px;white-space:nowrap}
+.msg .who{font-size:12px;color:var(--soft)}
+.msg .subject{font-weight:600}
+.msg .body{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;
+  font-size:13px;max-height:5.4em;overflow:hidden}
+.msg.open .body{max-height:none}
+.msg .more{background:none;border:0;color:var(--accent);padding:0;
+  font-size:12px;cursor:pointer;text-decoration:underline}
+.chip{border:1px solid var(--rule);border-radius:10px;padding:0 6px;
+  font-size:11px;color:var(--soft)}
+.chip.bad{color:var(--bad);border-color:var(--bad)}
+.mempty{color:var(--soft);padding:14px;margin:0}
+/* A dot rather than a number: the strip squares are half a centimetre and a
+   count would not fit in one. */
+.wpad button.unread::after{content:'';position:absolute;top:1px;right:1px;
+  width:5px;height:5px;border-radius:50%;background:var(--warn)}
+.wpad button{position:relative}
+@media(max-width:820px){
+  .mview{max-height:60vh}
+  /* The strip drops to one column here, so the wide button becomes a square
+     like the rest. The label has to fit inside half a centimetre. */
+  .mpad button.all{font-size:9px;letter-spacing:0}
+}
+@media(pointer:coarse){
+  .mpad button.all{font-size:12px}
+}
+
 /* The retract class lives on .wsplit, and the strip is not always inside it
    any more, so match it from the shell instead. */
 .shell.railoff .wpad{display:none}
@@ -2600,6 +2744,31 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <p class="hint" id="wnote"></p>
 </section>
 
+<section class="sec" id="sec-messages">
+  <h2>Messages</h2>
+  <!-- Every notification ikabot sent, kept here as it was sent. Telegram
+       cannot list a bot's own messages and a Discord webhook cannot be read
+       at all, so this is the only place they exist as one list. -->
+  <div class="row" style="margin-bottom:10px">
+    <input id="mq" type="search" placeholder="Search the text"
+           style="min-width:180px">
+    <button id="mfind" class="p">Search</button>
+    <button id="mrefresh">Refresh</button>
+    <button id="mseen">Mark all read</button>
+    <span class="hint" id="mcount" style="margin:0"></span>
+  </div>
+  <div class="wsplit" id="msplit">
+    <div class="mview" id="mview">
+      <p class="mempty" id="mempty">Loading…</p>
+    </div>
+    <div class="wrail" id="mrail">
+      <button class="wtoggle" id="mtoggle" title="Hide the instance strip">›</button>
+      <div class="wpad mpad" id="mpad"></div>
+    </div>
+  </div>
+  <p class="hint" id="mnote"></p>
+</section>
+
 </div>
 </div>
 
@@ -2818,7 +2987,8 @@ document.getElementById('openweb').addEventListener('click',function(){
 
 // --- section switcher ----------------------------------------------------
 var SECTIONS=[['instances','Instances','Inst'],['terminal','Terminal','Term'],
-              ['webservers','Web servers','Web'],['accounts','Accounts','Acct'],
+              ['webservers','Web servers','Web'],['messages','Messages','Msg'],
+              ['accounts','Accounts','Acct'],
               ['buttons','Buttons','Btn'],['modules','Modules','Mod'],
               ['ikabot','ikabot','ika'],['files','Files','File']];
 var current='instances';
@@ -2835,6 +3005,7 @@ function showSection(id){
   // but the two embedded ones only start loading once they are asked for.
   if(id==='terminal')mountTerminal();
   if(id==='webservers'){ renderServers(); fitServers(); }
+  if(id==='messages'){ renderMsgPad(); loadMessages(); }
   placeRail();
   window.scrollTo({top:0});
 }
@@ -2905,18 +3076,28 @@ function wHost(){ return location.hostname || last.host || 'localhost'; }
 // The strip lives under the section menu on a wide screen and beside the page
 // on a narrow one. Rather than keep two copies in step, the one element is
 // moved between the two places whenever the layout crosses the breakpoint.
+// Web servers and Messages each have a strip, and on a wide screen the strip
+// belongs under the menu rather than beside the content. Only one section is
+// on screen at a time, so both can use the one slot.
+var RAILS = {webservers:['wrail','wsplit'], messages:['mrail','msplit']};
+
 function placeRail(){
-  var rail = el('wrail'), slot = el('railslot'), split = el('wsplit');
-  if(!rail || !slot || !split) return;
+  var slot = el('railslot');
+  if(!slot) return;
   var narrow = window.matchMedia('(max-width:820px)').matches;
-  var wanted = narrow ? split : slot;
-  if(rail.parentNode !== wanted){
-    wanted.appendChild(rail);
-    // Moving it changes how much width the page has, so re-fit the frames.
-    fitServers();
-  }
-  // Only worth showing while that section is the one on screen.
-  slot.style.display = (!narrow && current === 'webservers') ? '' : 'none';
+  Object.keys(RAILS).forEach(function(sec){
+    var rail = el(RAILS[sec][0]), split = el(RAILS[sec][1]);
+    if(!rail || !split) return;
+    var wanted = (!narrow && current === sec) ? slot : split;
+    if(rail.parentNode !== wanted){
+      wanted.appendChild(rail);
+      // Moving it changes how much width the page has, so re-fit the frames.
+      if(sec === 'webservers') fitServers();
+    }
+  });
+  // Only worth showing while one of those sections is the one on screen.
+  slot.style.display =
+    (!narrow && RAILS.hasOwnProperty(current)) ? '' : 'none';
 }
 window.addEventListener('resize', placeRail);
 window.addEventListener('orientationchange', placeRail);
@@ -3562,6 +3743,7 @@ function refresh(){
     var tag=function(id,v){var e=el('tag-'+id); if(e)e.textContent=v||'';};
     tag('instances', s.running + (s.dead?'/'+(s.running+s.dead):''));
     tag('webservers', srv||'');
+    tag('messages', Object.keys(s.messages||{}).some(mUnread) ? 'new' : '');
     tag('buttons', (s.buttons||[]).length||'');
     tag('modules', modsDue||'');
     tag('accounts', (s.vault_labels||[]).length||'');
@@ -3573,6 +3755,14 @@ function refresh(){
       renderButtons(s.buttons||[]);
     }
     if(current==='webservers')renderServers();
+    // The strip follows every poll. The list is only re-fetched when a log has
+    // actually grown, so an open Messages section is not a request every five
+    // seconds for the same two hundred records.
+    if(current==='messages'){
+      var sig=JSON.stringify(s.messages||{});
+      renderMsgPad();
+      if(sig!==mSig){ mSig=sig; loadMessages(); }
+    }
     proxyNote();
     if(s.font_size) el('fsize').textContent = s.font_size;
 
@@ -3778,6 +3968,180 @@ function refresh(){
     if(busy)setBusy(true);
   }).catch(function(){head.textContent='Lost contact with the container.';});
 }
+// --- messages -------------------------------------------------------------
+// The local copy each instance writes as it sends. Nothing here talks to
+// Telegram, Discord or ntfy: a bot cannot list its own messages and a webhook
+// cannot be read at all, so the copy made at send time is the whole list.
+var mPick='all', mBusy=false, mSeen={}, mQuery='', mSig='';
+try{ mSeen=JSON.parse(localStorage.getItem('ikaMsgSeen')||'{}')||{}; }
+catch(e){ mSeen={}; }
+try{ mPick=localStorage.getItem('ikaMsgPick')||'all'; }catch(e){}
+
+function mSaveSeen(){
+  try{ localStorage.setItem('ikaMsgSeen',JSON.stringify(mSeen)); }catch(e){}
+}
+
+// Instance number -> the account its log is named after. Both come from the
+// same status file, so one numbered square means exactly one log.
+function mByNum(){
+  var map={};
+  (last.instances||[]).forEach(function(i){ if(i.account) map[i.num]=i.account; });
+  return map;
+}
+
+function mUnread(account){
+  var meta=(last.messages||{})[account];
+  return !!(meta && meta.last > (mSeen[account]||0));
+}
+
+function tagMessages(){
+  var e=el('tag-messages'); if(!e) return;
+  e.textContent = Object.keys(last.messages||{}).some(mUnread) ? 'new' : '';
+}
+
+// The strip is the Web servers strip with one button added across the top.
+// Every instance keeps its square whether or not it has ever sent anything,
+// so the numbers stay where they were.
+function renderMsgPad(){
+  var pad=el('mpad'); if(!pad) return;
+  var accounts=mByNum();
+  var nums=(last.instances||[]).map(function(i){return i.num;})
+                               .sort(function(a,b){return a-b;});
+  var anyNew=Object.keys(last.messages||{}).some(mUnread);
+  var html='<button class="all'+(mPick==='all'?' on':'')+
+           (anyNew?' unread':'')+'" data-msg="all" '+
+           'title="The newest from every instance at once">All</button>';
+  html+=nums.map(function(n){
+    var account=accounts[n]||'';
+    var meta=account?(last.messages||{})[account]:null;
+    var cls=[];
+    if(meta) cls.push('live');
+    if(mPick===String(n)) cls.push('on');
+    if(account && mUnread(account)) cls.push('unread');
+    return '<button data-msg="'+n+'"'+(meta?'':' disabled')+
+      (cls.length?' class="'+cls.join(' ')+'"':'')+
+      ' title="'+(meta?'instance '+n+' — '+esc(account)
+                     :'instance '+n+' — nothing sent yet')+'">'+n+'</button>';
+  }).join('');
+  pad.innerHTML=html;
+}
+
+function mWhen(t){
+  if(!t) return '';
+  try{ return new Date(t*1000).toLocaleString(); }
+  catch(e){ return String(t); }
+}
+
+function renderMsgList(rows){
+  var view=el('mview'), accounts=mByNum(), numOf={};
+  Object.keys(accounts).forEach(function(n){ numOf[accounts[n]]=n; });
+
+  if(!rows.length){
+    view.innerHTML='<p class="mempty">'+
+      (mQuery ? 'Nothing matches '+esc(mQuery)+'.'
+              : 'No messages yet. They appear here as the instances send them, '+
+                'whether or not Telegram, Discord or ntfy is set up.')+'</p>';
+  } else {
+    view.innerHTML=rows.map(function(r){
+      var chips=(r.sent||[]).map(function(x){
+        return '<span class="chip'+(x.ok?'':' bad')+'">'+esc(x.kind)+
+               (x.ok?'':' failed')+'</span>';
+      }).join(' ');
+      if(!(r.sent||[]).length)
+        chips='<span class="chip">kept here only</span>';
+      var num=numOf[r.account], body=r.body||'';
+      return '<div class="msg">'+
+        '<div class="top">'+
+          '<span class="when">'+esc(mWhen(r.t))+'</span>'+
+          '<span class="subject">'+esc(r.title||'(no subject)')+'</span>'+
+          '<span class="who">'+(num?'instance '+esc(num)+' · ':'')+
+            esc(r.account||'')+(r.module?' · '+esc(r.module):'')+'</span>'+
+          chips+
+        '</div>'+
+        (body?'<p class="body">'+esc(body)+'</p>':'')+
+        // The body is clipped at about four lines, so the button appears
+        // whenever there is more than that — by length or by line count,
+        // because six short lines are clipped just as five long ones are.
+        (body.length>220||body.split('\n').length>4
+          ?'<button class="more">Show all</button>':'')+
+      '</div>';
+    }).join('');
+  }
+
+  el('mcount').textContent = rows.length
+    ? rows.length+' message'+(rows.length===1?'':'s')+
+      (mPick==='all'?' from every instance':' from instance '+mPick)
+    : '';
+
+  // What is on screen has been read. Done here rather than on the click, so a
+  // list that failed to load does not clear the mark that says it is new.
+  var now=Math.floor(Date.now()/1000);
+  if(mPick==='all'){
+    Object.keys(last.messages||{}).forEach(function(a){ mSeen[a]=now; });
+  } else {
+    var one=accounts[mPick]; if(one) mSeen[one]=now;
+  }
+  mSaveSeen(); renderMsgPad(); tagMessages();
+}
+
+function loadMessages(){
+  var view=el('mview'); if(!view || mBusy) return;
+  var accounts=mByNum(), url='api/messages?limit=200';
+  if(mPick!=='all'){
+    var one=accounts[mPick];
+    if(!one){
+      renderMsgList([]);
+      el('mnote').textContent='Instance '+mPick+' has not sent anything yet.';
+      return;
+    }
+    url+='&acct='+encodeURIComponent(one);
+  }
+  if(mQuery) url+='&q='+encodeURIComponent(mQuery);
+  mBusy=true;
+  fetch(url).then(function(r){return r.json()}).then(function(d){
+    renderMsgList(d.messages||[]);
+    el('mnote').textContent = mPick==='all'
+      ? 'Newest first, from every instance. Press a number for one instance on '+
+        'its own. A dot on a square means something arrived since you last looked.'
+      : 'Newest first, from instance '+mPick+' only. Press All for every instance.';
+  }).catch(function(err){
+    view.innerHTML='<p class="mempty">Could not read the messages: '+
+                   esc(String(err))+'</p>';
+  }).then(function(){ mBusy=false; });
+}
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-msg]');
+  if(b && !b.disabled){
+    mPick=b.dataset.msg;
+    try{ localStorage.setItem('ikaMsgPick',mPick); }catch(err){}
+    renderMsgPad(); loadMessages();
+    return;
+  }
+  var more=e.target.closest('.msg .more');
+  if(more){
+    var open=more.closest('.msg').classList.toggle('open');
+    more.textContent = open ? 'Show less' : 'Show all';
+  }
+});
+
+el('mfind').addEventListener('click',function(){
+  mQuery=(el('mq').value||'').trim(); loadMessages();
+});
+el('mq').addEventListener('keydown',function(e){
+  if(e.key==='Enter'){ mQuery=(this.value||'').trim(); loadMessages(); }
+});
+el('mrefresh').addEventListener('click',function(){ loadMessages(); });
+el('mseen').addEventListener('click',function(){
+  var now=Math.floor(Date.now()/1000);
+  Object.keys(last.messages||{}).forEach(function(a){ mSeen[a]=now; });
+  mSaveSeen(); renderMsgPad(); tagMessages();
+});
+el('mtoggle').addEventListener('click',function(){
+  var off=el('shell').classList.toggle('railoff');
+  this.textContent = off ? '‹' : '›';
+});
+
 showSection(saved);
 refresh(); setInterval(function(){if(!busy)refresh();},5000);
 </script></body></html>

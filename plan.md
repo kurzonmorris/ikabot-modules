@@ -1,7 +1,7 @@
 # Messaging Hub — Build Plan
 
 > Module: `modules/messagingHub_v<X.Y.Z>.py` (external module, installs as `messagingHub.py`)
-> Status: **shipped and in use — `messagingHub_v1.1.0.py`.** Phases 1, 2 and 3
+> Status: **shipped and in use — `messagingHub_v1.2.0.py`.** Phases 1, 2 and 3
 > are in. Messages and resource monitoring are confirmed working on a live
 > account; movements and town events were fixed in 1.1.0 and are unconfirmed.
 > This file is the working spec across sessions.

@@ -217,6 +217,8 @@ def sendToBot(session, msg, Token=False, Photo=None):
     logger.warning("MESSAGE TO BOT: %s", msg, exc_info=True)
 
     has_any_backend = False
+    # One (kind, ok) pair per backend tried, kept for the local log below.
+    sent = []
 
     # Build the formatted message with header (shared across all backends)
     if Token is False:
@@ -262,7 +264,9 @@ def sendToBot(session, msg, Token=False, Photo=None):
                     # restore game headers even if the Telegram POST fails,
                     # otherwise all subsequent game requests go out header-less
                     session.s.headers = headers
+            sent.append(("telegram", True))
         except Exception:
+            sent.append(("telegram", False))
             logger.error("Failed to send Telegram message", exc_info=True)
 
     # --- 2. Discord webhook ---
@@ -274,8 +278,9 @@ def sendToBot(session, msg, Token=False, Photo=None):
         if webhook_url:
             has_any_backend = True
             try:
-                _send_discord(webhook_url, formatted_msg)
+                sent.append(("discord", bool(_send_discord(webhook_url, formatted_msg))))
             except Exception:
+                sent.append(("discord", False))
                 logger.error("Failed to send Discord notification", exc_info=True)
 
     # --- 3. ntfy.sh push ---
@@ -285,14 +290,25 @@ def sendToBot(session, msg, Token=False, Photo=None):
         if topic:
             has_any_backend = True
             try:
-                _send_ntfy(
+                sent.append(("ntfy", bool(_send_ntfy(
                     ntfy_config.get("server", "https://ntfy.sh"),
                     topic,
                     ntfy_config.get("token", ""),
                     formatted_msg,
-                )
+                ))))
             except Exception:
+                sent.append(("ntfy", False))
                 logger.error("Failed to send ntfy notification", exc_info=True)
+
+    # Written even with nothing configured: the panel is then the only place
+    # this message exists. Imported here because botComm is imported early and
+    # this pulls in the status helper.
+    try:
+        from ikabot.helpers.messageLog import log_message
+
+        log_message(session, formatted_msg, sent)
+    except Exception:
+        logger.warning("Could not log the notification", exc_info=True)
 
     if not has_any_backend:
         logger.error(
