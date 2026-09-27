@@ -958,6 +958,7 @@ Sign in with the same username and password as the terminal.
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Terminal** | The instance screens, embedded — the same thing as opening port 7681 |
 | **Web servers** | Pick an instance from a numbered strip and read its web server full size |
+| **Messages** | Every notification ikabot has sent, newest first. Pick one instance from a numbered strip, or press the wide **All** button for every instance at once. Below the list, the destinations those messages are sent to |
 | **Output** | What the command you just pressed actually printed — always on screen, whichever section you are in |
 
 ### Getting around
@@ -979,6 +980,50 @@ it is remembered.
 On a phone the menu becomes a row of chips you swipe along, and instance cards
 collapse to their name and state — tap one to open its buttons. On a desktop
 nothing has changed.
+
+### Messages
+
+Every notification ikabot sends is written to a file as it is sent, one file
+per account. The **Messages** section reads those files.
+
+The copy is made locally because the services cannot be asked. Telegram will
+not list a bot's own messages. A Discord webhook can only be written to. So
+what was sent is kept here, and it is kept even when no service is set up at
+all.
+
+The strip on the right works like the Web servers strip: one square per
+instance, numbered. Above them is a wide **All** button, five squares across,
+which shows every instance at once. A dot on a square means something arrived
+since you last looked.
+
+Each message shows the time, the instance, the module that sent it, and a chip
+for each service it went to. A red chip means that service refused it. The
+search box matches plain text in the subject and the body.
+
+#### Where messages go
+
+Under the list is one row per place ikabot sends to. Each row has a name you
+choose, a kind, and its own credentials. Two Telegram rows are two Telegram
+accounts.
+
+| Column | Means |
+|---|---|
+| **Name** | Whatever you called it |
+| **Kind** | `telegram`, `discord` or `ntfy` |
+| **Where it points** | The chat, webhook or topic, with the token shown as its last four characters only |
+| **Instances** | The instance numbers that use this row, or **all** |
+| **On** | Turn a row off without deleting it |
+
+**Test** sends a test message through that row alone. **Edit** reopens it —
+leave a token box empty to keep the token already stored.
+
+While the list is empty, ikabot uses the single Telegram, Discord and ntfy
+settings it has always used, so an existing install is untouched. The first row
+you add replaces them.
+
+> The destinations are kept in `/config/.ikabot/notify_targets.json`. It holds
+> bot tokens, so it is written readable by its owner only. The panel never
+> sends a token to the browser.
 
 ### Two embedded sections
 

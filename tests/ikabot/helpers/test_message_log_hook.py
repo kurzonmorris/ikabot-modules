@@ -9,6 +9,14 @@ import pytest
 
 import ikabot.helpers.botComm as bc
 import ikabot.helpers.messageLog as ml
+import ikabot.helpers.notifyTargets as nt
+
+
+@pytest.fixture(autouse=True)
+def no_named_destinations(tmp_path, monkeypatch):
+    # These tests are about the original path, so the destinations file must be
+    # this test's own and empty, never the one on the machine running them.
+    monkeypatch.setattr(nt, "TARGETS_FILE", str(tmp_path / "notify.json"))
 
 
 class FakeRequests:

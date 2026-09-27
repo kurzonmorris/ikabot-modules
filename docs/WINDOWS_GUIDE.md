@@ -200,6 +200,25 @@ You do not need to download the installer again for those.
 
 ---
 
+## Step 9a — Reading what ikabot sent you
+
+**Messages** in the menu lists every notification ikabot has sent, newest
+first.
+
+Pick one instance from the numbered strip on the right, or press the wide
+**All** button above them for every instance at once. A dot on a square means
+something arrived since you last looked.
+
+The messages are kept on your own PC as they are sent. Telegram will not list a
+bot's own messages and a Discord webhook cannot be read, so this list works
+even when no service is set up.
+
+Under the list, **Where messages go** holds one row per place ikabot sends to.
+Add a second Telegram row for a second Telegram account. Leave **Instances**
+blank to use that row for every instance.
+
+---
+
 ## Step 10 — Reaching it from your phone, anywhere (optional)
 
 So far the control panel only works on the PC it is installed on. This step

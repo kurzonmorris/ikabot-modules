@@ -195,39 +195,14 @@ def sendToBotDebug(session, msg, debugON):
         sendToBot(session, msg)
 
 
-def sendToBot(session, msg, Token=False, Photo=None):
-    """Send a notification to all configured backends (Telegram, Discord, ntfy.sh).
+def _send_to_one_setting(session, formatted_msg, Photo):
+    """The original fan-out: one Telegram, one Discord, one ntfy, shared.
 
-    This is an enhanced drop-in replacement. The original only supported Telegram.
-    Now messages are routed to every configured backend. If a backend fails,
-    other backends still receive the message.
-
-    Parameters
-    ----------
-    session : ikabot.web.session.Session
-        Session object
-    msg : str
-        a string representing the message to send
-    Token : bool
-        if False, the process id, server, world and username are prepended to the message
-    Photo : bytes
-        a bytes object representing a picture to be sent (Telegram only).
+    Kept exactly as it was, and still what runs until the first named
+    destination is added. Returns (sent, has_any_backend).
     """
-
-    logger.warning("MESSAGE TO BOT: %s", msg, exc_info=True)
-
-    has_any_backend = False
-    # One (kind, ok) pair per backend tried, kept for the local log below.
     sent = []
-
-    # Build the formatted message with header (shared across all backends)
-    if Token is False:
-        infoUser = "Server:{}, World:{}, Player:{}".format(
-            session.servidor, session.word, session.username
-        )
-        formatted_msg = "pid:{}\n{}\n{}".format(os.getpid(), infoUser, msg)
-    else:
-        formatted_msg = msg
+    has_any_backend = False
 
     # --- 1. Telegram (original behavior preserved exactly) ---
     if telegramDataIsValid(session):
@@ -299,6 +274,67 @@ def sendToBot(session, msg, Token=False, Photo=None):
             except Exception:
                 sent.append(("ntfy", False))
                 logger.error("Failed to send ntfy notification", exc_info=True)
+
+    return sent, has_any_backend
+
+
+def _send_to_targets(session, formatted_msg, Photo):
+    """The named destinations, when any have been added.
+
+    Returns (sent, used). *used* is False when there are no destinations, which
+    is what sends the message down the original path instead.
+    """
+    try:
+        from ikabot.helpers.notifyTargets import have_targets, send_all
+        from ikabot.helpers.taskWatchdog import account_id
+    except ImportError:
+        return [], False
+
+    try:
+        if not have_targets():
+            return [], False
+        return send_all(account_id(session), formatted_msg, Photo), True
+    except Exception:
+        logger.error("Could not use the notification destinations",
+                     exc_info=True)
+        return [], False
+
+
+def sendToBot(session, msg, Token=False, Photo=None):
+    """Send a notification to every place this account is set up to use.
+
+    Named destinations come first: once any exist, they are the whole list,
+    because they are the only place a second Telegram account can be put. With
+    none, the original three shared settings are used exactly as before, so an
+    install that has never opened the destinations screen is untouched.
+
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+        Session object
+    msg : str
+        a string representing the message to send
+    Token : bool
+        if False, the process id, server, world and username are prepended to the message
+    Photo : bytes
+        a bytes object representing a picture to be sent (Telegram only).
+    """
+
+    logger.warning("MESSAGE TO BOT: %s", msg, exc_info=True)
+
+    # Build the formatted message with header (shared across all backends)
+    if Token is False:
+        infoUser = "Server:{}, World:{}, Player:{}".format(
+            session.servidor, session.word, session.username
+        )
+        formatted_msg = "pid:{}\n{}\n{}".format(os.getpid(), infoUser, msg)
+    else:
+        formatted_msg = msg
+
+    sent, used = _send_to_targets(session, formatted_msg, Photo)
+    has_any_backend = bool(sent)
+    if not used:
+        sent, has_any_backend = _send_to_one_setting(session, formatted_msg, Photo)
 
     # Written even with nothing configured: the panel is then the only place
     # this message exists. Imported here because botComm is imported early and
