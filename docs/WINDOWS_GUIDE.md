@@ -219,6 +219,25 @@ blank to use that row for every instance.
 
 ---
 
+## Step 9b — Running several jobs in a row
+
+Pressing a button across every instance takes a while, and the page will not
+let you press another until it finishes. That stops two commands colliding.
+
+The **Queue** block at the top of **Instances** does the waiting for you.
+
+1. Pick a step from the list
+2. Press **Add to queue**
+3. Add more, and order them with **▲** and **▼**
+4. Press **Start**
+
+The steps run one at a time, in order. **Stop** lets the step running now
+finish, then skips the rest.
+
+The queue is held by ikabot, not by your browser, so you can close the tab.
+
+---
+
 ## Step 10 — Reaching it from your phone, anywhere (optional)
 
 So far the control panel only works on the PC it is installed on. This step

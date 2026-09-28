@@ -951,6 +951,7 @@ Sign in with the same username and password as the terminal.
 | **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
 | **Instances** — proxy alert | Tick **Alert on proxy trouble** and any instance whose proxy has stopped working breathes blue, with *proxy not working* and how long it has been so on the card. Off by default, remembered per browser, and it can only fire on an instance that has a proxy configured |
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Says so plainly at the top when there is one to install, and marks the menu item **new**. Download and install an update, or roll the last one back |
+| **Instances** — queue | A list of presses, run one after another. Pick a step, order it, press **Start**. Nothing else can type into an instance while a step is running, so two sequences cannot collide |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
 | **Accounts** | Paste every account in at once and save them to ikabot's vault in one press — for a fresh install, or a machine that has no vault yet |
 | **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
@@ -980,6 +981,57 @@ it is remembered.
 On a phone the menu becomes a row of chips you swipe along, and instance cards
 collapse to their name and state — tap one to open its buttons. On a desktop
 nothing has changed.
+
+### The queue
+
+Pressing one of your buttons across twenty-four instances takes minutes, and
+until it answers the page greys out every other button. That is deliberate:
+two key sequences typed into one instance at the same moment interleave into
+nonsense. The queue does that waiting for you.
+
+At the top of **Instances** is a **Queue** block.
+
+1. Pick a step from the list — one of your own buttons, or one of the actions
+2. Press **Add to queue**
+3. Repeat, then put the steps in the order you want
+4. Press **Start**
+
+The steps then run one at a time, in order, with no one at the screen.
+
+**Reordering.** Each waiting step has **▲** and **▼**. On a desktop you can
+also drag a step by the **⠿** handle. Dragging does nothing on a touchscreen —
+the browser does not send those events — so the arrows are the way to do it on
+a phone or tablet, not a fallback.
+
+**While it runs.** The line beside **Queue** says which step is running and how
+many are left. The step running now is outlined. Finished steps keep an
+**Output** button holding what they printed.
+
+| Mark | Means |
+|---|---|
+| `waiting` | Not started |
+| `running` | Going now |
+| `done` | Finished |
+| `failed` | It ran and reported a problem. The queue carries on to the next step |
+| `skipped` | You pressed Stop before it started |
+
+**Stop** lets the step running now finish, then skips the rest. Nothing is ever
+cut off part way through typing. **Clear finished** tidies the list. **Empty the
+queue** removes everything waiting.
+
+You can add a step while the queue is running. It is picked up when the current
+step ends.
+
+> The queue is held by the panel, not by your browser. Closing the tab or
+> letting a phone sleep does not stop it, and a second browser sees the same
+> list. Restarting the panel loses it.
+
+**What can be queued.** Your own buttons, and: restart crashed only, restart
+all, stop all processes, clear all lock files, stop all web servers, show
+status, update all modules, download and update ikabot.
+
+Anything aimed at one instance is not on the list, because it is already one
+press. Nor is updating the panel itself, which restarts the panel.
 
 ### Messages
 

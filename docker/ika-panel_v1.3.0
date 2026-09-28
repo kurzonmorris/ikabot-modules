@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.2.0"
+PANEL_VERSION = "1.3.0"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -295,9 +295,20 @@ def check_loop():
 # --------------------------------------------------------------------------
 
 def _sh(args, timeout=600):
+    """What the command printed. The exit code is dropped on purpose.
+
+    Nearly every caller wants the text and nothing else — a command that
+    prints why it refused has said all there is to say. _run() is for the
+    queue, which has to mark a step failed rather than just show the words.
+    """
+    return _run(args, timeout)[0]
+
+
+def _run(args, timeout=600):
+    """(output, exit code). 1 if it could not start, 124 if it timed out."""
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-        return (p.stdout or "") + (p.stderr or "")
+        return (p.stdout or "") + (p.stderr or ""), p.returncode
     except subprocess.TimeoutExpired as exc:
         # Everything it printed before it stopped, which is the only thing
         # that says where it got to. Throwing it away leaves "timed out" and
@@ -308,9 +319,9 @@ def _sh(args, timeout=600):
                 got += part if isinstance(part, str) else part.decode("utf-8", "replace")
         head = "Timed out after %ds: %s" % (timeout, " ".join(args))
         return head + ("\n\nIt had got this far:\n\n" + got.strip() if got.strip()
-                       else "\n\nIt printed nothing before it stopped.")
+                       else "\n\nIt printed nothing before it stopped."), 124
     except OSError as exc:
-        return "Could not run %s: %s" % (" ".join(args), exc)
+        return "Could not run %s: %s" % (" ".join(args), exc), 1
 
 
 def _parent(pid):
@@ -1531,6 +1542,7 @@ def state():
         "core_error": core_err,
         "panel_version": PANEL_VERSION,
         "messages": message_meta(),
+        "queue": queue_view(),
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
         "ttyd_port": TTYD_PORT,
@@ -1606,6 +1618,363 @@ def command_for(action, arg):
     }.get(action)
 
 
+def run_button(act, arg):
+    """Press a saved button in one instance, or in all it applies to.
+
+    Returns (out, error, ran). Split out of the request handler so the queue
+    runs exactly the same code as a button press, rather than a second copy of
+    it that could drift.
+    """
+    bid, _, target = arg.partition(":")
+    wanted = next((b for b in load_buttons() if b["id"] == bid), None)
+    if wanted is None:
+        return "", "no such button", act
+
+    with _run_lock:
+        instances = state()["instances"]
+        if act == "button":
+            if not target.isdigit():
+                return "", "bad instance", act
+            num = int(target)
+            inst = next((i for i in instances if i["num"] == num), None)
+            if inst is None:
+                return "", "no such instance", act
+            if inst["dead"]:
+                return ("%s has crashed — restart it first." % inst["name"],
+                        "", "button")
+            menu = wanted.get("menu", True)
+            press(inst["name"], wanted["keys"],
+                  wanted.get("delay", DEFAULT_DELAY), menu)
+            out = "Sent %s%s to %s." % (
+                "/menu then " if menu else "",
+                describe(wanted["keys"]), inst["name"])
+        else:
+            lines, sent = [], 0
+            for inst in instances:
+                if not applies_to(wanted, inst["num"]):
+                    continue
+                if inst["dead"]:
+                    lines.append("%s skipped (crashed)" % inst["name"])
+                    continue
+                press(inst["name"], wanted["keys"],
+                      wanted.get("delay", DEFAULT_DELAY),
+                      wanted.get("menu", True))
+                lines.append("%s <- %s" % (inst["name"], describe(wanted["keys"])))
+                sent += 1
+            out = ("Ran '%s' on %d instance(s):\n\n%s"
+                   % (wanted["label"], sent, "\n".join(lines) or "none"))
+    return out, "", wanted["label"]
+
+
+def run_kill(act, arg):
+    """Stop one task, an instance's tasks, or every task. Returns (out, error, ran)."""
+    with _run_lock:
+        instances = state()["instances"]
+
+        if act == "kill_task":
+            num, _, pid_s = arg.partition(":")
+            if not num.isdigit() or not pid_s.isdigit():
+                return "", "bad target", act
+            inst = next((i for i in instances if i["num"] == int(num)), None)
+            if inst is None:
+                return "", "no such instance", act
+            pid = int(pid_s)
+            task = next((x for x in inst["tasks"]
+                         if str(x.get("pid")) == str(pid)), None)
+            if task is None:
+                out = ("That process is no longer running on %s — "
+                       "the list has been refreshed." % inst["name"])
+            else:
+                out = "\n".join(stop_tasks(inst["name"], [task]))
+
+        elif act == "kill_instance":
+            if not arg.isdigit():
+                return "", "bad instance", act
+            inst = next((i for i in instances if i["num"] == int(arg)), None)
+            if inst is None:
+                return "", "no such instance", act
+            lines = stop_tasks(inst["name"], inst["tasks"])
+            out = ("Stopped %d process(es) on %s:\n\n%s"
+                   % (len(lines), inst["name"], "\n".join(lines))
+                   if lines else
+                   "%s had nothing running." % inst["name"])
+
+        else:
+            lines, total = [], 0
+            for inst in instances:
+                if not inst["tasks"]:
+                    continue
+                done = stop_tasks(inst["name"], inst["tasks"])
+                lines.extend(done)
+                total += len(done)
+            out = ("Stopped %d process(es) across %d instance(s):\n\n%s"
+                   % (total, sum(1 for i in instances if i["tasks"]),
+                      "\n".join(lines))
+                   if lines else
+                   "Nothing was running in any instance.")
+
+    return out, "", act
+
+
+def run_locks(act, arg):
+    """Clear module lock files for one instance or all. Returns (out, error, ran)."""
+    with _run_lock:
+        s = state()
+        instances = s["instances"]
+
+        if act == "locks_one":
+            if not arg.isdigit():
+                return "", "bad instance", act
+            inst = next((i for i in instances if i["num"] == int(arg)), None)
+            if inst is None:
+                return "", "no such instance", act
+            # A lock removed while its owner still runs stops being a
+            # lock: two processes would both believe they hold it and
+            # ship, build or recruit twice over. Refuse rather than
+            # warn.
+            if inst["tasks"]:
+                out = ("%s still has %d process(es) running:\n\n%s\n\n"
+                       "Deleting a lock while its task is running would let "
+                       "two run at once. Press 'Stop tasks' on %s first, "
+                       "then clear its locks."
+                       % (inst["name"], len(inst["tasks"]),
+                          "\n".join("  " + (t.get("action") or "unknown")
+                                     for t in inst["tasks"]),
+                          inst["name"]))
+            elif not inst["locks"]:
+                out = "%s has no lock files." % inst["name"]
+            else:
+                wanted = set(inst["locks"])
+                pairs = [x for x in lock_files() if x[1] in wanted]
+                lines = delete_locks(pairs)
+                out = ("Cleared %d lock file(s) for %s:\n\n%s"
+                       % (len(lines), inst["name"], "\n".join(lines)))
+
+        else:
+            busy = [i for i in instances if i["tasks"]]
+            pairs = lock_files()
+            if busy:
+                out = ("%d instance(s) still have processes running:\n\n%s"
+                       "\n\nDeleting a lock while its task is running would "
+                       "let two run at once. Press 'Stop all processes' "
+                       "first, then clear the locks."
+                       % (len(busy),
+                          "\n".join("  %s — %d task(s)"
+                                     % (i["name"], len(i["tasks"]))
+                                     for i in busy)))
+            elif not pairs:
+                out = "No lock files found."
+            else:
+                lines = delete_locks(pairs)
+                out = ("Cleared %d lock file(s) across every instance:\n\n%s"
+                       % (len(lines), "\n".join(lines)))
+
+    return out, "", act
+
+
+def run_command(act, arg, strict=False):
+    """One of the plain ika commands. Returns (out, error, ran).
+
+    *strict* reports a non-zero exit as an error. A button press shows what
+    the command printed and lets the reader judge it; a queue step has to
+    decide for itself whether it worked, because nobody is watching.
+    """
+    cmd = command_for(act, arg)
+    if cmd is None:
+        return "", "unknown or malformed action", act
+    # One at a time: two updates or restarts at once would fight each other.
+    with _run_lock:
+        out, code = _run(cmd, timeout=TIMEOUTS.get(act, 600))
+    if strict and code:
+        return "", (out or "").strip() or "%s exited %d" % (" ".join(cmd), code), \
+               " ".join(cmd)
+    return out or "(no output)", "", " ".join(cmd)
+
+
+def run_command_strict(act, arg):
+    """run_command, with a non-zero exit reported as a failed step."""
+    return run_command(act, arg, strict=True)
+
+
+
+# --------------------------------------------------------------------------
+# The queue
+# --------------------------------------------------------------------------
+# Pressing a button across twenty-four instances takes minutes, and until it
+# answers the page greys out every other button. That is the right behaviour —
+# two sequences typed into the same instance at once interleave into nonsense —
+# but it means waiting at the screen to press the next one. The queue is that
+# wait, done by the panel: a list of presses, in an order you choose, run one
+# after another under the same lock a manual press takes.
+#
+# It lives on the server, not in the page, so closing the tab or letting a
+# phone sleep does not stop it, and every browser looking at the panel sees the
+# same list. It is held in memory: restarting the panel loses it, which is
+# stated on screen rather than half-resumed.
+
+QUEUE_MAX = 40
+# What may be queued. Everything here is slow, repeatable and needs no answer
+# while it runs. Deliberately absent: anything that reads a file for the page,
+# anything that restarts the panel itself, and the single-instance actions,
+# which are already one press.
+QUEUEABLE = {
+    "button_all": run_button,
+    "button": run_button,
+    "restart_all": run_command_strict,
+    "restart_dead": run_command_strict,
+    "status": run_command_strict,
+    "web_stop": run_command_strict,
+    "modules_all": run_command_strict,
+    "modules_local": run_command_strict,
+    "update": run_command_strict,
+    "kill_all": run_kill,
+    "locks_all": run_locks,
+}
+
+_queue_lock = threading.Lock()
+_queue = {"items": [], "running": False, "stop": False, "started": 0}
+
+
+def _queue_item(raw):
+    """Validate one entry the page asked to queue. Returns (item, error)."""
+    if not isinstance(raw, dict):
+        return None, "not a queue entry"
+    action = str(raw.get("action", ""))
+    if action not in QUEUEABLE:
+        return None, "%s cannot be queued" % (action or "that")
+    arg = str(raw.get("arg", ""))
+    if len(arg) > MAX_FIELD_LEN or KEY_BAD.search(arg):
+        return None, "bad argument"
+    label = str(raw.get("label", "")).strip()[:48] or action
+    # An id the page already holds is kept, so dragging a step does not give
+    # every other step a new identity underneath the drag.
+    keep = str(raw.get("id") or "")
+    return {"id": keep if ID_OK.match(keep) else _new_id(),
+            "action": action, "arg": arg, "label": label,
+            "state": "waiting", "output": "", "started": 0, "finished": 0}, ""
+
+
+def queue_view(full=False):
+    """The queue as the page reads it. Cheap enough for every poll.
+
+    Output is left out unless asked for: twenty-four lines a step, times forty
+    steps, is not something to send every five seconds.
+    """
+    with _queue_lock:
+        items = []
+        for it in _queue["items"]:
+            row = {k: it[k] for k in
+                   ("id", "action", "arg", "label", "state", "started", "finished")}
+            # Whether there is output, but not the output itself: the page
+            # only needs to know whether to offer the button.
+            row["has_output"] = bool(it["output"])
+            if full:
+                row["output"] = it["output"]
+            items.append(row)
+        return {"items": items, "running": _queue["running"],
+                "stopping": _queue["stop"]}
+
+
+def queue_worker():
+    """Run the waiting entries in order, one at a time, until none are left."""
+    while True:
+        with _queue_lock:
+            if _queue["stop"]:
+                for it in _queue["items"]:
+                    if it["state"] == "waiting":
+                        it["state"] = "skipped"
+                _queue["stop"] = False
+                _queue["running"] = False
+                return
+            item = next((i for i in _queue["items"]
+                         if i["state"] == "waiting"), None)
+            if item is None:
+                _queue["running"] = False
+                return
+            item["state"] = "running"
+            item["started"] = int(time.time())
+
+        # Outside the queue lock: this is the slow part, and the page has to be
+        # able to read the queue and to stop it while it runs.
+        try:
+            out, error, _ = QUEUEABLE[item["action"]](item["action"], item["arg"])
+        except BaseException as exc:
+            out, error = "", "%s: %s" % (type(exc).__name__, exc)
+
+        with _queue_lock:
+            item["state"] = "failed" if error else "done"
+            item["output"] = (error or out or "")[:8000]
+            item["finished"] = int(time.time())
+
+
+def queue_start():
+    """Start the worker if it is not already going. Returns a sentence."""
+    with _queue_lock:
+        if _queue["running"]:
+            return "The queue is already running."
+        waiting = [i for i in _queue["items"] if i["state"] == "waiting"]
+        if not waiting:
+            return "Nothing is waiting in the queue."
+        _queue["running"] = True
+        _queue["stop"] = False
+        _queue["started"] = int(time.time())
+    threading.Thread(target=queue_worker, daemon=True).start()
+    return "Running %d step(s), one after another." % len(waiting)
+
+
+def queue_set(raw_items):
+    """Replace the waiting entries with this list, in this order.
+
+    One operation covers adding, removing and reordering, because the page
+    always sends the whole pending list. What has already run is kept and is
+    not reorderable — it is history.
+    """
+    if not isinstance(raw_items, list):
+        return "", "bad queue"
+    if len(raw_items) > QUEUE_MAX:
+        return "", "At most %d steps in the queue." % QUEUE_MAX
+    fresh = []
+    for raw in raw_items:
+        item, error = _queue_item(raw)
+        if item is None:
+            return "", error
+        fresh.append(item)
+    with _queue_lock:
+        # A step that is running stays where it is; the page never sends it
+        # back, and stopping it is a separate button.
+        kept = [i for i in _queue["items"] if i["state"] != "waiting"]
+        _queue["items"] = kept + fresh
+        running = _queue["running"]
+    # Started already and something new was added: pick it up without a second
+    # press, which is what dropping a step onto a running queue means.
+    if running:
+        return "%d step(s) waiting." % len(fresh), ""
+    return "%d step(s) ready. Press Start." % len(fresh), ""
+
+
+def queue_stop():
+    """Let the running step finish, then skip the rest."""
+    with _queue_lock:
+        if not _queue["running"]:
+            return "The queue is not running."
+        _queue["stop"] = True
+    return ("Stopping. The step running now finishes first — nothing is "
+            "interrupted half typed.")
+
+
+def queue_clear(what):
+    """Remove finished entries, or everything that is not running."""
+    with _queue_lock:
+        if what == "finished":
+            _queue["items"] = [i for i in _queue["items"]
+                               if i["state"] in ("waiting", "running")]
+            return "Finished steps removed."
+        _queue["items"] = [i for i in _queue["items"] if i["state"] == "running"]
+        if _queue["running"]:
+            _queue["stop"] = True
+        return "Queue cleared."
+
+
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
@@ -1644,6 +2013,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _answer(self, result):
+        """Turn a (output, error, ran) result into the reply the page expects."""
+        out, error, ran = result
+        if error:
+            return self._send(400, json.dumps({"error": error}))
+        return self._send(200, json.dumps({"output": out, "ran": ran}))
+
     def _query(self):
         return parse_qs(urlparse(self.path).query)
 
@@ -1652,6 +2028,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny()
         if self.path.startswith("/api/state"):
             return self._send(200, json.dumps(state()))
+
+        if self.path.startswith("/api/queue"):
+            return self._send(200, json.dumps(queue_view(full=True)))
 
         if self.path.startswith("/api/targets"):
             notify, why = notify_api()
@@ -1725,6 +2104,32 @@ class Handler(BaseHTTPRequestHandler):
         # body: a password must never reach a URL, where it would land in
         # browser history. Nothing here is logged — log_message is a no-op —
         # and nothing is kept once the vault has been written.
+        if self.path.startswith("/api/queue"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or "{}")
+            except (ValueError, OSError):
+                return self._send(400, json.dumps({"error": "bad request"}))
+
+            op = str(body.get("op") or "")
+            if op == "set":
+                out, error = queue_set(body.get("items"))
+                if error:
+                    return self._send(400, json.dumps({"error": error}))
+                return self._send(200, json.dumps({"output": out,
+                                                   "queue": queue_view()}))
+            if op == "start":
+                return self._send(200, json.dumps(
+                    {"output": queue_start(), "queue": queue_view()}))
+            if op == "stop":
+                return self._send(200, json.dumps(
+                    {"output": queue_stop(), "queue": queue_view()}))
+            if op == "clear":
+                return self._send(200, json.dumps(
+                    {"output": queue_clear(str(body.get("what") or "")),
+                     "queue": queue_view()}))
+            return self._send(400, json.dumps({"error": "unknown queue action"}))
+
         if self.path.startswith("/api/targets"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1981,47 +2386,7 @@ class Handler(BaseHTTPRequestHandler):
         act = payload.get("action")
 
         if act in ("button", "button_all"):
-            arg = str(payload.get("arg", ""))
-            bid, _, target = arg.partition(":")
-            wanted = next((b for b in load_buttons() if b["id"] == bid), None)
-            if wanted is None:
-                return self._send(400, json.dumps({"error": "no such button"}))
-
-            with _run_lock:
-                instances = state()["instances"]
-                if act == "button":
-                    if not target.isdigit():
-                        return self._send(400, json.dumps({"error": "bad instance"}))
-                    num = int(target)
-                    inst = next((i for i in instances if i["num"] == num), None)
-                    if inst is None:
-                        return self._send(400, json.dumps({"error": "no such instance"}))
-                    if inst["dead"]:
-                        return self._send(200, json.dumps({
-                            "output": "%s has crashed — restart it first." % inst["name"],
-                            "ran": "button"}))
-                    menu = wanted.get("menu", True)
-                    press(inst["name"], wanted["keys"],
-                          wanted.get("delay", DEFAULT_DELAY), menu)
-                    out = "Sent %s%s to %s." % (
-                        "/menu then " if menu else "",
-                        describe(wanted["keys"]), inst["name"])
-                else:
-                    lines, sent = [], 0
-                    for inst in instances:
-                        if not applies_to(wanted, inst["num"]):
-                            continue
-                        if inst["dead"]:
-                            lines.append("%s skipped (crashed)" % inst["name"])
-                            continue
-                        press(inst["name"], wanted["keys"],
-                              wanted.get("delay", DEFAULT_DELAY),
-                              wanted.get("menu", True))
-                        lines.append("%s <- %s" % (inst["name"], describe(wanted["keys"])))
-                        sent += 1
-                    out = ("Ran '%s' on %d instance(s):\n\n%s"
-                           % (wanted["label"], sent, "\n".join(lines) or "none"))
-            return self._send(200, json.dumps({"output": out, "ran": wanted["label"]}))
+            return self._answer(run_button(act, str(payload.get("arg", ""))))
 
 
         # Stopping tasks. The browser never supplies a bare pid to kill: every
@@ -2062,111 +2427,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"where": term_scroll(arg)}))
 
         if act in ("kill_task", "kill_instance", "kill_all"):
-            arg = str(payload.get("arg", ""))
-            with _run_lock:
-                instances = state()["instances"]
-
-                if act == "kill_task":
-                    num, _, pid_s = arg.partition(":")
-                    if not num.isdigit() or not pid_s.isdigit():
-                        return self._send(400, json.dumps({"error": "bad target"}))
-                    inst = next((i for i in instances if i["num"] == int(num)), None)
-                    if inst is None:
-                        return self._send(400, json.dumps({"error": "no such instance"}))
-                    pid = int(pid_s)
-                    task = next((x for x in inst["tasks"]
-                                 if str(x.get("pid")) == str(pid)), None)
-                    if task is None:
-                        out = ("That process is no longer running on %s — "
-                               "the list has been refreshed." % inst["name"])
-                    else:
-                        out = "\n".join(stop_tasks(inst["name"], [task]))
-
-                elif act == "kill_instance":
-                    if not arg.isdigit():
-                        return self._send(400, json.dumps({"error": "bad instance"}))
-                    inst = next((i for i in instances if i["num"] == int(arg)), None)
-                    if inst is None:
-                        return self._send(400, json.dumps({"error": "no such instance"}))
-                    lines = stop_tasks(inst["name"], inst["tasks"])
-                    out = ("Stopped %d process(es) on %s:\n\n%s"
-                           % (len(lines), inst["name"], "\n".join(lines))
-                           if lines else
-                           "%s had nothing running." % inst["name"])
-
-                else:
-                    lines, total = [], 0
-                    for inst in instances:
-                        if not inst["tasks"]:
-                            continue
-                        done = stop_tasks(inst["name"], inst["tasks"])
-                        lines.extend(done)
-                        total += len(done)
-                    out = ("Stopped %d process(es) across %d instance(s):\n\n%s"
-                           % (total, sum(1 for i in instances if i["tasks"]),
-                              "\n".join(lines))
-                           if lines else
-                           "Nothing was running in any instance.")
-
-            return self._send(200, json.dumps({"output": out, "ran": act}))
+            return self._answer(run_kill(act, str(payload.get("arg", ""))))
 
         # Clearing lock files. The browser sends an instance number or
         # nothing at all — never a path. The panel rescans and decides which
         # files those words mean, so nothing outside a module lock is reachable.
         if act in ("locks_one", "locks_all"):
-            arg = str(payload.get("arg", ""))
-            with _run_lock:
-                s = state()
-                instances = s["instances"]
-
-                if act == "locks_one":
-                    if not arg.isdigit():
-                        return self._send(400, json.dumps({"error": "bad instance"}))
-                    inst = next((i for i in instances if i["num"] == int(arg)), None)
-                    if inst is None:
-                        return self._send(400, json.dumps({"error": "no such instance"}))
-                    # A lock removed while its owner still runs stops being a
-                    # lock: two processes would both believe they hold it and
-                    # ship, build or recruit twice over. Refuse rather than
-                    # warn.
-                    if inst["tasks"]:
-                        out = ("%s still has %d process(es) running:\n\n%s\n\n"
-                               "Deleting a lock while its task is running would let "
-                               "two run at once. Press 'Stop tasks' on %s first, "
-                               "then clear its locks."
-                               % (inst["name"], len(inst["tasks"]),
-                                  "\n".join("  " + (t.get("action") or "unknown")
-                                             for t in inst["tasks"]),
-                                  inst["name"]))
-                    elif not inst["locks"]:
-                        out = "%s has no lock files." % inst["name"]
-                    else:
-                        wanted = set(inst["locks"])
-                        pairs = [x for x in lock_files() if x[1] in wanted]
-                        lines = delete_locks(pairs)
-                        out = ("Cleared %d lock file(s) for %s:\n\n%s"
-                               % (len(lines), inst["name"], "\n".join(lines)))
-
-                else:
-                    busy = [i for i in instances if i["tasks"]]
-                    pairs = lock_files()
-                    if busy:
-                        out = ("%d instance(s) still have processes running:\n\n%s"
-                               "\n\nDeleting a lock while its task is running would "
-                               "let two run at once. Press 'Stop all processes' "
-                               "first, then clear the locks."
-                               % (len(busy),
-                                  "\n".join("  %s — %d task(s)"
-                                             % (i["name"], len(i["tasks"]))
-                                             for i in busy)))
-                    elif not pairs:
-                        out = "No lock files found."
-                    else:
-                        lines = delete_locks(pairs)
-                        out = ("Cleared %d lock file(s) across every instance:\n\n%s"
-                               % (len(lines), "\n".join(lines)))
-
-            return self._send(200, json.dumps({"output": out, "ran": act}))
+            return self._answer(run_locks(act, str(payload.get("arg", ""))))
 
         # Two commands, so it does not fit the one-argv table below. The bar
         # along the bottom of the terminal is the only way between instances
@@ -2221,15 +2488,7 @@ class Handler(BaseHTTPRequestHandler):
                 msg = refresh_available()
             return self._send(200, json.dumps({"output": msg, "ran": "check versions"}))
 
-        cmd = command_for(act, payload.get("arg", ""))
-        if cmd is None:
-            return self._send(400, json.dumps({"error": "unknown or malformed action"}))
-
-        # One at a time: two updates or restarts at once would fight each other.
-        with _run_lock:
-            out = _sh(cmd, timeout=TIMEOUTS.get(act, 600))
-        self._send(200, json.dumps({"output": out or "(no output)",
-                                    "ran": " ".join(cmd)}))
+        return self._answer(run_command(act, str(payload.get("arg", ""))))
 
 
 PAGE = r"""<!doctype html>
@@ -2407,6 +2666,34 @@ display:grid;place-items:center;line-height:1}
   .wpad button{font-size:12px}
 }
 /* Retracted: just the arrow, so the page gets the whole width. */
+/* The queue. Numbered rows in the order they will run, with the one running
+   marked, so the list reads as a plan rather than a log. */
+.qwrap{border:1px solid var(--rule);border-radius:8px;background:var(--card);
+padding:10px;margin-bottom:12px}
+.qlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.qlist li{display:flex;align-items:center;gap:8px;padding:5px 8px;
+border:1px solid var(--rule);border-radius:6px;background:var(--bg)}
+.qlist li.running{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.qlist li.done{opacity:.6}
+.qlist li.failed{border-color:var(--bad)}
+.qlist li.skipped{opacity:.45}
+.qlist li.over{border-style:dashed;border-color:var(--accent)}
+.qgrip{cursor:grab;color:var(--soft);line-height:1;user-select:none}
+.qnum{font-family:ui-monospace,monospace;font-size:11px;color:var(--soft);
+min-width:18px;text-align:right}
+.qlabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qmark{font-size:11px;padding:1px 6px;border-radius:99px;
+border:1px solid var(--rule);color:var(--soft);white-space:nowrap}
+.qmark.running{color:var(--accent);border-color:var(--accent)}
+.qmark.done{color:var(--ok);border-color:var(--ok)}
+.qmark.failed{color:var(--bad);border-color:var(--bad)}
+.qlist li button{padding:2px 7px;font-size:12px}
+/* Dragging does not exist on a touchscreen, so the arrows are the way to
+   reorder there and are given a target a finger can hit. */
+@media(pointer:coarse){.qlist li button{padding:8px 11px;font-size:13px}}
+.qout{margin:4px 0 0;font-size:12px;color:var(--soft);white-space:pre-wrap;
+max-height:8em;overflow:auto}
+
 /* Messages. The strip is the Web servers strip, down to the class names, so
    the two read the same way. The one addition is the wide button across the
    top: five squares plus the gaps between them, from grid-column 1 / -1. */
@@ -2643,6 +2930,22 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
       <input type="checkbox" id="proxyalert"> Alert on proxy trouble
     </label>
     <span class="hint" id="proxynote" style="margin:0"></span>
+  </div>
+  <div class="qwrap" id="qwrap">
+    <div class="row" style="margin-bottom:8px">
+      <b style="font-size:13.5px">Queue</b>
+      <span class="hint" id="qstate" style="margin:0"></span>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <select id="qpick" style="max-width:260px"></select>
+      <button id="qaddbtn">Add to queue</button>
+      <button class="p" id="qstart">Start</button>
+      <button id="qstop">Stop after this step</button>
+      <button id="qtidy">Clear finished</button>
+      <button class="d" id="qwipe">Empty the queue</button>
+    </div>
+    <ol class="qlist" id="qlist"></ol>
+    <p class="hint" id="qnote"></p>
   </div>
   <div class="grid" id="grid"></div>
   <p class="hint" id="statushint"></p>
@@ -3892,6 +4195,11 @@ function refresh(){
       renderButtons(s.buttons||[]);
     }
     if(current==='webservers')renderServers();
+    // The queue redraws whichever section is open, because it is the thing
+    // that says whether it is safe to press anything else.
+    var qs=JSON.stringify(s.queue||{});
+    if(qs!==qSig){ qSig=qs; renderQueue(); }
+    else if((s.queue||{}).running) renderQueue();   // keep the seconds moving
     // The strip follows every poll. The list is only re-fetched when a log has
     // actually grown, so an open Messages section is not a request every five
     // seconds for the same two hundred records.
@@ -4467,6 +4775,213 @@ document.addEventListener('click',function(e){
 });
 
 dFields();
+
+// --- the queue ------------------------------------------------------------
+// Pressing a button across twenty-four instances takes minutes, and the page
+// greys out everything until it answers, because two sequences typed into one
+// instance at once interleave into nonsense. The queue is that wait done for
+// you: a list of presses in an order you choose, run one after another.
+//
+// The list lives on the server. The page only ever sends the whole pending
+// list back, so adding, removing and reordering are all the same request and
+// two browsers cannot end up disagreeing about the order.
+var QUEUE_ACTIONS = [
+  ['restart_dead', 'Restart crashed only'],
+  ['restart_all',  'Restart all'],
+  ['kill_all',     'Stop all processes'],
+  ['locks_all',    'Clear all lock files'],
+  ['web_stop',     'Stop all web servers'],
+  ['status',       'Show status'],
+  ['modules_all',  'Update all modules from GitHub'],
+  ['update',       'Download & update ikabot']
+];
+var qSig='', qOpen={}, qDrag=null;
+
+function qItems(){ return ((last.queue||{}).items)||[]; }
+function qWaiting(){ return qItems().filter(function(i){return i.state==='waiting';}); }
+
+function qPost(body, done){
+  fetch('api/queue',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)})
+  .then(function(r){return r.json()})
+  .then(function(d){
+    if(d.error){ el('qnote').textContent='Queue: '+d.error; return; }
+    if(d.queue){ last.queue=d.queue; qSig=JSON.stringify(d.queue); renderQueue(); }
+    if(d.output) el('qnote').textContent=d.output;
+    if(done) done(d);
+  })
+  .catch(function(err){ el('qnote').textContent='Queue request failed: '+err; });
+}
+
+// Everything the page still has waiting, in the order shown, with whatever
+// change the caller made already applied.
+function qSend(list){
+  qPost({op:'set', items:list.map(function(i){
+    return {id:i.id, action:i.action, arg:i.arg, label:i.label};
+  })});
+}
+
+function qFillPicker(){
+  var sel=el('qpick'); if(!sel) return;
+  var buttons=(last.buttons||[]);
+  var sig=JSON.stringify([buttons.map(function(b){return b.id+b.label;})]);
+  if(sel.dataset.sig===sig) return;
+  var opts='';
+  if(buttons.length){
+    opts+='<optgroup label="Your buttons, in every instance they apply to">'+
+      buttons.map(function(b){
+        return '<option value="button_all:'+esc(b.id)+'">'+esc(b.label)+'</option>';
+      }).join('')+'</optgroup>';
+  }
+  opts+='<optgroup label="Actions">'+QUEUE_ACTIONS.map(function(a){
+    return '<option value="'+a[0]+':">'+esc(a[1])+'</option>';
+  }).join('')+'</optgroup>';
+  sel.innerHTML=opts;
+  sel.dataset.sig=sig;
+}
+
+function qLabelFor(value){
+  var kind=value.split(':')[0], arg=value.slice(kind.length+1);
+  if(kind==='button_all'){
+    var b=(last.buttons||[]).filter(function(x){return x.id===arg;})[0];
+    return b ? b.label : 'button';
+  }
+  var a=QUEUE_ACTIONS.filter(function(x){return x[0]===kind;})[0];
+  return a ? a[1] : kind;
+}
+
+function qMark(state){
+  if(state==='running') return 'running';
+  if(state==='done') return 'done';
+  if(state==='failed') return 'failed';
+  if(state==='skipped') return 'skipped';
+  return 'waiting';
+}
+
+function renderQueue(){
+  var list=el('qlist'); if(!list) return;
+  qFillPicker();
+  var items=qItems(), waiting=qWaiting();
+
+  list.innerHTML = items.length ? items.map(function(it, n){
+    var mark=qMark(it.state), movable=it.state==='waiting';
+    var at=waiting.indexOf(it);
+    var secs = it.started ? Math.max(0, (it.finished||Math.floor(Date.now()/1000))-it.started) : 0;
+    return '<li class="'+mark+'" data-qid="'+esc(it.id)+'"'+
+        (movable?' draggable="true"':'')+'>'+
+      (movable?'<span class="qgrip" title="Drag to reorder">⠿</span>'
+              :'<span class="qgrip" style="visibility:hidden">⠿</span>')+
+      '<span class="qnum">'+(n+1)+'</span>'+
+      '<span class="qlabel">'+esc(it.label)+'</span>'+
+      '<span class="qmark '+mark+'">'+mark+
+        (secs?' '+secs+'s':'')+'</span>'+
+      (it.has_output?'<button data-qop="show">Output</button>':'')+
+      (movable?'<button data-qop="up"'+(at<=0?' disabled':'')+' title="Move up">▲</button>'+
+               '<button data-qop="down"'+(at>=waiting.length-1?' disabled':'')+
+               ' title="Move down">▼</button>'+
+               '<button class="d" data-qop="drop" title="Remove">×</button>':'')+
+      (qOpen[it.id]&&it.output?'<p class="qout">'+esc(it.output)+'</p>':'')+
+    '</li>';
+  }).join('') : '';
+
+  var running=(last.queue||{}).running, stopping=(last.queue||{}).stopping;
+  var now=items.filter(function(i){return i.state==='running';})[0];
+  var ran=items.filter(function(i){return i.state!=='waiting'&&i.state!=='running';});
+  el('qstate').textContent = running
+    ? (stopping ? 'stopping after the step running now'
+                : 'running' + (now ? ' — ' + now.label : '') +
+                  ', ' + waiting.length + ' still to go')
+    : (waiting.length ? waiting.length+' step'+(waiting.length===1?'':'s')+
+                        ' ready — press Start'
+       : (ran.length ? 'nothing waiting — '+ran.length+' step'+
+                       (ran.length===1?'':'s')+' finished'
+                     : 'empty'));
+  el('qstart').disabled = !!running || !waiting.length;
+  el('qstop').disabled = !running;
+  el('qnote').textContent = el('qnote').textContent || '';
+}
+
+// The output of a finished step is not sent with every poll, so it is fetched
+// the first time one is opened.
+function qShowOutput(id){
+  qOpen[id]=!qOpen[id];
+  if(!qOpen[id]){ renderQueue(); return; }
+  fetch('api/queue').then(function(r){return r.json()}).then(function(d){
+    var full={};
+    (d.items||[]).forEach(function(i){ full[i.id]=i.output||''; });
+    qItems().forEach(function(i){ if(full[i.id]!==undefined) i.output=full[i.id]; });
+    renderQueue();
+  }).catch(function(err){ el('qnote').textContent='Could not read it: '+err; });
+}
+
+el('qaddbtn').addEventListener('click',function(){
+  var sel=el('qpick'), value=sel.value||'';
+  if(!value) return;
+  var kind=value.split(':')[0], arg=value.slice(kind.length+1);
+  var list=qWaiting().slice();
+  list.push({id:'', action:kind, arg:arg, label:qLabelFor(value)});
+  qSend(list);
+});
+
+el('qstart').addEventListener('click',function(){ qPost({op:'start'}); });
+el('qstop').addEventListener('click',function(){ qPost({op:'stop'}); });
+el('qtidy').addEventListener('click',function(){
+  qPost({op:'clear', what:'finished'});
+});
+el('qwipe').addEventListener('click',function(){
+  if(!confirm('Empty the queue?\n\nA step already running finishes first.'))return;
+  qPost({op:'clear', what:'all'});
+});
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('#qlist button[data-qop]'); if(!b||b.disabled) return;
+  var id=b.closest('li').dataset.qid, op=b.dataset.qop;
+  if(op==='show'){ qShowOutput(id); return; }
+  var list=qWaiting().slice(), at=-1;
+  list.forEach(function(i,n){ if(i.id===id) at=n; });
+  if(at<0) return;
+  if(op==='drop') list.splice(at,1);
+  else if(op==='up'&&at>0) list.splice(at-1,0,list.splice(at,1)[0]);
+  else if(op==='down'&&at<list.length-1) list.splice(at+1,0,list.splice(at,1)[0]);
+  else return;
+  qSend(list);
+});
+
+// Dragging, for a mouse. A touchscreen gets nothing from this — HTML drag
+// events never fire there — which is why the arrows above are not a fallback
+// but the main way to reorder.
+document.addEventListener('dragstart',function(e){
+  var li=e.target.closest('#qlist li[draggable]'); if(!li) return;
+  qDrag=li.dataset.qid;
+  e.dataTransfer.effectAllowed='move';
+  try{ e.dataTransfer.setData('text/plain', qDrag); }catch(err){}
+});
+document.addEventListener('dragover',function(e){
+  var li=e.target.closest('#qlist li[draggable]'); if(!li||!qDrag) return;
+  e.preventDefault();
+  Array.prototype.forEach.call(document.querySelectorAll('#qlist li.over'),
+    function(x){ x.classList.remove('over'); });
+  li.classList.add('over');
+});
+document.addEventListener('drop',function(e){
+  var li=e.target.closest('#qlist li[draggable]'); if(!li||!qDrag) return;
+  e.preventDefault();
+  li.classList.remove('over');
+  var list=qWaiting().slice(), from=-1, to=-1;
+  list.forEach(function(i,n){
+    if(i.id===qDrag) from=n;
+    if(i.id===li.dataset.qid) to=n;
+  });
+  qDrag=null;
+  if(from<0||to<0||from===to) return;
+  list.splice(to,0,list.splice(from,1)[0]);
+  qSend(list);
+});
+document.addEventListener('dragend',function(){
+  qDrag=null;
+  Array.prototype.forEach.call(document.querySelectorAll('#qlist li.over'),
+    function(x){ x.classList.remove('over'); });
+});
 
 showSection(saved);
 refresh(); setInterval(function(){if(!busy)refresh();},5000);
