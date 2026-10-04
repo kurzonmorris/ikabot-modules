@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.13.0"
+MODULE_VERSION = "10.14.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -952,7 +952,7 @@ def release_shipping_lock(session, use_freighters=False):
 #  TRANSPORT SCHEDULE CSV  — persistent state for all shipping modes
 # ============================================================================
 
-SCHEDULE_SCHEMA_VERSION = 5
+SCHEDULE_SCHEMA_VERSION = 6
 
 SCHEDULE_COLUMNS = [
     "schedule_id",
@@ -983,7 +983,15 @@ SCHEDULE_COLUMNS = [
     "last_duration",
     "last_error",
     "armed_at",
+    "amount_scope",
 ]
+
+# How a "send specific amounts" figure is read when there are several source
+# cities. per_city asks every city for that amount, so four cities ship four
+# times the figure. total treats it as the quantity to arrive, shared out
+# across the sources until it is met.
+AMOUNT_SCOPE_PER_CITY = "per_city"
+AMOUNT_SCOPE_TOTAL = "total"
 
 # Priority 1 = vital .. 5 = least vital. Everything defaults to 3 (standard).
 PRIORITY_DEFAULT = 3
@@ -1004,6 +1012,9 @@ SCHEDULE_COLUMN_DEFAULTS = {
     "last_duration": 0,
     "last_error": "",
     "armed_at": 0,
+    # Existing schedules were built when the amounts were always requested
+    # from every source city, so they must keep behaving that way.
+    "amount_scope": "per_city",
 }
 
 SCHEDULE_INT_COLS = {
@@ -1767,7 +1778,8 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
                        min_shipment_threshold=0, interval_hours=0,
                        run_at_time="",
                        notif_level="none", status="pending",
-                       notes="", priority=PRIORITY_DEFAULT):
+                       notes="", priority=PRIORITY_DEFAULT,
+                       amount_scope=AMOUNT_SCOPE_PER_CITY):
     now_ts = int(time.time())
     if run_at_time:
         first_run = _next_run_for_time(run_at_time)
@@ -1802,6 +1814,7 @@ def build_schedule_row(schedule_id, mode, ship_type="m",
         "last_duration":   0,
         "last_error":      "",
         "armed_at":        now_ts,
+        "amount_scope":    amount_scope,
     }
 
 
@@ -2383,7 +2396,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
     result = {"success": False, "error": None, "ships_used": 0,
               "no_ap": False, "below_threshold": False,
               "city_unavailable": False, "shortfalls": {},
-              "partial": False, "port_busy": False, "hold_seconds": 0}
+              "partial": False, "port_busy": False, "hold_seconds": 0,
+              "sent": []}
 
     # Full-ships-only mode: trim stock-derived cargo so every ship
     # sails full (freighters: at least the user-set minimum on the last
@@ -2713,6 +2727,7 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
 
         result["success"] = True
         result["ships_used"] = ships_needed
+        result["sent"] = list(resources)
         # We have just put this port to work, so anything we knew about how
         # busy it was is out of date — the next order re-asks it.
         _port_hold_clear(origin_city["id"])
@@ -3754,6 +3769,40 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             event.set()
             return
 
+        # With one source there is no difference, and "keep reserves" is
+        # inherently per city because the reserve is measured against that
+        # city's own stock.
+        amount_scope = AMOUNT_SCOPE_PER_CITY
+        if send_mode == 2 and len(origin_cities) > 1:
+            n_src = len(origin_cities)
+
+            def _draw_consol_scope():
+                print_module_banner("Consolidate — Amount Meaning")
+                print(f"  Sources: {C.CYAN}{source_summary}{C.RESET} "
+                      f"({n_src} cities)\n")
+                print(f"  {C.DIM}You are about to enter an amount per "
+                      f"resource. With {n_src} source cities, what does "
+                      f"that amount mean?{C.RESET}\n")
+                print(f"  {C.BOLD}(1){C.RESET} The total to collect here")
+                print(f"  {C.DIM}    Shared out across the {n_src} cities "
+                      f"until the amount is met.{C.RESET}")
+                print(f"  {C.DIM}    Enter 1m and 1m arrives.{C.RESET}")
+                print(f"  {C.BOLD}(2){C.RESET} The amount from EACH city")
+                print(f"  {C.DIM}    Every city is asked for it, so up to "
+                      f"{n_src}x as much arrives.{C.RESET}")
+                print(f"  {C.DIM}    Enter 1m and up to {n_src}m "
+                      f"arrives.{C.RESET}")
+                print(f"\n  {C.BOLD}('){C.RESET} Back")
+            _draw_consol_scope()
+            _set_redraw(_draw_consol_scope)
+            scope_choice = _safe_read(min=1, max=2, digit=True,
+                                      additionalValues=["'"])
+            if scope_choice == "'":
+                event.set()
+                return
+            amount_scope = (AMOUNT_SCOPE_TOTAL if scope_choice == 1
+                            else AMOUNT_SCOPE_PER_CITY)
+
         print_module_banner("Consolidate — Resources")
         print(f"  Source: {C.CYAN}{source_summary}{C.RESET}\n")
         if send_mode == 1:
@@ -3763,7 +3812,17 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             print(f"  {C.HINT}  e = send ALL (keep nothing)  |  blank = skip{C.RESET}")
             print(f"  {C.HINT}  = restart  |  ' exit{C.RESET}\n")
         else:
-            print(f"  {C.DIM}Enter how much of each resource to SEND.{C.RESET}\n")
+            if amount_scope == AMOUNT_SCOPE_TOTAL:
+                print(f"  {C.DIM}Enter the TOTAL of each resource to collect "
+                      f"here, across all {len(origin_cities)} source "
+                      f"cities.{C.RESET}\n")
+            elif len(origin_cities) > 1:
+                print(f"  {C.DIM}Enter how much of each resource to send "
+                      f"FROM EACH of the {len(origin_cities)} source "
+                      f"cities.{C.RESET}\n")
+            else:
+                print(f"  {C.DIM}Enter how much of each resource to "
+                      f"SEND.{C.RESET}\n")
             print(f"  {C.HINT}  number = send that amount  |  e = send ALL{C.RESET}")
             print(f"  {C.HINT}  blank = skip  |  = restart  |  ' exit{C.RESET}\n")
             if len(origin_cities) == 1:
@@ -3918,6 +3977,10 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
 
         total_send = [0] * len(materials_names)
         space_warnings = []
+        outstanding_preview = [
+            resource_config[i] if isinstance(resource_config[i], int) else None
+            for i in range(len(materials_names))
+        ]
         for oc in origin_cities:
             html = session.get(city_url + str(oc["id"]))
             odata = getCity(html)
@@ -3926,6 +3989,10 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                     continue
                 avail = odata["availableResources"][i]
                 s = _resolve_rc(resource_config[i], avail, send_mode)
+                if (amount_scope == AMOUNT_SCOPE_TOTAL
+                        and outstanding_preview[i] is not None):
+                    s = min(s, max(0, outstanding_preview[i]))
+                    outstanding_preview[i] -= s
                 if destination_city.get("isOwnCity", False):
                     free = destination_city["freeSpaceForResources"][i]
                     if s > free:
@@ -3952,6 +4019,17 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
             mode_label = "Keep reserves" if send_mode == 1 else "Send specific"
             print(f"  {C.BOLD}Mode:{C.RESET}        {mode_label}")
             print(f"  {C.BOLD}Sources:{C.RESET}     {source_summary} ({len(origin_cities)})")
+            if send_mode == 2 and len(origin_cities) > 1:
+                asked = sum(v for v in resource_config
+                            if isinstance(v, int))
+                if amount_scope == AMOUNT_SCOPE_TOTAL:
+                    print(f"  {C.BOLD}Amounts:{C.RESET}     "
+                          f"{addThousandSeparator(asked)} in total, shared "
+                          f"across the {len(origin_cities)} cities")
+                else:
+                    print(f"  {C.BOLD}Amounts:{C.RESET}     "
+                          f"{C.WARN}{addThousandSeparator(asked)} from EACH "
+                          f"of the {len(origin_cities)} cities{C.RESET}")
             print(f"  {C.BOLD}Destination:{C.RESET} {destination_city['name']}")
             if dest_minimums:
                 print(f"  {C.BOLD}Send if below:{C.RESET} {_format_resource_list(dest_minimums)}")
@@ -4017,6 +4095,7 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
         notif_level=notif_config.get("level", "none"),
         notes=f"{src_names} -> {destination_city['name']}",
         priority=priority,
+        amount_scope=amount_scope,
     )
     _save_and_maybe_activate(session, event, schedule_row, notif_config,
                              log_path)
@@ -6383,6 +6462,19 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
     small_shipments = []
     exhaustion_log = []
 
+    # With several sources, an exact amount is either wanted from every city
+    # or wanted in total. For a total, the cities share one budget and each
+    # one only contributes what is still outstanding.
+    share_budget = (
+        sched.get("amount_scope", AMOUNT_SCOPE_PER_CITY) == AMOUNT_SCOPE_TOTAL
+        and send_mode == 2
+    )
+    outstanding = [
+        resource_config[i] if (i < len(resource_config)
+                               and isinstance(resource_config[i], int)) else None
+        for i in range(len(materials_names))
+    ]
+
     cycle_sent = 0
     for idx_c, cid in enumerate(source_city_ids):
         if _deadline_passed(deadline_ts) or _should_yield(session):
@@ -6391,6 +6483,8 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                     session, notif_config, "CONSOLIDATE",
                     f"{len(source_city_ids) - idx_c} source city(ies)")
             break
+        if share_budget and not any(o for o in outstanding if o):
+            break   # the requested total has been met
         if int(cid) in excluded:
             continue
         html = session.get(city_url + str(cid))
@@ -6407,6 +6501,8 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
             avail = oc_fresh["availableResources"][i]
             free = _rrs_free_from_summary(summary, cid, i, avail) if RRS_AVAILABLE else avail
             s = _resolve_rc(resource_config[i], free, send_mode)
+            if share_budget and outstanding[i] is not None:
+                s = min(s, max(0, outstanding[i]))
             try:
                 s = min(s, destination_city["freeSpaceForResources"][i])
             except (KeyError, IndexError):
@@ -6438,6 +6534,13 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                     (oc_fresh["name"], destination_city["name"], toSend))
             elif result["success"]:
                 cycle_sent += 1
+                if share_budget:
+                    # Count what actually went, not what was planned: a
+                    # trimmed or partial load leaves more outstanding.
+                    went = result.get("sent") or toSend
+                    for i in range(len(materials_names)):
+                        if outstanding[i] is not None and i < len(went):
+                            outstanding[i] = max(0, outstanding[i] - went[i])
                 if not dest_is_foreign:
                     try:
                         html = session.get(city_url + dest_city_id)
