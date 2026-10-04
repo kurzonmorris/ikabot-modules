@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.4.0"
+__version__ = "2.6.0"
 
 import csv
 import glob
@@ -37,6 +37,9 @@ from ikabot.config import (
     materials_names,
 )
 from ikabot.helpers.botComm import checkTelegramData, sendToBot, sendToBotDebug
+from ikabot.helpers.browserActivity import (
+    seconds_since_activity as seconds_since_browser_activity,
+)
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import banner, bcolors, enter
 from ikabot.helpers.modulePrefs import (
@@ -99,6 +102,14 @@ HARD_LEVEL_CAP = 150
 BUILD_POST_VERIFY_DELAY_SECONDS = 2
 POST_VERIFY_MAX_ATTEMPTS = 3   # retries before a build row is cancelled
 SUPPLIER_LIST_TTL_SECONDS = 120
+
+# Waiting for resources used to re-check every SHIP_RETRY_SECONDS, and each
+# re-check loads the city — which moves the player's own view in the browser.
+# Nothing changes in a city until a fleet lands, so wait for that instead.
+NO_FLEET_WAIT_SECONDS = 5 * 60      # nothing inbound: the soonest a ship could
+                                    # realistically bring anything
+MOVEMENTS_TTL_SECONDS = 45          # share one movements read across a tick
+ARRIVAL_FUDGE_SECONDS = 20          # let the server settle the delivery first
 
 # slug → ikipedia buildingId, captured from the live game's help grid
 # (every entry uses helpId=1, so the detail URL is fully derivable from this).
@@ -216,6 +227,148 @@ DEFAULT_QUEUE_STRATEGY = "wait_in_order"
 SKIP_AHEAD_MAX_CANDIDATES = 12   # bounds the per-tick scan
 
 PREFS_NAME = "constructionManager"
+
+
+# --- Colours and layout -----------------------------------------------------
+# Copied from resourceTransportManager so both modules look the same. Every
+# code resolves to an empty string when the terminal cannot show colour, so
+# the text stays readable either way.
+
+def _ansi_supported():
+    if os.name == "nt":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            handle = k32.GetStdHandle(-11)
+            mode = ctypes.c_ulong()
+            if k32.GetConsoleMode(handle, ctypes.byref(mode)):
+                k32.SetConsoleMode(handle, mode.value | 0x0004)
+                return True
+        except Exception:
+            pass
+        return os.environ.get("WT_SESSION") is not None
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+
+_USE_COLOUR = _ansi_supported()
+
+
+class C:
+    """Colour codes. All resolve to empty string when ANSI is off."""
+    RESET  = "\033[0m"  if _USE_COLOUR else ""
+    BOLD   = "\033[1m"  if _USE_COLOUR else ""
+    DIM    = "\033[2m"  if _USE_COLOUR else ""
+    CYAN   = "\033[36m" if _USE_COLOUR else ""
+    GREEN  = "\033[32m" if _USE_COLOUR else ""
+    YELLOW = "\033[33m" if _USE_COLOUR else ""
+    RED    = "\033[31m" if _USE_COLOUR else ""
+    WHITE  = "\033[97m" if _USE_COLOUR else ""
+    BLUE   = "\033[34m" if _USE_COLOUR else ""
+    HEADER = "\033[1;36m" if _USE_COLOUR else ""   # bold cyan
+    OK     = "\033[1;32m" if _USE_COLOUR else ""   # bold green
+    WARN   = "\033[1;33m" if _USE_COLOUR else ""   # bold yellow
+    ERR    = "\033[1;31m" if _USE_COLOUR else ""   # bold red
+    HINT   = "\033[2;37m" if _USE_COLOUR else ""   # dim white
+
+
+def section(title):
+    """Print a divider heading, same style as resourceTransportManager."""
+    print(f"\n  {C.HEADER}── {title} ──{C.RESET}\n")
+
+
+def option(key, title, explain=""):
+    """Print one menu choice with a dim line under it saying what it does."""
+    print(f"  {C.BOLD}({key}){C.RESET} {title}")
+    if explain:
+        print(f"  {C.DIM}      {explain}{C.RESET}")
+
+
+# --- Pause -----------------------------------------------------------------
+# Loading a city moves the player's own view, so a manual action that needs
+# several steps loses its place. While paused the worker loads nothing at all.
+
+AUTO_PAUSE_SECONDS = 5 * 60     # granted when the player is seen clicking
+ACTIVITY_FRESH_SECONDS = 90     # a click this recent counts as "still playing"
+PAUSE_ADD_CHOICES = (1, 5, 10)  # minutes the menu can add
+
+
+def pause_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_construction_pause_{_account_suffix(session)}",
+    )
+
+
+def pause_remaining(session):
+    """Seconds of pause left, or 0 when not paused."""
+    try:
+        with open(pause_path(session), "r") as f:
+            until = float(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+    left = until - time.time()
+    return int(left) if left > 0 else 0
+
+
+def pause_set(session, seconds_from_now):
+    """Pause for seconds_from_now, or clear the pause when 0 or less."""
+    path = pause_path(session)
+    if seconds_from_now <= 0:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return 0
+    until = time.time() + seconds_from_now
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(str(until))
+        os.replace(tmp, path)
+    except OSError:
+        return pause_remaining(session)
+    return int(seconds_from_now)
+
+
+def pause_add(session, minutes):
+    """Add minutes on top of whatever pause is left."""
+    return pause_set(session, pause_remaining(session) + minutes * 60)
+
+
+def pause_for_browser_activity(session):
+    """Extend the pause while the player is using the browser.
+
+    Returns the pause now in force. Does nothing when the web server is not
+    running, because then there are no clicks to see. The manual pause still
+    works in that case.
+    """
+    try:
+        idle = seconds_since_browser_activity(session)
+    except Exception:
+        return pause_remaining(session)
+    if idle is None or idle > ACTIVITY_FRESH_SECONDS:
+        return pause_remaining(session)
+    # Count from the last click, not from now, so the pause ends 5 minutes
+    # after the player stops rather than 5 minutes after we noticed.
+    wanted = int(AUTO_PAUSE_SECONDS - idle)
+    if wanted > pause_remaining(session):
+        return pause_set(session, wanted)
+    return pause_remaining(session)
+
+
+def pause_label(session):
+    """One line for the menu. Shown whether or not a pause is in force."""
+    left = pause_remaining(session)
+    if left > 0:
+        mins, secs = divmod(left, 60)
+        return f"{bcolors.YELLOW}PAUSED - {mins}m {secs:02d}s left{bcolors.ENDC}"
+    try:
+        idle = seconds_since_browser_activity(session)
+    except Exception:
+        idle = None
+    if idle is None:
+        return "not paused (no web server seen, so manual pause only)"
+    return "not paused"
 
 
 def _legacy_prefs_path(session):
@@ -870,6 +1023,102 @@ def fetch_island(session, city):
     return getIsland(html)
 
 
+# --- Inbound fleet watch ----------------------------------------------------
+# `view=city&cityId=N` is a real city switch: it moves the player's own view.
+# The military advisor view reads every fleet movement in one request while
+# keeping the current city as the background, so it costs no switch at all.
+
+_movements_cache = {"at": 0.0, "arrivals": None}
+_movements_lock = threading.Lock()
+
+
+def fetch_inbound_arrivals(session):
+    """Seconds until each of our own inbound fleets lands.
+
+    Returns a dict: {"by_name": {city_name: seconds}, "soonest": seconds|None,
+    "named": bool}.  `named` is False when the response carried no usable
+    destination name, so callers know a per-city answer was not possible.
+    Cached briefly so one scheduler tick costs one request, not one per city.
+    """
+    now = time.time()
+    with _movements_lock:
+        if (_movements_cache["arrivals"] is not None
+                and now - _movements_cache["at"] < MOVEMENTS_TTL_SECONDS):
+            return _movements_cache["arrivals"]
+
+    empty = {"by_name": {}, "soonest": None, "named": False}
+    try:
+        # session.get() with no view returns the page already loaded, so it
+        # does not move the player either.
+        html = session.get()
+        match = re.search(r"currentCityId:\s(\d+),", html)
+        if match is None:
+            return empty
+        url = (
+            "view=militaryAdvisor&oldView=city&oldBackgroundView=city"
+            "&backgroundView=city&currentCityId={cid}&actionRequest={ar}&ajax=1"
+        ).format(cid=match.group(1), ar=actionRequest)
+        data = json.loads(session.post(url), strict=False)
+        movements = data[1][1][2]["viewScriptParams"]["militaryAndFleetMovements"]
+        server_time = int(data[0][1]["time"])
+    except Exception:
+        sendToBotDebug(
+            session,
+            f"fetch_inbound_arrivals failed:\n{traceback.format_exc()}",
+            True,
+        )
+        return empty
+
+    by_name, soonest, named = {}, None, False
+    for mv in movements:
+        try:
+            if not mv.get("isOwnArmyOrFleet"):
+                continue
+            # A returning fleet carries nothing to its destination.
+            if (mv.get("event") or {}).get("isFleetReturning"):
+                continue
+            left = int(mv["eventTime"]) - server_time
+            if left < 0:
+                left = 0
+            target = (mv.get("target") or {}).get("name")
+            if target:
+                named = True
+                key = str(target)
+                if key not in by_name or left < by_name[key]:
+                    by_name[key] = left
+            if soonest is None or left < soonest:
+                soonest = left
+        except Exception:
+            continue
+
+    arrivals = {"by_name": by_name, "soonest": soonest, "named": named}
+    with _movements_lock:
+        _movements_cache["at"] = time.time()
+        _movements_cache["arrivals"] = arrivals
+    return arrivals
+
+
+def resource_wait_seconds(session, city_name):
+    """How long to leave a city alone while it waits for resources.
+
+    Returns the time until the next fleet lands at that city, so the city is
+    loaded once when something actually arrives instead of once a minute.
+    Falls back to the soonest arrival anywhere when the destination cannot be
+    identified, and to NO_FLEET_WAIT_SECONDS when no fleet is inbound.
+    """
+    arrivals = fetch_inbound_arrivals(session)
+    wait = None
+    if city_name and arrivals["by_name"]:
+        wait = arrivals["by_name"].get(str(city_name))
+    if wait is None and not arrivals["named"]:
+        # No destination names in the response — fall back to any arrival
+        # rather than assume nothing is coming.
+        wait = arrivals["soonest"]
+    if wait is None:
+        return NO_FLEET_WAIT_SECONDS
+    return max(SHIP_RETRY_SECONDS, int(wait) + ARRIVAL_FUDGE_SECONDS)
+
+
 # ---------------------------------------------------------------------------
 # Cost helpers — ported from research/constructionList.py:156 + :186
 # ---------------------------------------------------------------------------
@@ -1259,16 +1508,16 @@ def _print_cost_table(header, rows):
 # Interactive add-to-queue flow (menu option 1)
 # ---------------------------------------------------------------------------
 
-# Navigation keys accepted at the level prompts.  "=" is kept for backwards
+# Navigation key accepted at the level prompts.
 # compatibility with the old tip line; "b"/"back" is the discoverable spelling.
-_BACK_VALUES = ["b", "B", "back", "Back", "BACK"]
-_LEVEL_NAV_VALUES = ["'", "="] + _BACK_VALUES
+# ' is the single "go back one step" key everywhere, matching
+# resourceTransportManager. Press it again to leave the add screen.
+_LEVEL_NAV_VALUES = ["'"]
 
 
 def _is_back_choice(value):
-    """True for "=" or any spelling of "b"/"back" — one step back, not exit."""
-    return (isinstance(value, str)
-            and value.strip().lower() in ("=", "b", "back"))
+    """True for the back key."""
+    return isinstance(value, str) and value.strip() == "'"
 
 def _prompt_insert_position(pending_rows, city_name):
     """Show numbered pending rows and ask where to insert the new block.
@@ -1283,10 +1532,9 @@ def _prompt_insert_position(pending_rows, city_name):
         print(f"    {i + 1}) after  {r['building']} → lv {r['target_level']}")
     print(f"    {n + 1}) [bottom — append after all pending]")
     print(f"\n  Choice [0–{n + 1}, default 0]:")
-    raw = read(min=0, max=n + 1, digit=True, empty=True, additionalValues=["'", "="])
+    raw = read(min=0, max=n + 1, digit=True, empty=True,
+               additionalValues=["'"])
     if raw == "'":
-        return None, "exit"
-    if raw == "=":
         return None, "restart"
     idx = 0 if raw == "" else int(raw)
     # position n+1 (bottom) = insert after all pending = same as len(pending)
@@ -1319,12 +1567,10 @@ def _add_to_queue(session):
     _render_slot_grid(city, _gather_pending_for_city(session, city_id))
 
     print(
-        f"  {bcolors.WARNING if hasattr(bcolors, 'WARNING') else ''}"
-        f"Tip: at any prompt below, 'b' (or '=') goes back one step and "
-        f"re-prompts for a slot, and ' (apostrophe) exits to the main menu.\n"
-        f"  At a level prompt, entering the level the slot is already at "
-        f"skips that slot without queueing anything."
-        f"{bcolors.ENDC}\n"
+        f"  {C.HINT}How to move around: (') goes back one step. "
+        f"At a level prompt,{C.RESET}\n"
+        f"  {C.HINT}entering the level the slot is already at skips that slot "
+        f"and queues nothing.{C.RESET}\n"
     )
 
     # ---- session-default transport mode ----
@@ -1356,8 +1602,11 @@ def _add_to_queue(session):
     while not exit_to_menu and slot_targets < ADD_SESSION_SLOT_CAP:
         remaining = ADD_SESSION_SLOT_CAP - slot_targets
         print(
-            f"  Enter slot number (0–{max_slot})  |  S=re-show  |  "
-            f"'=exit  |  Enter/d/done=finish   [{remaining} left]:"
+            f"  Slot number (0–{max_slot})   "
+            f"{C.BOLD}(s){C.RESET} show the grid again   "
+            f"{C.BOLD}(d){C.RESET} done   "
+            f"{C.BOLD}('){C.RESET} back"
+            f"   {C.DIM}[{remaining} more slot(s) allowed]{C.RESET}:"
         )
         raw = read(empty=True).strip()
         if raw == "" or raw.lower() in ("d", "done"):
@@ -1365,12 +1614,6 @@ def _add_to_queue(session):
         if raw == "'":
             exit_to_menu = True
             break
-        if raw == "=":
-            # No-op at the top of the cycle — equivalent to a re-show.
-            _render_slot_grid(
-                city, _gather_pending_for_city(session, city_id)
-            )
-            continue
         if raw.lower() == "s":
             _render_slot_grid(
                 city, _gather_pending_for_city(session, city_id)
@@ -1406,7 +1649,7 @@ def _add_to_queue(session):
                 print(f"  ({idx}) {o['name']}")
             chosen_idx = read(
                 min=1, max=len(opts),
-                additionalValues=["'", "="] + _BACK_VALUES,
+                additionalValues=_LEVEL_NAV_VALUES,
             )
             if chosen_idx == "'":
                 exit_to_menu = True
@@ -1542,7 +1785,7 @@ def _add_to_queue(session):
                 )
                 print("  Continue anyway? [y/N]   '=exit  ==restart")
                 ans = read(
-                    values=["y", "Y", "n", "N", "", "'", "="], default="N"
+                    values=["y", "Y", "n", "N", "", "'"], default="N"
                 )
                 if ans == "'":
                     exit_to_menu = True
@@ -1627,12 +1870,12 @@ def _add_to_queue(session):
         )
         tm_choice = read(
             min=1, max=3, digit=True, empty=True,
-            additionalValues=["'", "="],
+            additionalValues=["'"],
         )
         if tm_choice == "'":
             exit_to_menu = True
             break
-        if tm_choice == "=":
+        if tm_choice == "'":
             continue
         transport_mode = {
             1: "jit", 2: "bulk", 3: "none", "": session_default_mode,
@@ -1960,16 +2203,16 @@ def _view_queue(session):
 
         if detailed:
             _print_queue_detailed(rows)
-            print("\n  (c) Compact view    (') Back")
+            print(f"\n  {C.BOLD}(d){C.RESET} back to the short list   "
+                  f"{C.BOLD}('){C.RESET} Back")
         else:
             _print_queue_grouped(rows)
-            print("\n  (d) Detailed per-level view    (') Back")
+            print(f"\n  {C.BOLD}(d){C.RESET} show every level   "
+                  f"{C.BOLD}('){C.RESET} Back")
 
         ans = str(read(empty=True)).strip().lower()
         if ans == "d":
-            detailed = True
-        elif ans == "c":
-            detailed = False
+            detailed = not detailed
         else:
             return
 
@@ -2048,19 +2291,21 @@ def _edit_queue(session):
                 f"    ({i}) slot {g['slot_position']:>2}  {g['building']:<20}  "
                 f"{lv_range}  [{len(g['pending_qids'])} row(s)]"
             )
-        print(f"\n  (R) Reorder  (T) Transport mode  (B) Back")
+        print(f"\n  {C.BOLD}(e){C.RESET} Reorder the list   "
+              f"{C.BOLD}(o){C.RESET} Change how resources are sent   "
+              f"{C.BOLD}('){C.RESET} Back")
 
         raw = read(
             min=1, max=len(groups), digit=True, empty=True,
-            additionalValues=["r", "R", "t", "T", "b", "B"],
+            additionalValues=["e", "E", "o", "O", "'"],
         )
         if raw in ("", None):
             continue
-        if isinstance(raw, str) and raw.upper() == "B":
+        if isinstance(raw, str) and raw == "'":
             return
 
         # ---- Reorder within city ------------------------------------------
-        if isinstance(raw, str) and raw.upper() == "R":
+        if isinstance(raw, str) and raw.upper() == "E":
             rows = csv_load(session)
             city_ids = sorted({r["city_id"] for r in rows})
             if not city_ids:
@@ -2114,7 +2359,7 @@ def _edit_queue(session):
             continue
 
         # ---- Transport mode bulk-set for city ------------------------------
-        if isinstance(raw, str) and raw.upper() == "T":
+        if isinstance(raw, str) and raw.upper() == "O":
             rows = csv_load(session)
             city_ids = sorted({r["city_id"] for r in rows})
             if not city_ids:
@@ -2153,8 +2398,9 @@ def _edit_queue(session):
         print("  (1) Delete this entire slot queue")
         print(f"  (2) Trim — change the target from lv {g['max_level']} to a lower level")
         print("  (3) Modify a single row")
-        print("  (B) Back")
-        slot_action = read(min=1, max=3, digit=True, additionalValues=["b", "B"])
+        print(f"  {C.BOLD}('){C.RESET} Back")
+        slot_action = read(min=1, max=3, digit=True,
+                           additionalValues=["'"])
         if isinstance(slot_action, str) and slot_action.upper() == "B":
             continue
 
@@ -2402,9 +2648,11 @@ def _cancel_all_pending(session):
         return
     print(f"\n  This will delete all {len(pending)} pending row(s) across all cities.")
     print(f"  Running/shipping rows are unaffected.")
-    print(f"  Type {bcolors.BOLD}yes{bcolors.ENDC} to confirm:")
-    confirm = read(msg="  > ", empty=True, additionalValues=["yes", "Yes", "YES"])
-    if str(confirm).lower() != "yes":
+    print(f"  Delete them? {C.BOLD}(y){C.RESET} yes   "
+          f"{C.BOLD}(n){C.RESET} no   [default: no]")
+    confirm = read(msg="  > ", empty=True,
+                   additionalValues=["y", "Y", "n", "N", "'"])
+    if str(confirm).strip().lower() != "y":
         print("  Cancelled.")
         enter()
         return
@@ -2521,6 +2769,64 @@ def _toggle_city_strategy(session):
         if _is_worker_running(session):
             print(f"  The running worker applies this within "
                   f"{TICK_BUDGET_SECONDS}s. No restart is needed.")
+        enter()
+
+
+def _pause_menu(session):
+    """Add time to the pause, or clear it."""
+    while True:
+        banner()
+        _print_module_banner("Pause")
+        left = pause_remaining(session)
+
+        print("  While paused the worker loads no cities at all, so your")
+        print("  browser stays on the city you are looking at.\n")
+        print(f"  Now: {pause_label(session)}\n")
+
+        try:
+            idle = seconds_since_browser_activity(session)
+        except Exception:
+            idle = None
+        if idle is None:
+            print(f"  {C.HINT}The web server is not running, so the module "
+                  f"cannot see your clicks.{C.RESET}")
+            print(f"  {C.HINT}Add time here instead, or start the web server "
+                  f"to get an automatic pause.{C.RESET}")
+        else:
+            print(f"  {C.HINT}Your last click was {int(idle)}s ago. While you "
+                  f"keep clicking, the pause{C.RESET}")
+            print(f"  {C.HINT}renews itself for "
+                  f"{AUTO_PAUSE_SECONDS // 60} minutes.{C.RESET}")
+
+        section("Add time")
+        for i, mins in enumerate(PAUSE_ADD_CHOICES, 1):
+            option(i, f"Add {mins} minute{'s' if mins != 1 else ''}",
+                   f"Pause ends {mins} minute{'s' if mins != 1 else ''} later "
+                   f"than it would now.")
+        if left > 0:
+            option("d", "Clear the pause",
+                   "The worker starts loading cities again straight away.")
+        option("'", "Back")
+
+        keys = [str(i) for i in range(1, len(PAUSE_ADD_CHOICES) + 1)]
+        if left > 0:
+            keys += ["d", "D"]
+        choice = read(values=keys + ["'", ""], empty=True,
+                      additionalValues=keys + ["'"])
+        text = str(choice).strip().lower()
+        if text in ("", "'"):
+            return
+        if text == "d":
+            pause_set(session, 0)
+            print(f"\n  {C.OK}Pause cleared.{C.RESET}")
+            enter()
+            continue
+        try:
+            mins = PAUSE_ADD_CHOICES[int(text) - 1]
+        except (ValueError, IndexError):
+            continue
+        total = pause_add(session, mins)
+        print(f"\n  {C.OK}Paused for {total // 60}m {total % 60:02d}s.{C.RESET}")
         enter()
 
 
@@ -2868,28 +3174,58 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
     try:
         while True:
             banner()
+            _print_module_banner()
             pending = csv_count_pending(session)
             n_cities = csv_count_cities_with_work(session)
-            print(
-                f"Construction Manager v{__version__}\n"
-                f"  CSV: {csv_path(session)}\n"
-                f"  {_worker_status_line(session)}\n"
-                f"  {pending} pending row(s) across {n_cities} city/cities\n"
-                f"  Strategy: {_strategy_label(get_queue_strategy(session))}\n"
-            )
-            print(f"  {bcolors.BOLD}(s){bcolors.ENDC} Start worker   "
-                  f"{bcolors.BOLD}(o){bcolors.ENDC} Stop worker   "
-                  f"{bcolors.BOLD}(x){bcolors.ENDC} Cancel all pending   "
-                  f"{bcolors.BOLD}(r){bcolors.ENDC} Retry skipped\n")
-            print("(1) Add construction(s) to queue        [interactive only]")
-            print("(2) View queue")
-            print("(3) Edit queue (modify / delete / reorder) [interactive only]")
-            print("(4) Resource requirements per city")
-            print("(5) Queue strategy (wait in order / skip ahead)")
-            print("(') Back")
-            choice = read(min=1, max=5,
-                          additionalValues=["'", "s", "S", "o", "O",
-                                            "x", "X", "r", "R"])
+            skipped = sum(1 for r in csv_load(session)
+                          if r["status"] == "skipped")
+
+            print(f"  {_worker_status_line(session)}")
+            print(f"  Pause:   {pause_label(session)}")
+            print(f"  Queued:  {pending} building step(s) in "
+                  f"{n_cities} city/cities")
+            if skipped:
+                print(f"  {C.WARN}Stopped: {skipped} step(s) were cancelled "
+                      f"and need option 5.{C.RESET}")
+            print(f"  Plan:    {_strategy_label(get_queue_strategy(session))}")
+            city_over = len(get_city_strategies(session))
+            if city_over:
+                print(f"  {C.DIM}           {city_over} city/cities use their "
+                      f"own plan.{C.RESET}")
+
+            section("The worker")
+            option("s", "Start the worker",
+                   "Builds the queue in the background. Asks about "
+                   "notifications first.")
+            option("o", "Stop the worker",
+                   "Lets any shipment finish, then stops. Nothing is lost.")
+            option(1, "Pause for a while",
+                   "Stops all city loading so your browser stays put while "
+                   "you play.")
+
+            section("The building queue")
+            option(2, "Add buildings",
+                   "Pick a city, pick a slot, choose the level to reach.")
+            option(3, "See the queue",
+                   "What is queued, what is building now, and what is stuck.")
+            option(4, "Change the queue",
+                   "Edit a target level, reorder, or remove single buildings.")
+            option(5, "Retry cancelled steps",
+                   "Puts steps the module gave up on back into the queue.")
+            option("d", "Delete the whole queue",
+                   "Removes every waiting step. Asks you to confirm.")
+
+            section("Resources and plan")
+            option(6, "Resources needed",
+                   "Per city: what it still needs, and what to send now.")
+            option(7, "Build order plan",
+                   "Wait in order, or skip to a building you can afford.")
+
+            print()
+            option("'", "Back")
+
+            choice = read(min=1, max=7,
+                          additionalValues=["'", "s", "S", "o", "O", "d", "D"])
 
             if isinstance(choice, str):
                 letter = choice.lower()
@@ -2900,29 +3236,32 @@ def constructionManager(session, event, stdin_fd, predetermined_input):
                     return
                 if letter == "o":
                     _stop_worker(session)
-                elif letter == "x":
+                elif letter == "d":
                     _cancel_all_pending(session)
-                elif letter == "r":
-                    _requeue_skipped(session)
                 continue
 
-            if choice in (1, 3) and not interactive:
+            if choice in (2, 4) and not interactive:
                 print(
-                    f"  Option {choice} requires an interactive session "
-                    f"(predetermined_input is set). Skipping."
+                    f"  Option {choice} needs you at the keyboard. "
+                    f"This session is running a saved sequence, so it is "
+                    f"skipped."
                 )
                 enter()
                 continue
 
             if choice == 1:
-                _add_to_queue(session)
+                _pause_menu(session)
             elif choice == 2:
-                _view_queue(session)
+                _add_to_queue(session)
             elif choice == 3:
-                _edit_queue(session)
+                _view_queue(session)
             elif choice == 4:
-                _resource_requirements(session)
+                _edit_queue(session)
             elif choice == 5:
+                _requeue_skipped(session)
+            elif choice == 6:
+                _resource_requirements(session)
+            elif choice == 7:
                 _choose_queue_strategy(session)
     except KeyboardInterrupt:
         pass
@@ -3045,6 +3384,7 @@ def post_build_or_upgrade(session, city, row):
 # ---------------------------------------------------------------------------
 
 _supplier_id_cache = {}   # {dest_city_id: (timestamp, [city_id_str, ...])}
+_supplier_city_cache = {} # {city_id_str: (timestamp, city_dict)}
 _supplier_cache_lock = threading.Lock()
 
 
@@ -3063,14 +3403,29 @@ def _get_supplier_ids(session, dest_city_id):
 
 
 def build_supplier_list(session, dest_city_id):
-    """Return list of freshly-fetched city dicts for all cities except dest."""
+    """Return city dicts for all cities except dest.
+
+    Every city here is a real city switch, so 15 other cities means 15
+    switches in a burst. The dicts are cached for the same short window as
+    the id list, so a run of shipments costs one sweep, not one per shipment.
+    """
     supplier_ids = _get_supplier_ids(session, dest_city_id)
+    now = time.time()
     suppliers = []
     for cid in supplier_ids:
+        key = str(cid)
+        with _supplier_cache_lock:
+            cached = _supplier_city_cache.get(key)
+        if cached and now - cached[0] < SUPPLIER_LIST_TTL_SECONDS:
+            suppliers.append(cached[1])
+            continue
         try:
-            suppliers.append(fetch_city(session, cid))
+            city = fetch_city(session, cid)
         except Exception:
             continue
+        with _supplier_cache_lock:
+            _supplier_city_cache[key] = (time.time(), city)
+        suppliers.append(city)
     return suppliers
 
 
@@ -3781,9 +4136,11 @@ def service_city(session, city_id, st, rows, stop_event):
                     session, row,
                     "the game won't start this upgrade yet — usually too few "
                     "citizens, low wine/happiness, or a resource check; "
-                    "retrying every minute",
+                    "will look again when a fleet lands",
                 )
-                st["next_check"] = now + SHIP_RETRY_SECONDS
+                st["next_check"] = now + resource_wait_seconds(
+                    session, row.get("city_name")
+                )
                 return
             clear_wait_note(session, row)
             issue_and_confirm(session, city_id, st, row, city, cost)
@@ -3860,7 +4217,11 @@ def service_city(session, city_id, st, rows, stop_event):
             st["phase"]      = "skip-cooldown"
             st["next_check"] = now + SHIP_RETRY_SECONDS
             return
-        st["next_check"] = now + SHIP_RETRY_SECONDS
+        # Wait for the next fleet instead of re-loading the city every
+        # minute; a city load moves the player's own view in the browser.
+        st["next_check"] = now + resource_wait_seconds(
+            session, row.get("city_name")
+        )
         return
 
     # ---- RUNNING -------------------------------------------------------
@@ -4015,6 +4376,20 @@ def scheduler_loop(session, stop_event, worker_token=None):
         # effect on a running worker rather than needing a restart.
         WORKER_PREFS["queue_strategy"] = get_queue_strategy(session)
         WORKER_PREFS["city_strategy"]  = get_city_strategies(session)
+
+        # Hold off entirely while the player is using the browser. Loading any
+        # city would move their view and spoil a manual action mid-step.
+        paused = pause_for_browser_activity(session)
+        if paused > 0:
+            try:
+                session.setStatus(
+                    f"Construction worker: paused {paused // 60}m "
+                    f"{paused % 60:02d}s (browser in use)"
+                )
+            except Exception:
+                pass
+            stop_event.wait(min(paused, TICK_BUDGET_SECONDS))
+            continue
 
         now = int(time.time())
         drain_shortage_events(session, city_state, now)
