@@ -3037,6 +3037,27 @@ def resolve_resources(parsed, source_available, row, csv_resource_cols,
     return resolved
 
 
+def _consolidate_amount(rc_val, avail, send_mode, outstanding=None):
+    """How much one source city contributes to a consolidation.
+
+    outstanding is the quantity still wanted when the figure entered is a
+    total for all the sources together; None when every city is asked for
+    the full amount.
+    """
+    amount = _resolve_rc(rc_val, avail, send_mode)
+    if outstanding is not None:
+        amount = min(amount, max(0, outstanding))
+    return amount
+
+
+def _reduce_outstanding(outstanding, went):
+    """Take what actually shipped off a shared budget."""
+    for i in range(len(outstanding)):
+        if outstanding[i] is not None and i < len(went):
+            outstanding[i] = max(0, outstanding[i] - went[i])
+    return outstanding
+
+
 def _resolve_rc(rc_val, avail, send_mode):
     """Resolve a single resource_config entry against available amount.
     rc_val can be: None, 0, int, ("except", reserve) or ["except", reserve].
@@ -3988,10 +4009,12 @@ def consolidateMode(session, event, stdin_fd, predetermined_input,
                 if resource_config[i] is None:
                     continue
                 avail = odata["availableResources"][i]
-                s = _resolve_rc(resource_config[i], avail, send_mode)
+                s = _consolidate_amount(
+                    resource_config[i], avail, send_mode,
+                    outstanding_preview[i]
+                    if amount_scope == AMOUNT_SCOPE_TOTAL else None)
                 if (amount_scope == AMOUNT_SCOPE_TOTAL
                         and outstanding_preview[i] is not None):
-                    s = min(s, max(0, outstanding_preview[i]))
                     outstanding_preview[i] -= s
                 if destination_city.get("isOwnCity", False):
                     free = destination_city["freeSpaceForResources"][i]
@@ -6500,9 +6523,9 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                 continue
             avail = oc_fresh["availableResources"][i]
             free = _rrs_free_from_summary(summary, cid, i, avail) if RRS_AVAILABLE else avail
-            s = _resolve_rc(resource_config[i], free, send_mode)
-            if share_budget and outstanding[i] is not None:
-                s = min(s, max(0, outstanding[i]))
+            s = _consolidate_amount(
+                resource_config[i], free, send_mode,
+                outstanding[i] if share_budget else None)
             try:
                 s = min(s, destination_city["freeSpaceForResources"][i])
             except (KeyError, IndexError):
@@ -6537,10 +6560,8 @@ def run_consolidate_cycle(session, sched, notif_config, log_path):
                 if share_budget:
                     # Count what actually went, not what was planned: a
                     # trimmed or partial load leaves more outstanding.
-                    went = result.get("sent") or toSend
-                    for i in range(len(materials_names)):
-                        if outstanding[i] is not None and i < len(went):
-                            outstanding[i] = max(0, outstanding[i] - went[i])
+                    _reduce_outstanding(outstanding,
+                                        result.get("sent") or toSend)
                 if not dest_is_foreign:
                     try:
                         html = session.get(city_url + dest_city_id)
