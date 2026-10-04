@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 
 import csv
 import glob
@@ -99,6 +99,14 @@ HARD_LEVEL_CAP = 150
 BUILD_POST_VERIFY_DELAY_SECONDS = 2
 POST_VERIFY_MAX_ATTEMPTS = 3   # retries before a build row is cancelled
 SUPPLIER_LIST_TTL_SECONDS = 120
+
+# Waiting for resources used to re-check every SHIP_RETRY_SECONDS, and each
+# re-check loads the city — which moves the player's own view in the browser.
+# Nothing changes in a city until a fleet lands, so wait for that instead.
+NO_FLEET_WAIT_SECONDS = 5 * 60      # nothing inbound: the soonest a ship could
+                                    # realistically bring anything
+MOVEMENTS_TTL_SECONDS = 45          # share one movements read across a tick
+ARRIVAL_FUDGE_SECONDS = 20          # let the server settle the delivery first
 
 # slug → ikipedia buildingId, captured from the live game's help grid
 # (every entry uses helpId=1, so the detail URL is fully derivable from this).
@@ -868,6 +876,102 @@ def fetch_island(session, city):
     """Return parsed island dict for the island this city sits on."""
     html = session.get(island_url + str(city["islandId"]))
     return getIsland(html)
+
+
+# --- Inbound fleet watch ----------------------------------------------------
+# `view=city&cityId=N` is a real city switch: it moves the player's own view.
+# The military advisor view reads every fleet movement in one request while
+# keeping the current city as the background, so it costs no switch at all.
+
+_movements_cache = {"at": 0.0, "arrivals": None}
+_movements_lock = threading.Lock()
+
+
+def fetch_inbound_arrivals(session):
+    """Seconds until each of our own inbound fleets lands.
+
+    Returns a dict: {"by_name": {city_name: seconds}, "soonest": seconds|None,
+    "named": bool}.  `named` is False when the response carried no usable
+    destination name, so callers know a per-city answer was not possible.
+    Cached briefly so one scheduler tick costs one request, not one per city.
+    """
+    now = time.time()
+    with _movements_lock:
+        if (_movements_cache["arrivals"] is not None
+                and now - _movements_cache["at"] < MOVEMENTS_TTL_SECONDS):
+            return _movements_cache["arrivals"]
+
+    empty = {"by_name": {}, "soonest": None, "named": False}
+    try:
+        # session.get() with no view returns the page already loaded, so it
+        # does not move the player either.
+        html = session.get()
+        match = re.search(r"currentCityId:\s(\d+),", html)
+        if match is None:
+            return empty
+        url = (
+            "view=militaryAdvisor&oldView=city&oldBackgroundView=city"
+            "&backgroundView=city&currentCityId={cid}&actionRequest={ar}&ajax=1"
+        ).format(cid=match.group(1), ar=actionRequest)
+        data = json.loads(session.post(url), strict=False)
+        movements = data[1][1][2]["viewScriptParams"]["militaryAndFleetMovements"]
+        server_time = int(data[0][1]["time"])
+    except Exception:
+        sendToBotDebug(
+            session,
+            f"fetch_inbound_arrivals failed:\n{traceback.format_exc()}",
+            True,
+        )
+        return empty
+
+    by_name, soonest, named = {}, None, False
+    for mv in movements:
+        try:
+            if not mv.get("isOwnArmyOrFleet"):
+                continue
+            # A returning fleet carries nothing to its destination.
+            if (mv.get("event") or {}).get("isFleetReturning"):
+                continue
+            left = int(mv["eventTime"]) - server_time
+            if left < 0:
+                left = 0
+            target = (mv.get("target") or {}).get("name")
+            if target:
+                named = True
+                key = str(target)
+                if key not in by_name or left < by_name[key]:
+                    by_name[key] = left
+            if soonest is None or left < soonest:
+                soonest = left
+        except Exception:
+            continue
+
+    arrivals = {"by_name": by_name, "soonest": soonest, "named": named}
+    with _movements_lock:
+        _movements_cache["at"] = time.time()
+        _movements_cache["arrivals"] = arrivals
+    return arrivals
+
+
+def resource_wait_seconds(session, city_name):
+    """How long to leave a city alone while it waits for resources.
+
+    Returns the time until the next fleet lands at that city, so the city is
+    loaded once when something actually arrives instead of once a minute.
+    Falls back to the soonest arrival anywhere when the destination cannot be
+    identified, and to NO_FLEET_WAIT_SECONDS when no fleet is inbound.
+    """
+    arrivals = fetch_inbound_arrivals(session)
+    wait = None
+    if city_name and arrivals["by_name"]:
+        wait = arrivals["by_name"].get(str(city_name))
+    if wait is None and not arrivals["named"]:
+        # No destination names in the response — fall back to any arrival
+        # rather than assume nothing is coming.
+        wait = arrivals["soonest"]
+    if wait is None:
+        return NO_FLEET_WAIT_SECONDS
+    return max(SHIP_RETRY_SECONDS, int(wait) + ARRIVAL_FUDGE_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -3045,6 +3149,7 @@ def post_build_or_upgrade(session, city, row):
 # ---------------------------------------------------------------------------
 
 _supplier_id_cache = {}   # {dest_city_id: (timestamp, [city_id_str, ...])}
+_supplier_city_cache = {} # {city_id_str: (timestamp, city_dict)}
 _supplier_cache_lock = threading.Lock()
 
 
@@ -3063,14 +3168,29 @@ def _get_supplier_ids(session, dest_city_id):
 
 
 def build_supplier_list(session, dest_city_id):
-    """Return list of freshly-fetched city dicts for all cities except dest."""
+    """Return city dicts for all cities except dest.
+
+    Every city here is a real city switch, so 15 other cities means 15
+    switches in a burst. The dicts are cached for the same short window as
+    the id list, so a run of shipments costs one sweep, not one per shipment.
+    """
     supplier_ids = _get_supplier_ids(session, dest_city_id)
+    now = time.time()
     suppliers = []
     for cid in supplier_ids:
+        key = str(cid)
+        with _supplier_cache_lock:
+            cached = _supplier_city_cache.get(key)
+        if cached and now - cached[0] < SUPPLIER_LIST_TTL_SECONDS:
+            suppliers.append(cached[1])
+            continue
         try:
-            suppliers.append(fetch_city(session, cid))
+            city = fetch_city(session, cid)
         except Exception:
             continue
+        with _supplier_cache_lock:
+            _supplier_city_cache[key] = (time.time(), city)
+        suppliers.append(city)
     return suppliers
 
 
@@ -3781,9 +3901,11 @@ def service_city(session, city_id, st, rows, stop_event):
                     session, row,
                     "the game won't start this upgrade yet — usually too few "
                     "citizens, low wine/happiness, or a resource check; "
-                    "retrying every minute",
+                    "will look again when a fleet lands",
                 )
-                st["next_check"] = now + SHIP_RETRY_SECONDS
+                st["next_check"] = now + resource_wait_seconds(
+                    session, row.get("city_name")
+                )
                 return
             clear_wait_note(session, row)
             issue_and_confirm(session, city_id, st, row, city, cost)
@@ -3860,7 +3982,11 @@ def service_city(session, city_id, st, rows, stop_event):
             st["phase"]      = "skip-cooldown"
             st["next_check"] = now + SHIP_RETRY_SECONDS
             return
-        st["next_check"] = now + SHIP_RETRY_SECONDS
+        # Wait for the next fleet instead of re-loading the city every
+        # minute; a city load moves the player's own view in the browser.
+        st["next_check"] = now + resource_wait_seconds(
+            session, row.get("city_name")
+        )
         return
 
     # ---- RUNNING -------------------------------------------------------
