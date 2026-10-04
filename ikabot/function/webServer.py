@@ -21,6 +21,7 @@ import requests
 
 from ikabot.config import *
 from ikabot.helpers.botComm import *
+from ikabot.helpers.browserActivity import record_activity
 from ikabot.helpers.getJson import *
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import *
@@ -228,6 +229,12 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                 or ".cur" in request.url
             )
             
+            # Stamp that the player is using the browser, so background tasks
+            # can hold off and not move the view mid-action. Images are
+            # skipped: one page pulls dozens of them and they prove nothing.
+            if not is_image:
+                record_activity(session)
+
             if is_image:
                 # add caching for images
                 expires = datetime.utcnow() + timedelta(days=1)

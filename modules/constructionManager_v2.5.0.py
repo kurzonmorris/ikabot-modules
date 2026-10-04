@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.4.1"
+__version__ = "2.5.0"
 
 import csv
 import glob
@@ -37,6 +37,9 @@ from ikabot.config import (
     materials_names,
 )
 from ikabot.helpers.botComm import checkTelegramData, sendToBot, sendToBotDebug
+from ikabot.helpers.browserActivity import (
+    seconds_since_activity as seconds_since_browser_activity,
+)
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import banner, bcolors, enter
 from ikabot.helpers.modulePrefs import (
@@ -224,6 +227,94 @@ DEFAULT_QUEUE_STRATEGY = "wait_in_order"
 SKIP_AHEAD_MAX_CANDIDATES = 12   # bounds the per-tick scan
 
 PREFS_NAME = "constructionManager"
+
+
+# --- Pause -----------------------------------------------------------------
+# Loading a city moves the player's own view, so a manual action that needs
+# several steps loses its place. While paused the worker loads nothing at all.
+
+AUTO_PAUSE_SECONDS = 5 * 60     # granted when the player is seen clicking
+ACTIVITY_FRESH_SECONDS = 90     # a click this recent counts as "still playing"
+PAUSE_ADD_CHOICES = (1, 5, 10)  # minutes the menu can add
+
+
+def pause_path(session):
+    return os.path.join(
+        os.path.expanduser("~"),
+        f".ikabot_construction_pause_{_account_suffix(session)}",
+    )
+
+
+def pause_remaining(session):
+    """Seconds of pause left, or 0 when not paused."""
+    try:
+        with open(pause_path(session), "r") as f:
+            until = float(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+    left = until - time.time()
+    return int(left) if left > 0 else 0
+
+
+def pause_set(session, seconds_from_now):
+    """Pause for seconds_from_now, or clear the pause when 0 or less."""
+    path = pause_path(session)
+    if seconds_from_now <= 0:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return 0
+    until = time.time() + seconds_from_now
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(str(until))
+        os.replace(tmp, path)
+    except OSError:
+        return pause_remaining(session)
+    return int(seconds_from_now)
+
+
+def pause_add(session, minutes):
+    """Add minutes on top of whatever pause is left."""
+    return pause_set(session, pause_remaining(session) + minutes * 60)
+
+
+def pause_for_browser_activity(session):
+    """Extend the pause while the player is using the browser.
+
+    Returns the pause now in force. Does nothing when the web server is not
+    running, because then there are no clicks to see. The manual pause still
+    works in that case.
+    """
+    try:
+        idle = seconds_since_browser_activity(session)
+    except Exception:
+        return pause_remaining(session)
+    if idle is None or idle > ACTIVITY_FRESH_SECONDS:
+        return pause_remaining(session)
+    # Count from the last click, not from now, so the pause ends 5 minutes
+    # after the player stops rather than 5 minutes after we noticed.
+    wanted = int(AUTO_PAUSE_SECONDS - idle)
+    if wanted > pause_remaining(session):
+        return pause_set(session, wanted)
+    return pause_remaining(session)
+
+
+def pause_label(session):
+    """One line for the menu. Shown whether or not a pause is in force."""
+    left = pause_remaining(session)
+    if left > 0:
+        mins, secs = divmod(left, 60)
+        return f"{bcolors.YELLOW}PAUSED - {mins}m {secs:02d}s left{bcolors.ENDC}"
+    try:
+        idle = seconds_since_browser_activity(session)
+    except Exception:
+        idle = None
+    if idle is None:
+        return "not paused (no web server seen, so manual pause only)"
+    return "not paused"
 
 
 def _legacy_prefs_path(session):
@@ -4141,6 +4232,20 @@ def scheduler_loop(session, stop_event, worker_token=None):
         # effect on a running worker rather than needing a restart.
         WORKER_PREFS["queue_strategy"] = get_queue_strategy(session)
         WORKER_PREFS["city_strategy"]  = get_city_strategies(session)
+
+        # Hold off entirely while the player is using the browser. Loading any
+        # city would move their view and spoil a manual action mid-step.
+        paused = pause_for_browser_activity(session)
+        if paused > 0:
+            try:
+                session.setStatus(
+                    f"Construction worker: paused {paused // 60}m "
+                    f"{paused % 60:02d}s (browser in use)"
+                )
+            except Exception:
+                pass
+            stop_event.wait(min(paused, TICK_BUDGET_SECONDS))
+            continue
 
         now = int(time.time())
         drain_shortage_events(session, city_state, now)

@@ -140,7 +140,7 @@ changed. Put a version on anything that can carry one.
 - **A file.** Put the version before the extension, after `_v`:
 
   ```
-  constructionManager_v2.4.1.py
+  constructionManager_v2.5.0.py
   ```
 
 - **Inside the file.** Keep a `__version__` constant that matches the name.
