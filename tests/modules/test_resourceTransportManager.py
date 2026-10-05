@@ -1270,3 +1270,218 @@ def test_the_setup_asks_which_reading_applies_and_stores_it():
         "the summary must name the reading it used"
     assert "outstanding_preview" in body, \
         "the preview must share the budget or it still shows N times"
+
+
+# ===========================================================================
+#  Waiting for ships
+#
+#  The module used to ask every twenty seconds whether ships were home. The
+#  game already knows: the military advisor lists every one of our own
+#  movements with the moment it lands. No local ledger of ships is kept,
+#  because one would drift the first time the player sends a fleet by hand.
+# ===========================================================================
+
+def _advisor(movements, server_time=1_000_000):
+    """A military advisor reply in the shape the game sends."""
+    return json.dumps([
+        ["x", {"time": server_time}],
+        ["y", ["a", "b", {"viewScriptParams":
+                          {"militaryAndFleetMovements": movements}}]],
+    ])
+
+
+def _mv(event_time, own=True, returning=True):
+    return {"isOwnArmyOrFleet": own, "eventTime": event_time,
+            "event": {"isFleetReturning": returning}}
+
+
+def test_our_own_arrivals_are_read_soonest_first(rtm):
+    payload = _advisor([_mv(1_000_600), _mv(1_000_120), _mv(1_003_600)])
+    assert rtm._parse_fleet_events(payload) == [120, 600, 3600]
+
+
+def test_other_players_fleets_are_ignored(rtm):
+    payload = _advisor([_mv(1_000_060, own=False), _mv(1_000_600)])
+    assert rtm._parse_fleet_events(payload) == [600]
+
+
+def test_nothing_of_ours_moving_is_an_answer_not_a_failure(rtm):
+    assert rtm._parse_fleet_events(_advisor([])) == []
+
+
+@pytest.mark.parametrize("payload", [
+    "not json at all",
+    "{}",
+    json.dumps([["x", {}], ["y", []]]),
+    json.dumps([["x", {"time": 1}], ["y", ["z", {"viewScriptParams": {}}]]]),
+])
+def test_a_reply_that_cannot_be_read_is_unknown_not_empty(rtm, payload):
+    # None and [] must stay distinguishable: [] means nothing is out, which
+    # would wrongly say ships are free right now.
+    assert rtm._parse_fleet_events(payload) is None
+
+
+def test_the_servers_clock_is_used_not_this_machines(rtm):
+    # A local clock an hour out must not change the answer.
+    payload = _advisor([_mv(5_000_300)], server_time=5_000_000)
+    assert rtm._parse_fleet_events(payload) == [300]
+
+
+def test_a_landing_already_past_reads_as_zero_not_negative(rtm):
+    assert rtm._parse_fleet_events(_advisor([_mv(999_000)])) == [0]
+
+
+def test_an_absurd_arrival_is_discarded(rtm):
+    far = 1_000_000 + rtm.FLEET_EVENT_SANITY_SECONDS + 600
+    assert rtm._parse_fleet_events(_advisor([_mv(far), _mv(1_000_300)])) == [300]
+
+
+def test_a_movement_missing_its_time_is_skipped_not_fatal(rtm):
+    payload = _advisor([{"isOwnArmyOrFleet": True}, _mv(1_000_300)])
+    assert rtm._parse_fleet_events(payload) == [300]
+
+
+@pytest.fixture
+def fleet(rtm, monkeypatch):
+    """Answer the advisor with a scripted reply and count the requests."""
+    rtm._fleet_event_cache.clear()
+    state = {"calls": 0, "payload": _advisor([])}
+    monkeypatch.setattr(rtm, "_current_city_id", lambda s: "123")
+
+    class Advisor(FakeSession):
+        def post(self, *a, **k):
+            state["calls"] += 1
+            if isinstance(state["payload"], Exception):
+                raise state["payload"]
+            return state["payload"]
+
+    state["session"] = Advisor()
+    return state
+
+
+def test_the_earliest_event_is_what_the_module_waits_for(rtm, fleet):
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 7200), _mv(now + 900)],
+                                server_time=now)
+    assert rtm._next_fleet_event_seconds(fleet["session"]) == 900
+
+
+def test_the_answer_is_cached_so_one_cycle_asks_once(rtm, fleet):
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 900)], server_time=now)
+    first = rtm._next_fleet_event_seconds(fleet["session"])
+    again = rtm._next_fleet_event_seconds(fleet["session"])
+    assert first == again == 900
+    assert fleet["calls"] == 1
+
+
+def test_an_advisor_that_fails_reports_unknown(rtm, fleet):
+    fleet["payload"] = RuntimeError("server down")
+    assert rtm._next_fleet_event_seconds(fleet["session"]) is None
+
+
+def test_an_unreadable_advisor_falls_back_to_the_short_poll(rtm, fleet):
+    fleet["payload"] = "nonsense"
+    nap, arrival = rtm._ship_wait_sleep(fleet["session"], remaining=3600)
+    assert arrival is None
+    assert nap <= rtm.SHIP_WAIT_POLL_SECONDS + 5, \
+        "with no information it must keep checking often"
+
+
+def test_a_known_arrival_is_waited_out_instead_of_polled(rtm, fleet,
+                                                         monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": 60})
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 1800)], server_time=now)
+    nap, arrival = rtm._ship_wait_sleep(fleet["session"], remaining=7200)
+    assert arrival == 1800
+    assert nap == 1810, "it waits for the landing, plus a small margin"
+    assert nap > rtm.SHIP_WAIT_POLL_SECONDS * 10
+
+
+def test_the_ceiling_keeps_manual_play_noticeable(rtm, fleet, monkeypatch):
+    # Ships can come free sooner than a known landing if the player finishes
+    # building more, so the module never sleeps past the ceiling.
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": 15})
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 7200)], server_time=now)
+    nap, arrival = rtm._ship_wait_sleep(fleet["session"], remaining=86400)
+    assert arrival == 7200
+    assert nap == 15 * 60
+
+
+def test_the_ceiling_is_configurable(rtm, monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": 40})
+    assert rtm._ship_wait_ceiling() == 40 * 60
+    monkeypatch.setattr(rtm, "load_prefs", lambda: {})
+    assert rtm._ship_wait_ceiling() == rtm.SHIP_WAIT_MAX_SLEEP_MINUTES * 60
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": "rubbish"})
+    assert rtm._ship_wait_ceiling() == rtm.SHIP_WAIT_MAX_SLEEP_MINUTES * 60
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": 0})
+    assert rtm._ship_wait_ceiling() >= rtm.SHIP_WAIT_MIN_SLEEP_SECONDS, \
+        "zero must not mean a busy loop"
+
+
+def test_the_wait_never_runs_past_the_budget_it_was_given(rtm, fleet):
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 3600)], server_time=now)
+    nap, _ = rtm._ship_wait_sleep(fleet["session"], remaining=120)
+    assert nap == 120
+    assert rtm._ship_wait_sleep(fleet["session"], remaining=0) == (0, None)
+
+
+def test_nothing_of_ours_out_means_look_again_at_once(rtm, fleet):
+    # Zero ships free and nothing moving is contradictory, so re-check
+    # promptly rather than sleeping on it.
+    fleet["payload"] = _advisor([])
+    nap, arrival = rtm._ship_wait_sleep(fleet["session"], remaining=3600)
+    assert arrival == 0
+    assert nap == rtm.SHIP_WAIT_MIN_SLEEP_SECONDS
+
+
+def test_a_ships_wait_and_a_port_wait_are_told_apart(rtm):
+    rtm._record_cycle_error("")
+    assert rtm._cycle_hold_reason() == ""
+    rtm._record_fleet_hold(600)
+    assert rtm._cycle_hold_reason() == "fleet"
+    rtm._record_port_hold(300)
+    assert rtm._cycle_hold_reason() == "fleet", "the longer wait wins"
+    rtm._record_port_hold(1200)
+    assert rtm._cycle_hold_reason() == "port"
+    rtm._record_cycle_error("")
+    assert rtm._cycle_hold_reason() == ""
+
+
+def test_the_scheduler_names_what_it_is_waiting_for(rtm):
+    import ast
+    src = _module_source()
+    loop = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef)
+                and n.name == "transport_scheduler_loop")
+    body = ast.get_source_segment(src, loop)
+    assert "_cycle_hold_reason()" in body
+    assert "Waiting for ships" in body
+    assert "Waiting for the trading port" in body
+
+
+def test_a_shipment_short_of_ships_records_when_they_land(rtm):
+    import ast
+    src = _module_source()
+    send = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef) and n.name == "send_shipment")
+    body = ast.get_source_segment(src, send)
+    assert "_record_fleet_hold(back_in)" in body, \
+        "the retry must land when the fleet does, not on a flat interval"
+
+
+def test_no_local_ledger_of_ships_is_kept():
+    # The game is the only authority: a local count drifts the first time the
+    # player sends a fleet by hand, builds more, or loses some.
+    src = _module_source()
+    for banned in ("_ship_inventory", "_fleet_ledger", "ships_owned"):
+        assert banned not in src

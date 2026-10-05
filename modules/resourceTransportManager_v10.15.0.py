@@ -66,7 +66,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.14.0"
+MODULE_VERSION = "10.15.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -1964,6 +1964,127 @@ def getShipCapacity(session):
     )
 
 
+# ---------------------------------------------------------------------------
+#  Fleet arrivals
+#
+#  Polling every twenty seconds to see whether ships are home is wasted work:
+#  the game already knows. The military advisor lists every one of our own
+#  movements with the moment it lands, so the module waits for that instead.
+#
+#  No local ledger of ships is kept on purpose. One would drift from the game
+#  within a day — the player sends fleets by hand, builds more, loses some,
+#  and other ikabot modules move the same ships. The game is the only
+#  authority worth asking.
+# ---------------------------------------------------------------------------
+
+SHIP_WAIT_POLL_SECONDS = 20          # used only when arrivals cannot be read
+SHIP_WAIT_MAX_SLEEP_MINUTES = 15     # ceiling, so manual play is still noticed
+SHIP_WAIT_MIN_SLEEP_SECONDS = 15
+# A freighter round trip can legitimately run for hours; anything past this is
+# a misread rather than a voyage.
+FLEET_EVENT_SANITY_SECONDS = 24 * 3600
+_FLEET_CACHE_TTL = 30
+
+_fleet_event_cache = {}   # {account: (checked_at, seconds or None)}
+
+
+def _ship_wait_ceiling():
+    """Longest the module will sleep while waiting for ships."""
+    try:
+        mins = int(load_prefs().get("ship_wait_max_sleep_minutes",
+                                    SHIP_WAIT_MAX_SLEEP_MINUTES))
+    except Exception:
+        mins = SHIP_WAIT_MAX_SLEEP_MINUTES
+    return max(SHIP_WAIT_MIN_SLEEP_SECONDS, mins * 60)
+
+
+def _parse_fleet_events(payload):
+    """Seconds until each of our own fleet movements lands, soonest first.
+
+    The server sends its own clock with the movements, so the figures do not
+    depend on this machine's time being correct. Returns None when the reply
+    cannot be read — never an empty list, which would mean "nothing is out".
+    """
+    try:
+        data = json.loads(payload, strict=False)
+        movements = data[1][1][2]["viewScriptParams"][
+            "militaryAndFleetMovements"]
+        server_time = int(data[0][1]["time"])
+    except (ValueError, TypeError, KeyError, IndexError):
+        return None
+    if not isinstance(movements, list):
+        return None
+    events = []
+    for mv in movements:
+        if not isinstance(mv, dict) or not mv.get("isOwnArmyOrFleet"):
+            continue
+        try:
+            left = int(mv["eventTime"]) - server_time
+        except (ValueError, TypeError, KeyError):
+            continue
+        if left > FLEET_EVENT_SANITY_SECONDS:
+            continue
+        events.append(max(0, left))
+    return sorted(events)
+
+
+def _next_fleet_event_seconds(session, use_cache=True):
+    """Seconds until our earliest own fleet event, or None when unknown.
+
+    The earliest event is the first moment anything can change, so waiting
+    for it never overshoots. It may be an outbound leg landing rather than
+    ships coming home; the next look simply works out a new bound, which is
+    still far cheaper than asking every twenty seconds.
+    """
+    key = _account_suffix(session)
+    now = time.time()
+    if use_cache:
+        cached = _fleet_event_cache.get(key)
+        if cached and now - cached[0] < _FLEET_CACHE_TTL:
+            return cached[1]
+    seconds = None
+    try:
+        city_id = _current_city_id(session)
+        if city_id is not None:
+            url = (
+                "view=militaryAdvisor&oldView=city&oldBackgroundView=city"
+                "&backgroundView=city&currentCityId={}&actionRequest={}&ajax=1"
+            ).format(city_id, actionRequest)
+            events = _parse_fleet_events(session.post(url))
+            # An empty list is an answer: nothing of ours is moving.
+            if events is not None:
+                seconds = events[0] if events else 0
+    except Exception:
+        seconds = None
+    _fleet_event_cache[key] = (now, seconds)
+    return seconds
+
+
+def _current_city_id(session):
+    try:
+        m = re.search(r"currentCityId:\s(\d+),", session.get())
+    except Exception:
+        return None
+    return m.group(1) if m else None
+
+
+def _ship_wait_sleep(session, remaining):
+    """How long to wait before looking for free ships again.
+
+    Returns (seconds, known_arrival). known_arrival is None when the game
+    could not tell us, which falls back to the short poll.
+    """
+    if remaining <= 0:
+        return 0, None
+    nxt = _next_fleet_event_seconds(session)
+    if nxt is None:
+        poll = SHIP_WAIT_POLL_SECONDS + random.randint(-5, 5)
+        return max(1, min(poll, remaining)), None
+    # A small margin so the fleet has actually landed before we look.
+    wait = max(SHIP_WAIT_MIN_SLEEP_SECONDS, int(nxt) + 10)
+    return min(wait, _ship_wait_ceiling(), remaining), int(nxt)
+
+
 def wait_for_ships(session, useFreighters, status_prefix="", max_wait=3600):
     ship_type = "freighters" if useFreighters else "merchant ships"
     start = time.time()
@@ -1983,10 +2104,23 @@ def wait_for_ships(session, useFreighters, status_prefix="", max_wait=3600):
                 f"{status_prefix}Timed out waiting for {ship_type} ({elapsed}s)"
             )
             return 0
-        session.setStatus(
-            f"{status_prefix}Waiting for {ship_type}... ({elapsed}s)"
-        )
-        time.sleep(20 + random.randint(-5, 5))
+        nap, arrival = _ship_wait_sleep(session, max_wait - elapsed)
+        if nap <= 0:
+            session.setStatus(
+                f"{status_prefix}Timed out waiting for {ship_type} ({elapsed}s)"
+            )
+            return 0
+        if arrival is None:
+            session.setStatus(
+                f"{status_prefix}Waiting for {ship_type}... ({elapsed}s)"
+            )
+        else:
+            session.setStatus(
+                f"{status_prefix}No free {ship_type}; next fleet lands in "
+                f"{max(1, arrival // 60)}min, looking again in "
+                f"{max(1, nap // 60)}min"
+            )
+        time.sleep(nap)
 
 
 def getActionPoints(html):
@@ -2560,6 +2694,10 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                                max_wait=ship_wait)
     if available == 0:
         result["error"] = f"No {ship_type_name} available (timed out)"
+        back_in = _next_fleet_event_seconds(session)
+        if back_in:
+            _record_fleet_hold(back_in)
+            result["error"] += f"; next fleet lands in {back_in // 60}min"
         if should_notify(notif_config, "error"):
             sendToBot(session,
                       f"SHIPMENT SKIPPED\n{prefix}\n"
@@ -7711,17 +7849,35 @@ _last_cycle_error = {"text": "", "detail": ""}
 # retry interval. A port queue is also not a failure — it must not burn the
 # give-up budget, or a city shipping several orders in a row would stop
 # itself after the first one.
-_last_cycle_hold = {"until": 0.0}
+_last_cycle_hold = {"until": 0.0, "reason": ""}
 
 
-def _record_port_hold(seconds):
+def _record_cycle_hold(seconds, reason):
+    """Note that the cycle is waiting on something with a known end.
+
+    The longest wait of the cycle wins, because the schedule cannot finish
+    before the last thing it is queued behind.
+    """
     until = time.time() + max(0, seconds)
     if until > _last_cycle_hold["until"]:
         _last_cycle_hold["until"] = until
+        _last_cycle_hold["reason"] = reason
+
+
+def _record_port_hold(seconds):
+    _record_cycle_hold(seconds, "port")
+
+
+def _record_fleet_hold(seconds):
+    _record_cycle_hold(seconds, "fleet")
 
 
 def _cycle_hold_until():
     return _last_cycle_hold["until"]
+
+
+def _cycle_hold_reason():
+    return _last_cycle_hold["reason"]
 
 
 def _record_cycle_error(text, detail=""):
@@ -7729,6 +7885,7 @@ def _record_cycle_error(text, detail=""):
     _last_cycle_error["detail"] = detail
     if not text:
         _last_cycle_hold["until"] = 0.0
+        _last_cycle_hold["reason"] = ""
 
 
 def _cycle_error_note():
@@ -8082,15 +8239,23 @@ def transport_scheduler_loop(session, stop_event):
                                 pass
                     else:
                         if port_held:
-                            # A little past the reported finish, so the port
-                            # has actually released before we ask again.
+                            # A little past the reported finish, so whatever
+                            # we are queued behind has actually cleared.
                             retry_at = max(finished + 60,
                                            int(hold_until) + 30)
-                            why = (
-                                "Waiting for the trading port: it is still "
-                                "loading an earlier shipment. This order is "
-                                "queued behind it and goes as soon as the "
-                                "port is free.")
+                            if _cycle_hold_reason() == "fleet":
+                                why = (
+                                    "Waiting for ships: they are all out on "
+                                    "other trips. The game says when the "
+                                    "next fleet lands, so this order waits "
+                                    "for that rather than checking over and "
+                                    "over.")
+                            else:
+                                why = (
+                                    "Waiting for the trading port: it is "
+                                    "still loading an earlier shipment. This "
+                                    "order is queued behind it and goes as "
+                                    "soon as the port is free.")
                         else:
                             retry_at = finished + ONE_SHOT_RETRY_SECONDS
                             why = (
@@ -8108,9 +8273,13 @@ def transport_scheduler_loop(session, stop_event):
                         )
                         if port_held:
                             try:
+                                waiting_for = ("ships"
+                                               if _cycle_hold_reason() == "fleet"
+                                               else "port")
                                 session.setStatus(
-                                    f"Schedule #{sid}: port busy, retrying "
-                                    f"in {max(1, (retry_at - finished) // 60)}"
+                                    f"Schedule #{sid}: waiting on "
+                                    f"{waiting_for}, retrying in "
+                                    f"{max(1, (retry_at - finished) // 60)}"
                                     f"min")
                             except Exception:
                                 pass

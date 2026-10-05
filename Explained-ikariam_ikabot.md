@@ -236,7 +236,7 @@ version. Nothing reads it. Rename it with the mod version.
 ### External Module Version (filename suffix — REMOVED at load time)
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
-resourceTransportManager_v10.14.0.py
+resourceTransportManager_v10.15.0.py
 constructionManager_v2.6.0.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
@@ -277,7 +277,7 @@ ikabot-modules/
 │   └── web/
 │       └── session.py             ← Session class — all HTTP calls go through here
 ├── modules/                             ← External modules, versioned filenames
-│   ├── resourceTransportManager_v10.14.0.py
+│   ├── resourceTransportManager_v10.15.0.py
 │   ├── constructionManager_v2.6.0.py
 │   └── ...                              ← see §13 for the full list
 ├── GUIDE.md                            ← End-user guide
@@ -664,7 +664,7 @@ name and the function name must match exactly. With a version still in the name
 that fallback resolves to nonsense:
 
 ```
-resourceTransportManager_v10.14.0.py  ->  looks for  resourceTransportManager_v10.14.0()  ✗
+resourceTransportManager_v10.15.0.py  ->  looks for  resourceTransportManager_v10.15.0()  ✗
 resourceTransportManager.py          ->  looks for  resourceTransportManager()          ✓
 ```
 
@@ -682,7 +682,7 @@ does not matter at all. Do it in every new module.
 
 | Filename in repo `modules/` | base | version |
 |---|---|---|
-| `resourceTransportManager_v10.14.0.py` | `resourceTransportManager.py` | `10.14.0` |
+| `resourceTransportManager_v10.15.0.py` | `resourceTransportManager.py` | `10.15.0` |
 | `noVersion.py` | `noVersion.py` | *(none)* |
 
 A module without the suffix still installs, but shows "no version" in the
@@ -787,7 +787,7 @@ numbers below drift.**
 
 | Module | Does |
 |---|---|
-| `resourceTransportManager_v10.14.0.py` | Moves resources between cities and to other players: ship routing, partial loads, per-shipment notifications with configurable levels. Priority scheduling 1-5 with a hold window, a trading-port hold list, shipment history with resend, retry of a failed schedule, per-account logs. Consolidate asks whether an exact amount is wanted from **each** source city or **in total**. Sends through its own copy of the route logic; it deliberately does not call `executeRoutes()`, because that path reads ship capacity through a core helper a dropped-in module cannot update. |
+| `resourceTransportManager_v10.15.0.py` | Moves resources between cities and to other players: ship routing, partial loads, per-shipment notifications with configurable levels. Priority scheduling 1-5 with a hold window, a trading-port hold list, shipment history with resend, retry of a failed schedule, per-account logs. Consolidate asks whether an exact amount is wanted from **each** source city or **in total**. Waits for the fleet arrival the game reports rather than polling for returning ships. Sends through its own copy of the route logic; it deliberately does not call `executeRoutes()`, because that path reads ship capacity through a core helper a dropped-in module cannot update. |
 | `constructionManager_v2.6.0.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per account or per city, per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §29. |
 | `autoRecruitmentManager_v2.14.0.py` | Trains units/ships across barracks and shipyards from a goals CSV, with per-type city include lists, configurable batch sizing and capacity-aware allocation (§ Population and citizens). **The working RRS integration example.** Also the reference for *verifying* an order was accepted before mutating state — see §Order verification. |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
@@ -1479,7 +1479,7 @@ in your module.
 ## 27. Concurrency, Locks and Multi-Instance Safety
 
 Learned the hard way while hardening `resourceTransportManager` (v10.4.1 →
-v10.14.0) across Windows and Docker. Every rule below caused a real,
+v10.15.0) across Windows and Docker. Every rule below caused a real,
 observed failure.
 
 ### ⚠ Per-account filenames must include the WORLD number
