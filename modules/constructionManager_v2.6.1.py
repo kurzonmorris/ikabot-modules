@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.6.0"
+__version__ = "2.6.1"
 
 import csv
 import glob
@@ -37,9 +37,6 @@ from ikabot.config import (
     materials_names,
 )
 from ikabot.helpers.botComm import checkTelegramData, sendToBot, sendToBotDebug
-from ikabot.helpers.browserActivity import (
-    seconds_since_activity as seconds_since_browser_activity,
-)
 from ikabot.helpers.getJson import getCity, getIsland
 from ikabot.helpers.gui import banner, bcolors, enter
 from ikabot.helpers.modulePrefs import (
@@ -281,6 +278,38 @@ def option(key, title, explain=""):
     print(f"  {C.BOLD}({key}){C.RESET} {title}")
     if explain:
         print(f"  {C.DIM}      {explain}{C.RESET}")
+
+
+def _browser_activity_path(session):
+    """Where the web server stamps the player's last click.
+
+    Deliberately NOT imported from ikabot.helpers.browserActivity: an external
+    module has to keep working on an install that does not carry that helper
+    yet, and a missing import killed the whole module. The path is built the
+    same way the helper builds it, and the helper stays the source of truth.
+    """
+    data_dir = getattr(config, "IKABOT_DATA_DIR", None) or os.path.join(
+        os.path.expanduser("~"), ".ikabot"
+    )
+    return os.path.join(
+        data_dir, f"browser_activity_{_account_suffix(session)}"
+    )
+
+
+def seconds_since_browser_activity(session):
+    """Seconds since the player's last browser click, or None if unknown.
+
+    None means there is no stamp: either the web server does not write one, or
+    it has not been used. Callers must read that as "cannot tell", never as
+    "the player is away".
+    """
+    try:
+        with open(_browser_activity_path(session), "r") as f:
+            stamp = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    # A stamp from the future means the clock moved. Treat it as right now.
+    return max(0.0, time.time() - stamp)
 
 
 # --- Pause -----------------------------------------------------------------
