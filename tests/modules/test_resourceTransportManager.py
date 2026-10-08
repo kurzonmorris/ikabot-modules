@@ -365,16 +365,20 @@ def _module_source():
     return open(_module_path()).read()
 
 
-def test_executeroutes_is_not_imported_but_sendgoods_still_is():
+def test_no_part_of_core_route_logic_is_imported():
+    # executeRoutes went in v10.12.2 because it read ship capacity through a
+    # helper a dropped-in module cannot fix. sendGoods went when it turned
+    # out to retry a refused load forever, five seconds apart, with no way
+    # to give up — the whole send path is the module's own now.
     import ast
     imported = set()
     for node in ast.parse(_module_source()).body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 imported.add(alias.asname or alias.name)
-    assert "executeRoutes" not in imported, \
-        "the send path must not reach into core for its route logic"
-    assert "sendGoods" in imported, "the module's own sender needs it"
+    assert "executeRoutes" not in imported
+    assert "sendGoods" not in imported, \
+        "importing it invites the unbounded retry back"
 
 
 def test_every_shipment_goes_through_the_modules_own_sender(rtm):
@@ -1270,3 +1274,530 @@ def test_the_setup_asks_which_reading_applies_and_stores_it():
         "the summary must name the reading it used"
     assert "outstanding_preview" in body, \
         "the preview must share the budget or it still shows N times"
+
+
+# ===========================================================================
+#  Waiting for ships
+#
+#  The module used to ask every twenty seconds whether ships were home. The
+#  game already knows: the military advisor lists every one of our own
+#  movements with the moment it lands. No local ledger of ships is kept,
+#  because one would drift the first time the player sends a fleet by hand.
+# ===========================================================================
+
+def _advisor(movements, server_time=1_000_000):
+    """A military advisor reply in the shape the game sends."""
+    return json.dumps([
+        ["x", {"time": server_time}],
+        ["y", ["a", "b", {"viewScriptParams":
+                          {"militaryAndFleetMovements": movements}}]],
+    ])
+
+
+def _mv(event_time, own=True, returning=True):
+    return {"isOwnArmyOrFleet": own, "eventTime": event_time,
+            "event": {"isFleetReturning": returning}}
+
+
+def test_our_own_arrivals_are_read_soonest_first(rtm):
+    payload = _advisor([_mv(1_000_600), _mv(1_000_120), _mv(1_003_600)])
+    assert rtm._parse_fleet_events(payload) == [120, 600, 3600]
+
+
+def test_other_players_fleets_are_ignored(rtm):
+    payload = _advisor([_mv(1_000_060, own=False), _mv(1_000_600)])
+    assert rtm._parse_fleet_events(payload) == [600]
+
+
+def test_nothing_of_ours_moving_is_an_answer_not_a_failure(rtm):
+    assert rtm._parse_fleet_events(_advisor([])) == []
+
+
+@pytest.mark.parametrize("payload", [
+    "not json at all",
+    "{}",
+    json.dumps([["x", {}], ["y", []]]),
+    json.dumps([["x", {"time": 1}], ["y", ["z", {"viewScriptParams": {}}]]]),
+])
+def test_a_reply_that_cannot_be_read_is_unknown_not_empty(rtm, payload):
+    # None and [] must stay distinguishable: [] means nothing is out, which
+    # would wrongly say ships are free right now.
+    assert rtm._parse_fleet_events(payload) is None
+
+
+def test_the_servers_clock_is_used_not_this_machines(rtm):
+    # A local clock an hour out must not change the answer.
+    payload = _advisor([_mv(5_000_300)], server_time=5_000_000)
+    assert rtm._parse_fleet_events(payload) == [300]
+
+
+def test_a_landing_already_past_reads_as_zero_not_negative(rtm):
+    assert rtm._parse_fleet_events(_advisor([_mv(999_000)])) == [0]
+
+
+def test_an_absurd_arrival_is_discarded(rtm):
+    far = 1_000_000 + rtm.FLEET_EVENT_SANITY_SECONDS + 600
+    assert rtm._parse_fleet_events(_advisor([_mv(far), _mv(1_000_300)])) == [300]
+
+
+def test_a_movement_missing_its_time_is_skipped_not_fatal(rtm):
+    payload = _advisor([{"isOwnArmyOrFleet": True}, _mv(1_000_300)])
+    assert rtm._parse_fleet_events(payload) == [300]
+
+
+@pytest.fixture
+def fleet(rtm, monkeypatch):
+    """Answer the advisor with a scripted reply and count the requests."""
+    rtm._fleet_event_cache.clear()
+    state = {"calls": 0, "payload": _advisor([])}
+    monkeypatch.setattr(rtm, "_current_city_id", lambda s: "123")
+
+    class Advisor(FakeSession):
+        def post(self, *a, **k):
+            state["calls"] += 1
+            if isinstance(state["payload"], Exception):
+                raise state["payload"]
+            return state["payload"]
+
+    state["session"] = Advisor()
+    return state
+
+
+def test_the_earliest_event_is_what_the_module_waits_for(rtm, fleet):
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 7200), _mv(now + 900)],
+                                server_time=now)
+    assert rtm._next_fleet_event_seconds(fleet["session"]) == 900
+
+
+def test_the_answer_is_cached_so_one_cycle_asks_once(rtm, fleet):
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 900)], server_time=now)
+    first = rtm._next_fleet_event_seconds(fleet["session"])
+    again = rtm._next_fleet_event_seconds(fleet["session"])
+    assert first == again == 900
+    assert fleet["calls"] == 1
+
+
+def test_an_advisor_that_fails_reports_unknown(rtm, fleet):
+    fleet["payload"] = RuntimeError("server down")
+    assert rtm._next_fleet_event_seconds(fleet["session"]) is None
+
+
+def test_an_unreadable_advisor_falls_back_to_the_short_poll(rtm, fleet):
+    fleet["payload"] = "nonsense"
+    nap, arrival = rtm._ship_wait_sleep(fleet["session"], remaining=3600)
+    assert arrival is None
+    assert nap <= rtm.SHIP_WAIT_POLL_SECONDS + 5, \
+        "with no information it must keep checking often"
+
+
+def test_a_known_arrival_is_waited_out_instead_of_polled(rtm, fleet,
+                                                         monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": 60})
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 1800)], server_time=now)
+    nap, arrival = rtm._ship_wait_sleep(fleet["session"], remaining=7200)
+    assert arrival == 1800
+    assert nap == 1810, "it waits for the landing, plus a small margin"
+    assert nap > rtm.SHIP_WAIT_POLL_SECONDS * 10
+
+
+def test_the_ceiling_keeps_manual_play_noticeable(rtm, fleet, monkeypatch):
+    # Ships can come free sooner than a known landing if the player finishes
+    # building more, so the module never sleeps past the ceiling.
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": 15})
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 7200)], server_time=now)
+    nap, arrival = rtm._ship_wait_sleep(fleet["session"], remaining=86400)
+    assert arrival == 7200
+    assert nap == 15 * 60
+
+
+def test_the_ceiling_is_configurable(rtm, monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": 40})
+    assert rtm._ship_wait_ceiling() == 40 * 60
+    monkeypatch.setattr(rtm, "load_prefs", lambda: {})
+    assert rtm._ship_wait_ceiling() == rtm.SHIP_WAIT_MAX_SLEEP_MINUTES * 60
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": "rubbish"})
+    assert rtm._ship_wait_ceiling() == rtm.SHIP_WAIT_MAX_SLEEP_MINUTES * 60
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"ship_wait_max_sleep_minutes": 0})
+    assert rtm._ship_wait_ceiling() >= rtm.SHIP_WAIT_MIN_SLEEP_SECONDS, \
+        "zero must not mean a busy loop"
+
+
+def test_the_wait_never_runs_past_the_budget_it_was_given(rtm, fleet):
+    now = int(time.time())
+    fleet["payload"] = _advisor([_mv(now + 3600)], server_time=now)
+    nap, _ = rtm._ship_wait_sleep(fleet["session"], remaining=120)
+    assert nap == 120
+    assert rtm._ship_wait_sleep(fleet["session"], remaining=0) == (0, None)
+
+
+def test_nothing_of_ours_out_means_look_again_at_once(rtm, fleet):
+    # Zero ships free and nothing moving is contradictory, so re-check
+    # promptly rather than sleeping on it.
+    fleet["payload"] = _advisor([])
+    nap, arrival = rtm._ship_wait_sleep(fleet["session"], remaining=3600)
+    assert arrival == 0
+    assert nap == rtm.SHIP_WAIT_MIN_SLEEP_SECONDS
+
+
+def test_a_ships_wait_and_a_port_wait_are_told_apart(rtm):
+    rtm._record_cycle_error("")
+    assert rtm._cycle_hold_reason() == ""
+    rtm._record_fleet_hold(600)
+    assert rtm._cycle_hold_reason() == "fleet"
+    rtm._record_port_hold(300)
+    assert rtm._cycle_hold_reason() == "fleet", "the longer wait wins"
+    rtm._record_port_hold(1200)
+    assert rtm._cycle_hold_reason() == "port"
+    rtm._record_cycle_error("")
+    assert rtm._cycle_hold_reason() == ""
+
+
+def test_the_scheduler_names_what_it_is_waiting_for(rtm):
+    import ast
+    src = _module_source()
+    loop = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef)
+                and n.name == "transport_scheduler_loop")
+    body = ast.get_source_segment(src, loop)
+    assert "_cycle_hold_reason()" in body
+    assert "Waiting for ships" in body
+    assert "Waiting for the trading port" in body
+
+
+def test_a_shipment_short_of_ships_records_when_they_land(rtm):
+    import ast
+    src = _module_source()
+    send = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef) and n.name == "send_shipment")
+    body = ast.get_source_segment(src, send)
+    assert "_record_fleet_hold(back_in)" in body, \
+        "the retry must land when the fleet does, not on a flat interval"
+
+
+def test_no_local_ledger_of_ships_is_kept():
+    # The game is the only authority: a local count drifts the first time the
+    # player sends a fleet by hand, builds more, or loses some.
+    src = _module_source()
+    for banned in ("_ship_inventory", "_fleet_ledger", "ships_owned"):
+        assert banned not in src
+
+
+# ===========================================================================
+#  Request pacing
+#
+#  An IP was temporarily blocked while a 40,000,000 shipment sat refusing to
+#  send. Nothing below this module limits the rate: session.get and
+#  session.post go out as fast as they are called. The ceiling that matters
+#  is per address, and around two dozen instances share one.
+# ===========================================================================
+
+def _reset_throttle(rtm, allowance=None, burst=None):
+    rtm._throttle["allowance"] = (float(burst if allowance is None
+                                        else allowance)
+                                  if allowance is not None
+                                  else float(rtm.REQUEST_BURST))
+    rtm._throttle["checked"] = None
+    rtm._throttle["installed"].clear()
+    rtm._throttle["paced"] = 0
+    rtm._throttle["waited"] = 0.0
+
+
+def test_a_burst_goes_straight_through_then_pacing_bites(rtm, monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"request_min_interval_seconds": 1.0,
+                                 "request_burst": 3})
+    napped = []
+    monkeypatch.setattr(rtm.time, "sleep", lambda s: napped.append(s))
+    _reset_throttle(rtm, allowance=3.0)
+    clock = 1000.0
+    monkeypatch.setattr(rtm.time, "monotonic", lambda: clock)
+    # Three in a row at the same instant: the burst allowance covers them.
+    assert [rtm._throttle_wait() for _ in range(3)] == [0.0, 0.0, 0.0]
+    assert napped == []
+    # The fourth has to wait, because no time has passed to refill it.
+    assert rtm._throttle_wait() > 0
+    assert napped and napped[0] > 0
+
+
+def test_a_tight_loop_settles_to_the_sustained_rate(rtm, monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"request_min_interval_seconds": 2.0,
+                                 "request_burst": 1})
+    napped = []
+    monkeypatch.setattr(rtm.time, "sleep", lambda s: napped.append(s))
+    _reset_throttle(rtm, allowance=1.0)
+    clock = [500.0]
+    monkeypatch.setattr(rtm.time, "monotonic", lambda: clock[0])
+    rtm._throttle_wait()                      # spends the one token
+    for _ in range(5):
+        rtm._throttle_wait()
+    assert len(napped) == 5
+    assert all(abs(n - 2.0) < 0.01 for n in napped), \
+        "with no time passing, each request waits a full interval"
+
+
+def test_time_passing_refills_the_allowance(rtm, monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"request_min_interval_seconds": 1.0,
+                                 "request_burst": 5})
+    monkeypatch.setattr(rtm.time, "sleep", lambda s: None)
+    _reset_throttle(rtm, allowance=0.0)
+    clock = [0.0]
+    monkeypatch.setattr(rtm.time, "monotonic", lambda: clock[0])
+    rtm._throttle_wait()
+    clock[0] = 10.0                            # ten seconds of quiet
+    assert rtm._throttle_wait() == 0.0, "a quiet period must not be punished"
+
+
+def test_pacing_can_be_turned_off_but_is_on_by_default(rtm, monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"request_min_interval_seconds": 0})
+    _reset_throttle(rtm)
+    assert rtm._throttle_wait() == 0.0
+    monkeypatch.setattr(rtm, "load_prefs", lambda: {})
+    interval, burst = rtm._request_rate_settings()
+    assert interval == rtm.REQUEST_MIN_INTERVAL_SECONDS
+    assert interval >= 1.0, \
+        "two dozen instances at one a second is already too many per address"
+    assert burst == rtm.REQUEST_BURST
+
+
+@pytest.mark.parametrize("prefs", [
+    {"request_min_interval_seconds": "nonsense"},
+    {"request_burst": None},
+    {"request_min_interval_seconds": -5, "request_burst": 0},
+])
+def test_junk_pacing_settings_fall_back_to_safe_ones(rtm, monkeypatch, prefs):
+    monkeypatch.setattr(rtm, "load_prefs", lambda: prefs)
+    interval, burst = rtm._request_rate_settings()
+    assert interval >= 0
+    assert burst >= 1, "a zero burst must not divide by nothing"
+
+
+def test_the_throttle_wraps_the_session_once(rtm, monkeypatch):
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"request_min_interval_seconds": 0.0})
+    _reset_throttle(rtm)
+    s = FakeSession(["a", "b"])
+    original_get = s.get
+    assert rtm.install_request_throttle(s) is True
+    assert s.get is not original_get, "requests must go through the pacer"
+    assert rtm.install_request_throttle(s) is False, "wrapping twice stacks"
+    assert s.get() == "a", "the wrapper must still return the response"
+
+
+def test_wrapping_the_session_catches_cores_requests_too(rtm, monkeypatch):
+    # The loops that flooded the server are in core, and core is handed this
+    # same session object, so pacing it is what bounds them.
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"request_min_interval_seconds": 1.0,
+                                 "request_burst": 1})
+    napped = []
+    monkeypatch.setattr(rtm.time, "sleep", lambda s: napped.append(s))
+    _reset_throttle(rtm, allowance=1.0)
+    clock = [0.0]
+    monkeypatch.setattr(rtm.time, "monotonic", lambda: clock[0])
+    s = FakeSession(["x"] * 6)
+    rtm.install_request_throttle(s)
+    for _ in range(4):
+        s.post()
+    assert len(napped) == 3, "only the first went free"
+
+
+def test_both_entry_points_install_the_throttle():
+    src = _module_source()
+    import ast
+    for name in ("transport_scheduler_loop", "resourceTransportManager"):
+        fn = next(n for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef) and n.name == name)
+        assert "install_request_throttle(session)" in \
+            ast.get_source_segment(src, fn), f"{name} must pace its requests"
+
+
+# ===========================================================================
+#  A refused load must give up
+# ===========================================================================
+
+def _reply(code=None, text=None, nested=False):
+    inner = {"type": code} if code is not None else {}
+    if text and not nested:
+        inner["text"] = text
+    body = [0, 0, 0, [None, [inner]]]
+    if text and nested:
+        body[1] = {"deep": [{"other": {"text": text}}]}
+    return json.dumps(body)
+
+
+def test_the_games_reason_is_found_wherever_it_sits(rtm):
+    assert rtm._refusal_text(json.loads(_reply(11, "Not enough ships"))) \
+        == "Not enough ships"
+    assert "Buried" in rtm._refusal_text(
+        json.loads(_reply(11, "Buried reason", nested=True)))
+    assert rtm._refusal_text(json.loads(_reply(10))) == ""
+    assert rtm._refusal_text({}) == ""
+
+
+def test_a_repeated_reason_is_not_repeated_back(rtm):
+    payload = {"a": {"text": "same"}, "b": {"text": "same"}}
+    assert rtm._refusal_text(payload) == "same"
+
+
+@pytest.fixture
+def sender(rtm, monkeypatch):
+    monkeypatch.setattr(rtm.time, "sleep", lambda s: None)
+    monkeypatch.setattr(rtm, "_next_fleet_event_seconds",
+                        lambda s, **k: 300)
+    monkeypatch.setattr(rtm, "_ship_wait_ceiling", lambda: 900)
+    city = ('"updateBackgroundData", {"id":"111","name":"A",'
+            '"availableResources":[1,1,1,1,1],"ownerId":1,"ownerName":"x",'
+            '"islandXCoord":"1","islandYCoord":"2"} ],'
+            '["updateTemplateData"')
+
+    class Sender(FakeSession):
+        def __init__(self, replies):
+            super().__init__()
+            self.replies = list(replies)
+            self.posts = 0
+
+        def get(self, *a, **k):
+            return city
+
+        def post(self, *a, **k):
+            self.posts += 1
+            # the changeCurrentCity post has no reply we read
+            if a or k.get("params", {}).get("function") == "changeCurrentCity":
+                if k.get("params", {}).get("function") == "changeCurrentCity":
+                    return ""
+            if self.replies:
+                return self.replies.pop(0)
+            return _reply(None)
+    return Sender
+
+
+def test_a_refused_load_stops_instead_of_retrying_forever(rtm, sender,
+                                                          monkeypatch):
+    monkeypatch.setattr(rtm, "getCity", lambda html: {
+        "id": "111", "availableResources": [1, 1, 1, 1, 1]})
+    s = sender([_reply(11, "Not enough ships")] * 20)
+    ok, why = rtm._send_one_load(s, "111", "222", "9", 3, [500, 0, 0, 0, 0],
+                                 False)
+    assert ok is False
+    assert "Not enough ships" in why, "the reason must reach the user"
+    # The old code retried for as long as the account existed.
+    assert s.posts <= rtm.SEND_ATTEMPT_LIMIT * 2 + 2
+
+
+def test_the_sender_has_no_unbounded_loop_in_it():
+    # The flood came from `while True` with a five second sleep. The bound
+    # must be structural, not a break somebody can delete.
+    import ast
+    src = _module_source()
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef) and n.name == "_send_one_load")
+    for loop in [n for n in ast.walk(fn) if isinstance(n, ast.While)]:
+        assert not (isinstance(loop.test, ast.Constant)
+                    and loop.test.value is True), \
+            "a refused load must not be retried in an unbounded loop"
+    ranges = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
+    assert ranges, "the attempts must be a bounded loop"
+    assert 1 < rtm_attempt_limit() <= 10
+
+
+def rtm_attempt_limit():
+    import ast
+    src = _module_source()
+    node = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", "") == "SEND_ATTEMPT_LIMIT"
+                        for t in n.targets))
+    return ast.literal_eval(node.value)
+
+
+def test_an_accepted_load_returns_at_once(rtm, sender, monkeypatch):
+    monkeypatch.setattr(rtm, "getCity", lambda html: {
+        "id": "111", "availableResources": [1, 1, 1, 1, 1]})
+    s = sender([_reply(rtm.SEND_ACCEPTED)])
+    ok, why = rtm._send_one_load(s, "111", "222", "9", 3, [500, 0, 0, 0, 0],
+                                 False)
+    assert (ok, why) == (True, "")
+
+
+def test_a_load_with_nothing_in_it_is_not_sent(rtm, sender, monkeypatch):
+    # getCity is patched so the send path would genuinely proceed. Without
+    # that, this passed because the real parser choked on the fake page
+    # rather than because the guard held.
+    monkeypatch.setattr(rtm, "getCity", lambda html: {
+        "id": "111", "availableResources": [1, 1, 1, 1, 1]})
+    s = sender([_reply(rtm.SEND_ACCEPTED)] * 4)
+    assert rtm._send_one_load(s, "1", "2", "9", 0, [500, 0, 0, 0, 0],
+                              False)[0] is False, "no ships means no load"
+    assert rtm._send_one_load(s, "1", "2", "9", 3, [0] * 5,
+                              False)[0] is False, "no cargo means no load"
+    assert s.posts == 0, "it must not even ask the game"
+
+
+def test_a_silent_refusal_still_says_something(rtm, sender, monkeypatch):
+    monkeypatch.setattr(rtm, "getCity", lambda html: {
+        "id": "111", "availableResources": [1, 1, 1, 1, 1]})
+    s = sender([_reply(None)] * 20)
+    ok, why = rtm._send_one_load(s, "111", "222", "9", 3, [500, 0, 0, 0, 0],
+                                 False)
+    assert ok is False
+    assert why, "a refusal with no reason must not read as success"
+
+
+# ===========================================================================
+#  A shipment too big to send
+# ===========================================================================
+
+def test_the_loads_a_shipment_needs_are_counted_before_sending():
+    import ast
+    src = _module_source()
+    send = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef) and n.name == "send_shipment")
+    body = ast.get_source_segment(src, send)
+    assert "MAX_LOADS_PER_SHIPMENT" in body, \
+        "40,000,000 by merchant ship is 80,000 loads and must be refused"
+    assert "SHIPMENT TOO BIG" in body
+    assert "Freighters carry" in body, "it must point at the way that works"
+
+
+def test_the_reported_shipment_would_now_be_refused(rtm):
+    # 40,000,000 at 500 per merchant ship.
+    import math
+    loads = math.ceil(40_000_000 / 500)
+    assert loads == 80_000
+    assert loads > rtm.MAX_LOADS_PER_SHIPMENT
+    # The same by freighter is still far too many, so that is refused too.
+    assert math.ceil(40_000_000 / 2500) > rtm.MAX_LOADS_PER_SHIPMENT
+
+
+def test_an_ordinary_shipment_is_not_refused(rtm):
+    import math
+    assert math.ceil(100_000 / 500) <= rtm.MAX_LOADS_PER_SHIPMENT
+    assert math.ceil(500_000 / 2500) <= rtm.MAX_LOADS_PER_SHIPMENT
+
+
+def test_a_cycle_stops_after_a_sane_number_of_loads(rtm):
+    import ast
+    src = _module_source()
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "_execute_routes_bounded")
+    body = ast.get_source_segment(src, fn)
+    assert "MAX_LOADS_PER_CYCLE" in body
+    assert "TRIP_GAP_SECONDS" in body, \
+        "back-to-back loads with no pause is what floods the server"
+    assert "_send_one_load(" in body
+    assert "if not accepted:" in body, "a refusal must end the cycle"
+    assert 0 < rtm.MAX_LOADS_PER_CYCLE <= 200
+    assert rtm.TRIP_GAP_SECONDS >= 1
