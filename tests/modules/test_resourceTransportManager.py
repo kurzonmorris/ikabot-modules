@@ -1613,6 +1613,48 @@ def test_wrapping_the_session_catches_cores_requests_too(rtm, monkeypatch):
     assert len(napped) == 3, "only the first went free"
 
 
+def test_pacing_a_request_does_not_hide_it_from_the_connection_count(rtm,
+                                                                    monkeypatch,
+                                                                    tmp_path):
+    """The throttle wraps the session, and the counter is inside it.
+
+    If the pacer ever answered a request itself rather than calling through,
+    the Connections graph would quietly under-report the one module most
+    likely to flood — so the two are pinned together here rather than left to
+    be true by construction.
+    """
+    import ikabot.helpers.requestLog as rl
+
+    monkeypatch.setattr(rl, "MONITOR_DIR", str(tmp_path))
+    monkeypatch.setattr(rl, "FLUSH_SECONDS", 0.0)
+    rl._state.update({"account": "", "path": "", "t0": 0, "counts": [],
+                      "errors": [], "total": 0, "peak": 0, "flushed": 0.0,
+                      "pruned": 0.0})
+    monkeypatch.setattr(rtm, "load_prefs",
+                        lambda: {"request_min_interval_seconds": 0.0,
+                                 "request_burst": 10})
+    _reset_throttle(rtm, allowance=10.0)
+
+    class Counted(FakeSession):
+        def get(self, *a, **k):
+            body = self._next()
+            rl.record_request(self, 200)
+            return body
+
+        def post(self, *a, **k):
+            return self.get(*a, **k)
+
+    session = Counted(["page"] * 6)
+    assert rtm.install_request_throttle(session) is True
+    for _ in range(6):
+        session.get()
+
+    assert session.calls == 6, "the pacer must call through, not answer itself"
+    counted = rl.read_counts("Stave_en70")
+    assert counted, "the paced requests never reached the counter"
+    assert sum(sum(part["counts"]) for part in counted) == 6
+
+
 def test_both_entry_points_install_the_throttle():
     src = _module_source()
     import ast
