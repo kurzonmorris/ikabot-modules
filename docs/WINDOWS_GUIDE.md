@@ -238,6 +238,22 @@ The queue is held by ikabot, not by your browser, so you can close the tab.
 
 ---
 
+## Step 9c — Checking how much you are sending
+
+Ikariam limits by IP address, and every instance shares yours. **Connections**
+in the menu shows how many requests each instance sent, second by second.
+
+Pick an instance from the numbered strip, or **All** for every instance
+together. The numbers above the graph are the rates per second, per 30 seconds
+and per minute, with the busiest moment in the window beside each one.
+
+> The per-instance web servers forward your browser to Ikariam. Every page and
+> every image loaded through one is another request from your address, and
+> **Load all** opens 24 game pages at once. If Ikariam ever blocks you for a
+> while, look there first.
+
+---
+
 ## Step 10 — Reaching it from your phone, anywhere (optional)
 
 So far the control panel only works on the PC it is installed on. This step

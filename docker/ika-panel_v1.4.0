@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.3.0"
+PANEL_VERSION = "1.4.0"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -42,7 +42,15 @@ INSTALLER_STAMP = os.path.join(HOME_DIR, ".installer-version")
 DATA_DIR = os.environ.get("IKABOT_DATA_DIR", os.path.join(HOME_DIR, ".ikabot"))
 # Subfolders of the data folder that never hold a module lock. Skipped so a
 # large logs folder is not listed every five seconds.
-LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache", "messages"}
+LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache", "messages",
+                  "connections"}
+
+# How many requests each account sent to Ikariam, second by second, written by
+# ikabot/helpers/requestLog.py. One file per process, because an account runs
+# the menu, a web server and a process per background task and they all send
+# requests. Summed here rather than locked there.
+CONN_DIR = os.environ.get("CONN_DIR", os.path.join(DATA_DIR, "connections"))
+CONN_WINDOW = 600
 
 # A local copy of every notification ikabot sent, written by
 # ikabot/helpers/messageLog.py. One file per account, one JSON object a line.
@@ -1377,6 +1385,123 @@ def read_message_log(accounts=None, limit=MSG_LIMIT, query=""):
     return out[:limit]
 
 
+def conn_meta():
+    """Per account: when it last sent anything, and how much in total.
+
+    Sent with every poll, so it reads the files but not the per-second lists.
+    """
+    out = {}
+    try:
+        names = sorted(os.listdir(CONN_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json") or name.startswith("."):
+            continue
+        account = name.split(".")[0]
+        try:
+            with open(os.path.join(CONN_DIR, name), encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        row = out.setdefault(account, {"last": 0, "total": 0, "parts": 0})
+        row["last"] = max(row["last"], int(payload.get("updated") or 0))
+        row["total"] += int(payload.get("total") or 0)
+        row["parts"] += 1
+    return out
+
+
+def connection_series(accounts=None, window=CONN_WINDOW, bucket=1, now=None):
+    """Requests per bucket over the last *window* seconds, newest at the end.
+
+    Every process's file is laid onto one grid of seconds ending at the current
+    second, so an account's menu, its web server and its tasks add up instead
+    of appearing as three separate accounts. The buckets are built from that
+    grid, so the rates below and the graph can never disagree.
+    """
+    window = max(10, min(int(window or CONN_WINDOW), CONN_WINDOW))
+    bucket = max(1, min(int(bucket or 1), 60))
+    now = int(time.time()) if now is None else int(now)
+    start = now - window + 1
+    seconds = [0] * window
+    bad = [0] * window
+    wanted = set(accounts) if accounts else None
+    total = 0
+
+    try:
+        names = sorted(os.listdir(CONN_DIR))
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json") or name.startswith("."):
+            continue
+        if wanted is not None and name.split(".")[0] not in wanted:
+            continue
+        try:
+            with open(os.path.join(CONN_DIR, name), encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        counts = payload.get("counts") or []
+        errors = payload.get("errors") or []
+        try:
+            t0 = int(payload.get("t0") or 0)
+            total += int(payload.get("total") or 0)
+        except (TypeError, ValueError):
+            continue
+        for i, value in enumerate(counts):
+            at = t0 + i - start
+            if not 0 <= at < window:
+                continue
+            try:
+                seconds[at] += int(value)
+                bad[at] += int(errors[i]) if i < len(errors) else 0
+            except (TypeError, ValueError):
+                continue
+
+    # The last second is still in progress, so its count is always short and
+    # would read as a sudden drop at the right of the graph. Every rate below
+    # is measured over whole seconds only.
+    whole = seconds[:-1]
+
+    def rate(n):
+        return sum(whole[-n:]) if whole else 0
+
+    def worst(n):
+        if len(whole) <= n:
+            return sum(whole)
+        return max(sum(whole[i:i + n]) for i in range(len(whole) - n + 1))
+
+    if bucket == 1:
+        reqs, errs = seconds, bad
+    else:
+        size = (window + bucket - 1) // bucket
+        reqs, errs = [0] * size, [0] * size
+        for i in range(window):
+            reqs[i // bucket] += seconds[i]
+            errs[i // bucket] += bad[i]
+
+    return {
+        "start": start,
+        "bucket": bucket,
+        "window": window,
+        "requests": reqs,
+        "errors": errs,
+        "total": total,
+        "now_1": rate(1),
+        "now_30": rate(30),
+        "now_60": rate(60),
+        "peak_1": max(whole) if whole else 0,
+        "peak_30": worst(30),
+        "peak_60": worst(60),
+        "error_total": sum(bad),
+    }
+
+
 def state():
     raw = subprocess.run(
         ["tmux", "list-windows", "-t", SESSION, "-F",
@@ -1542,6 +1667,7 @@ def state():
         "core_error": core_err,
         "panel_version": PANEL_VERSION,
         "messages": message_meta(),
+        "connections": conn_meta(),
         "queue": queue_view(),
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
@@ -2028,6 +2154,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny()
         if self.path.startswith("/api/state"):
             return self._send(200, json.dumps(state()))
+
+        if self.path.startswith("/api/connections"):
+            q = self._query()
+            raw = (q.get("acct") or [""])[0]
+            accounts = [a for a in raw.split(",") if a] or None
+
+            def number(key, fallback):
+                try:
+                    return int((q.get(key) or [""])[0] or fallback)
+                except ValueError:
+                    return fallback
+
+            return self._send(200, json.dumps(connection_series(
+                accounts, number("window", CONN_WINDOW), number("bucket", 1))))
 
         if self.path.startswith("/api/queue"):
             return self._send(200, json.dumps(queue_view(full=True)))
@@ -2694,6 +2834,41 @@ border:1px solid var(--rule);color:var(--soft);white-space:nowrap}
 .qout{margin:4px 0 0;font-size:12px;color:var(--soft);white-space:pre-wrap;
 max-height:8em;overflow:auto}
 
+/* Connections. One series in the accent colour, and errors as a status series
+   — dashed as well as red, so the two are told apart without relying on
+   colour at all. Grid and axes are recessive; the numbers wear ink tokens and
+   never a series colour. */
+.cwrap{border:1px solid var(--rule);border-radius:6px;background:var(--card);
+padding:10px;min-height:220px}
+.cchart{display:block;width:100%;height:220px;touch-action:none}
+.cgrid{stroke:var(--rule);stroke-width:1}
+.caxis{fill:var(--soft);font-size:10px;
+font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.cline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round}
+.cfill{fill:var(--accent);opacity:.12}
+.cbadline{fill:none;stroke:var(--bad);stroke-width:2;stroke-dasharray:4 3;
+stroke-linejoin:round}
+.chair{stroke:var(--soft);stroke-width:1;stroke-dasharray:3 3}
+.cdot{fill:var(--accent);stroke:var(--card);stroke-width:2}
+.cdot.bad{fill:var(--bad)}
+.ctip{position:absolute;pointer-events:none;background:var(--card);
+border:1px solid var(--rule);border-radius:5px;padding:5px 8px;font-size:12px;
+box-shadow:0 2px 10px -4px rgba(0,0,0,.4);white-space:nowrap;z-index:4}
+.ckey{display:flex;gap:14px;align-items:center;flex-wrap:wrap;
+margin:0 0 6px;font-size:12px;color:var(--soft)}
+.ckey i{display:inline-block;width:18px;height:0;border-top:2px solid var(--accent);
+margin-right:5px;vertical-align:middle}
+.ckey i.bad{border-top:2px dashed var(--bad)}
+.ctiles{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.ctile{border:1px solid var(--rule);border-radius:6px;background:var(--card);
+padding:6px 10px;min-width:92px}
+.ctile b{display:block;font-size:19px;font-weight:600;line-height:1.2;
+font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ctile span{display:block;font-size:10.5px;letter-spacing:.06em;
+text-transform:uppercase;color:var(--soft)}
+.ctile.hot b{color:var(--bad)}
+.cpos{position:relative}
+
 /* Messages. The strip is the Web servers strip, down to the class names, so
    the two read the same way. The one addition is the wide button across the
    top: five squares plus the gaps between them, from grid-column 1 / -1. */
@@ -3143,6 +3318,40 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
   <p class="hint" id="wnote"></p>
 </section>
 
+<section class="sec" id="sec-connections">
+  <h2>Connections</h2>
+  <!-- Ikariam limits by address and every instance shares one. The per-instance
+       web server is a reverse proxy, so a browser page loaded through it is
+       dozens more requests from the same address. Counted rather than guessed
+       at: ikabot/helpers/requestLog.py writes a bucket a second. -->
+  <div class="row" style="margin-bottom:10px">
+    <span class="zoom">Window
+      <button data-cw="120:1" class="p">2 minutes</button>
+      <button data-cw="600:5">10 minutes</button>
+    </span>
+    <button id="crefresh">Refresh</button>
+    <span class="hint" id="cwhen" style="margin:0"></span>
+  </div>
+  <div class="ctiles" id="ctiles"></div>
+  <div class="wsplit" id="csplit">
+    <div class="cwrap cpos" id="cwrap">
+      <p class="ckey" id="ckey">
+        <span><i></i>requests</span>
+        <span><i class="bad"></i>refused or failed</span>
+      </p>
+      <div id="cchartwrap"><p class="mempty" id="cempty">Loading…</p></div>
+    </div>
+    <div class="wrail" id="crail">
+      <button class="wtoggle" id="ctoggle" title="Hide the instance strip">›</button>
+      <div class="wpad mpad" id="cpad"></div>
+    </div>
+  </div>
+  <table style="margin-top:12px"><thead><tr><th>Rate</th><th>Now</th>
+    <th>Worst in the window</th></tr></thead>
+  <tbody id="cbody"></tbody></table>
+  <p class="hint" id="cnote"></p>
+</section>
+
 <section class="sec" id="sec-messages">
   <h2>Messages</h2>
   <!-- Every notification ikabot sent, kept here as it was sent. Telegram
@@ -3428,6 +3637,7 @@ document.getElementById('openweb').addEventListener('click',function(){
 // --- section switcher ----------------------------------------------------
 var SECTIONS=[['instances','Instances','Inst'],['terminal','Terminal','Term'],
               ['webservers','Web servers','Web'],['messages','Messages','Msg'],
+              ['connections','Connections','Conn'],
               ['accounts','Accounts','Acct'],
               ['buttons','Buttons','Btn'],['modules','Modules','Mod'],
               ['ikabot','ikabot','ika'],['files','Files','File']];
@@ -3446,6 +3656,7 @@ function showSection(id){
   if(id==='terminal')mountTerminal();
   if(id==='webservers'){ renderServers(); fitServers(); }
   if(id==='messages'){ renderMsgPad(); loadMessages(); dLoad(); }
+  if(id==='connections'){ renderConnPad(); loadConnections(); }
   placeRail();
   window.scrollTo({top:0});
 }
@@ -3519,7 +3730,8 @@ function wHost(){ return location.hostname || last.host || 'localhost'; }
 // Web servers and Messages each have a strip, and on a wide screen the strip
 // belongs under the menu rather than beside the content. Only one section is
 // on screen at a time, so both can use the one slot.
-var RAILS = {webservers:['wrail','wsplit'], messages:['mrail','msplit']};
+var RAILS = {webservers:['wrail','wsplit'], messages:['mrail','msplit'],
+             connections:['crail','csplit']};
 
 function placeRail(){
   var slot = el('railslot');
@@ -4208,6 +4420,9 @@ function refresh(){
       renderMsgPad();
       if(sig!==mSig){ mSig=sig; loadMessages(); }
     }
+    // Unlike the others this is redrawn on every poll whatever happened: the
+    // graph is a clock, and a still one would read as no traffic.
+    if(current==='connections'){ renderConnPad(); loadConnections(); }
     proxyNote();
     if(s.font_size) el('fsize').textContent = s.font_size;
 
@@ -4981,6 +5196,218 @@ document.addEventListener('dragend',function(){
   qDrag=null;
   Array.prototype.forEach.call(document.querySelectorAll('#qlist li.over'),
     function(x){ x.classList.remove('over'); });
+});
+
+// --- connections ----------------------------------------------------------
+// Ikariam limits by address, every instance shares one, and the per-instance
+// web server is a reverse proxy — so one browser page loaded through it is
+// dozens more requests from the same address. This draws what was actually
+// sent, per second, so a block can be traced to what caused it.
+//
+// One series, plus errors as a status series. The error line is dashed as well
+// as red, so the two are told apart with no colour vision at all.
+var cPick='all', cWindow=120, cBucket=1, cData=null, cBusy=false;
+try{ cPick=localStorage.getItem('ikaConnPick')||'all'; }catch(e){}
+
+function cByNum(){
+  var map={};
+  (last.instances||[]).forEach(function(i){ if(i.account) map[i.num]=i.account; });
+  return map;
+}
+
+function renderConnPad(){
+  var pad=el('cpad'); if(!pad) return;
+  var accounts=cByNum(), meta=last.connections||{};
+  var nums=(last.instances||[]).map(function(i){return i.num;})
+                               .sort(function(a,b){return a-b;});
+  var html='<button class="all'+(cPick==='all'?' on':'')+'" data-conn="all" '+
+           'title="Every instance added together">All</button>';
+  html+=nums.map(function(n){
+    var account=accounts[n]||'', seen=account?meta[account]:null;
+    var cls=[];
+    if(seen) cls.push('live');
+    if(cPick===String(n)) cls.push('on');
+    return '<button data-conn="'+n+'"'+(seen?'':' disabled')+
+      (cls.length?' class="'+cls.join(' ')+'"':'')+
+      ' title="'+(seen?'instance '+n+' — '+esc(account)+', '+
+                       (seen.total||0)+' request(s) so far'
+                     :'instance '+n+' — nothing counted yet')+'">'+n+'</button>';
+  }).join('');
+  pad.innerHTML=html;
+}
+
+function cTiles(d){
+  function tile(value, label, hot){
+    return '<div class="ctile'+(hot?' hot':'')+'"><b>'+value+'</b><span>'+
+           esc(label)+'</span></div>';
+  }
+  el('ctiles').innerHTML =
+    tile(d.now_1, 'per second') +
+    tile(d.now_30, 'per 30 seconds') +
+    tile(d.now_60, 'per minute') +
+    tile(d.peak_1, 'busiest second') +
+    tile(d.error_total, 'refused or failed', d.error_total > 0) +
+    tile(d.total, 'since ikabot started');
+
+  el('cbody').innerHTML = [
+    ['Per second', d.now_1, d.peak_1],
+    ['Per 30 seconds', d.now_30, d.peak_30],
+    ['Per minute', d.now_60, d.peak_60]
+  ].map(function(r){
+    return '<tr><td>'+r[0]+'</td><td class="mono">'+r[1]+
+           '</td><td class="mono">'+r[2]+'</td></tr>';
+  }).join('');
+}
+
+// Drawn as SVG rather than on a canvas: it scales with the page, it reads the
+// same two colour tokens the rest of the panel uses, so dark mode is the
+// panel's own dark mode and not a flipped copy.
+function drawChart(d){
+  var host=el('cchartwrap'); if(!host) return;
+  var reqs=d.requests||[], errs=d.errors||[];
+  if(!reqs.length){
+    host.innerHTML='<p class="mempty">Nothing counted yet.</p>';
+    return;
+  }
+  var W=1000, H=220, L=34, R=8, T=10, B=22;
+  var iw=W-L-R, ih=H-T-B;
+  var top=Math.max(1, Math.max.apply(null, reqs));
+  // A round ceiling, so the gridline labels are numbers worth reading.
+  var step=Math.pow(10, Math.floor(Math.log(top)/Math.LN10));
+  top=Math.ceil(top/step)*step;
+
+  var x=function(i){ return L + (reqs.length<2?0:(i*iw/(reqs.length-1))); };
+  var y=function(v){ return T + ih - (v/top)*ih; };
+  var path=function(list){
+    return list.map(function(v,i){ return (i?'L':'M')+x(i).toFixed(1)+' '+
+                                          y(v).toFixed(1); }).join(' ');
+  };
+
+  var grid='', labels='';
+  [0,0.5,1].forEach(function(f){
+    var v=top*f, yy=y(v);
+    grid+='<line class="cgrid" x1="'+L+'" y1="'+yy.toFixed(1)+'" x2="'+(W-R)+
+          '" y2="'+yy.toFixed(1)+'"/>';
+    labels+='<text class="caxis" x="'+(L-6)+'" y="'+(yy+3.5).toFixed(1)+
+            '" text-anchor="end">'+Math.round(v)+'</text>';
+  });
+  var span=d.window||120;
+  [[0, '-'+Math.round(span/60)+' min'], [reqs.length-1, 'now']].forEach(
+    function(pair){
+      labels+='<text class="caxis" x="'+x(pair[0]).toFixed(1)+'" y="'+(H-6)+
+              '" text-anchor="'+(pair[0]?'end':'start')+'">'+pair[1]+'</text>';
+    });
+
+  var area=path(reqs)+' L '+x(reqs.length-1).toFixed(1)+' '+y(0).toFixed(1)+
+           ' L '+x(0).toFixed(1)+' '+y(0).toFixed(1)+' Z';
+  var anyBad=errs.some(function(v){return v>0;});
+
+  host.innerHTML=
+    '<svg class="cchart" id="csvg" viewBox="0 0 '+W+' '+H+'" '+
+         'preserveAspectRatio="none" role="img" '+
+         'aria-label="Requests per '+(d.bucket>1?d.bucket+' seconds':'second')+
+         ' over the last '+Math.round(span/60)+' minutes">'+
+      grid+
+      '<path class="cfill" d="'+area+'"/>'+
+      '<path class="cline" d="'+path(reqs)+'"/>'+
+      (anyBad?'<path class="cbadline" d="'+path(errs)+'"/>':'')+
+      labels+
+      '<g id="chair" style="display:none">'+
+        '<line class="chair" y1="'+T+'" y2="'+(T+ih)+'"/>'+
+        '<circle class="cdot" r="4"/>'+
+        '<circle class="cdot bad" r="4" style="display:none"/>'+
+      '</g>'+
+    '</svg>'+
+    '<div class="ctip" id="ctip" style="display:none"></div>';
+
+  // The hover layer. A line chart without one makes the reader guess which
+  // second a spike was.
+  var svg=el('csvg'), hair=el('chair'), tip=el('ctip');
+  var dots=hair.querySelectorAll('circle');
+  function move(ev){
+    var box=svg.getBoundingClientRect();
+    var px=(ev.touches?ev.touches[0].clientX:ev.clientX)-box.left;
+    var at=Math.round(((px/box.width)*W - L)/(iw||1)*(reqs.length-1));
+    at=Math.max(0, Math.min(reqs.length-1, at));
+    hair.style.display='';
+    hair.querySelector('line').setAttribute('x1', x(at));
+    hair.querySelector('line').setAttribute('x2', x(at));
+    dots[0].setAttribute('cx', x(at)); dots[0].setAttribute('cy', y(reqs[at]));
+    dots[1].setAttribute('cx', x(at)); dots[1].setAttribute('cy', y(errs[at]||0));
+    dots[1].style.display = errs[at] ? '' : 'none';
+    var when=new Date((d.start+at*d.bucket)*1000);
+    tip.innerHTML='<b>'+reqs[at]+'</b> request'+(reqs[at]===1?'':'s')+
+      (d.bucket>1?' in '+d.bucket+'s':'')+
+      (errs[at]?'<br>'+errs[at]+' refused or failed':'')+
+      '<br><span class="hint" style="margin:0">'+
+      when.toLocaleTimeString()+'</span>';
+    tip.style.display='';
+    var want=(x(at)/W)*box.width;
+    tip.style.left=Math.min(box.width-tip.offsetWidth-4,
+                            Math.max(0, want+8))+'px';
+    tip.style.top='8px';
+  }
+  svg.addEventListener('mousemove', move);
+  svg.addEventListener('touchstart', move);
+  svg.addEventListener('touchmove', move);
+  svg.addEventListener('mouseleave', function(){
+    hair.style.display='none'; tip.style.display='none';
+  });
+}
+
+function loadConnections(){
+  if(cBusy) return;
+  var accounts=cByNum(), url='api/connections?window='+cWindow+'&bucket='+cBucket;
+  if(cPick!=='all'){
+    var one=accounts[cPick];
+    if(!one){
+      el('cchartwrap').innerHTML='<p class="mempty">Instance '+esc(cPick)+
+        ' has not sent anything yet.</p>';
+      return;
+    }
+    url+='&acct='+encodeURIComponent(one);
+  }
+  cBusy=true;
+  fetch(url).then(function(r){return r.json()}).then(function(d){
+    cData=d;
+    cTiles(d);
+    drawChart(d);
+    el('cwhen').textContent='read '+new Date().toLocaleTimeString()+
+      ', refreshes by itself every 5 seconds';
+    el('cnote').textContent = cPick==='all'
+      ? 'Every instance added together. Each instance also counts what its own '+
+        'web server forwards, so a browser page opened through Web servers '+
+        'appears here too.'
+      : 'Instance '+cPick+' only, its menu, its tasks and its web server added '+
+        'together.';
+  }).catch(function(err){
+    el('cchartwrap').innerHTML='<p class="mempty">Could not read the counts: '+
+      esc(String(err))+'</p>';
+  }).then(function(){ cBusy=false; });
+}
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-conn]');
+  if(b && !b.disabled){
+    cPick=b.dataset.conn;
+    try{ localStorage.setItem('ikaConnPick', cPick); }catch(err){}
+    renderConnPad(); loadConnections();
+    return;
+  }
+  var w=e.target.closest('button[data-cw]');
+  if(w){
+    var parts=w.dataset.cw.split(':');
+    cWindow=parseInt(parts[0],10); cBucket=parseInt(parts[1],10);
+    Array.prototype.forEach.call(document.querySelectorAll('button[data-cw]'),
+      function(x){ x.classList.toggle('p', x===w); });
+    loadConnections();
+  }
+});
+
+el('crefresh').addEventListener('click',function(){ loadConnections(); });
+el('ctoggle').addEventListener('click',function(){
+  var off=el('shell').classList.toggle('railoff');
+  this.textContent = off ? '‹' : '›';
 });
 
 showSection(saved);

@@ -959,6 +959,7 @@ Sign in with the same username and password as the terminal.
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Terminal** | The instance screens, embedded — the same thing as opening port 7681 |
 | **Web servers** | Pick an instance from a numbered strip and read its web server full size |
+| **Connections** | How many requests each instance sent to Ikariam, second by second, as a graph. Rates per second, per 30 seconds and per minute, with the worst in the window beside them |
 | **Messages** | Every notification ikabot has sent, newest first. Pick one instance from a numbered strip, or press the wide **All** button for every instance at once. Below the list, the destinations those messages are sent to |
 | **Output** | What the command you just pressed actually printed — always on screen, whichever section you are in |
 
@@ -1032,6 +1033,48 @@ status, update all modules, download and update ikabot.
 
 Anything aimed at one instance is not on the list, because it is already one
 press. Nor is updating the panel itself, which restarts the panel.
+
+### Connections
+
+Ikariam limits by IP address, and every instance here shares one. This section
+counts what was actually sent, so a temporary block can be traced to whatever
+caused it rather than guessed at.
+
+The counting is in `Session.get` and `Session.post`, which every request passes
+through. That matters, because it means the count is not only your modules.
+
+> **The web servers are a reverse proxy.** A per-instance web server does not
+> show you a copy of the game — it forwards your browser to Ikariam, from this
+> machine's address. Every page, every image and every click goes through
+> `session.get`. **Load all** opens 24 full game pages at once, and a game page
+> is dozens of requests. One press is several hundred requests from one address
+> in a few seconds.
+>
+> If you have been temporarily blocked, look there first.
+
+**Reading it.** Pick an instance from the numbered strip, or the wide **All**
+button for every instance added together. An account's menu, its web server and
+each of its background tasks are counted together, because they all leave from
+the same address.
+
+The window is **2 minutes** at one point a second, or **10 minutes** at one
+point every five seconds. Hover the graph for the count at any moment.
+
+| Figure | Means |
+|---|---|
+| Per second / per 30 seconds / per minute | What has been sent in the last 1, 30 and 60 whole seconds |
+| Worst in the window | The busiest second, the busiest 30 seconds and the busiest minute anywhere in the window. A burst that has passed still shows here |
+| Refused or failed | Answers that were not a 2xx or 3xx, and requests that got no answer at all. A block arrives as a status, not as silence |
+| Since ikabot started | Everything counted since each process began |
+
+The second in progress is drawn on the graph but left out of every rate, so an
+unfinished second does not read as a sudden drop.
+
+The error line is **dashed as well as red**, so the two lines can be told apart
+with no colour vision at all.
+
+> Needs mod 2.3.0 or later, which is what does the counting. On anything older
+> the section stays empty.
 
 ### Messages
 
@@ -1238,6 +1281,43 @@ This replaces keeping twenty-four browser tabs open. It needs the ports to be
 reachable from your browser, which they are on Unraid, TrueNAS, Linux and a
 Steam Deck; on Windows and Mac Docker cannot share the host's network, so only
 the panel and terminal are reachable there.
+
+### A proxy, and when it starts being used
+
+**The Gameforge account login never goes through the proxy.** Gameforge
+refuses a login from a hosting address, so that request always leaves from this
+machine. This is not a setting — the session object is built with no proxy at
+all and the login happens before one is ever applied.
+
+That is why a proxy which works in a browser can look broken in ikabot, and it
+is why there is a choice about *when* the proxy starts.
+
+| Phase | The proxy is used | 
+|---|---|
+| **From entering the game server onwards** | The default, and what ikabot has always done |
+| **From choosing the server onwards** | One request earlier, so the game session is created from the same address that will use it |
+
+Pick the second one if the first does not work. It is what turning a VPN on at
+the server list does in a browser: choosing the server and playing on it both
+happen from the proxy's address, while the login did not.
+
+Set it in ikabot: **Settings → Proxy**, then *Change when the proxy starts
+being used*. It is stored per account.
+
+**A VPN cannot do this.** A VPN moves everything this container sends,
+including the login, so the login would be refused. What you want is a **SOCKS5
+proxy**, which is the same exit address applied per request. Private Internet
+Access provides one: generate a SOCKS5 username and password in the PIA app —
+these are not your account login — and take the host from PIA. Then enter:
+
+```
+socks5://username:password@host:1080
+```
+
+`requests[socks]` is already installed in the image, so nothing else is needed.
+
+> A proxy works around a block. It does not reduce what you send. Look at
+> **Connections** first.
 
 ### When a proxy stops working
 

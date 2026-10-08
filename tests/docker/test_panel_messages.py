@@ -17,7 +17,7 @@ import pytest
 
 _PANEL = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "docker", "ika-panel_v1.3.0",
+    "docker", "ika-panel_v1.4.0",
 )
 
 
