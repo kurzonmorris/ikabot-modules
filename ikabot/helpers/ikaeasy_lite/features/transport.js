@@ -160,9 +160,16 @@
                 b.addEventListener('click', function (e) { e.preventDefault(); applySum(input, s.sum); });
                 bar.appendChild(b);
             });
-            // Sit the bar just under the resource's input.
-            var host = input.parentNode;
-            host.insertBefore(bar, input.nextSibling);
+            // Place the bar as its own row BETWEEN the slider rows. The game's
+            // rows use absolute positioning inside each <li>, so inserting a
+            // sibling <li>-level block after the row is the only placement that
+            // never overlaps the slider above or below.
+            var li = input.closest('li');
+            if (li && li.parentNode) {
+                li.parentNode.insertBefore(bar, li.nextSibling);
+            } else {
+                input.parentNode.insertBefore(bar, input.nextSibling);
+            }
         });
     }
 

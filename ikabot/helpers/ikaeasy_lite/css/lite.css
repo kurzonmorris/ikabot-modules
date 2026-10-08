@@ -64,8 +64,18 @@
 .ikel-range { vertical-align: middle; }
 .ikel-pct   { min-width: 34px; text-align: right; display: inline-block; }
 
-/* Quick-amount buttons on the transport goods form. */
-.ikel-tbtns { display: flex; flex-wrap: wrap; gap: 3px; margin: 3px 0; }
+/* Quick-amount buttons on the transport goods form. They render as their own
+   row between the game's slider rows, indented to sit under the slider, with a
+   gap above and below so they never overlap a slider. */
+.ikel-tbtns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin: 4px 0 8px 34px;
+    clear: both;
+    position: relative;
+    z-index: 5;
+}
 .ikel-tbtn {
     display: inline-block;
     min-width: 20px;
