@@ -237,7 +237,7 @@ version. Nothing reads it. Rename it with the mod version.
 External modules (`.py` files in the external modules directory) have a version number **in the filename** only:
 ```
 resourceTransportManager_v10.16.0.py
-constructionManager_v2.6.0.py
+constructionManager_v2.6.1.py
 ```
 The suffix is stripped by the **installer** when it copies the file into the
 user's modules folder — *not* by the module loader. `MODULE_NAME` is the display
@@ -278,7 +278,7 @@ ikabot-modules/
 │       └── session.py             ← Session class — all HTTP calls go through here
 ├── modules/                             ← External modules, versioned filenames
 │   ├── resourceTransportManager_v10.16.0.py
-│   ├── constructionManager_v2.6.0.py
+│   ├── constructionManager_v2.6.1.py
 │   └── ...                              ← see §13 for the full list
 ├── GUIDE.md                            ← End-user guide
 ├── RELEASE_NOTES.md                    ← Changelog vs upstream
@@ -788,7 +788,7 @@ numbers below drift.**
 | Module | Does |
 |---|---|
 | `resourceTransportManager_v10.16.0.py` | Moves resources between cities and to other players: ship routing, partial loads, per-shipment notifications with configurable levels. Priority scheduling 1-5 with a hold window, a trading-port hold list, shipment history with resend, retry of a failed schedule, per-account logs. Consolidate asks whether an exact amount is wanted from **each** source city or **in total**. Waits for the fleet arrival the game reports rather than polling for returning ships. Paces every request it makes, because nothing below it does and about two dozen instances share one address. Sends through its own copy of the route logic; it deliberately does not call `executeRoutes()`, because that path reads ship capacity through a core helper a dropped-in module cannot update. |
-| `constructionManager_v2.6.0.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per account or per city, per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §29. |
+| `constructionManager_v2.6.1.py` | CSV-backed multi-city construction queue. Polls, triggers builds/upgrades, and handles shortages by waiting or requesting transport. Selectable queue strategy (wait in order / skip ahead), per account or per city, per-city resource requirements report, and a queue that re-aligns itself with buildings done by hand. See §29. |
 | `autoRecruitmentManager_v2.14.0.py` | Trains units/ships across barracks and shipyards from a goals CSV, with per-type city include lists, configurable batch sizing and capacity-aware allocation (§ Population and citizens). **The working RRS integration example.** Also the reference for *verifying* an order was accepted before mutating state — see §Order verification. |
 | `tavernManager_v2.0.1.py` | Keeps satisfaction at target by adjusting wine. **The best settings-memory example (§23)** — namespaced per flow, validates, re-resolves city ids. |
 | `resourceProductionManager_v1.0.3.py` | Manages production/luxury assignment per city. Own persistence, predates `modulePrefs`. |
