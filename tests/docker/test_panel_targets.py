@@ -22,7 +22,7 @@ import ikabot.helpers.notifyTargets as nt
 
 _PANEL = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "docker", "ika-panel_v1.2.0",
+    "docker", "ika-panel_v1.4.0",
 )
 
 TOKEN = "123456:abcdefghijklmnopqrstuvwx"

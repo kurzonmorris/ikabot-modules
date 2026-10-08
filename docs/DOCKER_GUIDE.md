@@ -951,6 +951,7 @@ Sign in with the same username and password as the terminal.
 | **Modules** | Every module in the repo, installed or not — installed version next to the one on GitHub. **Green** up to date, **red** update available, **blue** published but not installed yet, with an **Install** button. Update one, update all, or reinstall from the app folder |
 | **Instances** — proxy alert | Tick **Alert on proxy trouble** and any instance whose proxy has stopped working breathes blue, with *proxy not working* and how long it has been so on the card. Off by default, remembered per browser, and it can only fire on an instance that has a proxy configured |
 | **ikabot** | Installed version of ikabot and the mod next to what is published — **red** when a newer one exists, **green** when current. Says so plainly at the top when there is one to install, and marks the menu item **new**. Download and install an update, or roll the last one back |
+| **Instances** — queue | A list of presses, run one after another. Pick a step, order it, press **Start**. Nothing else can type into an instance while a step is running, so two sequences cannot collide |
 | **Active processes** | Per instance, a dropdown listing what that account is actually running — module name, its status line, and how long it has been going. Click one to stop it |
 | **Accounts** | Paste every account in at once and save them to ikabot's vault in one press — for a fresh install, or a machine that has no vault yet |
 | **Lock files** | Per instance and across all of them, clear the lock files modules leave behind so a module can start fresh |
@@ -958,6 +959,7 @@ Sign in with the same username and password as the terminal.
 | **Buttons** | Your own named buttons — create, edit and delete them; each presses a sequence of menu options in one instance or in every instance it applies to |
 | **Terminal** | The instance screens, embedded — the same thing as opening port 7681 |
 | **Web servers** | Pick an instance from a numbered strip and read its web server full size |
+| **Connections** | How many requests each instance sent to Ikariam, second by second, as a graph. Rates per second, per 30 seconds and per minute, with the worst in the window beside them |
 | **Messages** | Every notification ikabot has sent, newest first. Pick one instance from a numbered strip, or press the wide **All** button for every instance at once. Below the list, the destinations those messages are sent to |
 | **Output** | What the command you just pressed actually printed — always on screen, whichever section you are in |
 
@@ -980,6 +982,99 @@ it is remembered.
 On a phone the menu becomes a row of chips you swipe along, and instance cards
 collapse to their name and state — tap one to open its buttons. On a desktop
 nothing has changed.
+
+### The queue
+
+Pressing one of your buttons across twenty-four instances takes minutes, and
+until it answers the page greys out every other button. That is deliberate:
+two key sequences typed into one instance at the same moment interleave into
+nonsense. The queue does that waiting for you.
+
+At the top of **Instances** is a **Queue** block.
+
+1. Pick a step from the list — one of your own buttons, or one of the actions
+2. Press **Add to queue**
+3. Repeat, then put the steps in the order you want
+4. Press **Start**
+
+The steps then run one at a time, in order, with no one at the screen.
+
+**Reordering.** Each waiting step has **▲** and **▼**. On a desktop you can
+also drag a step by the **⠿** handle. Dragging does nothing on a touchscreen —
+the browser does not send those events — so the arrows are the way to do it on
+a phone or tablet, not a fallback.
+
+**While it runs.** The line beside **Queue** says which step is running and how
+many are left. The step running now is outlined. Finished steps keep an
+**Output** button holding what they printed.
+
+| Mark | Means |
+|---|---|
+| `waiting` | Not started |
+| `running` | Going now |
+| `done` | Finished |
+| `failed` | It ran and reported a problem. The queue carries on to the next step |
+| `skipped` | You pressed Stop before it started |
+
+**Stop** lets the step running now finish, then skips the rest. Nothing is ever
+cut off part way through typing. **Clear finished** tidies the list. **Empty the
+queue** removes everything waiting.
+
+You can add a step while the queue is running. It is picked up when the current
+step ends.
+
+> The queue is held by the panel, not by your browser. Closing the tab or
+> letting a phone sleep does not stop it, and a second browser sees the same
+> list. Restarting the panel loses it.
+
+**What can be queued.** Your own buttons, and: restart crashed only, restart
+all, stop all processes, clear all lock files, stop all web servers, show
+status, update all modules, download and update ikabot.
+
+Anything aimed at one instance is not on the list, because it is already one
+press. Nor is updating the panel itself, which restarts the panel.
+
+### Connections
+
+Ikariam limits by IP address, and every instance here shares one. This section
+counts what was actually sent, so a temporary block can be traced to whatever
+caused it rather than guessed at.
+
+The counting is in `Session.get` and `Session.post`, which every request passes
+through. That matters, because it means the count is not only your modules.
+
+> **The web servers are a reverse proxy.** A per-instance web server does not
+> show you a copy of the game — it forwards your browser to Ikariam, from this
+> machine's address. Every page, every image and every click goes through
+> `session.get`. **Load all** opens 24 full game pages at once, and a game page
+> is dozens of requests. One press is several hundred requests from one address
+> in a few seconds.
+>
+> If you have been temporarily blocked, look there first.
+
+**Reading it.** Pick an instance from the numbered strip, or the wide **All**
+button for every instance added together. An account's menu, its web server and
+each of its background tasks are counted together, because they all leave from
+the same address.
+
+The window is **2 minutes** at one point a second, or **10 minutes** at one
+point every five seconds. Hover the graph for the count at any moment.
+
+| Figure | Means |
+|---|---|
+| Per second / per 30 seconds / per minute | What has been sent in the last 1, 30 and 60 whole seconds |
+| Worst in the window | The busiest second, the busiest 30 seconds and the busiest minute anywhere in the window. A burst that has passed still shows here |
+| Refused or failed | Answers that were not a 2xx or 3xx, and requests that got no answer at all. A block arrives as a status, not as silence |
+| Since ikabot started | Everything counted since each process began |
+
+The second in progress is drawn on the graph but left out of every rate, so an
+unfinished second does not read as a sudden drop.
+
+The error line is **dashed as well as red**, so the two lines can be told apart
+with no colour vision at all.
+
+> Needs mod 2.3.0 or later, which is what does the counting. On anything older
+> the section stays empty.
 
 ### Messages
 
@@ -1186,6 +1281,43 @@ This replaces keeping twenty-four browser tabs open. It needs the ports to be
 reachable from your browser, which they are on Unraid, TrueNAS, Linux and a
 Steam Deck; on Windows and Mac Docker cannot share the host's network, so only
 the panel and terminal are reachable there.
+
+### A proxy, and when it starts being used
+
+**The Gameforge account login never goes through the proxy.** Gameforge
+refuses a login from a hosting address, so that request always leaves from this
+machine. This is not a setting — the session object is built with no proxy at
+all and the login happens before one is ever applied.
+
+That is why a proxy which works in a browser can look broken in ikabot, and it
+is why there is a choice about *when* the proxy starts.
+
+| Phase | The proxy is used | 
+|---|---|
+| **From entering the game server onwards** | The default, and what ikabot has always done |
+| **From choosing the server onwards** | One request earlier, so the game session is created from the same address that will use it |
+
+Pick the second one if the first does not work. It is what turning a VPN on at
+the server list does in a browser: choosing the server and playing on it both
+happen from the proxy's address, while the login did not.
+
+Set it in ikabot: **Settings → Proxy**, then *Change when the proxy starts
+being used*. It is stored per account.
+
+**A VPN cannot do this.** A VPN moves everything this container sends,
+including the login, so the login would be refused. What you want is a **SOCKS5
+proxy**, which is the same exit address applied per request. Private Internet
+Access provides one: generate a SOCKS5 username and password in the PIA app —
+these are not your account login — and take the host from PIA. Then enter:
+
+```
+socks5://username:password@host:1080
+```
+
+`requests[socks]` is already installed in the image, so nothing else is needed.
+
+> A proxy works around a block. It does not reduce what you send. Look at
+> **Connections** first.
 
 ### When a proxy stops working
 

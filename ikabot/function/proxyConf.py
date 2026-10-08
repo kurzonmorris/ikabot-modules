@@ -59,6 +59,9 @@ def handle_broken_proxy(session, reason=""):
         def _store_proxy(sd):
             sd.setdefault("proxy", {})["conf"] = proxy_dict
             sd["proxy"]["set"] = True
+            # Whatever phase was chosen before is kept: a proxy replaced
+            # because the old one died is the same job as the old one.
+            sd["proxy"].setdefault("phase", DEFAULT_PHASE)
             return sd
 
         session.mutateSessionData(_store_proxy)
@@ -66,11 +69,44 @@ def handle_broken_proxy(session, reason=""):
         return True
 
 
+PHASES = {
+    "game": "from entering the game server onwards",
+    "select": "from choosing the server onwards",
+}
+DEFAULT_PHASE = "game"
+
+
+def proxy_phase(session_data):
+    """Which phase the stored proxy uses. Absent reads as the old behaviour."""
+    phase = session_data.get("proxy", {}).get("phase")
+    return phase if phase in PHASES else DEFAULT_PHASE
+
+
+def read_phase(current=DEFAULT_PHASE):
+    """Ask when the proxy should start being used. Returns a phase."""
+    print("\nWhen should the proxy start being used?")
+    print("The Gameforge account login never uses it, either way. Gameforge")
+    print("refuses a login from a hosting address, so that request always")
+    print("comes from this machine.")
+    print("")
+    print("1) From entering the game server onwards (what ikabot has always done)")
+    print("2) From choosing the server onwards — one request earlier")
+    print("")
+    print("Pick 2 if 1 does not work. Choosing the server and using the game")
+    print("session then happen from the same address, which is what turning a")
+    print("VPN on at the server list does in a browser.")
+    print("")
+    choice = read(min=1, max=2, default=1 if current == "game" else 2)
+    return "game" if choice == 1 else "select"
+
+
 def _proxy_message(session_data):
     """Keep the banner's proxy line in step with what is actually set."""
     msg = "using proxy:"
     if session_data.get("proxy", {}).get("set") is True:
-        curr_proxy = session_data["proxy"]["conf"]["https"]
+        curr_proxy = "{} ({})".format(
+            session_data["proxy"]["conf"]["https"],
+            PHASES[proxy_phase(session_data)])
         if msg not in config.update_msg:
             # add proxy message
             config.update_msg += "{} {}\n".format(msg, curr_proxy)
@@ -149,9 +185,10 @@ def proxyConf(session, event, stdin_fd, predetermined_input):
     config.predetermined_input = predetermined_input
     try:
         banner()
-        print(
-            "Warning: The proxy does not apply to the requests sent to the lobby!\n"
-        )
+        print("The Gameforge account login never goes through the proxy.")
+        print("Gameforge refuses a login from a hosting address, so that")
+        print("request always comes from this machine. Everything after it")
+        print("can use any address, and that is what the proxy is for.\n")
 
         session_data = session.getSessionData()
         if "proxy" not in session_data or session_data["proxy"]["set"] is False:
@@ -163,14 +200,17 @@ def proxyConf(session, event, stdin_fd, predetermined_input):
             session_data["proxy"] = {}
             session_data["proxy"]["conf"] = proxy_dict
             session_data["proxy"]["set"] = True
+            session_data["proxy"]["phase"] = read_phase()
         else:
             curr_proxy = session_data["proxy"]["conf"]["https"]
             print("Current proxy: {}".format(curr_proxy))
+            print("Used {}.".format(PHASES[proxy_phase(session_data)]))
             print("What do you want to do?")
             print("0) Exit")
             print("1) Set a new proxy")
             print("2) Remove the current proxy")
-            rta = read(min=0, max=2)
+            print("3) Change when the proxy starts being used")
+            rta = read(min=0, max=3)
 
             if rta == 0:
                 event.set()
@@ -182,9 +222,16 @@ def proxyConf(session, event, stdin_fd, predetermined_input):
                     return
                 session_data["proxy"]["conf"] = proxy_dict
                 session_data["proxy"]["set"] = True
+                session_data["proxy"]["phase"] = read_phase(
+                    proxy_phase(session_data))
             if rta == 2:
                 session_data["proxy"]["set"] = False
                 print("The proxy has been removed.")
+                enter()
+            if rta == 3:
+                session_data["proxy"]["phase"] = read_phase(
+                    proxy_phase(session_data))
+                print("Saved. Restart the instance for it to take effect.")
                 enter()
 
         session.setSessionData(session_data)
