@@ -1801,3 +1801,188 @@ def test_a_cycle_stops_after_a_sane_number_of_loads(rtm):
     assert "if not accepted:" in body, "a refusal must end the cycle"
     assert 0 < rtm.MAX_LOADS_PER_CYCLE <= 200
     assert rtm.TRIP_GAP_SECONDS >= 1
+
+
+# ===========================================================================
+#  A delivery that stood aside must come back
+#
+#  One stood aside for a more important delivery and was then never sent.
+#  Two separate reasons, both below.
+# ===========================================================================
+
+def _one_time_outcome(cycle_sent, total_before, hold_left, preempted,
+                      finished=1000):
+    """What the scheduler decides for a one-time schedule after a cycle.
+
+    total_before is total_shipments as stored, a lifetime counter.
+    hold_left is seconds of hold still outstanding at `finished`.
+    """
+    total = total_before + cycle_sent
+    if preempted:
+        return "resume"
+    held = (finished + hold_left) > finished
+    if cycle_sent > 0 and not held:
+        return "completed"
+    return "retry"
+
+
+def _old_one_time_outcome(cycle_sent, total_before, hold_left, preempted):
+    """The rule before the fix: total_shipments > 0 meant done."""
+    if preempted:
+        return "resume"
+    return "completed" if total_before + cycle_sent > 0 else "retry"
+
+
+def test_a_clean_one_time_run_is_finished(rtm):
+    assert _one_time_outcome(cycle_sent=5, total_before=0, hold_left=0,
+                             preempted=False) == "completed"
+
+
+def test_standing_aside_queues_a_resume(rtm):
+    assert _one_time_outcome(cycle_sent=2, total_before=0, hold_left=0,
+                             preempted=True) == "resume"
+
+
+def test_the_old_rule_finished_a_delivery_that_had_work_left(rtm):
+    # Sent 2 of its shipments, stood aside, came back to a busy port and
+    # sent none. total_shipments was 2, so it was closed as done and the
+    # rest never went. This is the reported fault.
+    assert _old_one_time_outcome(cycle_sent=0, total_before=2, hold_left=600,
+                                 preempted=False) == "completed"
+
+
+def test_a_resume_blocked_by_a_busy_port_retries_instead(rtm):
+    assert _one_time_outcome(cycle_sent=0, total_before=2, hold_left=600,
+                             preempted=False) == "retry"
+
+
+def test_a_resume_that_ships_the_rest_is_then_finished(rtm):
+    assert _one_time_outcome(cycle_sent=3, total_before=2, hold_left=0,
+                             preempted=False) == "completed"
+
+
+def test_a_cycle_cut_short_by_a_hold_is_never_called_done(rtm):
+    # Shipped some and was still queued behind something: more may remain.
+    assert _one_time_outcome(cycle_sent=1, total_before=0, hold_left=300,
+                             preempted=False) == "retry"
+
+
+def test_a_schedule_that_never_shipped_still_retries(rtm):
+    # The earlier "done, 0 sent" fix must not be undone.
+    assert _one_time_outcome(cycle_sent=0, total_before=0, hold_left=0,
+                             preempted=False) == "retry"
+    assert _old_one_time_outcome(cycle_sent=0, total_before=0, hold_left=0,
+                                 preempted=False) == "retry"
+
+
+def test_the_completion_test_reads_this_cycle_not_the_lifetime_total():
+    import ast
+    src = _module_source()
+    loop = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef)
+                and n.name == "transport_scheduler_loop")
+    body = ast.get_source_segment(src, loop)
+    assert "elif cycle_sent > 0 and _cycle_hold_until() <= finished:" in body
+    assert "elif total > 0:" not in body, \
+        "total_shipments is a lifetime counter, not what is left to do"
+
+
+# ---------------------------------------------------------------------------
+#  The second reason: the hold-back decision read a stale snapshot
+# ---------------------------------------------------------------------------
+
+def _frozen(rtm, mine_priority, high_next_run, now, window, last_duration=0):
+    schedules = [
+        {"schedule_id": 1, "status": "active", "priority": 1,
+         "next_run": high_next_run},
+        {"schedule_id": 2, "status": "active", "priority": mine_priority,
+         "next_run": now, "last_duration": last_duration},
+    ]
+    mine = schedules[1]
+    return rtm._frozen_for(mine, schedules, now, window)[0]
+
+
+def test_a_vital_delivery_due_soon_holds_a_standard_one_back(rtm):
+    now = 1_000_000
+    assert _frozen(rtm, 3, high_next_run=now + 600, now=now, window=1800)
+
+
+def test_a_vital_delivery_far_off_does_not(rtm):
+    now = 1_000_000
+    assert not _frozen(rtm, 3, high_next_run=now + 7200, now=now, window=1800)
+
+
+def test_a_vital_delivery_already_run_does_not_hold_anything(rtm):
+    # This is the stale-snapshot fault. With the tick's own clock, a
+    # schedule that has already run still has next_run in the past, which
+    # clamps to "due now" and freezes everything below it. Reading the time
+    # and the file afresh is what fixes it.
+    now = 1_000_000
+    stale = _frozen(rtm, 3, high_next_run=now - 10, now=now, window=1800)
+    assert stale, "an overdue vital delivery does hold others back"
+    # After it runs its next_run moves forward, and nothing is frozen.
+    assert not _frozen(rtm, 3, high_next_run=now + 7200, now=now,
+                       window=1800)
+
+
+def test_it_is_the_stale_schedule_list_that_held_things_back(rtm):
+    # Not the clock. A vital delivery that is genuinely overdue should hold
+    # others back, and does. The fault was the list: within one tick the
+    # vital delivery runs and its next_run moves forward, but the hold
+    # decision was still reading the copy loaded before any of that.
+    now = 1_000_000
+    mine = {"schedule_id": 2, "status": "active", "priority": 3,
+            "next_run": now, "last_duration": 0}
+    as_the_tick_saw_it = [
+        {"schedule_id": 1, "status": "active", "priority": 1,
+         "next_run": now},                     # due, about to run
+        mine,
+    ]
+    as_it_is_now = [
+        {"schedule_id": 1, "status": "active", "priority": 1,
+         "next_run": now + 7200},              # it ran; next one is hours off
+        mine,
+    ]
+    assert rtm._frozen_for(mine, as_the_tick_saw_it, now, 1800)[0], \
+        "on the stale list the vital delivery still looks imminent"
+    assert not rtm._frozen_for(mine, as_it_is_now, now, 1800)[0], \
+        "on the live list there is nothing to wait for"
+
+
+def test_a_vital_delivery_is_never_held_back_by_this(rtm):
+    now = 1_000_000
+    for priority in rtm.HIGH_PRIORITIES:
+        assert not _frozen(rtm, priority, high_next_run=now, now=now,
+                           window=1800)
+
+
+def test_a_job_that_would_finish_in_time_is_let_through(rtm):
+    now = 1_000_000
+    assert not _frozen(rtm, 3, high_next_run=now + 1200, now=now,
+                       window=1800, last_duration=300), \
+        "a known short job that fits before the vital one may go"
+    assert _frozen(rtm, 3, high_next_run=now + 1200, now=now,
+                   window=1800, last_duration=1500), \
+        "one that would overrun it is held"
+
+
+def test_turning_the_hold_window_off_disables_it(rtm):
+    now = 1_000_000
+    assert not _frozen(rtm, 3, high_next_run=now, now=now, window=0)
+
+
+def test_the_loop_rereads_before_holding_a_delivery_back():
+    import ast
+    src = _module_source()
+    loop = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef)
+                and n.name == "transport_scheduler_loop")
+    body = ast.get_source_segment(src, loop)
+    assert "live = transport_csv_load(session)" in body
+    assert "_frozen_for(sched, live, live_now, window)" in body, \
+        "the hold decision must use live state, not the tick's snapshot"
+    assert "_frozen_for(sched, schedules, now, window)" not in body
+    assert "if not _is_due(fresh, live_now):" in body, \
+        "a schedule run since the tick began must not be run again"
+    assert 'fresh.get("status") != "active"' in body, \
+        "one paused or deleted mid-tick must be left alone"

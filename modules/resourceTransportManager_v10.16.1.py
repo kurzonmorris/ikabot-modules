@@ -65,7 +65,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.16.0"
+MODULE_VERSION = "10.16.1"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -8363,7 +8363,23 @@ def transport_scheduler_loop(session, stop_event):
 
                 sid = sched["schedule_id"]
 
-                frozen, why = _frozen_for(sched, schedules, now, window)
+                # The snapshot this tick began with is not evidence any
+                # more: one cycle can run for hours, and the schedules that
+                # looked due then have since run. Deciding to hold a
+                # delivery back on that stale picture is what kept a
+                # lower-priority one waiting after the important work had
+                # already finished.
+                live = transport_csv_load(session)
+                fresh = next((s for s in live
+                              if s.get("schedule_id") == sid), None)
+                if fresh is None or fresh.get("status") != "active":
+                    continue      # paused, deleted or finished meanwhile
+                live_now = int(time.time())
+                if not _is_due(fresh, live_now):
+                    continue      # already run, by a retry or another tick
+                sched = fresh
+
+                frozen, why = _frozen_for(sched, live, live_now, window)
                 if frozen:
                     try:
                         session.setStatus(
@@ -8467,10 +8483,18 @@ def transport_scheduler_loop(session, stop_event):
                         last_duration=elapsed,
                         last_error=_cycle_error_note(),
                     )
-                elif total > 0:
-                    # One-time schedule that actually shipped: mark it done
-                    # rather than delete it, so it stays visible in Manage
-                    # Schedules instead of silently vanishing.
+                elif cycle_sent > 0 and _cycle_hold_until() <= finished:
+                    # One-time schedule that shipped in a cycle that ran to
+                    # the end: mark it done rather than delete it, so it
+                    # stays visible in Manage Schedules.
+                    #
+                    # The test is this cycle's work, not total_shipments.
+                    # That is a lifetime counter, so once a schedule had
+                    # ever sent anything, the next cycle to send nothing
+                    # closed it as done — and a delivery that stood aside
+                    # for a more important one, then came back to a busy
+                    # port, was finished off with its remaining shipments
+                    # never sent.
                     transport_csv_update(
                         session, sid,
                         last_run=finished, next_run="",
@@ -8478,10 +8502,12 @@ def transport_scheduler_loop(session, stop_event):
                         last_duration=elapsed, last_error="",
                     )
                 else:
-                    # Nothing was shipped, so this is NOT done. A cycle can
-                    # run start to finish and send zero — no free ships of
-                    # the required type, no action points, a blockade —
-                    # and closing it as "done, 0 sent" silently threw the
+                    # Either nothing was shipped, or the cycle was cut
+                    # short by something with a known end. Both mean work
+                    # may remain, so this is NOT done. A cycle can run
+                    # start to finish and send zero — no free ships of the
+                    # required type, no action points, a blockade — and
+                    # closing it as "done, 0 sent" silently threw the
                     # delivery away. Keep it and try again.
                     # Measured from when the schedule was last put in
                     # the queue, not when it was first created — retrying a
