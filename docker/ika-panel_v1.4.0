@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.2.0"
+PANEL_VERSION = "1.4.0"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -42,7 +42,15 @@ INSTALLER_STAMP = os.path.join(HOME_DIR, ".installer-version")
 DATA_DIR = os.environ.get("IKABOT_DATA_DIR", os.path.join(HOME_DIR, ".ikabot"))
 # Subfolders of the data folder that never hold a module lock. Skipped so a
 # large logs folder is not listed every five seconds.
-LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache", "messages"}
+LOCK_SKIP_DIRS = {"sessions", "logs", "status", "backups", "cache", "messages",
+                  "connections"}
+
+# How many requests each account sent to Ikariam, second by second, written by
+# ikabot/helpers/requestLog.py. One file per process, because an account runs
+# the menu, a web server and a process per background task and they all send
+# requests. Summed here rather than locked there.
+CONN_DIR = os.environ.get("CONN_DIR", os.path.join(DATA_DIR, "connections"))
+CONN_WINDOW = 600
 
 # A local copy of every notification ikabot sent, written by
 # ikabot/helpers/messageLog.py. One file per account, one JSON object a line.
@@ -295,9 +303,20 @@ def check_loop():
 # --------------------------------------------------------------------------
 
 def _sh(args, timeout=600):
+    """What the command printed. The exit code is dropped on purpose.
+
+    Nearly every caller wants the text and nothing else — a command that
+    prints why it refused has said all there is to say. _run() is for the
+    queue, which has to mark a step failed rather than just show the words.
+    """
+    return _run(args, timeout)[0]
+
+
+def _run(args, timeout=600):
+    """(output, exit code). 1 if it could not start, 124 if it timed out."""
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-        return (p.stdout or "") + (p.stderr or "")
+        return (p.stdout or "") + (p.stderr or ""), p.returncode
     except subprocess.TimeoutExpired as exc:
         # Everything it printed before it stopped, which is the only thing
         # that says where it got to. Throwing it away leaves "timed out" and
@@ -308,9 +327,9 @@ def _sh(args, timeout=600):
                 got += part if isinstance(part, str) else part.decode("utf-8", "replace")
         head = "Timed out after %ds: %s" % (timeout, " ".join(args))
         return head + ("\n\nIt had got this far:\n\n" + got.strip() if got.strip()
-                       else "\n\nIt printed nothing before it stopped.")
+                       else "\n\nIt printed nothing before it stopped."), 124
     except OSError as exc:
-        return "Could not run %s: %s" % (" ".join(args), exc)
+        return "Could not run %s: %s" % (" ".join(args), exc), 1
 
 
 def _parent(pid):
@@ -1366,6 +1385,123 @@ def read_message_log(accounts=None, limit=MSG_LIMIT, query=""):
     return out[:limit]
 
 
+def conn_meta():
+    """Per account: when it last sent anything, and how much in total.
+
+    Sent with every poll, so it reads the files but not the per-second lists.
+    """
+    out = {}
+    try:
+        names = sorted(os.listdir(CONN_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json") or name.startswith("."):
+            continue
+        account = name.split(".")[0]
+        try:
+            with open(os.path.join(CONN_DIR, name), encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        row = out.setdefault(account, {"last": 0, "total": 0, "parts": 0})
+        row["last"] = max(row["last"], int(payload.get("updated") or 0))
+        row["total"] += int(payload.get("total") or 0)
+        row["parts"] += 1
+    return out
+
+
+def connection_series(accounts=None, window=CONN_WINDOW, bucket=1, now=None):
+    """Requests per bucket over the last *window* seconds, newest at the end.
+
+    Every process's file is laid onto one grid of seconds ending at the current
+    second, so an account's menu, its web server and its tasks add up instead
+    of appearing as three separate accounts. The buckets are built from that
+    grid, so the rates below and the graph can never disagree.
+    """
+    window = max(10, min(int(window or CONN_WINDOW), CONN_WINDOW))
+    bucket = max(1, min(int(bucket or 1), 60))
+    now = int(time.time()) if now is None else int(now)
+    start = now - window + 1
+    seconds = [0] * window
+    bad = [0] * window
+    wanted = set(accounts) if accounts else None
+    total = 0
+
+    try:
+        names = sorted(os.listdir(CONN_DIR))
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json") or name.startswith("."):
+            continue
+        if wanted is not None and name.split(".")[0] not in wanted:
+            continue
+        try:
+            with open(os.path.join(CONN_DIR, name), encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        counts = payload.get("counts") or []
+        errors = payload.get("errors") or []
+        try:
+            t0 = int(payload.get("t0") or 0)
+            total += int(payload.get("total") or 0)
+        except (TypeError, ValueError):
+            continue
+        for i, value in enumerate(counts):
+            at = t0 + i - start
+            if not 0 <= at < window:
+                continue
+            try:
+                seconds[at] += int(value)
+                bad[at] += int(errors[i]) if i < len(errors) else 0
+            except (TypeError, ValueError):
+                continue
+
+    # The last second is still in progress, so its count is always short and
+    # would read as a sudden drop at the right of the graph. Every rate below
+    # is measured over whole seconds only.
+    whole = seconds[:-1]
+
+    def rate(n):
+        return sum(whole[-n:]) if whole else 0
+
+    def worst(n):
+        if len(whole) <= n:
+            return sum(whole)
+        return max(sum(whole[i:i + n]) for i in range(len(whole) - n + 1))
+
+    if bucket == 1:
+        reqs, errs = seconds, bad
+    else:
+        size = (window + bucket - 1) // bucket
+        reqs, errs = [0] * size, [0] * size
+        for i in range(window):
+            reqs[i // bucket] += seconds[i]
+            errs[i // bucket] += bad[i]
+
+    return {
+        "start": start,
+        "bucket": bucket,
+        "window": window,
+        "requests": reqs,
+        "errors": errs,
+        "total": total,
+        "now_1": rate(1),
+        "now_30": rate(30),
+        "now_60": rate(60),
+        "peak_1": max(whole) if whole else 0,
+        "peak_30": worst(30),
+        "peak_60": worst(60),
+        "error_total": sum(bad),
+    }
+
+
 def state():
     raw = subprocess.run(
         ["tmux", "list-windows", "-t", SESSION, "-F",
@@ -1531,6 +1667,8 @@ def state():
         "core_error": core_err,
         "panel_version": PANEL_VERSION,
         "messages": message_meta(),
+        "connections": conn_meta(),
+        "queue": queue_view(),
         "versions_available": core_avail,
         "status_available": os.path.isdir(STATUS_DIR),
         "ttyd_port": TTYD_PORT,
@@ -1606,6 +1744,363 @@ def command_for(action, arg):
     }.get(action)
 
 
+def run_button(act, arg):
+    """Press a saved button in one instance, or in all it applies to.
+
+    Returns (out, error, ran). Split out of the request handler so the queue
+    runs exactly the same code as a button press, rather than a second copy of
+    it that could drift.
+    """
+    bid, _, target = arg.partition(":")
+    wanted = next((b for b in load_buttons() if b["id"] == bid), None)
+    if wanted is None:
+        return "", "no such button", act
+
+    with _run_lock:
+        instances = state()["instances"]
+        if act == "button":
+            if not target.isdigit():
+                return "", "bad instance", act
+            num = int(target)
+            inst = next((i for i in instances if i["num"] == num), None)
+            if inst is None:
+                return "", "no such instance", act
+            if inst["dead"]:
+                return ("%s has crashed — restart it first." % inst["name"],
+                        "", "button")
+            menu = wanted.get("menu", True)
+            press(inst["name"], wanted["keys"],
+                  wanted.get("delay", DEFAULT_DELAY), menu)
+            out = "Sent %s%s to %s." % (
+                "/menu then " if menu else "",
+                describe(wanted["keys"]), inst["name"])
+        else:
+            lines, sent = [], 0
+            for inst in instances:
+                if not applies_to(wanted, inst["num"]):
+                    continue
+                if inst["dead"]:
+                    lines.append("%s skipped (crashed)" % inst["name"])
+                    continue
+                press(inst["name"], wanted["keys"],
+                      wanted.get("delay", DEFAULT_DELAY),
+                      wanted.get("menu", True))
+                lines.append("%s <- %s" % (inst["name"], describe(wanted["keys"])))
+                sent += 1
+            out = ("Ran '%s' on %d instance(s):\n\n%s"
+                   % (wanted["label"], sent, "\n".join(lines) or "none"))
+    return out, "", wanted["label"]
+
+
+def run_kill(act, arg):
+    """Stop one task, an instance's tasks, or every task. Returns (out, error, ran)."""
+    with _run_lock:
+        instances = state()["instances"]
+
+        if act == "kill_task":
+            num, _, pid_s = arg.partition(":")
+            if not num.isdigit() or not pid_s.isdigit():
+                return "", "bad target", act
+            inst = next((i for i in instances if i["num"] == int(num)), None)
+            if inst is None:
+                return "", "no such instance", act
+            pid = int(pid_s)
+            task = next((x for x in inst["tasks"]
+                         if str(x.get("pid")) == str(pid)), None)
+            if task is None:
+                out = ("That process is no longer running on %s — "
+                       "the list has been refreshed." % inst["name"])
+            else:
+                out = "\n".join(stop_tasks(inst["name"], [task]))
+
+        elif act == "kill_instance":
+            if not arg.isdigit():
+                return "", "bad instance", act
+            inst = next((i for i in instances if i["num"] == int(arg)), None)
+            if inst is None:
+                return "", "no such instance", act
+            lines = stop_tasks(inst["name"], inst["tasks"])
+            out = ("Stopped %d process(es) on %s:\n\n%s"
+                   % (len(lines), inst["name"], "\n".join(lines))
+                   if lines else
+                   "%s had nothing running." % inst["name"])
+
+        else:
+            lines, total = [], 0
+            for inst in instances:
+                if not inst["tasks"]:
+                    continue
+                done = stop_tasks(inst["name"], inst["tasks"])
+                lines.extend(done)
+                total += len(done)
+            out = ("Stopped %d process(es) across %d instance(s):\n\n%s"
+                   % (total, sum(1 for i in instances if i["tasks"]),
+                      "\n".join(lines))
+                   if lines else
+                   "Nothing was running in any instance.")
+
+    return out, "", act
+
+
+def run_locks(act, arg):
+    """Clear module lock files for one instance or all. Returns (out, error, ran)."""
+    with _run_lock:
+        s = state()
+        instances = s["instances"]
+
+        if act == "locks_one":
+            if not arg.isdigit():
+                return "", "bad instance", act
+            inst = next((i for i in instances if i["num"] == int(arg)), None)
+            if inst is None:
+                return "", "no such instance", act
+            # A lock removed while its owner still runs stops being a
+            # lock: two processes would both believe they hold it and
+            # ship, build or recruit twice over. Refuse rather than
+            # warn.
+            if inst["tasks"]:
+                out = ("%s still has %d process(es) running:\n\n%s\n\n"
+                       "Deleting a lock while its task is running would let "
+                       "two run at once. Press 'Stop tasks' on %s first, "
+                       "then clear its locks."
+                       % (inst["name"], len(inst["tasks"]),
+                          "\n".join("  " + (t.get("action") or "unknown")
+                                     for t in inst["tasks"]),
+                          inst["name"]))
+            elif not inst["locks"]:
+                out = "%s has no lock files." % inst["name"]
+            else:
+                wanted = set(inst["locks"])
+                pairs = [x for x in lock_files() if x[1] in wanted]
+                lines = delete_locks(pairs)
+                out = ("Cleared %d lock file(s) for %s:\n\n%s"
+                       % (len(lines), inst["name"], "\n".join(lines)))
+
+        else:
+            busy = [i for i in instances if i["tasks"]]
+            pairs = lock_files()
+            if busy:
+                out = ("%d instance(s) still have processes running:\n\n%s"
+                       "\n\nDeleting a lock while its task is running would "
+                       "let two run at once. Press 'Stop all processes' "
+                       "first, then clear the locks."
+                       % (len(busy),
+                          "\n".join("  %s — %d task(s)"
+                                     % (i["name"], len(i["tasks"]))
+                                     for i in busy)))
+            elif not pairs:
+                out = "No lock files found."
+            else:
+                lines = delete_locks(pairs)
+                out = ("Cleared %d lock file(s) across every instance:\n\n%s"
+                       % (len(lines), "\n".join(lines)))
+
+    return out, "", act
+
+
+def run_command(act, arg, strict=False):
+    """One of the plain ika commands. Returns (out, error, ran).
+
+    *strict* reports a non-zero exit as an error. A button press shows what
+    the command printed and lets the reader judge it; a queue step has to
+    decide for itself whether it worked, because nobody is watching.
+    """
+    cmd = command_for(act, arg)
+    if cmd is None:
+        return "", "unknown or malformed action", act
+    # One at a time: two updates or restarts at once would fight each other.
+    with _run_lock:
+        out, code = _run(cmd, timeout=TIMEOUTS.get(act, 600))
+    if strict and code:
+        return "", (out or "").strip() or "%s exited %d" % (" ".join(cmd), code), \
+               " ".join(cmd)
+    return out or "(no output)", "", " ".join(cmd)
+
+
+def run_command_strict(act, arg):
+    """run_command, with a non-zero exit reported as a failed step."""
+    return run_command(act, arg, strict=True)
+
+
+
+# --------------------------------------------------------------------------
+# The queue
+# --------------------------------------------------------------------------
+# Pressing a button across twenty-four instances takes minutes, and until it
+# answers the page greys out every other button. That is the right behaviour —
+# two sequences typed into the same instance at once interleave into nonsense —
+# but it means waiting at the screen to press the next one. The queue is that
+# wait, done by the panel: a list of presses, in an order you choose, run one
+# after another under the same lock a manual press takes.
+#
+# It lives on the server, not in the page, so closing the tab or letting a
+# phone sleep does not stop it, and every browser looking at the panel sees the
+# same list. It is held in memory: restarting the panel loses it, which is
+# stated on screen rather than half-resumed.
+
+QUEUE_MAX = 40
+# What may be queued. Everything here is slow, repeatable and needs no answer
+# while it runs. Deliberately absent: anything that reads a file for the page,
+# anything that restarts the panel itself, and the single-instance actions,
+# which are already one press.
+QUEUEABLE = {
+    "button_all": run_button,
+    "button": run_button,
+    "restart_all": run_command_strict,
+    "restart_dead": run_command_strict,
+    "status": run_command_strict,
+    "web_stop": run_command_strict,
+    "modules_all": run_command_strict,
+    "modules_local": run_command_strict,
+    "update": run_command_strict,
+    "kill_all": run_kill,
+    "locks_all": run_locks,
+}
+
+_queue_lock = threading.Lock()
+_queue = {"items": [], "running": False, "stop": False, "started": 0}
+
+
+def _queue_item(raw):
+    """Validate one entry the page asked to queue. Returns (item, error)."""
+    if not isinstance(raw, dict):
+        return None, "not a queue entry"
+    action = str(raw.get("action", ""))
+    if action not in QUEUEABLE:
+        return None, "%s cannot be queued" % (action or "that")
+    arg = str(raw.get("arg", ""))
+    if len(arg) > MAX_FIELD_LEN or KEY_BAD.search(arg):
+        return None, "bad argument"
+    label = str(raw.get("label", "")).strip()[:48] or action
+    # An id the page already holds is kept, so dragging a step does not give
+    # every other step a new identity underneath the drag.
+    keep = str(raw.get("id") or "")
+    return {"id": keep if ID_OK.match(keep) else _new_id(),
+            "action": action, "arg": arg, "label": label,
+            "state": "waiting", "output": "", "started": 0, "finished": 0}, ""
+
+
+def queue_view(full=False):
+    """The queue as the page reads it. Cheap enough for every poll.
+
+    Output is left out unless asked for: twenty-four lines a step, times forty
+    steps, is not something to send every five seconds.
+    """
+    with _queue_lock:
+        items = []
+        for it in _queue["items"]:
+            row = {k: it[k] for k in
+                   ("id", "action", "arg", "label", "state", "started", "finished")}
+            # Whether there is output, but not the output itself: the page
+            # only needs to know whether to offer the button.
+            row["has_output"] = bool(it["output"])
+            if full:
+                row["output"] = it["output"]
+            items.append(row)
+        return {"items": items, "running": _queue["running"],
+                "stopping": _queue["stop"]}
+
+
+def queue_worker():
+    """Run the waiting entries in order, one at a time, until none are left."""
+    while True:
+        with _queue_lock:
+            if _queue["stop"]:
+                for it in _queue["items"]:
+                    if it["state"] == "waiting":
+                        it["state"] = "skipped"
+                _queue["stop"] = False
+                _queue["running"] = False
+                return
+            item = next((i for i in _queue["items"]
+                         if i["state"] == "waiting"), None)
+            if item is None:
+                _queue["running"] = False
+                return
+            item["state"] = "running"
+            item["started"] = int(time.time())
+
+        # Outside the queue lock: this is the slow part, and the page has to be
+        # able to read the queue and to stop it while it runs.
+        try:
+            out, error, _ = QUEUEABLE[item["action"]](item["action"], item["arg"])
+        except BaseException as exc:
+            out, error = "", "%s: %s" % (type(exc).__name__, exc)
+
+        with _queue_lock:
+            item["state"] = "failed" if error else "done"
+            item["output"] = (error or out or "")[:8000]
+            item["finished"] = int(time.time())
+
+
+def queue_start():
+    """Start the worker if it is not already going. Returns a sentence."""
+    with _queue_lock:
+        if _queue["running"]:
+            return "The queue is already running."
+        waiting = [i for i in _queue["items"] if i["state"] == "waiting"]
+        if not waiting:
+            return "Nothing is waiting in the queue."
+        _queue["running"] = True
+        _queue["stop"] = False
+        _queue["started"] = int(time.time())
+    threading.Thread(target=queue_worker, daemon=True).start()
+    return "Running %d step(s), one after another." % len(waiting)
+
+
+def queue_set(raw_items):
+    """Replace the waiting entries with this list, in this order.
+
+    One operation covers adding, removing and reordering, because the page
+    always sends the whole pending list. What has already run is kept and is
+    not reorderable — it is history.
+    """
+    if not isinstance(raw_items, list):
+        return "", "bad queue"
+    if len(raw_items) > QUEUE_MAX:
+        return "", "At most %d steps in the queue." % QUEUE_MAX
+    fresh = []
+    for raw in raw_items:
+        item, error = _queue_item(raw)
+        if item is None:
+            return "", error
+        fresh.append(item)
+    with _queue_lock:
+        # A step that is running stays where it is; the page never sends it
+        # back, and stopping it is a separate button.
+        kept = [i for i in _queue["items"] if i["state"] != "waiting"]
+        _queue["items"] = kept + fresh
+        running = _queue["running"]
+    # Started already and something new was added: pick it up without a second
+    # press, which is what dropping a step onto a running queue means.
+    if running:
+        return "%d step(s) waiting." % len(fresh), ""
+    return "%d step(s) ready. Press Start." % len(fresh), ""
+
+
+def queue_stop():
+    """Let the running step finish, then skip the rest."""
+    with _queue_lock:
+        if not _queue["running"]:
+            return "The queue is not running."
+        _queue["stop"] = True
+    return ("Stopping. The step running now finishes first — nothing is "
+            "interrupted half typed.")
+
+
+def queue_clear(what):
+    """Remove finished entries, or everything that is not running."""
+    with _queue_lock:
+        if what == "finished":
+            _queue["items"] = [i for i in _queue["items"]
+                               if i["state"] in ("waiting", "running")]
+            return "Finished steps removed."
+        _queue["items"] = [i for i in _queue["items"] if i["state"] == "running"]
+        if _queue["running"]:
+            _queue["stop"] = True
+        return "Queue cleared."
+
+
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
@@ -1644,6 +2139,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _answer(self, result):
+        """Turn a (output, error, ran) result into the reply the page expects."""
+        out, error, ran = result
+        if error:
+            return self._send(400, json.dumps({"error": error}))
+        return self._send(200, json.dumps({"output": out, "ran": ran}))
+
     def _query(self):
         return parse_qs(urlparse(self.path).query)
 
@@ -1652,6 +2154,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny()
         if self.path.startswith("/api/state"):
             return self._send(200, json.dumps(state()))
+
+        if self.path.startswith("/api/connections"):
+            q = self._query()
+            raw = (q.get("acct") or [""])[0]
+            accounts = [a for a in raw.split(",") if a] or None
+
+            def number(key, fallback):
+                try:
+                    return int((q.get(key) or [""])[0] or fallback)
+                except ValueError:
+                    return fallback
+
+            return self._send(200, json.dumps(connection_series(
+                accounts, number("window", CONN_WINDOW), number("bucket", 1))))
+
+        if self.path.startswith("/api/queue"):
+            return self._send(200, json.dumps(queue_view(full=True)))
 
         if self.path.startswith("/api/targets"):
             notify, why = notify_api()
@@ -1725,6 +2244,32 @@ class Handler(BaseHTTPRequestHandler):
         # body: a password must never reach a URL, where it would land in
         # browser history. Nothing here is logged — log_message is a no-op —
         # and nothing is kept once the vault has been written.
+        if self.path.startswith("/api/queue"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or "{}")
+            except (ValueError, OSError):
+                return self._send(400, json.dumps({"error": "bad request"}))
+
+            op = str(body.get("op") or "")
+            if op == "set":
+                out, error = queue_set(body.get("items"))
+                if error:
+                    return self._send(400, json.dumps({"error": error}))
+                return self._send(200, json.dumps({"output": out,
+                                                   "queue": queue_view()}))
+            if op == "start":
+                return self._send(200, json.dumps(
+                    {"output": queue_start(), "queue": queue_view()}))
+            if op == "stop":
+                return self._send(200, json.dumps(
+                    {"output": queue_stop(), "queue": queue_view()}))
+            if op == "clear":
+                return self._send(200, json.dumps(
+                    {"output": queue_clear(str(body.get("what") or "")),
+                     "queue": queue_view()}))
+            return self._send(400, json.dumps({"error": "unknown queue action"}))
+
         if self.path.startswith("/api/targets"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1981,47 +2526,7 @@ class Handler(BaseHTTPRequestHandler):
         act = payload.get("action")
 
         if act in ("button", "button_all"):
-            arg = str(payload.get("arg", ""))
-            bid, _, target = arg.partition(":")
-            wanted = next((b for b in load_buttons() if b["id"] == bid), None)
-            if wanted is None:
-                return self._send(400, json.dumps({"error": "no such button"}))
-
-            with _run_lock:
-                instances = state()["instances"]
-                if act == "button":
-                    if not target.isdigit():
-                        return self._send(400, json.dumps({"error": "bad instance"}))
-                    num = int(target)
-                    inst = next((i for i in instances if i["num"] == num), None)
-                    if inst is None:
-                        return self._send(400, json.dumps({"error": "no such instance"}))
-                    if inst["dead"]:
-                        return self._send(200, json.dumps({
-                            "output": "%s has crashed — restart it first." % inst["name"],
-                            "ran": "button"}))
-                    menu = wanted.get("menu", True)
-                    press(inst["name"], wanted["keys"],
-                          wanted.get("delay", DEFAULT_DELAY), menu)
-                    out = "Sent %s%s to %s." % (
-                        "/menu then " if menu else "",
-                        describe(wanted["keys"]), inst["name"])
-                else:
-                    lines, sent = [], 0
-                    for inst in instances:
-                        if not applies_to(wanted, inst["num"]):
-                            continue
-                        if inst["dead"]:
-                            lines.append("%s skipped (crashed)" % inst["name"])
-                            continue
-                        press(inst["name"], wanted["keys"],
-                              wanted.get("delay", DEFAULT_DELAY),
-                              wanted.get("menu", True))
-                        lines.append("%s <- %s" % (inst["name"], describe(wanted["keys"])))
-                        sent += 1
-                    out = ("Ran '%s' on %d instance(s):\n\n%s"
-                           % (wanted["label"], sent, "\n".join(lines) or "none"))
-            return self._send(200, json.dumps({"output": out, "ran": wanted["label"]}))
+            return self._answer(run_button(act, str(payload.get("arg", ""))))
 
 
         # Stopping tasks. The browser never supplies a bare pid to kill: every
@@ -2062,111 +2567,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"where": term_scroll(arg)}))
 
         if act in ("kill_task", "kill_instance", "kill_all"):
-            arg = str(payload.get("arg", ""))
-            with _run_lock:
-                instances = state()["instances"]
-
-                if act == "kill_task":
-                    num, _, pid_s = arg.partition(":")
-                    if not num.isdigit() or not pid_s.isdigit():
-                        return self._send(400, json.dumps({"error": "bad target"}))
-                    inst = next((i for i in instances if i["num"] == int(num)), None)
-                    if inst is None:
-                        return self._send(400, json.dumps({"error": "no such instance"}))
-                    pid = int(pid_s)
-                    task = next((x for x in inst["tasks"]
-                                 if str(x.get("pid")) == str(pid)), None)
-                    if task is None:
-                        out = ("That process is no longer running on %s — "
-                               "the list has been refreshed." % inst["name"])
-                    else:
-                        out = "\n".join(stop_tasks(inst["name"], [task]))
-
-                elif act == "kill_instance":
-                    if not arg.isdigit():
-                        return self._send(400, json.dumps({"error": "bad instance"}))
-                    inst = next((i for i in instances if i["num"] == int(arg)), None)
-                    if inst is None:
-                        return self._send(400, json.dumps({"error": "no such instance"}))
-                    lines = stop_tasks(inst["name"], inst["tasks"])
-                    out = ("Stopped %d process(es) on %s:\n\n%s"
-                           % (len(lines), inst["name"], "\n".join(lines))
-                           if lines else
-                           "%s had nothing running." % inst["name"])
-
-                else:
-                    lines, total = [], 0
-                    for inst in instances:
-                        if not inst["tasks"]:
-                            continue
-                        done = stop_tasks(inst["name"], inst["tasks"])
-                        lines.extend(done)
-                        total += len(done)
-                    out = ("Stopped %d process(es) across %d instance(s):\n\n%s"
-                           % (total, sum(1 for i in instances if i["tasks"]),
-                              "\n".join(lines))
-                           if lines else
-                           "Nothing was running in any instance.")
-
-            return self._send(200, json.dumps({"output": out, "ran": act}))
+            return self._answer(run_kill(act, str(payload.get("arg", ""))))
 
         # Clearing lock files. The browser sends an instance number or
         # nothing at all — never a path. The panel rescans and decides which
         # files those words mean, so nothing outside a module lock is reachable.
         if act in ("locks_one", "locks_all"):
-            arg = str(payload.get("arg", ""))
-            with _run_lock:
-                s = state()
-                instances = s["instances"]
-
-                if act == "locks_one":
-                    if not arg.isdigit():
-                        return self._send(400, json.dumps({"error": "bad instance"}))
-                    inst = next((i for i in instances if i["num"] == int(arg)), None)
-                    if inst is None:
-                        return self._send(400, json.dumps({"error": "no such instance"}))
-                    # A lock removed while its owner still runs stops being a
-                    # lock: two processes would both believe they hold it and
-                    # ship, build or recruit twice over. Refuse rather than
-                    # warn.
-                    if inst["tasks"]:
-                        out = ("%s still has %d process(es) running:\n\n%s\n\n"
-                               "Deleting a lock while its task is running would let "
-                               "two run at once. Press 'Stop tasks' on %s first, "
-                               "then clear its locks."
-                               % (inst["name"], len(inst["tasks"]),
-                                  "\n".join("  " + (t.get("action") or "unknown")
-                                             for t in inst["tasks"]),
-                                  inst["name"]))
-                    elif not inst["locks"]:
-                        out = "%s has no lock files." % inst["name"]
-                    else:
-                        wanted = set(inst["locks"])
-                        pairs = [x for x in lock_files() if x[1] in wanted]
-                        lines = delete_locks(pairs)
-                        out = ("Cleared %d lock file(s) for %s:\n\n%s"
-                               % (len(lines), inst["name"], "\n".join(lines)))
-
-                else:
-                    busy = [i for i in instances if i["tasks"]]
-                    pairs = lock_files()
-                    if busy:
-                        out = ("%d instance(s) still have processes running:\n\n%s"
-                               "\n\nDeleting a lock while its task is running would "
-                               "let two run at once. Press 'Stop all processes' "
-                               "first, then clear the locks."
-                               % (len(busy),
-                                  "\n".join("  %s — %d task(s)"
-                                             % (i["name"], len(i["tasks"]))
-                                             for i in busy)))
-                    elif not pairs:
-                        out = "No lock files found."
-                    else:
-                        lines = delete_locks(pairs)
-                        out = ("Cleared %d lock file(s) across every instance:\n\n%s"
-                               % (len(lines), "\n".join(lines)))
-
-            return self._send(200, json.dumps({"output": out, "ran": act}))
+            return self._answer(run_locks(act, str(payload.get("arg", ""))))
 
         # Two commands, so it does not fit the one-argv table below. The bar
         # along the bottom of the terminal is the only way between instances
@@ -2221,15 +2628,7 @@ class Handler(BaseHTTPRequestHandler):
                 msg = refresh_available()
             return self._send(200, json.dumps({"output": msg, "ran": "check versions"}))
 
-        cmd = command_for(act, payload.get("arg", ""))
-        if cmd is None:
-            return self._send(400, json.dumps({"error": "unknown or malformed action"}))
-
-        # One at a time: two updates or restarts at once would fight each other.
-        with _run_lock:
-            out = _sh(cmd, timeout=TIMEOUTS.get(act, 600))
-        self._send(200, json.dumps({"output": out or "(no output)",
-                                    "ran": " ".join(cmd)}))
+        return self._answer(run_command(act, str(payload.get("arg", ""))))
 
 
 PAGE = r"""<!doctype html>
@@ -2407,6 +2806,69 @@ display:grid;place-items:center;line-height:1}
   .wpad button{font-size:12px}
 }
 /* Retracted: just the arrow, so the page gets the whole width. */
+/* The queue. Numbered rows in the order they will run, with the one running
+   marked, so the list reads as a plan rather than a log. */
+.qwrap{border:1px solid var(--rule);border-radius:8px;background:var(--card);
+padding:10px;margin-bottom:12px}
+.qlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.qlist li{display:flex;align-items:center;gap:8px;padding:5px 8px;
+border:1px solid var(--rule);border-radius:6px;background:var(--bg)}
+.qlist li.running{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.qlist li.done{opacity:.6}
+.qlist li.failed{border-color:var(--bad)}
+.qlist li.skipped{opacity:.45}
+.qlist li.over{border-style:dashed;border-color:var(--accent)}
+.qgrip{cursor:grab;color:var(--soft);line-height:1;user-select:none}
+.qnum{font-family:ui-monospace,monospace;font-size:11px;color:var(--soft);
+min-width:18px;text-align:right}
+.qlabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qmark{font-size:11px;padding:1px 6px;border-radius:99px;
+border:1px solid var(--rule);color:var(--soft);white-space:nowrap}
+.qmark.running{color:var(--accent);border-color:var(--accent)}
+.qmark.done{color:var(--ok);border-color:var(--ok)}
+.qmark.failed{color:var(--bad);border-color:var(--bad)}
+.qlist li button{padding:2px 7px;font-size:12px}
+/* Dragging does not exist on a touchscreen, so the arrows are the way to
+   reorder there and are given a target a finger can hit. */
+@media(pointer:coarse){.qlist li button{padding:8px 11px;font-size:13px}}
+.qout{margin:4px 0 0;font-size:12px;color:var(--soft);white-space:pre-wrap;
+max-height:8em;overflow:auto}
+
+/* Connections. One series in the accent colour, and errors as a status series
+   — dashed as well as red, so the two are told apart without relying on
+   colour at all. Grid and axes are recessive; the numbers wear ink tokens and
+   never a series colour. */
+.cwrap{border:1px solid var(--rule);border-radius:6px;background:var(--card);
+padding:10px;min-height:220px}
+.cchart{display:block;width:100%;height:220px;touch-action:none}
+.cgrid{stroke:var(--rule);stroke-width:1}
+.caxis{fill:var(--soft);font-size:10px;
+font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.cline{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round}
+.cfill{fill:var(--accent);opacity:.12}
+.cbadline{fill:none;stroke:var(--bad);stroke-width:2;stroke-dasharray:4 3;
+stroke-linejoin:round}
+.chair{stroke:var(--soft);stroke-width:1;stroke-dasharray:3 3}
+.cdot{fill:var(--accent);stroke:var(--card);stroke-width:2}
+.cdot.bad{fill:var(--bad)}
+.ctip{position:absolute;pointer-events:none;background:var(--card);
+border:1px solid var(--rule);border-radius:5px;padding:5px 8px;font-size:12px;
+box-shadow:0 2px 10px -4px rgba(0,0,0,.4);white-space:nowrap;z-index:4}
+.ckey{display:flex;gap:14px;align-items:center;flex-wrap:wrap;
+margin:0 0 6px;font-size:12px;color:var(--soft)}
+.ckey i{display:inline-block;width:18px;height:0;border-top:2px solid var(--accent);
+margin-right:5px;vertical-align:middle}
+.ckey i.bad{border-top:2px dashed var(--bad)}
+.ctiles{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.ctile{border:1px solid var(--rule);border-radius:6px;background:var(--card);
+padding:6px 10px;min-width:92px}
+.ctile b{display:block;font-size:19px;font-weight:600;line-height:1.2;
+font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ctile span{display:block;font-size:10.5px;letter-spacing:.06em;
+text-transform:uppercase;color:var(--soft)}
+.ctile.hot b{color:var(--bad)}
+.cpos{position:relative}
+
 /* Messages. The strip is the Web servers strip, down to the class names, so
    the two read the same way. The one addition is the wide button across the
    top: five squares plus the gaps between them, from grid-column 1 / -1. */
@@ -2644,6 +3106,22 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     </label>
     <span class="hint" id="proxynote" style="margin:0"></span>
   </div>
+  <div class="qwrap" id="qwrap">
+    <div class="row" style="margin-bottom:8px">
+      <b style="font-size:13.5px">Queue</b>
+      <span class="hint" id="qstate" style="margin:0"></span>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <select id="qpick" style="max-width:260px"></select>
+      <button id="qaddbtn">Add to queue</button>
+      <button class="p" id="qstart">Start</button>
+      <button id="qstop">Stop after this step</button>
+      <button id="qtidy">Clear finished</button>
+      <button class="d" id="qwipe">Empty the queue</button>
+    </div>
+    <ol class="qlist" id="qlist"></ol>
+    <p class="hint" id="qnote"></p>
+  </div>
   <div class="grid" id="grid"></div>
   <p class="hint" id="statushint"></p>
 </section>
@@ -2838,6 +3316,40 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     </div>
   </div>
   <p class="hint" id="wnote"></p>
+</section>
+
+<section class="sec" id="sec-connections">
+  <h2>Connections</h2>
+  <!-- Ikariam limits by address and every instance shares one. The per-instance
+       web server is a reverse proxy, so a browser page loaded through it is
+       dozens more requests from the same address. Counted rather than guessed
+       at: ikabot/helpers/requestLog.py writes a bucket a second. -->
+  <div class="row" style="margin-bottom:10px">
+    <span class="zoom">Window
+      <button data-cw="120:1" class="p">2 minutes</button>
+      <button data-cw="600:5">10 minutes</button>
+    </span>
+    <button id="crefresh">Refresh</button>
+    <span class="hint" id="cwhen" style="margin:0"></span>
+  </div>
+  <div class="ctiles" id="ctiles"></div>
+  <div class="wsplit" id="csplit">
+    <div class="cwrap cpos" id="cwrap">
+      <p class="ckey" id="ckey">
+        <span><i></i>requests</span>
+        <span><i class="bad"></i>refused or failed</span>
+      </p>
+      <div id="cchartwrap"><p class="mempty" id="cempty">Loading…</p></div>
+    </div>
+    <div class="wrail" id="crail">
+      <button class="wtoggle" id="ctoggle" title="Hide the instance strip">›</button>
+      <div class="wpad mpad" id="cpad"></div>
+    </div>
+  </div>
+  <table style="margin-top:12px"><thead><tr><th>Rate</th><th>Now</th>
+    <th>Worst in the window</th></tr></thead>
+  <tbody id="cbody"></tbody></table>
+  <p class="hint" id="cnote"></p>
 </section>
 
 <section class="sec" id="sec-messages">
@@ -3125,6 +3637,7 @@ document.getElementById('openweb').addEventListener('click',function(){
 // --- section switcher ----------------------------------------------------
 var SECTIONS=[['instances','Instances','Inst'],['terminal','Terminal','Term'],
               ['webservers','Web servers','Web'],['messages','Messages','Msg'],
+              ['connections','Connections','Conn'],
               ['accounts','Accounts','Acct'],
               ['buttons','Buttons','Btn'],['modules','Modules','Mod'],
               ['ikabot','ikabot','ika'],['files','Files','File']];
@@ -3143,6 +3656,7 @@ function showSection(id){
   if(id==='terminal')mountTerminal();
   if(id==='webservers'){ renderServers(); fitServers(); }
   if(id==='messages'){ renderMsgPad(); loadMessages(); dLoad(); }
+  if(id==='connections'){ renderConnPad(); loadConnections(); }
   placeRail();
   window.scrollTo({top:0});
 }
@@ -3216,7 +3730,8 @@ function wHost(){ return location.hostname || last.host || 'localhost'; }
 // Web servers and Messages each have a strip, and on a wide screen the strip
 // belongs under the menu rather than beside the content. Only one section is
 // on screen at a time, so both can use the one slot.
-var RAILS = {webservers:['wrail','wsplit'], messages:['mrail','msplit']};
+var RAILS = {webservers:['wrail','wsplit'], messages:['mrail','msplit'],
+             connections:['crail','csplit']};
 
 function placeRail(){
   var slot = el('railslot');
@@ -3892,6 +4407,11 @@ function refresh(){
       renderButtons(s.buttons||[]);
     }
     if(current==='webservers')renderServers();
+    // The queue redraws whichever section is open, because it is the thing
+    // that says whether it is safe to press anything else.
+    var qs=JSON.stringify(s.queue||{});
+    if(qs!==qSig){ qSig=qs; renderQueue(); }
+    else if((s.queue||{}).running) renderQueue();   // keep the seconds moving
     // The strip follows every poll. The list is only re-fetched when a log has
     // actually grown, so an open Messages section is not a request every five
     // seconds for the same two hundred records.
@@ -3900,6 +4420,9 @@ function refresh(){
       renderMsgPad();
       if(sig!==mSig){ mSig=sig; loadMessages(); }
     }
+    // Unlike the others this is redrawn on every poll whatever happened: the
+    // graph is a clock, and a still one would read as no traffic.
+    if(current==='connections'){ renderConnPad(); loadConnections(); }
     proxyNote();
     if(s.font_size) el('fsize').textContent = s.font_size;
 
@@ -4467,6 +4990,425 @@ document.addEventListener('click',function(e){
 });
 
 dFields();
+
+// --- the queue ------------------------------------------------------------
+// Pressing a button across twenty-four instances takes minutes, and the page
+// greys out everything until it answers, because two sequences typed into one
+// instance at once interleave into nonsense. The queue is that wait done for
+// you: a list of presses in an order you choose, run one after another.
+//
+// The list lives on the server. The page only ever sends the whole pending
+// list back, so adding, removing and reordering are all the same request and
+// two browsers cannot end up disagreeing about the order.
+var QUEUE_ACTIONS = [
+  ['restart_dead', 'Restart crashed only'],
+  ['restart_all',  'Restart all'],
+  ['kill_all',     'Stop all processes'],
+  ['locks_all',    'Clear all lock files'],
+  ['web_stop',     'Stop all web servers'],
+  ['status',       'Show status'],
+  ['modules_all',  'Update all modules from GitHub'],
+  ['update',       'Download & update ikabot']
+];
+var qSig='', qOpen={}, qDrag=null;
+
+function qItems(){ return ((last.queue||{}).items)||[]; }
+function qWaiting(){ return qItems().filter(function(i){return i.state==='waiting';}); }
+
+function qPost(body, done){
+  fetch('api/queue',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)})
+  .then(function(r){return r.json()})
+  .then(function(d){
+    if(d.error){ el('qnote').textContent='Queue: '+d.error; return; }
+    if(d.queue){ last.queue=d.queue; qSig=JSON.stringify(d.queue); renderQueue(); }
+    if(d.output) el('qnote').textContent=d.output;
+    if(done) done(d);
+  })
+  .catch(function(err){ el('qnote').textContent='Queue request failed: '+err; });
+}
+
+// Everything the page still has waiting, in the order shown, with whatever
+// change the caller made already applied.
+function qSend(list){
+  qPost({op:'set', items:list.map(function(i){
+    return {id:i.id, action:i.action, arg:i.arg, label:i.label};
+  })});
+}
+
+function qFillPicker(){
+  var sel=el('qpick'); if(!sel) return;
+  var buttons=(last.buttons||[]);
+  var sig=JSON.stringify([buttons.map(function(b){return b.id+b.label;})]);
+  if(sel.dataset.sig===sig) return;
+  var opts='';
+  if(buttons.length){
+    opts+='<optgroup label="Your buttons, in every instance they apply to">'+
+      buttons.map(function(b){
+        return '<option value="button_all:'+esc(b.id)+'">'+esc(b.label)+'</option>';
+      }).join('')+'</optgroup>';
+  }
+  opts+='<optgroup label="Actions">'+QUEUE_ACTIONS.map(function(a){
+    return '<option value="'+a[0]+':">'+esc(a[1])+'</option>';
+  }).join('')+'</optgroup>';
+  sel.innerHTML=opts;
+  sel.dataset.sig=sig;
+}
+
+function qLabelFor(value){
+  var kind=value.split(':')[0], arg=value.slice(kind.length+1);
+  if(kind==='button_all'){
+    var b=(last.buttons||[]).filter(function(x){return x.id===arg;})[0];
+    return b ? b.label : 'button';
+  }
+  var a=QUEUE_ACTIONS.filter(function(x){return x[0]===kind;})[0];
+  return a ? a[1] : kind;
+}
+
+function qMark(state){
+  if(state==='running') return 'running';
+  if(state==='done') return 'done';
+  if(state==='failed') return 'failed';
+  if(state==='skipped') return 'skipped';
+  return 'waiting';
+}
+
+function renderQueue(){
+  var list=el('qlist'); if(!list) return;
+  qFillPicker();
+  var items=qItems(), waiting=qWaiting();
+
+  list.innerHTML = items.length ? items.map(function(it, n){
+    var mark=qMark(it.state), movable=it.state==='waiting';
+    var at=waiting.indexOf(it);
+    var secs = it.started ? Math.max(0, (it.finished||Math.floor(Date.now()/1000))-it.started) : 0;
+    return '<li class="'+mark+'" data-qid="'+esc(it.id)+'"'+
+        (movable?' draggable="true"':'')+'>'+
+      (movable?'<span class="qgrip" title="Drag to reorder">⠿</span>'
+              :'<span class="qgrip" style="visibility:hidden">⠿</span>')+
+      '<span class="qnum">'+(n+1)+'</span>'+
+      '<span class="qlabel">'+esc(it.label)+'</span>'+
+      '<span class="qmark '+mark+'">'+mark+
+        (secs?' '+secs+'s':'')+'</span>'+
+      (it.has_output?'<button data-qop="show">Output</button>':'')+
+      (movable?'<button data-qop="up"'+(at<=0?' disabled':'')+' title="Move up">▲</button>'+
+               '<button data-qop="down"'+(at>=waiting.length-1?' disabled':'')+
+               ' title="Move down">▼</button>'+
+               '<button class="d" data-qop="drop" title="Remove">×</button>':'')+
+      (qOpen[it.id]&&it.output?'<p class="qout">'+esc(it.output)+'</p>':'')+
+    '</li>';
+  }).join('') : '';
+
+  var running=(last.queue||{}).running, stopping=(last.queue||{}).stopping;
+  var now=items.filter(function(i){return i.state==='running';})[0];
+  var ran=items.filter(function(i){return i.state!=='waiting'&&i.state!=='running';});
+  el('qstate').textContent = running
+    ? (stopping ? 'stopping after the step running now'
+                : 'running' + (now ? ' — ' + now.label : '') +
+                  ', ' + waiting.length + ' still to go')
+    : (waiting.length ? waiting.length+' step'+(waiting.length===1?'':'s')+
+                        ' ready — press Start'
+       : (ran.length ? 'nothing waiting — '+ran.length+' step'+
+                       (ran.length===1?'':'s')+' finished'
+                     : 'empty'));
+  el('qstart').disabled = !!running || !waiting.length;
+  el('qstop').disabled = !running;
+  el('qnote').textContent = el('qnote').textContent || '';
+}
+
+// The output of a finished step is not sent with every poll, so it is fetched
+// the first time one is opened.
+function qShowOutput(id){
+  qOpen[id]=!qOpen[id];
+  if(!qOpen[id]){ renderQueue(); return; }
+  fetch('api/queue').then(function(r){return r.json()}).then(function(d){
+    var full={};
+    (d.items||[]).forEach(function(i){ full[i.id]=i.output||''; });
+    qItems().forEach(function(i){ if(full[i.id]!==undefined) i.output=full[i.id]; });
+    renderQueue();
+  }).catch(function(err){ el('qnote').textContent='Could not read it: '+err; });
+}
+
+el('qaddbtn').addEventListener('click',function(){
+  var sel=el('qpick'), value=sel.value||'';
+  if(!value) return;
+  var kind=value.split(':')[0], arg=value.slice(kind.length+1);
+  var list=qWaiting().slice();
+  list.push({id:'', action:kind, arg:arg, label:qLabelFor(value)});
+  qSend(list);
+});
+
+el('qstart').addEventListener('click',function(){ qPost({op:'start'}); });
+el('qstop').addEventListener('click',function(){ qPost({op:'stop'}); });
+el('qtidy').addEventListener('click',function(){
+  qPost({op:'clear', what:'finished'});
+});
+el('qwipe').addEventListener('click',function(){
+  if(!confirm('Empty the queue?\n\nA step already running finishes first.'))return;
+  qPost({op:'clear', what:'all'});
+});
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('#qlist button[data-qop]'); if(!b||b.disabled) return;
+  var id=b.closest('li').dataset.qid, op=b.dataset.qop;
+  if(op==='show'){ qShowOutput(id); return; }
+  var list=qWaiting().slice(), at=-1;
+  list.forEach(function(i,n){ if(i.id===id) at=n; });
+  if(at<0) return;
+  if(op==='drop') list.splice(at,1);
+  else if(op==='up'&&at>0) list.splice(at-1,0,list.splice(at,1)[0]);
+  else if(op==='down'&&at<list.length-1) list.splice(at+1,0,list.splice(at,1)[0]);
+  else return;
+  qSend(list);
+});
+
+// Dragging, for a mouse. A touchscreen gets nothing from this — HTML drag
+// events never fire there — which is why the arrows above are not a fallback
+// but the main way to reorder.
+document.addEventListener('dragstart',function(e){
+  var li=e.target.closest('#qlist li[draggable]'); if(!li) return;
+  qDrag=li.dataset.qid;
+  e.dataTransfer.effectAllowed='move';
+  try{ e.dataTransfer.setData('text/plain', qDrag); }catch(err){}
+});
+document.addEventListener('dragover',function(e){
+  var li=e.target.closest('#qlist li[draggable]'); if(!li||!qDrag) return;
+  e.preventDefault();
+  Array.prototype.forEach.call(document.querySelectorAll('#qlist li.over'),
+    function(x){ x.classList.remove('over'); });
+  li.classList.add('over');
+});
+document.addEventListener('drop',function(e){
+  var li=e.target.closest('#qlist li[draggable]'); if(!li||!qDrag) return;
+  e.preventDefault();
+  li.classList.remove('over');
+  var list=qWaiting().slice(), from=-1, to=-1;
+  list.forEach(function(i,n){
+    if(i.id===qDrag) from=n;
+    if(i.id===li.dataset.qid) to=n;
+  });
+  qDrag=null;
+  if(from<0||to<0||from===to) return;
+  list.splice(to,0,list.splice(from,1)[0]);
+  qSend(list);
+});
+document.addEventListener('dragend',function(){
+  qDrag=null;
+  Array.prototype.forEach.call(document.querySelectorAll('#qlist li.over'),
+    function(x){ x.classList.remove('over'); });
+});
+
+// --- connections ----------------------------------------------------------
+// Ikariam limits by address, every instance shares one, and the per-instance
+// web server is a reverse proxy — so one browser page loaded through it is
+// dozens more requests from the same address. This draws what was actually
+// sent, per second, so a block can be traced to what caused it.
+//
+// One series, plus errors as a status series. The error line is dashed as well
+// as red, so the two are told apart with no colour vision at all.
+var cPick='all', cWindow=120, cBucket=1, cData=null, cBusy=false;
+try{ cPick=localStorage.getItem('ikaConnPick')||'all'; }catch(e){}
+
+function cByNum(){
+  var map={};
+  (last.instances||[]).forEach(function(i){ if(i.account) map[i.num]=i.account; });
+  return map;
+}
+
+function renderConnPad(){
+  var pad=el('cpad'); if(!pad) return;
+  var accounts=cByNum(), meta=last.connections||{};
+  var nums=(last.instances||[]).map(function(i){return i.num;})
+                               .sort(function(a,b){return a-b;});
+  var html='<button class="all'+(cPick==='all'?' on':'')+'" data-conn="all" '+
+           'title="Every instance added together">All</button>';
+  html+=nums.map(function(n){
+    var account=accounts[n]||'', seen=account?meta[account]:null;
+    var cls=[];
+    if(seen) cls.push('live');
+    if(cPick===String(n)) cls.push('on');
+    return '<button data-conn="'+n+'"'+(seen?'':' disabled')+
+      (cls.length?' class="'+cls.join(' ')+'"':'')+
+      ' title="'+(seen?'instance '+n+' — '+esc(account)+', '+
+                       (seen.total||0)+' request(s) so far'
+                     :'instance '+n+' — nothing counted yet')+'">'+n+'</button>';
+  }).join('');
+  pad.innerHTML=html;
+}
+
+function cTiles(d){
+  function tile(value, label, hot){
+    return '<div class="ctile'+(hot?' hot':'')+'"><b>'+value+'</b><span>'+
+           esc(label)+'</span></div>';
+  }
+  el('ctiles').innerHTML =
+    tile(d.now_1, 'per second') +
+    tile(d.now_30, 'per 30 seconds') +
+    tile(d.now_60, 'per minute') +
+    tile(d.peak_1, 'busiest second') +
+    tile(d.error_total, 'refused or failed', d.error_total > 0) +
+    tile(d.total, 'since ikabot started');
+
+  el('cbody').innerHTML = [
+    ['Per second', d.now_1, d.peak_1],
+    ['Per 30 seconds', d.now_30, d.peak_30],
+    ['Per minute', d.now_60, d.peak_60]
+  ].map(function(r){
+    return '<tr><td>'+r[0]+'</td><td class="mono">'+r[1]+
+           '</td><td class="mono">'+r[2]+'</td></tr>';
+  }).join('');
+}
+
+// Drawn as SVG rather than on a canvas: it scales with the page, it reads the
+// same two colour tokens the rest of the panel uses, so dark mode is the
+// panel's own dark mode and not a flipped copy.
+function drawChart(d){
+  var host=el('cchartwrap'); if(!host) return;
+  var reqs=d.requests||[], errs=d.errors||[];
+  if(!reqs.length){
+    host.innerHTML='<p class="mempty">Nothing counted yet.</p>';
+    return;
+  }
+  var W=1000, H=220, L=34, R=8, T=10, B=22;
+  var iw=W-L-R, ih=H-T-B;
+  var top=Math.max(1, Math.max.apply(null, reqs));
+  // A round ceiling, so the gridline labels are numbers worth reading.
+  var step=Math.pow(10, Math.floor(Math.log(top)/Math.LN10));
+  top=Math.ceil(top/step)*step;
+
+  var x=function(i){ return L + (reqs.length<2?0:(i*iw/(reqs.length-1))); };
+  var y=function(v){ return T + ih - (v/top)*ih; };
+  var path=function(list){
+    return list.map(function(v,i){ return (i?'L':'M')+x(i).toFixed(1)+' '+
+                                          y(v).toFixed(1); }).join(' ');
+  };
+
+  var grid='', labels='';
+  [0,0.5,1].forEach(function(f){
+    var v=top*f, yy=y(v);
+    grid+='<line class="cgrid" x1="'+L+'" y1="'+yy.toFixed(1)+'" x2="'+(W-R)+
+          '" y2="'+yy.toFixed(1)+'"/>';
+    labels+='<text class="caxis" x="'+(L-6)+'" y="'+(yy+3.5).toFixed(1)+
+            '" text-anchor="end">'+Math.round(v)+'</text>';
+  });
+  var span=d.window||120;
+  [[0, '-'+Math.round(span/60)+' min'], [reqs.length-1, 'now']].forEach(
+    function(pair){
+      labels+='<text class="caxis" x="'+x(pair[0]).toFixed(1)+'" y="'+(H-6)+
+              '" text-anchor="'+(pair[0]?'end':'start')+'">'+pair[1]+'</text>';
+    });
+
+  var area=path(reqs)+' L '+x(reqs.length-1).toFixed(1)+' '+y(0).toFixed(1)+
+           ' L '+x(0).toFixed(1)+' '+y(0).toFixed(1)+' Z';
+  var anyBad=errs.some(function(v){return v>0;});
+
+  host.innerHTML=
+    '<svg class="cchart" id="csvg" viewBox="0 0 '+W+' '+H+'" '+
+         'preserveAspectRatio="none" role="img" '+
+         'aria-label="Requests per '+(d.bucket>1?d.bucket+' seconds':'second')+
+         ' over the last '+Math.round(span/60)+' minutes">'+
+      grid+
+      '<path class="cfill" d="'+area+'"/>'+
+      '<path class="cline" d="'+path(reqs)+'"/>'+
+      (anyBad?'<path class="cbadline" d="'+path(errs)+'"/>':'')+
+      labels+
+      '<g id="chair" style="display:none">'+
+        '<line class="chair" y1="'+T+'" y2="'+(T+ih)+'"/>'+
+        '<circle class="cdot" r="4"/>'+
+        '<circle class="cdot bad" r="4" style="display:none"/>'+
+      '</g>'+
+    '</svg>'+
+    '<div class="ctip" id="ctip" style="display:none"></div>';
+
+  // The hover layer. A line chart without one makes the reader guess which
+  // second a spike was.
+  var svg=el('csvg'), hair=el('chair'), tip=el('ctip');
+  var dots=hair.querySelectorAll('circle');
+  function move(ev){
+    var box=svg.getBoundingClientRect();
+    var px=(ev.touches?ev.touches[0].clientX:ev.clientX)-box.left;
+    var at=Math.round(((px/box.width)*W - L)/(iw||1)*(reqs.length-1));
+    at=Math.max(0, Math.min(reqs.length-1, at));
+    hair.style.display='';
+    hair.querySelector('line').setAttribute('x1', x(at));
+    hair.querySelector('line').setAttribute('x2', x(at));
+    dots[0].setAttribute('cx', x(at)); dots[0].setAttribute('cy', y(reqs[at]));
+    dots[1].setAttribute('cx', x(at)); dots[1].setAttribute('cy', y(errs[at]||0));
+    dots[1].style.display = errs[at] ? '' : 'none';
+    var when=new Date((d.start+at*d.bucket)*1000);
+    tip.innerHTML='<b>'+reqs[at]+'</b> request'+(reqs[at]===1?'':'s')+
+      (d.bucket>1?' in '+d.bucket+'s':'')+
+      (errs[at]?'<br>'+errs[at]+' refused or failed':'')+
+      '<br><span class="hint" style="margin:0">'+
+      when.toLocaleTimeString()+'</span>';
+    tip.style.display='';
+    var want=(x(at)/W)*box.width;
+    tip.style.left=Math.min(box.width-tip.offsetWidth-4,
+                            Math.max(0, want+8))+'px';
+    tip.style.top='8px';
+  }
+  svg.addEventListener('mousemove', move);
+  svg.addEventListener('touchstart', move);
+  svg.addEventListener('touchmove', move);
+  svg.addEventListener('mouseleave', function(){
+    hair.style.display='none'; tip.style.display='none';
+  });
+}
+
+function loadConnections(){
+  if(cBusy) return;
+  var accounts=cByNum(), url='api/connections?window='+cWindow+'&bucket='+cBucket;
+  if(cPick!=='all'){
+    var one=accounts[cPick];
+    if(!one){
+      el('cchartwrap').innerHTML='<p class="mempty">Instance '+esc(cPick)+
+        ' has not sent anything yet.</p>';
+      return;
+    }
+    url+='&acct='+encodeURIComponent(one);
+  }
+  cBusy=true;
+  fetch(url).then(function(r){return r.json()}).then(function(d){
+    cData=d;
+    cTiles(d);
+    drawChart(d);
+    el('cwhen').textContent='read '+new Date().toLocaleTimeString()+
+      ', refreshes by itself every 5 seconds';
+    el('cnote').textContent = cPick==='all'
+      ? 'Every instance added together. Each instance also counts what its own '+
+        'web server forwards, so a browser page opened through Web servers '+
+        'appears here too.'
+      : 'Instance '+cPick+' only, its menu, its tasks and its web server added '+
+        'together.';
+  }).catch(function(err){
+    el('cchartwrap').innerHTML='<p class="mempty">Could not read the counts: '+
+      esc(String(err))+'</p>';
+  }).then(function(){ cBusy=false; });
+}
+
+document.addEventListener('click',function(e){
+  var b=e.target.closest('button[data-conn]');
+  if(b && !b.disabled){
+    cPick=b.dataset.conn;
+    try{ localStorage.setItem('ikaConnPick', cPick); }catch(err){}
+    renderConnPad(); loadConnections();
+    return;
+  }
+  var w=e.target.closest('button[data-cw]');
+  if(w){
+    var parts=w.dataset.cw.split(':');
+    cWindow=parseInt(parts[0],10); cBucket=parseInt(parts[1],10);
+    Array.prototype.forEach.call(document.querySelectorAll('button[data-cw]'),
+      function(x){ x.classList.toggle('p', x===w); });
+    loadConnections();
+  }
+});
+
+el('crefresh').addEventListener('click',function(){ loadConnections(); });
+el('ctoggle').addEventListener('click',function(){
+  var off=el('shell').classList.toggle('railoff');
+  this.textContent = off ? '‹' : '›';
+});
 
 showSection(saved);
 refresh(); setInterval(function(){if(!busy)refresh();},5000);

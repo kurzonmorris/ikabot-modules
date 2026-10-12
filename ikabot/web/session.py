@@ -30,6 +30,14 @@ from ikabot.helpers.varios import getDateTime, lastloginTimetoString
 from ikabot.helpers.apiComm import getNewBlackBoxToken
 from ikabot.helpers.lobbyDecaptcha import break_interactive_captcha
 
+# Counts every request so a rate-limit block can be traced back to what caused
+# it. Guarded: a tree from before the counter still logs in.
+try:
+    from ikabot.helpers.requestLog import record_request
+except ImportError:
+    def record_request(*_args, **_kwargs):
+        return False
+
 
 class Session:
     def __init__(self, mail: str = None, password: str = None,
@@ -1099,6 +1107,14 @@ class Session:
                 "id": self.account["id"],
                 "blackbox": self.blackbox,
             }
+            # Choosing the server. The account login above has finished, so
+            # a proxy set to the "select" phase goes on here: the game session
+            # is then minted for the same address that will use it, which is
+            # what turning a VPN on at the server list does in a browser. The
+            # default phase leaves this request alone, as it always has.
+            if (sessionData.get("proxy", {}).get("set") is True
+                    and sessionData["proxy"].get("phase") == "select"):
+                self.__update_proxy(sessionData=sessionData)
             resp = self.s.post(
                 "https://lobby.ikariam.gameforge.com/api/users/me/loginLink", json=data
             )
@@ -1314,6 +1330,14 @@ class Session:
         return True
 
     def __update_proxy(self, *, obj=None, sessionData=None):
+        """Apply the stored proxy, if there is one and it is wanted yet.
+
+        The Gameforge account login is never proxied, by either setting.
+        Gameforge rejects a login from a hosting address, and a fresh Session
+        object is built with no proxy at all, so the authentication at the top
+        of __login runs from this machine. The proxy begins at the point the
+        chosen phase says, and from then on every request uses it.
+        """
         # set the proxy
         if obj is None:
             obj = self.s
@@ -1435,6 +1459,7 @@ class Session:
                     "headers": dict(response.headers),
                     "text": response.text,
                 }
+                record_request(self, response.status_code)
                 html = response.text
 
                 # A takeover sends us to the lobby. requests follows the
@@ -1484,9 +1509,13 @@ class Session:
             except AssertionError:
                 self.__sessionExpired()
             except requests.exceptions.ConnectionError:
+                # Counted as well: an attempt that never got an answer still
+                # left this address, and a block often looks like this.
+                record_request(self, None)
                 self.logger.warning(f"Connection error occured, retrying in {ConnectionError_wait}s\n{str(params) + ' --> ' + url}")
                 time.sleep(ConnectionError_wait)
             except requests.exceptions.Timeout:
+                record_request(self, None)
                 self.logger.warning(f"5 minute timeout occured on request, retrying in {ConnectionError_wait}s\n{str(params) + ' --> ' + url}")
                 time.sleep(ConnectionError_wait)
 
@@ -1562,6 +1591,7 @@ class Session:
                     "headers": dict(response.headers),
                     "text": response.text,
                 }
+                record_request(self, response.status_code)
                 resp = response.text
 
                 #  modifica redirect 302
@@ -1653,9 +1683,11 @@ class Session:
             except AssertionError:
                 self.__sessionExpired()
             except requests.exceptions.ConnectionError:
+                record_request(self, None)
                 self.logger.warning(f"Connection error occured, retrying in {ConnectionError_wait}s\n{str(params) + ' --> ' + url}")
                 time.sleep(ConnectionError_wait)
             except requests.exceptions.Timeout:
+                record_request(self, None)
                 self.logger.warning(f"5 minute timeout occured on request, retrying in {ConnectionError_wait}s\n{str(params) + ' --> ' + url}")
                 time.sleep(ConnectionError_wait)
 
