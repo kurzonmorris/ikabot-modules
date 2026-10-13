@@ -130,8 +130,74 @@ class AESCipher:
         except (OSError, PermissionError):
             return False
 
+    # How long a lock may be held before it is treated as abandoned. Also the
+    # age at which a lock nobody can identify is cleared.
+    LOCK_STALE_SECONDS = 30
+
     @staticmethod
-    def _acquire_lock(lock_path, timeout=30):
+    def _lock_age(lock_path, stamp=None):
+        """Seconds since the lock was taken, by its own stamp or by the file.
+
+        The file is created and written as two steps, so a process that dies
+        between them leaves a lock with nothing in it. Before this fell back to
+        the file's own timestamp, such a lock was never judged stale and never
+        cleared, and the account it belonged to could not be opened again
+        without deleting the file by hand.
+        """
+        if stamp is not None:
+            try:
+                return time.time() - float(stamp)
+            except (TypeError, ValueError):
+                pass
+        try:
+            return time.time() - os.path.getmtime(lock_path)
+        except OSError:
+            # Gone between the two calls, which means it is not held.
+            return AESCipher.LOCK_STALE_SECONDS + 1
+
+    @staticmethod
+    def _lock_is_stale(lock_path):
+        """True when this lock can be removed. Never raises.
+
+        Three ways a lock stops counting: the process that took it has gone,
+        it has been held longer than any write needs, or it says nothing at
+        all about who holds it.
+        """
+        try:
+            with open(lock_path, "r") as f:
+                content = f.read().strip()
+        except OSError:
+            return False
+
+        pid, stamp = None, None
+        if content:
+            parts = content.split(":", 1)
+            try:
+                pid = int(parts[0])
+            except (TypeError, ValueError):
+                pid = None
+            if len(parts) > 1:
+                stamp = parts[1]
+
+        if pid is None:
+            # Empty, or written by something that does not stamp it. Age is
+            # all there is to go on, and the file's own timestamp gives that.
+            return AESCipher._lock_age(lock_path) > AESCipher.LOCK_STALE_SECONDS
+
+        if not AESCipher._pid_alive(pid):
+            return True
+        # Alive, but a pid can be reused, so age still ends it.
+        return AESCipher._lock_age(lock_path, stamp) > AESCipher.LOCK_STALE_SECONDS
+
+    @staticmethod
+    def _acquire_lock(lock_path, timeout=45):
+        """Take the lock, clearing one that has been abandoned.
+
+        The timeout is longer than LOCK_STALE_SECONDS on purpose. A lock
+        abandoned a moment before this call becomes stale thirty seconds in,
+        and the wait has to outlast that or the one call that could have
+        recovered it gives up at the same instant instead.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -143,22 +209,12 @@ class AESCipher:
                 return
             except FileExistsError:
                 # Check whether the lock belongs to a dead process or is stale.
-                try:
-                    with open(lock_path, "r") as f:
-                        content = f.read().strip()
-                    if content:
-                        parts = content.split(":", 1)
-                        pid = int(parts[0])
-                        lock_age = time.time() - float(parts[1]) if len(parts) > 1 else 31
-                        # Clear if owner is dead OR lock is older than 30s (guards against PID reuse)
-                        if not AESCipher._pid_alive(pid) or lock_age > 30:
-                            try:
-                                os.unlink(lock_path)
-                            except (FileNotFoundError, PermissionError):
-                                pass
-                            continue  # retry immediately
-                except (OSError, ValueError):
-                    pass
+                if AESCipher._lock_is_stale(lock_path):
+                    try:
+                        os.unlink(lock_path)
+                    except (FileNotFoundError, PermissionError):
+                        pass
+                    continue  # retry immediately
                 time.sleep(0.05)
         raise TimeoutError(f"Could not acquire session lock: {lock_path}")
 

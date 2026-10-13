@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.4.0"
+PANEL_VERSION = "1.4.1"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -602,6 +602,159 @@ def files_for(entry, pool):
     out.sort(key=lambda f: (0 if "log" in f["label"].lower() else 1,
                             f["label"].lower()))
     return out
+
+
+# ikabot writes the session file under a lock, and the lock is created and
+# written as two steps. A process that dies between them leaves a lock with
+# nothing in it, and mod 2.3.1 and later age such a lock out by itself. On an
+# older ikabot it blocks that account for good, so the panel can clear one —
+# but only when it can show that nobody holds it.
+SESSION_DIR = os.path.join(DATA_DIR, "sessions")
+SESSION_STALE = 30
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def read_session_lock(name):
+    """What is known about one session lock. None when it is not there."""
+    path = os.path.join(SESSION_DIR, name)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            content = f.read().strip()
+        age = int(time.time() - os.path.getmtime(path))
+    except OSError:
+        return None
+
+    pid, stamp = 0, None
+    if content:
+        parts = content.split(":", 1)
+        try:
+            pid = int(parts[0])
+        except (TypeError, ValueError):
+            pid = 0
+        if len(parts) > 1:
+            try:
+                stamp = int(time.time() - float(parts[1]))
+            except (TypeError, ValueError):
+                stamp = None
+    if stamp is not None:
+        age = stamp
+
+    alive = bool(pid) and _pid_alive(pid)
+    # Exactly the rule ikabot itself uses, so the panel never offers to remove
+    # a lock ikabot would have waited for. A lock with no pid in it is not
+    # abandoned yet: the file is created first and written a moment later, so
+    # one just taken is briefly empty and belongs to a process still starting.
+    if pid:
+        stuck = (not alive) or age > SESSION_STALE
+    else:
+        stuck = age > SESSION_STALE
+    return {"name": name, "pid": pid, "alive": alive, "age": max(0, age),
+            "empty": not content, "stuck": stuck}
+
+
+def session_locks():
+    """Every session lock on disk, judged. Never raises."""
+    out = []
+    try:
+        names = sorted(os.listdir(SESSION_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".session.lock"):
+            continue
+        info = read_session_lock(name)
+        if info is not None:
+            out.append(info)
+    return out
+
+
+def session_lock_for(entry, locks):
+    """The session lock belonging to this account, if there is one.
+
+    The file is named <hash>_<username>_<server><world>.session.lock. A lock
+    written before an account's first successful login carries only the hash,
+    so it cannot be matched to an instance and is reported on its own.
+    """
+    user = _safe_part(entry.get("username") or "")
+    server = _safe_part(entry.get("server") or "")
+    world = _safe_part(entry.get("world") or "")
+    if not user or not server:
+        return None
+    tail = "_%s_%s%s.session.lock" % (user, server, world)
+    for info in locks:
+        if info["name"].endswith(tail):
+            return info
+    return None
+
+
+def run_session_lock(act, arg):
+    """Remove one account's abandoned session lock. Returns (out, error, ran).
+
+    The browser sends an instance number. Which file that means is worked out
+    here, so nothing outside the sessions folder is reachable and a lock that
+    is still held is refused rather than stolen.
+    """
+    if not arg.isdigit():
+        return "", "bad instance", act
+    with _run_lock:
+        instances = state()["instances"]
+        inst = next((i for i in instances if i["num"] == int(arg)), None)
+        if inst is None:
+            return "", "no such instance", act
+        info = inst.get("session_lock")
+        if not info:
+            return "%s has no session lock." % inst["name"], "", act
+        fresh = read_session_lock(info["name"])
+        if fresh is None:
+            return ("The lock on %s has already gone." % inst["name"], "", act)
+        if not fresh["stuck"]:
+            return ("%s's session lock is held by process %d, which is still "
+                    "running, and it has only been held %ds.\n\nikabot is "
+                    "waiting for it on purpose. Deleting it now would let two "
+                    "processes write that account's session file at once."
+                    % (inst["name"], fresh["pid"], fresh["age"]), "", act)
+        try:
+            os.unlink(os.path.join(SESSION_DIR, fresh["name"]))
+        except FileNotFoundError:
+            return ("The lock on %s had already gone." % inst["name"], "", act)
+        except OSError as exc:
+            return "", "Could not remove it: %s" % exc, act
+        why = ("it was empty — the process died before it could say who it was"
+               if fresh["empty"] else
+               "process %d is no longer running" % fresh["pid"]
+               if not fresh["alive"] else
+               "it had been held for %ds" % fresh["age"])
+        return ("Cleared the session lock on %s (%s).\n\n%s can be started "
+                "again now." % (inst["name"], why, inst["name"]), "", act)
+
+
+def run_session_lock_named(act, arg):
+    """Remove one session lock by name. Returns (out, error, ran).
+
+    The name has to be one this panel just listed, so nothing outside the
+    sessions folder is reachable however the request was made.
+    """
+    info = next((i for i in session_locks() if i["name"] == arg), None)
+    if info is None:
+        return "", "no such session lock", act
+    if not info["stuck"]:
+        return ("%s is held by process %d, which is still running.\n\n"
+                "ikabot is waiting for it on purpose." % (arg, info["pid"]),
+                "", act)
+    try:
+        os.unlink(os.path.join(SESSION_DIR, info["name"]))
+    except FileNotFoundError:
+        return "%s had already gone." % arg, "", act
+    except OSError as exc:
+        return "", "Could not remove it: %s" % exc, act
+    return "Cleared the session lock %s." % arg, "", act
 
 
 def lock_files():
@@ -1581,6 +1734,8 @@ def state():
         return out
 
     all_locks = lock_files()
+    all_session_locks = session_locks()
+    claimed_sessions = set()
     all_files = account_files()
     claimed = set()
 
@@ -1609,6 +1764,12 @@ def state():
             by_name[name]["updated"] = entry.get("updated", 0)
             by_name[name]["locks"] = [n for _, n in locks]
             by_name[name]["files"] = files_for(entry, all_files)
+            # A session lock blocks logging in at all, so it is on the card
+            # whether or not anything else about the account is known.
+            mine = session_lock_for(entry, all_session_locks)
+            by_name[name]["session_lock"] = mine
+            if mine:
+                claimed_sessions.add(mine["name"])
             # Written by ikabot (mod 2.0.2+). Absent on older ones, which the
             # page treats as "nothing known" rather than "nothing wrong".
             by_name[name]["proxy"] = entry.get("proxy")
@@ -1617,6 +1778,7 @@ def state():
             orphans.append(entry.get("account", "?"))
 
     for i in instances:
+        i.setdefault("session_lock", None)
         i.setdefault("proxy", None)
         i.setdefault("files", [])
         i.setdefault("locks", [])
@@ -1683,6 +1845,11 @@ def state():
         "locks_shared": sorted(n for pair, n in ((p, p[1]) for p in all_locks)
                                if pair not in claimed),
         "status_orphans": orphans,
+        # Session locks belonging to no instance on screen: written before an
+        # account's first successful login, so they carry only a hash and
+        # cannot be matched to a numbered window.
+        "session_orphans": [i for i in all_session_locks
+                            if i["name"] not in claimed_sessions],
         "buttons": load_buttons(),
         "instances": instances,
         "modules": modules,
@@ -2572,6 +2739,14 @@ class Handler(BaseHTTPRequestHandler):
         # Clearing lock files. The browser sends an instance number or
         # nothing at all — never a path. The panel rescans and decides which
         # files those words mean, so nothing outside a module lock is reachable.
+        if act == "session_lock_one":
+            return self._answer(
+                run_session_lock(act, str(payload.get("arg", ""))))
+
+        if act == "session_lock_named":
+            return self._answer(
+                run_session_lock_named(act, str(payload.get("arg", ""))))
+
         if act in ("locks_one", "locks_all"):
             return self._answer(run_locks(act, str(payload.get("arg", ""))))
 
@@ -2806,6 +2981,14 @@ display:grid;place-items:center;line-height:1}
   .wpad button{font-size:12px}
 }
 /* Retracted: just the arrow, so the page gets the whole width. */
+/* A session lock stops an instance logging in at all, so it is said on the
+   card in words rather than left to a colour. */
+.slock{margin:6px 0 0;padding:6px 8px;border-radius:5px;font-size:12px;
+border:1px solid var(--warn);color:var(--warn);background:var(--card)}
+.slock.held{border-color:var(--rule);color:var(--soft)}
+.slock b{font-weight:600}
+.slock .row{margin-top:5px}
+
 /* The queue. Numbered rows in the order they will run, with the one running
    marked, so the list reads as a plan rather than a log. */
 .qwrap{border:1px solid var(--rule);border-radius:8px;background:var(--card);
@@ -3123,6 +3306,7 @@ The instances themselves stay logged in and keep running.">Stop all processes</b
     <p class="hint" id="qnote"></p>
   </div>
   <div class="grid" id="grid"></div>
+  <div id="sorphans"></div>
   <p class="hint" id="statushint"></p>
 </section>
 
@@ -4512,6 +4696,27 @@ function refresh(){
             i.locks.length+')</button>'
           : '')+
         '</div>'+
+        // A session lock is not a module lock: it blocks logging in, it lives
+        // in the sessions folder, and Clear all lock files never touches it.
+        (i.session_lock
+          ? '<div class="slock'+(i.session_lock.stuck?'':' held')+'">'+
+            (i.session_lock.stuck
+              ? '<b>Session lock left behind.</b> '+
+                (i.session_lock.empty
+                  ? 'It is empty — a process died before it could say who it was.'
+                  : (i.session_lock.alive
+                      ? 'Held for '+i.session_lock.age+'s, longer than any write takes.'
+                      : 'Process '+i.session_lock.pid+' is no longer running.'))+
+                ' This instance cannot log in until it is cleared.'+
+                '<div class="row"><button class="d" data-a="session_lock_one" '+
+                'data-arg="'+i.num+'" data-confirm="Clear the session lock on '+
+                i.name+'?&#10;&#10;It is checked again first, and refused if '+
+                'anything still holds it.">Clear session lock</button></div>'
+              : '<b>Session lock in use.</b> Process '+i.session_lock.pid+
+                ' is writing this account, '+i.session_lock.age+'s ago. '+
+                'Nothing to do — ikabot waits for it.')+
+            '</div>'
+          : '')+
         (keys?'<div class="keys">'+keys+'</div>':'')+
         (i.files&&i.files.length
           ? '<div class="files">'+i.files.map(function(f){
@@ -4612,6 +4817,28 @@ function refresh(){
     } else {
       cc.textContent = 'Checking GitHub…';
     }
+
+    // Session locks matching no instance on screen: written before an account
+    // ever logged in, so they carry only a hash. Shown here because a card
+    // cannot claim them, and left alone unless they are provably abandoned.
+    var so=el('sorphans'), orphans=(s.session_orphans||[]);
+    so.innerHTML = orphans.length ? orphans.map(function(o){
+      return '<div class="slock'+(o.stuck?'':' held')+'">'+
+        '<b>Session lock with no instance:</b> <span class="mono">'+
+        esc(o.name)+'</span><br>'+
+        (o.stuck
+          ? (o.empty ? 'Empty — a process died before it could say who it was.'
+                     : (o.alive ? 'Held for '+o.age+'s.'
+                                : 'Process '+o.pid+' is no longer running.'))+
+            ' It belongs to an account that has not logged in yet, so no card '+
+            'can show it.'+
+            '<div class="row"><button class="d" data-a="session_lock_named" '+
+            'data-arg="'+esc(o.name)+'" data-confirm="Clear '+esc(o.name)+
+            '?&#10;&#10;It is checked again first, and refused if anything '+
+            'still holds it.">Clear it</button></div>'
+          : 'Held by process '+o.pid+', '+o.age+'s ago. Nothing to do.')+
+        '</div>';
+    }).join('') : '';
 
     if(!s.status_available){
       var h=document.getElementById('statushint');
