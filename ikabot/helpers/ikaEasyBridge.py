@@ -260,6 +260,183 @@ def create_rtm_schedule(session, body):
     return {"ok": True, "schedule_id": int(row["schedule_id"])}
 
 
+# ── Construction Manager: add to queue from the building view ────────────────
+
+def _module_path(pattern):
+    """Return the path to a versioned module file matching *pattern*, or None."""
+    try:
+        for name in os.listdir(_MODULES_DIR):
+            if re.match(pattern, name):
+                return os.path.join(_MODULES_DIR, name)
+    except OSError:
+        pass
+    return None
+
+
+def _load_module(name, pattern):
+    path = _module_path(pattern)
+    if not path:
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def get_cm_status(session):
+    """Report whether the Construction Manager module is installed and whether
+    its build worker is currently running for this account."""
+    cm = _load_module("constructionManager", r"constructionManager_v[\d.]+\.py$")
+    if cm is None:
+        return {"available": False, "worker_running": False}
+    try:
+        running = bool(cm._is_worker_running(session))
+    except Exception:
+        running = False
+    return {"available": True, "worker_running": running}
+
+
+def cm_add_building(session, body):
+    """Queue *levels* more level-ups for the building at *slot_position* in a
+    city, by reusing the Construction Manager's own cost lookup and CSV insert.
+
+    body fields:
+      city_id       : int
+      slot_position : int (0-15)
+      levels        : int — how many levels to add beyond what is already there
+                      or already queued
+      transport_mode: "jit" | "bulk" | "none"  (default "jit")
+      start         : bool — also start the build worker if it is not running
+    """
+    cm = _load_module("constructionManager", r"constructionManager_v[\d.]+\.py$")
+    if cm is None:
+        return {"ok": False, "error": "Construction Manager module not installed."}
+
+    try:
+        city_id = int(body.get("city_id", 0))
+        slot_pos = int(body.get("slot_position", -1))
+        levels = int(body.get("levels", 0))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Bad city_id, slot_position or levels."}
+
+    if not city_id or slot_pos < 0:
+        return {"ok": False, "error": "Missing city or slot."}
+    if levels < 1:
+        return {"ok": False, "error": "Enter at least one level."}
+
+    mode = body.get("transport_mode", "jit")
+    if mode not in ("jit", "bulk", "none"):
+        mode = "jit"
+
+    from ikabot.helpers.getJson import getCity
+    from ikabot.config import city_url
+    try:
+        city = getCity(session.get(city_url + str(city_id)))
+    except Exception as e:
+        return {"ok": False, "error": f"Could not read city: {e}"}
+    if str(city.get("id")) != str(city_id):
+        return {"ok": False, "error": "That city is not yours."}
+
+    positions = city.get("position", [])
+    if slot_pos >= len(positions):
+        return {"ok": False, "error": "Slot out of range."}
+    slot = positions[slot_pos]
+
+    city_name = city.get("cityName") or city.get("name", str(city_id))
+    is_empty = slot.get("building") == "empty"
+
+    # Pick up where current level / already-queued rows for this slot end.
+    slot_queue = cm._gather_pending_for_city(session, city_id).get(slot_pos, [])
+    queued_max = max((q["target_level"] for q in slot_queue), default=0)
+    build_queued = any(q["action"] == "build" for q in slot_queue)
+
+    if is_empty and not build_queued:
+        building_slug = slot.get("building")  # "empty" — resolved below
+        return {"ok": False, "error": "This slot is empty. Build it in-game first, "
+                                      "then queue upgrades."}
+    building_slug = slot_queue[0]["building"] if slot_queue else slot.get("building")
+    building_id = ""
+
+    current_lv = int(slot.get("level", 0) or 0)
+    start_from = max(current_lv, queued_max)
+    target_level = min(start_from + levels, cm.HARD_LEVEL_CAP)
+    if target_level <= start_from:
+        return {"ok": False, "error": f"Already at or above the level cap "
+                                      f"({cm.HARD_LEVEL_CAP})."}
+
+    rows_to_add = [(lv, "upgrade") for lv in range(start_from + 1, target_level + 1)]
+
+    costs = cm.fetch_costs_for_building(session, city, building_slug) or {}
+    import time as _time
+    now_ts = int(_time.time())
+    new_rows = []
+    for lv, action_type in rows_to_add:
+        c = costs.get(lv)
+        cost = c if c is not None else [0, 0, 0, 0, 0]
+        new_rows.append({
+            "queue_id":               0,
+            "city_id":                city_id,
+            "city_name":              city_name,
+            "slot_position":          slot_pos,
+            "action":                 action_type,
+            "building":               building_slug,
+            "building_id":            building_id,
+            "target_level":           lv,
+            "wood":                   cost[0],
+            "wine":                   cost[1],
+            "marble":                 cost[2],
+            "crystal":                cost[3],
+            "sulphur":                cost[4],
+            "transport_mode":         mode,
+            "auto_transport_enabled": "no" if mode == "none" else "yes",
+            "status":                 "pending",
+            "expected_finish":        "",
+            "added_at":               now_ts,
+            "notes":                  "" if c is not None else
+                                      "cost unknown at add-time; recomputed before execution",
+            "schema_version":         cm.SCHEMA_VERSION,
+        })
+
+    pending_count = sum(
+        1 for r in cm.csv_load(session)
+        if r["city_id"] == city_id and r["status"] == "pending"
+    )
+    try:
+        qids = cm._csv_insert_at(session, city_id, new_rows, pending_count)
+    except Exception as e:
+        return {"ok": False, "error": f"Could not add to queue: {e}"}
+
+    result = {"ok": True, "added": len(qids), "target_level": target_level,
+              "building": building_slug}
+
+    if body.get("start"):
+        result["worker"] = _cm_start_worker(session, cm)
+
+    return result
+
+
+def _cm_start_worker(session, cm):
+    """Start the Construction Manager build worker if it is not already running,
+    reusing schedulerMonitor's headless spawn."""
+    try:
+        if cm._is_worker_running(session):
+            return "already running"
+    except Exception:
+        pass
+    sm = _load_module("schedulerMonitor", r"schedulerMonitor_v[\d.]+\.py$")
+    if sm is None:
+        return "scheduler monitor not installed — start the worker from the ikabot menu"
+    try:
+        sm._activate(session, "construction")
+        return "started"
+    except Exception as e:
+        return f"could not start worker: {e}"
+
+
 # ── Tavern Manager ───────────────────────────────────────────────────────────
 
 def _tavern_module_path():
@@ -494,6 +671,8 @@ def handle(session, request, flask):
             payload = apply_tavern(session, body)
         elif action == "modify_production":
             payload = modify_production(session, body)
+        elif action == "cm_add":
+            payload = cm_add_building(session, body)
         else:
             payload = {"ok": False, "error": "Unknown action."}
 
@@ -517,6 +696,8 @@ def handle(session, request, flask):
         payload = get_prod_status(session)
     elif sub == "resources":
         payload = get_resources_overview(session)
+    elif sub == "cm_status":
+        payload = get_cm_status(session)
     else:
         payload = {
             "construction": get_construction_queue(session),
