@@ -1882,9 +1882,13 @@ def test_the_completion_test_reads_this_cycle_not_the_lifetime_total():
                 if isinstance(n, ast.FunctionDef)
                 and n.name == "transport_scheduler_loop")
     body = ast.get_source_segment(src, loop)
-    assert "elif cycle_sent > 0 and _cycle_hold_until() <= finished:" in body
+    # Assert the property, not the exact line: the condition has grown
+    # since, and pinning its text made this fail on a reformat.
     assert "elif total > 0:" not in body, \
         "total_shipments is a lifetime counter, not what is left to do"
+    assert "cycle_sent > 0" in body, "the test is this cycle's work"
+    assert "_cycle_hold_until() <= finished" in body, \
+        "a cycle still queued behind something is not finished"
 
 
 # ---------------------------------------------------------------------------
@@ -1986,3 +1990,122 @@ def test_the_loop_rereads_before_holding_a_delivery_back():
         "a schedule run since the tick began must not be run again"
     assert 'fresh.get("status") != "active"' in body, \
         "one paused or deleted mid-tick must be left alone"
+
+
+# ===========================================================================
+#  A partial shipment is not a finished one
+#
+#  Consolidate shipped the first load of a very large request, ran out of
+#  free ships, and the schedule was closed as done. Sending something is
+#  not the same as having nothing left to send — the third time that
+#  conflation has cost a delivery.
+# ===========================================================================
+
+def _one_time_outcome_v2(cycle_sent, hold_left, unfinished, preempted,
+                         finished=1000):
+    """The scheduler's decision for a one-time schedule after a cycle."""
+    if preempted:
+        return "resume"
+    held = (finished + hold_left) > finished
+    if cycle_sent > 0 and not unfinished and not held:
+        return "completed"
+    return "retry"
+
+
+def test_a_partial_shipment_does_not_finish_the_schedule(rtm):
+    # The reported fault: the first load went, ships ran out, and with no
+    # arrival time readable there was no hold either — so "shipped
+    # something, nothing holding it" read as done.
+    assert _one_time_outcome_v2(cycle_sent=1, hold_left=0, unfinished=True,
+                                preempted=False) == "retry"
+
+
+def test_the_old_rule_finished_it(rtm):
+    # Before the unfinished signal, exactly this closed as completed.
+    def old(cycle_sent, hold_left):
+        held = hold_left > 0
+        return "completed" if cycle_sent > 0 and not held else "retry"
+    assert old(cycle_sent=1, hold_left=0) == "completed"
+
+
+def test_a_whole_shipment_still_finishes(rtm):
+    assert _one_time_outcome_v2(cycle_sent=3, hold_left=0, unfinished=False,
+                                preempted=False) == "completed"
+
+
+def test_a_partial_with_a_known_arrival_also_retries(rtm):
+    assert _one_time_outcome_v2(cycle_sent=1, hold_left=600, unfinished=True,
+                                preempted=False) == "retry"
+
+
+def test_the_unfinished_flag_is_per_cycle(rtm):
+    rtm._record_cycle_error("")
+    assert rtm._cycle_unfinished() is False
+    rtm._record_cycle_unfinished("fleet")
+    assert rtm._cycle_unfinished() is True
+    assert rtm._cycle_hold_reason() == "fleet"
+    rtm._record_cycle_error("")
+    assert rtm._cycle_unfinished() is False, \
+        "it must not leak into the next schedule's cycle"
+
+
+def test_a_real_error_does_not_clear_the_unfinished_flag(rtm):
+    rtm._record_cycle_error("")
+    rtm._record_cycle_unfinished("fleet")
+    rtm._record_cycle_error("something broke", "detail")
+    assert rtm._cycle_unfinished() is True
+
+
+def test_an_existing_hold_reason_is_not_overwritten(rtm):
+    rtm._record_cycle_error("")
+    rtm._record_port_hold(300)
+    assert rtm._cycle_hold_reason() == "port"
+    rtm._record_cycle_unfinished("fleet")
+    assert rtm._cycle_hold_reason() == "port", \
+        "the reason already recorded is the specific one"
+    assert rtm._cycle_unfinished() is True
+
+
+def test_every_way_out_of_the_send_loop_reports_what_is_left():
+    import ast
+    src = _module_source()
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "_execute_routes_bounded")
+    body = ast.get_source_segment(src, fn)
+    # Checking for the text "if sum(toSend) > 0:" was not enough: the
+    # trip-gap guard uses the same line, so the assertion passed with the
+    # report removed. Tie the report to the condition structurally.
+    guarded_by_leftovers = False
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.If):
+            continue
+        reports = any(isinstance(c, ast.Call)
+                      and isinstance(c.func, ast.Name)
+                      and c.func.id == "_record_cycle_unfinished"
+                      for c in ast.walk(node))
+        if reports and "toSend" in (ast.get_source_segment(src, node.test) or ""):
+            guarded_by_leftovers = True
+    assert guarded_by_leftovers, \
+        "cargo still owed is what must trigger the report"
+    assert "_record_fleet_hold(back_in)" in body, \
+        "ships running out is a wait, so time the retry for the landing"
+
+
+def test_the_completion_test_respects_unfinished_work():
+    import ast
+    src = _module_source()
+    loop = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef)
+                and n.name == "transport_scheduler_loop")
+    body = ast.get_source_segment(src, loop)
+    assert "not _cycle_unfinished()" in body
+
+
+def test_the_partial_message_no_longer_asks_for_a_manual_resend():
+    # It said "send it again from Shipment History" while the schedule was
+    # being closed as done — advice that was both wrong and needed.
+    src = _module_source()
+    assert "send it again from Shipment History" not in src
+    assert "use (9) Shipment History to send it again." not in src
+    assert "goes when ships return" in src
