@@ -65,7 +65,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.16.1"
+MODULE_VERSION = "10.16.2"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -2516,6 +2516,9 @@ def _execute_routes_bounded(session, route, useFreighters, deadline_ts,
             max_wait=min(3600, int(remaining_time)),
         )
         if ships_available == 0:
+            back_in = _next_fleet_event_seconds(session)
+            if back_in:
+                _record_fleet_hold(back_in)
             break
         storage_in_ships = ships_available * capacity
 
@@ -2571,6 +2574,8 @@ def _execute_routes_bounded(session, route, useFreighters, deadline_ts,
             # free sends back-to-back as fast as the network allows.
             time.sleep(TRIP_GAP_SECONDS + random.uniform(0, 2))
 
+    if sum(toSend) > 0:
+        _record_cycle_unfinished("fleet")
     return [planned[i] - toSend[i] for i in range(len(planned))]
 
 
@@ -3170,8 +3175,8 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
             partial_note = ("Cycle time limit reached — remainder abandoned; "
                             "next cycle recalculates")
         else:
-            partial_note = ("Ran out of free ships — remainder not sent; "
-                            "send it again from Shipment History")
+            partial_note = ("Ran out of free ships — the rest is still "
+                            "pending and goes when ships return")
         if should_notify(notif_config, "all"):
             if not result["partial"]:
                 extra = ""
@@ -3181,8 +3186,9 @@ def send_shipment(session, route, useFreighters, notif_config, log_path,
                          "is included in the next cycle automatically.")
             else:
                 extra = ("\nNOTE: only part of the planned cargo was sent — "
-                         "there were not enough free ships. The rest was not "
-                         "sent; use (9) Shipment History to send it again.")
+                         "there were not enough free ships. The rest is "
+                         "still pending and goes automatically once ships "
+                         "return; nothing to do.")
             sendToBot(session,
                       f"SHIPMENT SENT\nAccount: {session.username}\n"
                       f"From: {origin_city['name']}\n"
@@ -8138,7 +8144,7 @@ _last_cycle_error = {"text": "", "detail": ""}
 # retry interval. A port queue is also not a failure — it must not burn the
 # give-up budget, or a city shipping several orders in a row would stop
 # itself after the first one.
-_last_cycle_hold = {"until": 0.0, "reason": ""}
+_last_cycle_hold = {"until": 0.0, "reason": "", "unfinished": False}
 
 
 def _record_cycle_hold(seconds, reason):
@@ -8169,12 +8175,29 @@ def _cycle_hold_reason():
     return _last_cycle_hold["reason"]
 
 
+def _record_cycle_unfinished(reason=""):
+    """This cycle left work behind, whatever it managed to send.
+
+    Sending something is not the same as being done. A shipment that put
+    half its cargo on the last free ship has succeeded and still owes the
+    rest, and a one-time schedule closed on that basis never sends it.
+    """
+    _last_cycle_hold["unfinished"] = True
+    if reason and not _last_cycle_hold["reason"]:
+        _last_cycle_hold["reason"] = reason
+
+
+def _cycle_unfinished():
+    return _last_cycle_hold["unfinished"]
+
+
 def _record_cycle_error(text, detail=""):
     _last_cycle_error["text"] = text
     _last_cycle_error["detail"] = detail
     if not text:
         _last_cycle_hold["until"] = 0.0
         _last_cycle_hold["reason"] = ""
+        _last_cycle_hold["unfinished"] = False
 
 
 def _cycle_error_note():
@@ -8483,7 +8506,8 @@ def transport_scheduler_loop(session, stop_event):
                         last_duration=elapsed,
                         last_error=_cycle_error_note(),
                     )
-                elif cycle_sent > 0 and _cycle_hold_until() <= finished:
+                elif (cycle_sent > 0 and not _cycle_unfinished()
+                      and _cycle_hold_until() <= finished):
                     # One-time schedule that shipped in a cycle that ran to
                     # the end: mark it done rather than delete it, so it
                     # stays visible in Manage Schedules.
