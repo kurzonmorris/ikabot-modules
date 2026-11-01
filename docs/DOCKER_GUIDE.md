@@ -1319,6 +1319,35 @@ socks5://username:password@host:1080
 > A proxy works around a block. It does not reduce what you send. Look at
 > **Connections** first.
 
+### A session lock left behind
+
+ikabot writes each account's session file under a lock. The lock file is
+created first and written a moment later, so a process that dies between those
+two steps leaves a lock with nothing in it.
+
+Before mod 2.3.1 such a lock was never judged abandoned, so it was never
+cleared, and that account could not log in again until the file was deleted by
+hand. It looks like this:
+
+```
+TimeoutError: Could not acquire session lock:
+/config/.ikabot/sessions/<hash>_<account>.session.lock
+```
+
+**Clear all lock files does not touch these.** That button clears *module*
+locks. Session locks live in the `sessions` folder and are deliberately
+excluded, because removing one while an instance is mid-write is the only way
+this could do harm.
+
+From mod 2.3.1 the lock ages out by itself after thirty seconds and this stops
+happening.
+
+For one already stuck, the instance card says so and offers **Clear session
+lock**. The panel checks again before removing anything and refuses a lock that
+is still held, naming the process holding it. A lock belonging to an account
+that has never logged in carries only a hash, so no card can claim it; those
+appear under the instance grid with their own button.
+
 ### When a proxy stops working
 
 An instance whose proxy has died is not crashed — it is up, logged in, and
