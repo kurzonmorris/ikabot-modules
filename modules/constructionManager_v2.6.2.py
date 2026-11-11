@@ -6,7 +6,7 @@
 See `construction/construction module plan.txt` for the design.
 """
 
-__version__ = "2.6.1"
+__version__ = "2.6.2"
 
 import csv
 import glob
@@ -658,12 +658,21 @@ def _lock_acquire(lock_file, timeout, stale_after, token=None):
                 # payload is not written yet).  Deleting it immediately would
                 # steal a lock its owner thinks it holds, so give the owner a
                 # grace period before treating an unreadable lock as junk.
+                # Judge the grace on the file's own age: a caller with a 1s
+                # timeout never watched long enough, so a lock left empty by a
+                # crash or a full disk blocked every restart forever.
                 if unreadable_since is None:
                     unreadable_since = time.time()
-                elif time.time() - unreadable_since > 2.0:
+                try:
+                    born = os.path.getmtime(lock_file)
+                except OSError:
+                    born = unreadable_since
+                if time.time() - min(born, unreadable_since) > 2.0:
                     unreadable_since = None
                     try:
                         os.remove(lock_file)
+                        broke = True
+                    except FileNotFoundError:
                         broke = True
                     except OSError:
                         pass
