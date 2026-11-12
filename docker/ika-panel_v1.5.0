@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 # Single source of truth for the panel version. The repo file is named
 # ika-panel_v<this>, and the _v suffix is stripped on install, matching the
 # convention the modules already use.
-PANEL_VERSION = "1.4.1"
+PANEL_VERSION = "1.5.0"
 
 PORT = int(os.environ.get("PANEL_PORT", "7682"))
 USER = os.environ.get("PANEL_USER") or os.environ.get("TTYD_USER", "ikabot")
@@ -507,23 +507,32 @@ def _safe_part(s):
     return "".join(c for c in str(s) if c.isalnum() or c in "-_")
 
 
+def _module_safe(s):
+    """The other sanitiser modules use: odd characters become "_", "." stays."""
+    return re.sub(r"[^\w.-]", "_", str(s))
+
+
 def lock_suffixes(entry):
     """The filename endings a module builds for this account.
 
     Modules name their locks <what>_<server><world>_<player>.lock. The older
     ones, and the pre-world versions of the newer ones, leave the world out.
     Both forms are matched so an old lock is still found and cleared.
+
+    Most modules turn a space or other odd character into "_"; a few drop it.
+    Both are matched, or a name like "Stave Dark" never finds its own locks.
     """
-    user = _safe_part(entry.get("username") or "")
-    server = _safe_part(entry.get("server") or "")
-    world = _safe_part(entry.get("world") or "")
-    if not user or not server:
-        return []
     out = []
-    if world:
-        out.append("%s%s_%s" % (server, world, user))
-    out.append("%s_%s" % (server, user))
-    return out
+    for clean in (_module_safe, _safe_part):
+        user = clean(entry.get("username") or "")
+        server = clean(entry.get("server") or "")
+        world = clean(entry.get("world") or "")
+        if not user or not server:
+            continue
+        if world:
+            out.append("%s%s_%s" % (server, world, user))
+        out.append("%s_%s" % (server, user))
+    return list(dict.fromkeys(out))
 
 
 def data_dirs():
@@ -2044,23 +2053,32 @@ def run_locks(act, arg):
                        % (len(lines), inst["name"], "\n".join(lines)))
 
         else:
+            # One busy instance used to block the whole button, and with many
+            # accounts one is nearly always busy. Clear the idle ones and keep
+            # only the busy ones' locks. A lock no instance claims is kept too
+            # while anything runs, since it cannot be shown to be idle.
             busy = [i for i in instances if i["tasks"]]
             pairs = lock_files()
-            if busy:
-                out = ("%d instance(s) still have processes running:\n\n%s"
-                       "\n\nDeleting a lock while its task is running would "
-                       "let two run at once. Press 'Stop all processes' "
-                       "first, then clear the locks."
-                       % (len(busy),
-                          "\n".join("  %s — %d task(s)"
-                                     % (i["name"], len(i["tasks"]))
-                                     for i in busy)))
-            elif not pairs:
+            busy_locks = {n for i in busy for n in i["locks"]}
+            claimed = {n for i in instances for n in i["locks"]}
+            kept = [p for p in pairs if p[1] in busy_locks
+                    or (busy and p[1] not in claimed)]
+            pairs = [p for p in pairs if p not in kept]
+            lines = delete_locks(pairs)
+            if not lines and not kept:
                 out = "No lock files found."
             else:
-                lines = delete_locks(pairs)
-                out = ("Cleared %d lock file(s) across every instance:\n\n%s"
-                       % (len(lines), "\n".join(lines)))
+                out = ("Cleared %d lock file(s):\n\n%s"
+                       % (len(lines), "\n".join(lines) or "  (none)"))
+            if kept:
+                out += ("\n\nKept %d lock file(s), because processes are "
+                        "still running:\n\n%s\n\nDeleting a lock while its "
+                        "task runs would let two run at once. Stop those "
+                        "processes first, then clear again."
+                        % (len(kept), "\n".join("  " + n for _, n in kept)))
+                out += "\n\nBusy: " + ", ".join(
+                    "%s (%d task(s))" % (i["name"], len(i["tasks"]))
+                    for i in busy)
 
     return out, "", act
 
