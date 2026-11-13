@@ -65,7 +65,7 @@ except ImportError:
     RRS_AVAILABLE = False
 
 MODULE_NAME = "resourceTransportManager"
-MODULE_VERSION = "10.16.2"
+MODULE_VERSION = "10.17.0"
 
 # ---------------------------------------------------------------------------
 #  Redraw hook — lets Ctrl+' (or Enter in fallback) refresh the screen
@@ -9691,6 +9691,43 @@ def _view_schedule_detail(sched):
     print(f"  {'─' * 40}")
 
 
+def _pick_foreign_city(session):
+    """Ask for island coordinates and a city on it. Returns the city id or None."""
+    while True:
+        print(f"\n  {C.DIM}Enter the island location of the target city.{C.RESET}")
+        print(f"  {C.HINT}' cancel{C.RESET}\n")
+        x_coord = _safe_read(msg="X coordinate: ", digit=True,
+                             additionalValues=["'"])
+        if x_coord == "'":
+            return None
+        y_coord = _safe_read(msg="Y coordinate: ", digit=True,
+                             additionalValues=["'"])
+        if y_coord == "'":
+            return None
+        island = _get_island_cached(session, x=x_coord, y=y_coord)
+        cities = [c for c in island.get("cities", [])
+                  if c.get("type") == "city"]
+        if not cities:
+            print(f"  No cities on island [{x_coord}:{y_coord}].")
+            continue
+        print(f"\n  Island: {island['name']} [{island['x']}:{island['y']}]")
+        print(f"    {'City Name':<20} {'Player':<15}")
+        for i, c in enumerate(cities):
+            print(f"  ({i+1:>2}) {c.get('name', '?')[:20]:<20} "
+                  f"{c.get('Name', '?')[:15]:<15}")
+        print("  (') Cancel")
+        cc = _safe_read(min=1, max=len(cities), digit=True,
+                        additionalValues=["'"])
+        if cc == "'":
+            return None
+        city = cities[cc - 1]
+        print(f"\n  Selected: {city.get('name', '?')} "
+              f"({city.get('Name', 'Unknown')}). Confirm? [Y/n]")
+        if read(values=["y", "Y", "n", "N", ""]).lower() == "n":
+            continue
+        return str(city["id"])
+
+
 def _modify_schedule(session):
     rows = transport_csv_load(session)
     if not rows:
@@ -9965,6 +10002,27 @@ def _modify_schedule(session):
                 target["source_city_ids"] = new_src
                 print(f"  {C.OK}Source cities updated ({len(new_src)} selected).{C.RESET}")
             else:
+                # Only Consolidate can deliver to another player's city; the
+                # other modes read the destination's own city page.
+                if mode == "consolidate":
+                    print(f"\n  {C.BOLD}(1){C.RESET} Your own city")
+                    print(f"  {C.BOLD}(2){C.RESET} Another player's city "
+                          f"(enter island coordinates)")
+                    print(f"  {C.BOLD}('){C.RESET} Back")
+                    dest_type = _safe_read(min=1, max=2, digit=True,
+                                           additionalValues=["'"])
+                    if dest_type == "'":
+                        continue
+                    if dest_type == 2:
+                        new_id = _pick_foreign_city(session)
+                        if new_id is None:
+                            continue
+                        transport_csv_update(session, sid,
+                                             dest_city_ids=[new_id])
+                        target["dest_city_ids"] = [new_id]
+                        print(f"  {C.OK}Destination updated.{C.RESET}")
+                        enter()
+                        continue
                 print(f"\n  {C.DIM}Select destination cities:{C.RESET}")
                 dst_msg = f"{C.DIM}Click cities to add as destinations:{C.RESET}"
                 new_dst_ids, _ = rtm_ignoreCities(session, msg=dst_msg)
